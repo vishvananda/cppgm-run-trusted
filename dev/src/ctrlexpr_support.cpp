@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -14,8 +15,6 @@ using namespace std;
 #include "ctrlexpr_support.h"
 #include "posttoken_support.h"
 #include "pptoken_lib.h"
-
-bool PA3Mock_IsDefinedIdentifier(const string& identifier);
 
 namespace ctrlexpr {
 namespace {
@@ -134,6 +133,25 @@ Token MakeLiteralToken(const string& source, const ExprValue& literal)
 bool IsOperatorToken(ETokenType token_type)
 {
 	return token_type >= OP_LBRACE;
+}
+
+bool is_identifier_like_operator_name(const string& data)
+{
+	static const char* const names[] = {
+		"new", "delete", "and", "and_eq", "bitand", "bitor", "compl",
+		"not", "not_eq", "or", "or_eq", "xor", "xor_eq"
+	};
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+	{
+		if (data == names[i])
+			return true;
+	}
+	return false;
+}
+
+bool MockIsDefinedIdentifier(const string& identifier)
+{
+	return !identifier.empty() && (identifier[0] % 2) != 0;
 }
 
 int64_t ToSigned(uint64_t bits)
@@ -335,7 +353,8 @@ bool ApplyBitwise(ETokenType op, const ExprValue& lhs,
 class Parser
 {
 public:
-	explicit Parser(const vector<Token>& tokens) : tokens_(tokens), pos_(0) {}
+	Parser(const vector<Token>& tokens, const ctrlexpr::DefinedPredicate& is_defined)
+		: tokens_(tokens), pos_(0), is_defined_(is_defined) {}
 
 	bool parse(ExprValue& out)
 	{
@@ -360,7 +379,10 @@ private:
 
 	bool parse_identifier_operand(string& source)
 	{
-		if (pos_ >= tokens_.size() || !tokens_[pos_].from_identifier)
+		if (pos_ >= tokens_.size())
+			return false;
+		if (!tokens_[pos_].from_identifier &&
+		    !is_identifier_like_operator_name(tokens_[pos_].source))
 			return false;
 		source = tokens_[pos_].source;
 		++pos_;
@@ -378,7 +400,7 @@ private:
 		}
 		else if (!parse_identifier_operand(identifier))
 			return false;
-		out = active ? MakeSigned(PA3Mock_IsDefinedIdentifier(identifier) ? 1 : 0)
+		out = active ? MakeSigned(is_defined_(identifier) ? 1 : 0)
 			: MakeSigned(0, false);
 		return true;
 	}
@@ -601,18 +623,22 @@ private:
 
 	const vector<Token>& tokens_;
 	size_t pos_;
+	ctrlexpr::DefinedPredicate is_defined_;
 };
 
-bool EvaluateTokens(const vector<Token>& tokens, ExprValue& out)
+bool EvaluateTokens(const vector<Token>& tokens,
+                    const ctrlexpr::DefinedPredicate& is_defined,
+                    ExprValue& out)
 {
-	Parser parser(tokens);
+	Parser parser(tokens, is_defined);
 	return parser.parse(out);
 }
 
 class CtrlExprTokenStream : public IPPTokenStream
 {
 public:
-	explicit CtrlExprTokenStream(ostream& out) : out_(out) {}
+	CtrlExprTokenStream(ostream& out, const ctrlexpr::DefinedPredicate& is_defined)
+		: out_(out), is_defined_(is_defined) {}
 
 	void emit_whitespace_sequence() {}
 
@@ -699,7 +725,7 @@ private:
 		if (line_.empty())
 			return;
 		ExprValue value;
-		if (EvaluateTokens(line_, value))
+		if (EvaluateTokens(line_, is_defined_, value))
 			write_value(value);
 		else
 			out_ << "error\n";
@@ -715,14 +741,80 @@ private:
 	}
 
 	ostream& out_;
+	ctrlexpr::DefinedPredicate is_defined_;
 	vector<Token> line_;
 };
 
+void AppendPPTokenAsCtrlExprToken(const PPToken& token, vector<Token>& out)
+{
+	if (IsWhitespace(token) || token.kind == PPTokenKind::EndOfFile ||
+	    token.kind == PPTokenKind::Placemarker)
+		return;
+	if (token.kind == PPTokenKind::HeaderName)
+		out.push_back(MakeInvalidToken(token.text));
+	else if (token.kind == PPTokenKind::Identifier)
+	{
+		unordered_map<string, ETokenType>::const_iterator it =
+			StringToTokenTypeMap.find(token.text);
+		if (it != StringToTokenTypeMap.end() && IsOperatorToken(it->second))
+			out.push_back(MakeSimpleToken(token.text, it->second, true));
+		else
+			out.push_back(MakeIdentifierToken(token.text));
+	}
+	else if (token.kind == PPTokenKind::PPNumber)
+	{
+		ExprValue literal;
+		if (MakeIntegerLiteral(token.text, literal))
+			out.push_back(MakeLiteralToken(token.text, literal));
+		else
+			out.push_back(MakeInvalidToken(token.text));
+	}
+	else if (token.kind == PPTokenKind::CharacterLiteral)
+	{
+		ExprValue literal;
+		if (MakeCharacterLiteral(token.text, literal))
+			out.push_back(MakeLiteralToken(token.text, literal));
+		else
+			out.push_back(MakeInvalidToken(token.text));
+	}
+	else if (token.kind == PPTokenKind::PreprocessingOpOrPunc)
+	{
+		if (token.text == "#" || token.text == "##" ||
+		    token.text == "%:" || token.text == "%:%:")
+			out.push_back(MakeInvalidToken(token.text));
+		else
+		{
+			unordered_map<string, ETokenType>::const_iterator it =
+				StringToTokenTypeMap.find(token.text);
+			if (it == StringToTokenTypeMap.end() || !IsOperatorToken(it->second))
+				out.push_back(MakeInvalidToken(token.text));
+			else
+				out.push_back(MakeSimpleToken(token.text, it->second, false));
+		}
+	}
+	else
+		out.push_back(MakeInvalidToken(token.text));
+}
+
 }  // namespace
+
+bool evaluate_tokens(const vector<PPToken>& tokens,
+                     const DefinedPredicate& is_defined,
+                     bool& out)
+{
+	vector<Token> converted;
+	for (size_t i = 0; i < tokens.size(); ++i)
+		AppendPPTokenAsCtrlExprToken(tokens[i], converted);
+	ExprValue value;
+	if (!EvaluateTokens(converted, is_defined, value))
+		return false;
+	out = value.bits != 0;
+	return true;
+}
 
 void run_ctrlexpr(istream& in, ostream& out)
 {
-	CtrlExprTokenStream tokens(out);
+	CtrlExprTokenStream tokens(out, MockIsDefinedIdentifier);
 	pptoken::run_pptoken(in, tokens);
 }
 

@@ -1,7 +1,17 @@
 #pragma once
 
+#include <string>
+
+using namespace std;
+
 struct IPPTokenStream
 {
+	virtual void note_source_location(int line, int column)
+	{
+		(void)line;
+		(void)column;
+	}
+
 	virtual void emit_whitespace_sequence() = 0;
 	virtual void emit_new_line() = 0;
 	virtual void emit_header_name(const string& data) = 0;

@@ -31,16 +31,27 @@ struct PPToken
 	string text;
 	set<string> unavailable;
 	bool active_paste;
+	string source_file;
+	int source_line;
+	int source_column;
 
-	PPToken() : kind(PPTokenKind::Whitespace), active_paste(false) {}
+	PPToken() : kind(PPTokenKind::Whitespace), active_paste(false),
+		source_line(0), source_column(0) {}
 	PPToken(PPTokenKind k, const string& s)
-		: kind(k), text(s), active_paste(false) {}
+		: kind(k), text(s), active_paste(false),
+		  source_line(0), source_column(0) {}
 };
 
 struct PPTokenCollector : IPPTokenStream
 {
 	vector<PPToken> tokens;
+	string source_file;
+	int pending_line;
+	int pending_column;
 
+	PPTokenCollector() : pending_line(0), pending_column(0) {}
+
+	void note_source_location(int line, int column);
 	void emit_whitespace_sequence();
 	void emit_new_line();
 	void emit_header_name(const string& data);
@@ -69,6 +80,11 @@ PPToken MakeWhitespaceToken();
 PPToken MakeStringLiteralToken(const string& text);
 PPToken MakePlacemarkerToken();
 
+void SetTokenLocation(PPToken& token,
+                      const string& file,
+                      int line,
+                      int column);
+void CopyTokenLocation(PPToken& token, const PPToken& from);
 void EmitPPToken(const PPToken& token, IPPTokenStream& out);
 void EmitPPTokens(const vector<PPToken>& tokens, IPPTokenStream& out);
 vector<PPToken> TokenizePPString(const string& source);

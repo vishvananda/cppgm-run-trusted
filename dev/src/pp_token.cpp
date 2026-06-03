@@ -10,71 +10,82 @@ using namespace std;
 namespace
 {
 
-void AddToken(vector<PPToken>& tokens, PPTokenKind kind, const string& text)
+void AddToken(PPTokenCollector& collector, PPTokenKind kind, const string& text)
 {
-	tokens.push_back(PPToken(kind, text));
+	PPToken token(kind, text);
+	SetTokenLocation(token,
+	                 collector.source_file,
+	                 collector.pending_line,
+	                 collector.pending_column);
+	collector.tokens.push_back(token);
 }
 
 }  // namespace
 
+void PPTokenCollector::note_source_location(int line, int column)
+{
+	pending_line = line;
+	pending_column = column;
+}
+
 void PPTokenCollector::emit_whitespace_sequence()
 {
-	AddToken(tokens, PPTokenKind::Whitespace, "");
+	AddToken(*this, PPTokenKind::Whitespace, "");
 }
 
 void PPTokenCollector::emit_new_line()
 {
-	AddToken(tokens, PPTokenKind::NewLine, "");
+	AddToken(*this, PPTokenKind::NewLine, "");
 }
 
 void PPTokenCollector::emit_header_name(const string& data)
 {
-	AddToken(tokens, PPTokenKind::HeaderName, data);
+	AddToken(*this, PPTokenKind::HeaderName, data);
 }
 
 void PPTokenCollector::emit_identifier(const string& data)
 {
-	AddToken(tokens, PPTokenKind::Identifier, data);
+	AddToken(*this, PPTokenKind::Identifier, data);
 }
 
 void PPTokenCollector::emit_pp_number(const string& data)
 {
-	AddToken(tokens, PPTokenKind::PPNumber, data);
+	AddToken(*this, PPTokenKind::PPNumber, data);
 }
 
 void PPTokenCollector::emit_character_literal(const string& data)
 {
-	AddToken(tokens, PPTokenKind::CharacterLiteral, data);
+	AddToken(*this, PPTokenKind::CharacterLiteral, data);
 }
 
 void PPTokenCollector::emit_user_defined_character_literal(const string& data)
 {
-	AddToken(tokens, PPTokenKind::UserDefinedCharacterLiteral, data);
+	AddToken(*this, PPTokenKind::UserDefinedCharacterLiteral, data);
 }
 
 void PPTokenCollector::emit_string_literal(const string& data)
 {
-	AddToken(tokens, PPTokenKind::StringLiteral, data);
+	AddToken(*this, PPTokenKind::StringLiteral, data);
 }
 
 void PPTokenCollector::emit_user_defined_string_literal(const string& data)
 {
-	AddToken(tokens, PPTokenKind::UserDefinedStringLiteral, data);
+	AddToken(*this, PPTokenKind::UserDefinedStringLiteral, data);
 }
 
 void PPTokenCollector::emit_preprocessing_op_or_punc(const string& data)
 {
-	AddToken(tokens, PPTokenKind::PreprocessingOpOrPunc, data);
+	AddToken(*this, PPTokenKind::PreprocessingOpOrPunc, data);
 }
 
 void PPTokenCollector::emit_non_whitespace_char(const string& data)
 {
-	AddToken(tokens, PPTokenKind::NonWhitespaceChar, data);
+	AddToken(*this, PPTokenKind::NonWhitespaceChar, data);
 }
 
 void PPTokenCollector::emit_eof()
 {
-	AddToken(tokens, PPTokenKind::EndOfFile, "");
+	AddToken(*this, PPTokenKind::EndOfFile, "");
 }
 
 bool IsWhitespace(const PPToken& token)
@@ -140,6 +151,21 @@ PPToken MakeStringLiteralToken(const string& text)
 PPToken MakePlacemarkerToken()
 {
 	return PPToken(PPTokenKind::Placemarker, "");
+}
+
+void SetTokenLocation(PPToken& token,
+                      const string& file,
+                      int line,
+                      int column)
+{
+	token.source_file = file;
+	token.source_line = line;
+	token.source_column = column;
+}
+
+void CopyTokenLocation(PPToken& token, const PPToken& from)
+{
+	SetTokenLocation(token, from.source_file, from.source_line, from.source_column);
 }
 
 void EmitPPToken(const PPToken& token, IPPTokenStream& out)

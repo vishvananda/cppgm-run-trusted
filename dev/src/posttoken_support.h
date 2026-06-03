@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -242,6 +243,9 @@ string HexDump(const void* pdata, size_t nbytes);
 
 struct DebugPostTokenOutputStream
 {
+	DebugPostTokenOutputStream();
+	explicit DebugPostTokenOutputStream(ostream& out);
+
 	void emit_invalid(const string& source);
 	void emit_simple(const string& source, ETokenType token_type);
 	void emit_identifier(const string& source);
@@ -252,6 +256,9 @@ struct DebugPostTokenOutputStream
 	void emit_user_defined_literal_integer(const string& source, const string& ud_suffix, const string& prefix);
 	void emit_user_defined_literal_floating(const string& source, const string& ud_suffix, const string& prefix);
 	void emit_eof();
+
+private:
+	ostream* out_;
 };
 
 float PA2Decode_float(const string& s);

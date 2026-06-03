@@ -376,6 +376,11 @@ struct PostTokenStream : IPPTokenStream
 {
 	DebugPostTokenOutputStream output;
 	vector<ParsedStringPiece> pending_strings;
+	bool invalid_seen;
+
+	explicit PostTokenStream(ostream& out) : output(out), invalid_seen(false)
+	{
+	}
 
 	void emit_whitespace_sequence()
 	{
@@ -388,7 +393,7 @@ struct PostTokenStream : IPPTokenStream
 	void emit_header_name(const string& data)
 	{
 		flush_strings();
-		output.emit_invalid(data);
+		emit_invalid(data);
 	}
 
 	void emit_identifier(const string& data)
@@ -435,20 +440,20 @@ struct PostTokenStream : IPPTokenStream
 		flush_strings();
 		if (data == "#" || data == "##" || data == "%:" || data == "%:%:")
 		{
-			output.emit_invalid(data);
+			emit_invalid(data);
 			return;
 		}
 		unordered_map<string, ETokenType>::const_iterator it = StringToTokenTypeMap.find(data);
 		if (it != StringToTokenTypeMap.end())
 			output.emit_simple(data, it->second);
 		else
-			output.emit_invalid(data);
+			emit_invalid(data);
 	}
 
 	void emit_non_whitespace_char(const string& data)
 	{
 		flush_strings();
-		output.emit_invalid(data);
+		emit_invalid(data);
 	}
 
 	void emit_eof()
@@ -480,7 +485,7 @@ struct PostTokenStream : IPPTokenStream
 		if (!ValidEncodingCombination(pending_strings, encoding) ||
 		    !ValidUdSuffixCombination(pending_strings, ud_suffix))
 		{
-			output.emit_invalid(source);
+			emit_invalid(source);
 			pending_strings.clear();
 			return;
 		}
@@ -502,7 +507,7 @@ struct PostTokenStream : IPPTokenStream
 		vector<unsigned char> bytes;
 		if (!EncodeStringData(code_points, encoding, type, elements, bytes))
 		{
-			output.emit_invalid(source);
+			emit_invalid(source);
 			pending_strings.clear();
 			return;
 		}
@@ -537,7 +542,7 @@ struct PostTokenStream : IPPTokenStream
 			output.emit_user_defined_literal_floating(data, suffix, data.substr(0, core_end));
 			return true;
 		}
-		output.emit_invalid(data);
+		emit_invalid(data);
 		return true;
 	}
 
@@ -545,7 +550,7 @@ struct PostTokenStream : IPPTokenStream
 	{
 		IntegerLiteralInfo info;
 		if (!AnalyzeIntegerLiteral(data, info))
-			output.emit_invalid(data);
+			emit_invalid(data);
 		else if (info.user_defined)
 			output.emit_user_defined_literal_integer(data, info.ud_suffix, info.prefix);
 		else
@@ -557,7 +562,7 @@ struct PostTokenStream : IPPTokenStream
 		CharacterLiteralInfo info;
 		if (!AnalyzeCharacterLiteral(data, user_defined, info))
 		{
-			output.emit_invalid(data);
+			emit_invalid(data);
 			return;
 		}
 
@@ -571,7 +576,7 @@ struct PostTokenStream : IPPTokenStream
 			AppendUint32(bytes, info.code_point);
 		else
 		{
-			output.emit_invalid(data);
+			emit_invalid(data);
 			return;
 		}
 
@@ -579,6 +584,12 @@ struct PostTokenStream : IPPTokenStream
 			output.emit_user_defined_literal_character(data, info.ud_suffix, info.type, bytes.data(), bytes.size());
 		else
 			output.emit_literal(data, info.type, bytes.data(), bytes.size());
+	}
+
+	void emit_invalid(const string& data)
+	{
+		invalid_seen = true;
+		output.emit_invalid(data);
 	}
 };
 
@@ -588,14 +599,25 @@ namespace posttoken {
 
 void emit_posttokens(const vector<PPToken>& tokens)
 {
-	PostTokenStream output;
+	emit_posttokens(tokens, cout);
+}
+
+void emit_posttokens(const vector<PPToken>& tokens, ostream& out)
+{
+	(void)emit_posttokens_checked(tokens, out);
+}
+
+bool emit_posttokens_checked(const vector<PPToken>& tokens, ostream& out)
+{
+	PostTokenStream output(out);
 	EmitPPTokens(tokens, output);
 	output.emit_eof();
+	return !output.invalid_seen;
 }
 
 void run_posttoken(istream& in)
 {
-	PostTokenStream output;
+	PostTokenStream output(cout);
 	pptoken::run_pptoken(in, output);
 }
 

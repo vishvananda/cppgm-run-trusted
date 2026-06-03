@@ -979,20 +979,28 @@ string HexDump(const void* pdata, size_t nbytes)
 	return s;
 }
 
+DebugPostTokenOutputStream::DebugPostTokenOutputStream() : out_(&cout)
+{
+}
+
+DebugPostTokenOutputStream::DebugPostTokenOutputStream(ostream& out) : out_(&out)
+{
+}
+
 
 void DebugPostTokenOutputStream::emit_invalid(const string& source)
 {
-	cout << "invalid " << source << endl;
+	*out_ << "invalid " << source << endl;
 }
 
 void DebugPostTokenOutputStream::emit_simple(const string& source, ETokenType token_type)
 {
-	cout << "simple " << source << " " << TokenTypeToStringMap.at(token_type) << endl;
+	*out_ << "simple " << source << " " << TokenTypeToStringMap.at(token_type) << endl;
 }
 
 void DebugPostTokenOutputStream::emit_identifier(const string& source)
 {
-	cout << "identifier " << source << endl;
+	*out_ << "identifier " << source << endl;
 }
 
 void DebugPostTokenOutputStream::emit_literal(const string& source,
@@ -1000,7 +1008,7 @@ void DebugPostTokenOutputStream::emit_literal(const string& source,
                                              const void* data,
                                              size_t nbytes)
 {
-	cout << "literal " << source << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
+	*out_ << "literal " << source << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
 }
 
 void DebugPostTokenOutputStream::emit_literal_array(const string& source,
@@ -1009,7 +1017,7 @@ void DebugPostTokenOutputStream::emit_literal_array(const string& source,
                                                    const void* data,
                                                    size_t nbytes)
 {
-	cout << "literal " << source << " array of " << num_elements << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
+	*out_ << "literal " << source << " array of " << num_elements << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
 }
 
 void DebugPostTokenOutputStream::emit_user_defined_literal_character(const string& source,
@@ -1018,7 +1026,7 @@ void DebugPostTokenOutputStream::emit_user_defined_literal_character(const strin
                                                                     const void* data,
                                                                     size_t nbytes)
 {
-	cout << "user-defined-literal " << source << " " << ud_suffix << " character " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
+	*out_ << "user-defined-literal " << source << " " << ud_suffix << " character " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
 }
 
 void DebugPostTokenOutputStream::emit_user_defined_literal_string_array(const string& source,
@@ -1028,26 +1036,26 @@ void DebugPostTokenOutputStream::emit_user_defined_literal_string_array(const st
                                                                        const void* data,
                                                                        size_t nbytes)
 {
-	cout << "user-defined-literal " << source << " " << ud_suffix << " string array of " << num_elements << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
+	*out_ << "user-defined-literal " << source << " " << ud_suffix << " string array of " << num_elements << " " << FundamentalTypeToStringMap.at(type) << " " << HexDump(data, nbytes) << endl;
 }
 
 void DebugPostTokenOutputStream::emit_user_defined_literal_integer(const string& source,
                                                                   const string& ud_suffix,
                                                                   const string& prefix)
 {
-	cout << "user-defined-literal " << source << " " << ud_suffix << " integer " << prefix << endl;
+	*out_ << "user-defined-literal " << source << " " << ud_suffix << " integer " << prefix << endl;
 }
 
 void DebugPostTokenOutputStream::emit_user_defined_literal_floating(const string& source,
                                                                    const string& ud_suffix,
                                                                    const string& prefix)
 {
-	cout << "user-defined-literal " << source << " " << ud_suffix << " floating " << prefix << endl;
+	*out_ << "user-defined-literal " << source << " " << ud_suffix << " floating " << prefix << endl;
 }
 
 void DebugPostTokenOutputStream::emit_eof()
 {
-	cout << "eof" << endl;
+	*out_ << "eof" << endl;
 }
 
 // use these 3 functions to scan `floating-literals` (see PA2)

@@ -19,35 +19,6 @@ namespace {
 
 const char* const kVaArgs = "__VA_ARGS__";
 
-struct MacroArgument
-{
-	vector<PPToken> raw;
-	vector<PPToken> expanded;
-	bool expanded_ready;
-
-	MacroArgument() : expanded_ready(false) {}
-};
-
-struct MacroDefinition
-{
-	string name;
-	bool function_like;
-	bool variadic;
-	vector<string> parameters;
-	vector<PPToken> replacement;
-	map<string, size_t> parameter_index;
-
-	MacroDefinition() : function_like(false), variadic(false) {}
-};
-
-struct Invocation
-{
-	size_t end_pos;
-	vector<MacroArgument> arguments;
-
-	Invocation() : end_pos(0) {}
-};
-
 PPToken MakeCommaToken()
 {
 	return PPToken(PPTokenKind::PreprocessingOpOrPunc, ",");
@@ -213,10 +184,6 @@ void ThrowError(const string& message)
 	throw runtime_error(message);
 }
 
-bool HasPasteBefore(const vector<PPToken>& tokens, size_t pos);
-bool HasPasteAfter(const vector<PPToken>& tokens, size_t pos);
-bool ParameterIsForwardedThroughCall(const MacroDefinition& macro, size_t pos);
-
 bool EscapesInsideStringizedToken(const PPToken& token)
 {
 	return token.kind == PPTokenKind::CharacterLiteral ||
@@ -225,53 +192,201 @@ bool EscapesInsideStringizedToken(const PPToken& token)
 	       token.kind == PPTokenKind::UserDefinedStringLiteral;
 }
 
-class MacroProcessor
+bool HasPasteBefore(const vector<PPToken>& tokens, size_t pos)
 {
-public:
-	vector<PPToken> process(const vector<PPToken>& tokens);
+	while (pos > 0)
+	{
+		--pos;
+		if (IsWhitespace(tokens[pos]))
+			continue;
+		return IsHashHash(tokens[pos]);
+	}
+	return false;
+}
 
-private:
-	map<string, MacroDefinition> macros_;
+bool HasPasteAfter(const vector<PPToken>& tokens, size_t pos)
+{
+	for (size_t i = pos + 1; i < tokens.size(); ++i)
+	{
+		if (IsWhitespace(tokens[i]))
+			continue;
+		return IsHashHash(tokens[i]);
+	}
+	return false;
+}
 
-	void flush_text(vector<PPToken>& text, vector<PPToken>& output);
-	size_t parse_directive(const vector<PPToken>& tokens, size_t hash_pos);
-	size_t find_directive_end(const vector<PPToken>& tokens, size_t hash_pos);
-	void parse_define(const vector<PPToken>& tokens, size_t pos, size_t end);
-	void parse_undef(const vector<PPToken>& tokens, size_t pos, size_t end);
-	size_t parse_function_parameters(const vector<PPToken>& tokens,
-	                                 size_t pos,
-	                                 size_t end,
-	                                 MacroDefinition& macro);
-	void finish_define(const string& name, MacroDefinition& macro);
-	void validate_replacement(const MacroDefinition& macro);
-	bool macro_matches(const MacroDefinition& a, const MacroDefinition& b);
+bool PreviousRealTokenIsCallHead(const MacroDefinition& macro,
+                                 const vector<PPToken>& tokens,
+                                 size_t open_pos)
+{
+	size_t pos = open_pos;
+	while (pos > 0)
+	{
+		--pos;
+		if (IsWhitespace(tokens[pos]))
+			continue;
+		return IsIdentifier(tokens[pos]) &&
+		       !IsParameterName(macro, tokens[pos].text);
+	}
+	return false;
+}
 
-	vector<PPToken> expand_tokens(const vector<PPToken>& tokens);
-	bool try_build_invocation(const vector<PPToken>& stream,
-	                          size_t pos,
-	                          const MacroDefinition& macro,
-	                          Invocation& invocation);
-	void parse_argument_segments(const vector<PPToken>& stream,
-	                             size_t open_pos,
-	                             vector<vector<PPToken> >& segments,
-	                             size_t& end_pos);
-	void build_arguments(const MacroDefinition& macro,
-	                     const vector<vector<PPToken> >& segments,
-	                     vector<MacroArgument>& arguments);
-	vector<PPToken> instantiate(const MacroDefinition& macro,
-	                            const PPToken& head,
-	                            vector<MacroArgument>& arguments);
-	void append_parameter(vector<PPToken>& out,
-	                      const MacroDefinition& macro,
-	                      const PPToken& head,
-	                      const string& name,
-	                      bool raw,
-	                      bool forwarded_through_call,
-	                      vector<MacroArgument>& arguments);
-	vector<PPToken>& expanded_argument(MacroArgument& argument);
-	vector<PPToken> process_pastes(vector<PPToken> tokens, const PPToken& head);
-	string stringify_argument(const vector<PPToken>& raw);
-};
+bool ParameterIsForwardedThroughCall(const MacroDefinition& macro, size_t pos)
+{
+	vector<bool> call_stack;
+	for (size_t i = 0; i < pos && i < macro.replacement.size(); ++i)
+	{
+		if (IsOp(macro.replacement[i], "("))
+		{
+			call_stack.push_back(
+				PreviousRealTokenIsCallHead(macro, macro.replacement, i));
+		}
+		else if (IsOp(macro.replacement[i], ")") && !call_stack.empty())
+		{
+			call_stack.pop_back();
+		}
+	}
+	for (size_t i = 0; i < call_stack.size(); ++i)
+	{
+		if (call_stack[i])
+			return true;
+	}
+	return false;
+}
+
+string DecimalString(int value)
+{
+	ostringstream out;
+	out << value;
+	return out.str();
+}
+
+string QuoteStringLiteral(const string& value)
+{
+	string out = "\"";
+	for (size_t i = 0; i < value.size(); ++i)
+	{
+		const unsigned char c = static_cast<unsigned char>(value[i]);
+		if (c == '\\' || c == '"')
+			out += '\\';
+		if (c == '\n')
+			out += "\\n";
+		else if (c == '\t')
+			out += "\\t";
+		else
+			out += static_cast<char>(c);
+	}
+	out += '"';
+	return out;
+}
+
+bool IsIdentifierLikeOperatorName(const string& data)
+{
+	static const char* const names[] = {
+		"new", "delete", "and", "and_eq", "bitand", "bitor", "compl",
+		"not", "not_eq", "or", "or_eq", "xor", "xor_eq"
+	};
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+	{
+		if (data == names[i])
+			return true;
+	}
+	return false;
+}
+
+bool IsDefinedOperandToken(const PPToken& token)
+{
+	return IsIdentifier(token) ||
+	       (token.kind == PPTokenKind::PreprocessingOpOrPunc &&
+	        IsIdentifierLikeOperatorName(token.text));
+}
+
+size_t NextRealToken(const vector<PPToken>& tokens, size_t pos)
+{
+	while (pos < tokens.size() && !IsRealToken(tokens[pos]))
+		++pos;
+	return pos;
+}
+
+void MaskDefinedOperands(vector<PPToken>& tokens)
+{
+	for (size_t pos = 0; pos < tokens.size(); ++pos)
+	{
+		if (!IsIdentifier(tokens[pos], "defined"))
+			continue;
+		tokens[pos].unavailable.insert("defined");
+		size_t next = NextRealToken(tokens, pos + 1);
+		if (next >= tokens.size())
+			continue;
+		if (IsOp(tokens[next], "("))
+		{
+			size_t name = NextRealToken(tokens, next + 1);
+			if (name < tokens.size() && IsDefinedOperandToken(tokens[name]))
+				tokens[name].unavailable.insert(tokens[name].text);
+			continue;
+		}
+		if (IsDefinedOperandToken(tokens[next]))
+			tokens[next].unavailable.insert(tokens[next].text);
+	}
+}
+
+}  // namespace
+
+MacroProcessor::MacroProcessor() : predefined_enabled_(false)
+{
+}
+
+void MacroProcessor::define_object_macro(const string& name,
+                                         const vector<PPToken>& replacement)
+{
+	MacroDefinition macro;
+	macro.name = name;
+	macro.replacement = NormalizeWhitespace(replacement, true);
+	finish_define(name, macro);
+}
+
+void MacroProcessor::initialize_predefined_macros(const string& author,
+                                                  const string& build_date,
+                                                  const string& build_time)
+{
+	predefined_enabled_ = true;
+	build_date_ = build_date;
+	build_time_ = build_time;
+	define_object_macro("__CPPGM__", TokenizePPString("201303L"));
+	define_object_macro("__cplusplus", TokenizePPString("201103L"));
+	define_object_macro("__STDC_HOSTED__", TokenizePPString("1"));
+	define_object_macro("__CPPGM_AUTHOR__",
+	                    TokenizePPString(QuoteStringLiteral(author)));
+	define_object_macro("__DATE__", TokenizePPString(QuoteStringLiteral(build_date_)));
+	define_object_macro("__TIME__", TokenizePPString(QuoteStringLiteral(build_time_)));
+}
+
+bool MacroProcessor::is_defined(const string& name) const
+{
+	return macros_.find(name) != macros_.end() || is_dynamic_predefined(name);
+}
+
+bool MacroProcessor::is_dynamic_predefined(const string& name) const
+{
+	return predefined_enabled_ && (name == "__FILE__" || name == "__LINE__");
+}
+
+vector<PPToken> MacroProcessor::dynamic_predefined_replacement(
+	const PPToken& head) const
+{
+	vector<PPToken> out;
+	if (head.text == "__FILE__")
+		out.push_back(MakeStringLiteralToken(QuoteStringLiteral(head.source_file)));
+	else if (head.text == "__LINE__")
+		out.push_back(PPToken(PPTokenKind::PPNumber,
+		                      DecimalString(head.source_line)));
+	for (size_t i = 0; i < out.size(); ++i)
+	{
+		CopyTokenLocation(out[i], head);
+		out[i].unavailable.insert(head.text);
+	}
+	return out;
+}
 
 vector<PPToken> MacroProcessor::process(const vector<PPToken>& tokens)
 {
@@ -304,6 +419,14 @@ vector<PPToken> MacroProcessor::process(const vector<PPToken>& tokens)
 	}
 	flush_text(text, output);
 	return output;
+}
+
+vector<PPToken> MacroProcessor::expand_control_expression(
+	const vector<PPToken>& tokens)
+{
+	vector<PPToken> copy = tokens;
+	MaskDefinedOperands(copy);
+	return expand_tokens(copy);
 }
 
 void MacroProcessor::flush_text(vector<PPToken>& text, vector<PPToken>& output)
@@ -490,6 +613,14 @@ vector<PPToken> MacroProcessor::expand_tokens(const vector<PPToken>& tokens)
 		PPToken token = stream[pos];
 		if (IsIdentifier(token, kVaArgs))
 			ThrowError("__VA_ARGS__ is reserved");
+		if (IsIdentifier(token) && is_dynamic_predefined(token.text) &&
+		    token.unavailable.count(token.text) == 0)
+		{
+			vector<PPToken> repl = dynamic_predefined_replacement(token);
+			stream.erase(stream.begin() + pos, stream.begin() + pos + 1);
+			stream.insert(stream.begin() + pos, repl.begin(), repl.end());
+			continue;
+		}
 		map<string, MacroDefinition>::iterator it = macros_.find(token.text);
 		if (IsIdentifier(token) && it != macros_.end() &&
 		    token.unavailable.count(token.text) == 0)
@@ -632,6 +763,7 @@ vector<PPToken> MacroProcessor::instantiate(const MacroDefinition& macro,
 					ArgumentIndexForName(macro, macro.replacement[next].text);
 				PPToken stringized =
 					MakeStringLiteralToken(stringify_argument(arguments[arg_index].raw));
+				CopyTokenLocation(stringized, head);
 				AddPaint(stringized, paint);
 				substituted.push_back(stringized);
 				i = next;
@@ -648,6 +780,7 @@ vector<PPToken> MacroProcessor::instantiate(const MacroDefinition& macro,
 			continue;
 		}
 		PPToken copy = token;
+		CopyTokenLocation(copy, head);
 		if (IsHashHash(copy))
 			copy.active_paste = true;
 		PaintOwnReplacementToken(copy, head, macro, macros_, i);
@@ -718,6 +851,7 @@ vector<PPToken> MacroProcessor::process_pastes(vector<PPToken> tokens,
 			replacement = TokenizePPString(tokens[left].text + tokens[right].text);
 			for (size_t i = 0; i < replacement.size(); ++i)
 			{
+				CopyTokenLocation(replacement[i], head);
 				AddPaint(replacement[i], paste_paint);
 				if (IsIdentifier(replacement[i]) &&
 				    head.unavailable.count(replacement[i].text) != 0 &&
@@ -783,70 +917,6 @@ string MacroProcessor::stringify_argument(const vector<PPToken>& raw)
 	out += '"';
 	return out;
 }
-
-bool HasPasteBefore(const vector<PPToken>& tokens, size_t pos)
-{
-	while (pos > 0)
-	{
-		--pos;
-		if (IsWhitespace(tokens[pos]))
-			continue;
-		return IsHashHash(tokens[pos]);
-	}
-	return false;
-}
-
-bool HasPasteAfter(const vector<PPToken>& tokens, size_t pos)
-{
-	for (size_t i = pos + 1; i < tokens.size(); ++i)
-	{
-		if (IsWhitespace(tokens[i]))
-			continue;
-		return IsHashHash(tokens[i]);
-	}
-	return false;
-}
-
-bool PreviousRealTokenIsCallHead(const MacroDefinition& macro,
-                                 const vector<PPToken>& tokens,
-                                 size_t open_pos)
-{
-	size_t pos = open_pos;
-	while (pos > 0)
-	{
-		--pos;
-		if (IsWhitespace(tokens[pos]))
-			continue;
-		return IsIdentifier(tokens[pos]) &&
-		       !IsParameterName(macro, tokens[pos].text);
-	}
-	return false;
-}
-
-bool ParameterIsForwardedThroughCall(const MacroDefinition& macro, size_t pos)
-{
-	vector<bool> call_stack;
-	for (size_t i = 0; i < pos && i < macro.replacement.size(); ++i)
-	{
-		if (IsOp(macro.replacement[i], "("))
-		{
-			call_stack.push_back(
-				PreviousRealTokenIsCallHead(macro, macro.replacement, i));
-		}
-		else if (IsOp(macro.replacement[i], ")") && !call_stack.empty())
-		{
-			call_stack.pop_back();
-		}
-	}
-	for (size_t i = 0; i < call_stack.size(); ++i)
-	{
-		if (call_stack[i])
-			return true;
-	}
-	return false;
-}
-
-}  // namespace
 
 void run_macro(istream& in)
 {

@@ -447,6 +447,17 @@ private:
     return location_message(1, 1, message);
   }
 
+  void note_location(size_t index)
+  {
+    if(index < text_.size()) {
+      output_.note_source_location(text_[index].line, text_[index].column);
+    } else if(!text_.empty()) {
+      output_.note_source_location(text_.back().line, text_.back().column);
+    } else {
+      output_.note_source_location(1, 1);
+    }
+  }
+
   bool decode_ucn_at(size_t index, LogicalChar & out, bool diagnose = true) const
   {
     if(index + 1 >= text_.size() || text_[index].cp != '\\') {
@@ -607,6 +618,7 @@ private:
     if(logical.cp != '\n') {
       return false;
     }
+    note_location(pos_);
     pos_ += logical.width;
     output_.emit_new_line();
     header_state_ = HeaderState::AtLineStart;
@@ -619,6 +631,7 @@ private:
     if(!logical_space_no_newline(pos_, width) && !starts_comment(pos_, width)) {
       return false;
     }
+    const size_t start = pos_;
     bool consumed = false;
     while(pos_ < text_.size()) {
       if(logical_space_no_newline(pos_, width)) {
@@ -646,6 +659,7 @@ private:
       break;
     }
     if(consumed) {
+      note_location(start);
       output_.emit_whitespace_sequence();
     }
     return consumed;
@@ -714,6 +728,7 @@ private:
       append_logical(pos_, logical, data);
       pos_ += logical.width;
       if(logical.cp == '>') {
+        note_location(start);
         output_.emit_header_name(data);
         header_state_ = HeaderState::Normal;
         return true;
@@ -738,6 +753,7 @@ private:
       append_logical(pos_, logical, data);
       pos_ += logical.width;
       if(logical.cp == '"') {
+        note_location(start);
         output_.emit_header_name(data);
         header_state_ = HeaderState::Normal;
         return true;
@@ -754,6 +770,7 @@ private:
 
   bool scan_raw_string()
   {
+    const size_t start = pos_;
     string data;
     size_t prefix_width = 0;
     if(!raw_prefix(data, prefix_width)) {
@@ -764,6 +781,7 @@ private:
     pos_ = text_position_after_source(source_end);
     data += source_slice(open_source, source_end);
     append_identifier_suffix(data);
+    note_location(start);
     emit_string_token(data);
     return true;
   }
@@ -863,6 +881,7 @@ private:
 
   bool scan_string()
   {
+    const size_t start = pos_;
     string data;
     size_t prefix_width = 0;
     if(!string_prefix(data, prefix_width)) {
@@ -871,6 +890,7 @@ private:
     pos_ += prefix_width;
     scan_quoted_body('"', "Unterminated string literal", data);
     append_identifier_suffix(data);
+    note_location(start);
     emit_string_token(data);
     return true;
   }
@@ -886,6 +906,7 @@ private:
 
   bool scan_character()
   {
+    const size_t start = pos_;
     string data;
     size_t prefix_width = 0;
     if(!character_prefix(data, prefix_width)) {
@@ -894,6 +915,7 @@ private:
     pos_ += prefix_width;
     scan_quoted_body('\'', "Unterminated character literal", data);
     append_identifier_suffix(data);
+    note_location(start);
     emit_character_token(data);
     return true;
   }
@@ -1039,6 +1061,7 @@ private:
     if(!is_identifier_start_cp(first.cp)) {
       return false;
     }
+    const size_t start = pos_;
     string data;
     while(pos_ < text_.size()) {
       LogicalChar logical = logical_at(pos_);
@@ -1048,6 +1071,7 @@ private:
       append_logical(pos_, logical, data);
       pos_ += logical.width;
     }
+    note_location(start);
     if(is_identifier_like_operator(data)) {
       output_.emit_preprocessing_op_or_punc(data);
       note_non_whitespace_token("op", data);
@@ -1063,6 +1087,7 @@ private:
     if(!starts_pp_number()) {
       return false;
     }
+    const size_t start = pos_;
     string data;
     int previous = -1;
     while(pos_ < text_.size()) {
@@ -1083,6 +1108,7 @@ private:
       }
       break;
     }
+    note_location(start);
     output_.emit_pp_number(data);
     note_non_whitespace_token("pp-number", data);
     return true;
@@ -1120,7 +1146,9 @@ private:
       const string op(ops[i]);
       size_t consumed = 0;
       if(logical_matches_ascii(pos_, op, consumed)) {
+        const size_t start = pos_;
         pos_ += consumed;
+        note_location(start);
         output_.emit_preprocessing_op_or_punc(op);
         note_non_whitespace_token("op", op);
         return true;
@@ -1140,7 +1168,9 @@ private:
       return false;
     }
     LogicalChar first = logical_at(pos_);
+    const size_t start = pos_;
     pos_ += first.width;
+    note_location(start);
     output_.emit_preprocessing_op_or_punc("<");
     note_non_whitespace_token("op", "<");
     return true;
@@ -1148,6 +1178,7 @@ private:
 
   void scan_non_whitespace()
   {
+    const size_t start = pos_;
     LogicalChar logical = logical_at(pos_);
     if(logical.cp == '"' || logical.cp == '\'') {
       throw runtime_error(error_at(pos_, "Invalid preprocessing token"));
@@ -1155,6 +1186,7 @@ private:
     string data;
     append_utf8(logical.cp, data);
     pos_ += logical.width;
+    note_location(start);
     output_.emit_non_whitespace_char(data);
     note_non_whitespace_token("non-whitespace", data);
   }

@@ -1,120 +1,64 @@
 // (C) 2013 CPPGM Foundation www.cppgm.org.  All rights reserved.
 
-#include <utility>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <stdexcept>
-#include <fstream>
 
 using namespace std;
 
-#include "exceptions.h"
+#include "preproc_support.h"
 
-// For pragma once implementation:
-// system-wide unique file id type `PA5FileId`
-typedef pair<unsigned long int, unsigned long int> PA5FileId;
-
-// bootstrap system call interface, used by PA5GetFileId
-extern "C" long int syscall(long int n, ...) throw ();
-
-// PA5GetFileId returns true iff file found at path `path`.
-// out parameter `out_fileid` is set to file id
-bool PA5GetFileId(const string& path, PA5FileId& out_fileid)
+namespace
 {
-	struct
-	{
-			unsigned long int dev;
-			unsigned long int ino;
-			long int unused[16];
-	} data;
 
-	int res = syscall(4, path.c_str(), &data);
+preproc::Options MakeOptions()
+{
+	time_t now = time(NULL);
+	tm* local = localtime(&now);
+	if (local == NULL)
+		throw runtime_error("cannot read build time");
+	char* text = asctime(local);
+	if (text == NULL)
+		throw runtime_error("cannot format build time");
+	const string stamp(text);
+	if (stamp.size() < 24)
+		throw runtime_error("invalid build time");
 
-	out_fileid = make_pair(data.dev, data.ino);
-
-	return res == 0;
+	preproc::Options options;
+	options.author = "Vishvananda Ishaya";
+	options.build_date = stamp.substr(4, 6) + " " + stamp.substr(20, 4);
+	options.build_time = stamp.substr(11, 8);
+	return options;
 }
 
-// OPTIONAL: Also search `PA5StdIncPaths` on `--stdinc` command-line switch (not by default)
-vector<string> PA5StdIncPaths =
-{
-    "/usr/include/c++/4.7/",
-    "/usr/include/c++/4.7/x86_64-linux-gnu/",
-    "/usr/include/c++/4.7/backward/",
-    "/usr/lib/gcc/x86_64-linux-gnu/4.7/include/",
-    "/usr/local/include/",
-    "/usr/lib/gcc/x86_64-linux-gnu/4.7/include-fixed/",
-    "/usr/include/x86_64-linux-gnu/",
-    "/usr/include/"
-};
-
-bool HasBatchStdinArg(int argc, char** argv)
-{
-	for (int i = 1; i < argc; i++)
-	{
-		if (string(argv[i]) == "--batch-stdin")
-			return true;
-	}
-	return false;
-}
-
-int RunNotImplementedBatchMode()
-{
-	string line;
-	while (getline(cin, line))
-	{
-		(void)line;
-		cout << "EXIT_NOT_IMPLEMENTED" << endl;
-	}
-	return EXIT_SUCCESS;
-}
+}  // namespace
 
 int main(int argc, char** argv)
 {
 	try
 	{
-		if (HasBatchStdinArg(argc, argv))
-			return RunNotImplementedBatchMode();
-
 		vector<string> args;
-
-		for (int i = 1; i < argc; i++)
-			args.emplace_back(argv[i]);
-
+		for (int i = 1; i < argc; ++i)
+			args.push_back(argv[i]);
 		if (args.size() < 3 || args[0] != "-o")
 			throw logic_error("invalid usage");
 
-		string outfile = args[1];
-		size_t nsrcfiles = args.size() - 2;
+		ofstream out(args[1].c_str());
+		if (!out)
+			throw runtime_error("cannot open output file");
 
-		throw NotImplementedException();
+		vector<string> srcfiles;
+		for (size_t i = 2; i < args.size(); ++i)
+			srcfiles.push_back(args[i]);
 
-		ofstream out(outfile);
-
-		out << "preproc " << nsrcfiles << endl;
-
-		for (size_t i = 0; i < nsrcfiles; i++)
-		{
-			string srcfile = args[i+2];
-
-			out << "sof " << srcfile << endl;
-
-			ifstream in(srcfile);
-
-			// TODO: implement `preproc` as per PA5 description
-			out << "not yet implemented" << endl;
-	
-			out << "eof" << endl;
-
-		}
+		preproc::run_preproc(srcfiles, out, MakeOptions());
+		return EXIT_SUCCESS;
 	}
-	catch (const NotImplementedException& e)
-	{
-		cerr << "ERROR: " << e.what() << endl;
-		return CPPGM_EXIT_NOT_IMPLEMENTED;
-	}
-	catch (exception& e)
+	catch (const exception& e)
 	{
 		cerr << "ERROR: " << e.what() << endl;
 		return EXIT_FAILURE;
