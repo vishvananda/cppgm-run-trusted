@@ -55,6 +55,16 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+size_t ordinary_string_elements(const string& source, size_t fallback)
+{
+	if (source.empty() || source[0] != '"')
+		return fallback;
+	vector<uint32_t> code_points;
+	if (!DecodeOrdinaryBody(source, 1, source.size() - 1, code_points))
+		return fallback;
+	return code_points.size() + 1;
+}
+
 }  // namespace
 
 Expr Parser::parse_expression()
@@ -92,12 +102,15 @@ Expr Parser::parse_conditional_expression()
 	Expr no = parse_assignment_expression();
 	TypePtr result_type = usual_arithmetic_type(yes.type, no.type);
 	ValueCategory category = ValueCategory::PRValue;
-	if (yes.category == ValueCategory::LValue &&
-	    no.category == ValueCategory::LValue &&
-	    pa11::same_type(yes.type, no.type))
+	if (pa11::same_type(yes.type, no.type))
 	{
-		result_type = yes.type;
-		category = ValueCategory::LValue;
+		result_type = lvalue_to_rvalue_type(yes.type);
+		if (yes.category == ValueCategory::LValue &&
+		    no.category == ValueCategory::LValue)
+		{
+			result_type = yes.type;
+			category = ValueCategory::LValue;
+		}
 	}
 	else if (type_is_pointer(yes.type) && type_is_pointer(no.type))
 	{
@@ -134,6 +147,7 @@ Expr Parser::parse_conditional_expression()
 	add_child(out.node, cond.node);
 	add_child(out.node, yes.node);
 	add_child(out.node, no.node);
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -166,12 +180,12 @@ Expr Parser::parse_unary_expression()
 		return parse_c_style_cast_or_parenthesized();
 	if (at(KW_STATIC_CAST) || at(KW_CONST_CAST) ||
 	    at(KW_REINTERPET_CAST) || at(KW_DYNAMIC_CAST))
-		return parse_cast_expression();
+		return parse_postfix_suffixes(parse_cast_expression());
 	if (at(KW_SIZEOF) || at(KW_ALIGNOF))
 		return parse_type_trait_expression(current().type);
 	TypePtr target;
 	if (expression_starts_type_name(target) && at(OP_LPAREN))
-		return parse_functional_cast(target);
+		return parse_postfix_suffixes(parse_functional_cast(target));
 	if (at(OP_INC) || at(OP_DEC) || at(OP_STAR) || at(OP_AMP) ||
 	    at(OP_PLUS) || at(OP_MINUS) || at(OP_LNOT) || at(OP_COMPL))
 	{
@@ -236,6 +250,8 @@ Expr Parser::parse_primary_expression()
 		out.has_constant_value = true;
 		out.constant_value = 1;
 		out.node = Node("literal prvalue bool KW_TRUE:true");
+		out.node.token_text = "true";
+		annotate_expr_node(out);
 		return out;
 	}
 	if (consume(KW_FALSE))
@@ -247,6 +263,8 @@ Expr Parser::parse_primary_expression()
 		out.has_constant_value = true;
 		out.constant_value = 0;
 		out.node = Node("literal prvalue bool KW_FALSE:false");
+		out.node.token_text = "false";
+		annotate_expr_node(out);
 		return out;
 	}
 	if (consume(KW_NULLPTR))
@@ -258,6 +276,8 @@ Expr Parser::parse_primary_expression()
 		out.has_constant_value = true;
 		out.constant_value = 0;
 		out.node = Node("literal prvalue nullptr_t KW_NULLPTR:nullptr");
+		out.node.token_text = "nullptr";
+		annotate_expr_node(out);
 		return out;
 	}
 	if (at_literal())
@@ -284,17 +304,31 @@ Expr Parser::parse_literal_expression()
 		TypePtr type = pa11::make_array(pa11::make_cv(pa11::make_fundamental(info.type),
 		                                             pa11::CV_CONST),
 		                                false,
-		                                info.elements);
+		                                ordinary_string_elements(source,
+		                                                         info.elements));
 		out.type = type;
 		out.category = ValueCategory::LValue;
 		out.constant_expression = true;
 		out.node = Node("literal lvalue " + pa11::describe_type(type) + " " + source);
+		out.node.token_text = source;
+		annotate_expr_node(out);
 		return out;
 	}
 	if (is_float_literal_text(source))
 	{
 		out.type = floating_literal_type(source);
 		out.constant_expression = true;
+	}
+	else if (!source.empty() && source[source.size() - 1] == '\'')
+	{
+		CharacterLiteralInfo info;
+		if (!AnalyzeCharacterLiteral(source, false, info))
+			throw runtime_error("invalid character literal");
+		out.type = pa11::make_fundamental(info.type);
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = info.code_point;
+		out.null_pointer_constant = false;
 	}
 	else
 	{
@@ -309,6 +343,8 @@ Expr Parser::parse_literal_expression()
 	}
 	out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
 	                " " + source);
+	out.node.token_text = source;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -387,6 +423,8 @@ Expr Parser::parse_functional_cast(TypePtr target)
 			zero.constant_value = 0;
 		}
 		zero.node = Node("literal prvalue " + pa11::describe_type(target) + " 0");
+		zero.node.token_text = "0";
+		annotate_expr_node(zero);
 		return zero;
 	}
 	Expr inner = parse_expression();

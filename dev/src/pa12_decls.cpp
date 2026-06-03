@@ -215,6 +215,33 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
+	if (at(OP_ASS) && lookahead(KW_DELETE, 1) &&
+	    declarator_function_suffix(declarator) != NULL)
+	{
+		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
+		          "simple-declaration");
+		Binding* function =
+			declare_one(specs, base, declarator, NULL, false, node);
+		deleted_functions_.insert(function);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			if (node.children[i].binding == function)
+				node.children[i].token_text = "deleted";
+		expect(OP_ASS);
+		expect(KW_DELETE);
+		expect(OP_SEMICOLON);
+		if (emit_node && !node.children.empty())
+		{
+			if (node.line.empty())
+			{
+				for (size_t i = 0; i < node.children.size(); ++i)
+					add_child(out, node.children[i]);
+			}
+			else
+				add_child(out, node);
+		}
+		return;
+	}
+
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
@@ -342,15 +369,28 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	if (type->kind == pa11::TypeKind::Function || function_definition)
 	{
 		Binding* function = add_value(target, BindingKind::Function, qname.name, type);
+		const Suffix* suffix = declarator_function_suffix(declarator);
+		if (suffix != NULL)
+		{
+			vector<Expr> defaults;
+			for (size_t i = 0; i < suffix->parameters.size(); ++i)
+				defaults.push_back(suffix->parameters[i].default_value);
+			default_arguments_[function] = defaults;
+		}
 		string keyword = function_definition ? "function-definition " :
 			"function-declaration ";
-		add_child(out, Node(keyword + qualified_decl_name(function) + " " +
-		                    pa11::describe_type(type)));
+		Node fn(keyword + qualified_decl_name(function) + " " +
+		        pa11::describe_type(type));
+		fn.binding = function;
+		fn.type = type;
+		add_child(out, fn);
 		return function;
 	}
 
 	Binding* variable = add_value(target, BindingKind::Variable, qname.name, type);
 	Node var("variable " + qname.name + " " + pa11::describe_type(type));
+	var.binding = variable;
+	var.type = type;
 	if (init != NULL)
 	{
 		if (init->braced_init_list)

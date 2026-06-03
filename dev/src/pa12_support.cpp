@@ -10,10 +10,25 @@ namespace pa12 {
 namespace internal {
 
 Node::Node()
+	: category(ValueCategory::PRValue),
+	  binding(NULL),
+	  direct_call(NULL),
+	  has_op(false),
+	  op(KW_ALIGNAS),
+	  has_constant_value(false),
+	  constant_value(0)
 {
 }
 
-Node::Node(const string& text) : line(text)
+Node::Node(const string& text)
+	: line(text),
+	  category(ValueCategory::PRValue),
+	  binding(NULL),
+	  direct_call(NULL),
+	  has_op(false),
+	  op(KW_ALIGNAS),
+	  has_constant_value(false),
+	  constant_value(0)
 {
 }
 
@@ -50,6 +65,11 @@ PtrOp::PtrOp(TypePtr class_type, unsigned flags)
 {
 }
 
+ParameterInfo::ParameterInfo()
+	: has_default(false)
+{
+}
+
 Suffix::Suffix(SuffixKind k)
 	: kind(k),
 	  unknown_bound(false),
@@ -75,6 +95,15 @@ Conversion::Conversion(bool ok, int cost, const Expr& converted)
 void add_child(Node& parent, const Node& child)
 {
 	parent.children.push_back(child);
+}
+
+void annotate_expr_node(Expr& expr)
+{
+	expr.node.type = expr.type;
+	expr.node.category = expr.category;
+	expr.node.binding = expr.binding;
+	expr.node.has_constant_value = expr.has_constant_value;
+	expr.node.constant_value = expr.constant_value;
 }
 
 void dump_node(ostream& out, const Node& node, int depth)

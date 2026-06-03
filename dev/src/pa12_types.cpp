@@ -236,6 +236,8 @@ TypePtr Parser::parse_enum_specifier()
 	TypePtr type = add_enum(current_scope(), name, scoped, underlying, true, scoped);
 	Scope* enum_scope = scoped && type->scope != NULL ? type->scope : current_scope();
 	expect(OP_LBRACE);
+	if (scoped)
+		scopes_.push_back(enum_scope);
 	uint64_t next_value = 0;
 	while (!at(OP_RBRACE))
 	{
@@ -256,6 +258,8 @@ TypePtr Parser::parse_enum_specifier()
 		if (!consume(OP_COMMA))
 			break;
 	}
+	if (scoped)
+		scopes_.pop_back();
 	expect(OP_RBRACE);
 	return type;
 }
@@ -342,12 +346,16 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 	{
 		if (at_identifier() && lookahead(OP_COLON2, 1))
 		{
+			size_t save = pos_;
 			string class_name = consume_identifier();
 			expect(OP_COLON2);
 			vector<Binding*> found =
 				lookup_unqualified_set(current_scope(), class_name, pa11::LOOKUP_TYPE);
 			if (found.empty() || !consume(OP_STAR))
-				throw runtime_error("invalid member pointer declarator");
+			{
+				pos_ = save;
+				return;
+			}
 			TypePtr class_type = found[0]->type;
 			unsigned cv = pa11::CV_NONE;
 			while (at_simple_cv())
@@ -482,6 +490,11 @@ ParameterInfo Parser::parse_parameter_declaration()
 			info.type = adjust_parameter_type(apply_declarator(declarator, base));
 			if (declarator_has_name(declarator))
 				info.name = declarator_name(declarator).name;
+			if (consume(OP_ASS))
+			{
+				info.has_default = true;
+				info.default_value = parse_assignment_expression();
+			}
 			return info;
 		}
 		catch (const exception&)
@@ -494,6 +507,11 @@ ParameterInfo Parser::parse_parameter_declaration()
 			apply_declarator(parse_abstract_declarator(), base));
 	else
 		info.type = adjust_parameter_type(base);
+	if (consume(OP_ASS))
+	{
+		info.has_default = true;
+		info.default_value = parse_assignment_expression();
+	}
 	return info;
 }
 

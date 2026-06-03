@@ -72,6 +72,16 @@ int arithmetic_rank(TypePtr type)
 	}
 }
 
+TypePtr integral_promotion(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Enum)
+		return pa11::make_fundamental(FT_INT);
+	if (pa11::is_integral_or_bool_type(type) && arithmetic_rank(type) < 3)
+		return pa11::make_fundamental(FT_INT);
+	return type;
+}
+
 bool type_is_pointer(TypePtr type)
 {
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
@@ -366,6 +376,9 @@ int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
 	TypePtr dst = pa11::strip_top_level_cv(target);
 	if (pa11::same_type(src, dst))
 		return 0;
+	TypePtr src_bare = pa11::strip_cv(src);
+	if (src_bare->kind == pa11::TypeKind::Enum && src_bare->scoped_enum)
+		return 1000000;
 	if (pa11::is_integral_or_bool_type(src) &&
 	    pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental &&
 	    pa11::strip_cv(dst)->fundamental == FT_INT)
@@ -388,6 +401,8 @@ TypePtr Parser::usual_arithmetic_type(TypePtr left, TypePtr right) const
 {
 	TypePtr l = lvalue_to_rvalue_type(left);
 	TypePtr r = lvalue_to_rvalue_type(right);
+	l = integral_promotion(l);
+	r = integral_promotion(r);
 	if (pa11::same_type(l, r))
 		return l;
 	if (type_is_floating(l))

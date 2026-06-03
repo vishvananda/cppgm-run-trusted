@@ -110,6 +110,7 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		out.builtin_constant_p = true;
 		out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 		                " __builtin_constant_p");
+		annotate_expr_node(out);
 		return out;
 	}
 	vector<Binding*> found = resolve_name_set(name, pa11::LOOKUP_VALUE);
@@ -138,6 +139,8 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		          Node("id-expression lvalue " +
 		               pa11::describe_type(storage_type) + " " +
 		               storage->name));
+		out.node.binding = binding;
+		annotate_expr_node(out);
 		return out;
 	}
 	if (binding->kind == BindingKind::Enumerator)
@@ -151,6 +154,9 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		out.has_constant_value = true;
 		out.constant_value = binding->constant_value;
 		out.null_pointer_constant = binding->constant_value == 0;
+		out.node.binding = binding;
+		out.node.token_text = to_string(binding->constant_value);
+		annotate_expr_node(out);
 		return out;
 	}
 	if (!out.overloads.empty())
@@ -171,6 +177,7 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		out.constant_value = binding->constant_value;
 		out.null_pointer_constant = binding->constant_value == 0;
 	}
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -191,7 +198,7 @@ Expr Parser::make_binary_expr(ETokenType op,
 		type = rhs.type;
 	Expr out;
 	out.type = type;
-	out.category = ValueCategory::PRValue;
+	out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue;
 	out.valid = true;
 	out.constant_expression = lhs.constant_expression && rhs.constant_expression;
 	if (lhs.has_constant_value && rhs.has_constant_value)
@@ -209,6 +216,10 @@ Expr Parser::make_binary_expr(ETokenType op,
 	                " " + op_leaf(op, text));
 	add_child(out.node, lhs.node);
 	add_child(out.node, rhs.node);
+	out.node.has_op = true;
+	out.node.op = op;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -248,6 +259,10 @@ Expr Parser::make_assignment_expr(ETokenType op,
 	                pa11::describe_type(out.type) + " " + op_leaf(op, text));
 	add_child(out.node, lhs.node);
 	add_child(out.node, conv.expr.node);
+	out.node.has_op = true;
+	out.node.op = op;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -295,6 +310,10 @@ Expr Parser::make_unary_expr(ETokenType op, const string& text, Expr inner)
 	                " " + pa11::describe_type(out.type) + " " +
 	                op_leaf(op, text));
 	add_child(out.node, inner.node);
+	out.node.has_op = true;
+	out.node.op = op;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -307,19 +326,23 @@ Expr Parser::make_postfix_expr(ETokenType op, const string& text, Expr inner)
 	out.node = Node("postfix-expression prvalue " +
 	                pa11::describe_type(out.type) + " " + op_leaf(op, text));
 	add_child(out.node, inner.node);
+	out.node.has_op = true;
+	out.node.op = op;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 
 Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 {
-	TypePtr base = expression_object_type(lhs.type);
+	TypePtr base = pa11::strip_cv(expression_object_type(lhs.type));
 	if (base->kind == pa11::TypeKind::Array)
 		base = base->base;
 	else if (base->kind == pa11::TypeKind::Pointer)
 		base = base->base;
 	else
 	{
-		TypePtr rbase = expression_object_type(rhs.type);
+		TypePtr rbase = pa11::strip_cv(expression_object_type(rhs.type));
 		if (rbase->kind == pa11::TypeKind::Array)
 			base = rbase->base;
 		else if (rbase->kind == pa11::TypeKind::Pointer)
@@ -332,8 +355,9 @@ Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 	out.category = ValueCategory::LValue;
 	out.valid = true;
 	out.node = Node("subscript-expression lvalue " + pa11::describe_type(base));
-	if (expression_object_type(rhs.type)->kind == pa11::TypeKind::Array ||
-	    expression_object_type(rhs.type)->kind == pa11::TypeKind::Pointer)
+	TypePtr rhs_base = pa11::strip_cv(expression_object_type(rhs.type));
+	if (rhs_base->kind == pa11::TypeKind::Array ||
+	    rhs_base->kind == pa11::TypeKind::Pointer)
 	{
 		add_child(out.node, rhs.node);
 		add_child(out.node, lhs.node);
@@ -343,6 +367,7 @@ Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 		add_child(out.node, lhs.node);
 		add_child(out.node, rhs.node);
 	}
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -363,10 +388,14 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 	Expr out;
 	out.type = member_type;
 	out.category = ValueCategory::LValue;
+	out.binding = found[0];
 	out.valid = true;
 	out.node = Node("member-expression lvalue " +
 	                pa11::describe_type(member_type) + " OP_DOT:" + name);
 	add_child(out.node, object.node);
+	out.node.binding = found[0];
+	out.node.token_text = name;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -374,8 +403,11 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 {
 	Expr out;
 	out.type = target;
-	out.category = target->kind == pa11::TypeKind::RValueReference
-		? ValueCategory::XValue : ValueCategory::PRValue;
+	out.category = target->kind == pa11::TypeKind::LValueReference
+		? ValueCategory::LValue :
+		target->kind == pa11::TypeKind::RValueReference
+		? ValueCategory::XValue :
+		ValueCategory::PRValue;
 	out.valid = true;
 	out.constant_expression = inner.constant_expression;
 	out.has_constant_value = inner.has_constant_value;
@@ -385,8 +417,10 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 	if (target->kind == pa11::TypeKind::RValueReference &&
 	    inner.binding != NULL)
 	{
+		out.binding = inner.binding;
 		out.node = Node("id-expression xvalue " + pa11::describe_type(target) +
 		                " " + inner.binding->name);
+		annotate_expr_node(out);
 		return out;
 	}
 	string line = "cast-expression prvalue " + pa11::describe_type(target);
@@ -394,6 +428,8 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 		line += " " + op_text;
 	out.node = Node(line);
 	add_child(out.node, inner.node);
+	out.node.token_text = op_text;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -408,6 +444,8 @@ Expr Parser::make_sizeof_expr(uint64_t value)
 	out.constant_value = value;
 	out.null_pointer_constant = value == 0;
 	out.node = Node("sizeof-expression prvalue unsigned long int");
+	out.node.token_text = to_string(value);
+	annotate_expr_node(out);
 	return out;
 }
 

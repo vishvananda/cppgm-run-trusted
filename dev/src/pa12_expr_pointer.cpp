@@ -76,6 +76,10 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 	out.node = Node("unary-expression prvalue " + pa11::describe_type(out.type) +
 	                " OP_AMP:" + text);
 	add_child(out.node, inner.node);
+	out.node.has_op = true;
+	out.node.op = OP_AMP;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -96,6 +100,10 @@ Expr Parser::make_deref_expr(const string& text, Expr inner)
 	out.node = Node("unary-expression lvalue " + pa11::describe_type(object) +
 	                " OP_STAR:" + text);
 	add_child(out.node, inner.node);
+	out.node.has_op = true;
+	out.node.op = OP_STAR;
+	out.node.token_text = text;
+	annotate_expr_node(out);
 	return out;
 }
 

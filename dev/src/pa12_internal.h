@@ -47,6 +47,15 @@ struct Node
 {
 	string line;
 	vector<Node> children;
+	TypePtr type;
+	ValueCategory category;
+	Binding* binding;
+	Binding* direct_call;
+	bool has_op;
+	ETokenType op;
+	string token_text;
+	bool has_constant_value;
+	uint64_t constant_value;
 
 	Node();
 	explicit Node(const string& text);
@@ -105,6 +114,10 @@ struct ParameterInfo
 {
 	string name;
 	TypePtr type;
+	bool has_default;
+	Expr default_value;
+
+	ParameterInfo();
 };
 
 struct Suffix
@@ -159,6 +172,8 @@ private:
 	vector<Node> generated_nodes_;
 	int local_type_counter_;
 	set<string> generated_default_ctors_;
+	map<Binding*, vector<Expr> > default_arguments_;
+	set<Binding*> deleted_functions_;
 
 	Scope* current_scope() const;
 	Scope* global_scope() const;
@@ -174,6 +189,7 @@ private:
 	void expect_eof();
 	string consume_identifier();
 	string consume_literal();
+	string consume_operator_function_name();
 	const Token& current() const;
 	const Token& at_token(size_t index) const;
 
@@ -353,6 +369,7 @@ private:
 
 void add_child(Node& parent, const Node& child);
 void dump_node(ostream& out, const Node& node, int depth);
+void annotate_expr_node(Expr& expr);
 
 }  // namespace internal
 }  // namespace pa12

@@ -7,6 +7,44 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+string Parser::consume_operator_function_name()
+{
+	expect(KW_OPERATOR);
+	if (consume(KW_NEW))
+	{
+		if (consume(OP_LSQUARE))
+		{
+			expect(OP_RSQUARE);
+			return "operatornew[]";
+		}
+		return "operatornew";
+	}
+	if (consume(KW_DELETE))
+	{
+		if (consume(OP_LSQUARE))
+		{
+			expect(OP_RSQUARE);
+			return "operatordelete[]";
+		}
+		return "operatordelete";
+	}
+	if (consume(OP_LPAREN))
+	{
+		expect(OP_RPAREN);
+		return "operator()";
+	}
+	if (consume(OP_LSQUARE))
+	{
+		expect(OP_RSQUARE);
+		return "operator[]";
+	}
+	if (current().kind != posttoken::TokenKind::Simple)
+		throw runtime_error("expected operator token");
+	string name = "operator" + current().source;
+	++pos_;
+	return name;
+}
+
 QualifiedName Parser::parse_id_expression_name()
 {
 	QualifiedName name;
@@ -18,7 +56,10 @@ QualifiedName Parser::parse_id_expression_name()
 		name.qualified = true;
 	}
 	if (consume(KW_OPERATOR))
-		name.name = "operator_" + consume_identifier();
+	{
+		--pos_;
+		name.name = consume_operator_function_name();
+	}
 	else
 		name.name = consume_identifier();
 	if (name.qualified)

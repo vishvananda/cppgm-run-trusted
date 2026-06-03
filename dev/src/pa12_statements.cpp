@@ -24,16 +24,24 @@ void Parser::parse_function_body(Binding* function,
 			string name = suffix->parameters[i].name;
 			if (!name.empty())
 			{
-				pa11::add_binding(function_scope,
-				                  BindingKind::Parameter,
-				                  name,
-				                  suffix->parameters[i].type);
-				add_child(fn, Node("parameter " + name + " " +
-				                   pa11::describe_type(suffix->parameters[i].type)));
+				Binding* param =
+					pa11::add_binding(function_scope,
+					                  BindingKind::Parameter,
+					                  name,
+					                  suffix->parameters[i].type);
+				Node param_node("parameter " + name + " " +
+				                pa11::describe_type(suffix->parameters[i].type));
+				param_node.binding = param;
+				param_node.type = suffix->parameters[i].type;
+				add_child(fn, param_node);
 			}
 			else
-				add_child(fn, Node("parameter  " +
-				                   pa11::describe_type(suffix->parameters[i].type)));
+			{
+				Node param_node("parameter  " +
+				                pa11::describe_type(suffix->parameters[i].type));
+				param_node.type = suffix->parameters[i].type;
+				add_child(fn, param_node);
+			}
 		}
 	}
 	scopes_.push_back(function_scope);
@@ -109,7 +117,7 @@ Node Parser::parse_statement()
 		return parse_do_statement();
 	if (at(KW_FOR))
 		return parse_for_statement();
-	if (at(KW_RETURN) || at(KW_BREAK) || at(KW_CONTINUE))
+	if (at(KW_RETURN) || at(KW_BREAK) || at(KW_CONTINUE) || at(KW_GOTO))
 		return parse_jump_statement();
 	if ((at_identifier() && lookahead(OP_COLON, 1)) ||
 	    at(KW_CASE) || at(KW_DEFAULT))
@@ -214,6 +222,12 @@ Node Parser::parse_jump_statement()
 		expect(OP_SEMICOLON);
 		return Node("continue-statement");
 	}
+	if (consume(KW_GOTO))
+	{
+		string label = consume_identifier();
+		expect(OP_SEMICOLON);
+		return Node("goto-statement " + label);
+	}
 	expect(KW_RETURN);
 	Node node("return-statement");
 	if (!at(OP_SEMICOLON))
@@ -253,7 +267,7 @@ Node Parser::parse_labeled_statement()
 	string label = consume_identifier();
 	expect(OP_COLON);
 	Node node("labeled-statement " + label);
-	add_child(node, parse_statement());
+	add_child(node, parse_block_item());
 	return node;
 }
 

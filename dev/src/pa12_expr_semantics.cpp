@@ -42,7 +42,22 @@ Conversion Parser::convert_reference(const Expr& expr, TypePtr target)
 {
 	Expr selected = select_overload_expr(expr, target);
 	if (!type_can_bind_reference(target, selected))
-		return Conversion();
+	{
+		if (target->kind != pa11::TypeKind::LValueReference ||
+		    !pa11::type_has_const(target->base))
+			return Conversion();
+		Conversion conv = convert_value(selected, target->base);
+		if (!conv.viable)
+			return Conversion();
+		Expr converted = conv.expr;
+		converted.type = target->base;
+		converted.category = ValueCategory::PRValue;
+		converted.node = Node("cast-expression prvalue " +
+		                      pa11::describe_type(target->base));
+		add_child(converted.node, selected.node);
+		annotate_expr_node(converted);
+		return Conversion(true, conv.rank + 1, converted);
+	}
 	int rank = pa11::same_type(expression_object_type(selected.type), target->base)
 		? 0 : 1;
 	if (target->kind == pa11::TypeKind::RValueReference &&
@@ -67,6 +82,8 @@ Conversion Parser::convert_value(const Expr& expr, TypePtr target)
 		selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " 0");
 		selected.constant_expression = true;
 		selected.has_constant_value = false;
+		selected.node.token_text = "0";
+		annotate_expr_node(selected);
 		return Conversion(true, 2, selected);
 	}
 	if (selected.null_pointer_constant &&
@@ -78,6 +95,8 @@ Conversion Parser::convert_value(const Expr& expr, TypePtr target)
 		selected.constant_expression = true;
 		selected.has_constant_value = true;
 		selected.constant_value = 0;
+		selected.node.token_text = "0";
+		annotate_expr_node(selected);
 		return Conversion(true, 2, selected);
 	}
 	if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental &&
@@ -122,6 +141,7 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 	out.category = ValueCategory::LValue;
 	out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 	                " " + found->name);
+	annotate_expr_node(out);
 	return out;
 }
 
@@ -148,15 +168,40 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 		if (duplicate)
 			continue;
 		if (args.size() < fn->type->parameters.size())
-			continue;
+		{
+			map<Binding*, vector<Expr> >::const_iterator dit =
+				default_arguments_.find(fn);
+			if (dit == default_arguments_.end())
+				continue;
+			bool have_defaults = true;
+			for (size_t j = args.size(); j < fn->type->parameters.size(); ++j)
+			{
+				if (j >= dit->second.size() || !dit->second[j].valid)
+				{
+					have_defaults = false;
+					break;
+				}
+			}
+			if (!have_defaults)
+				continue;
+		}
 		if (!fn->type->variadic && args.size() != fn->type->parameters.size())
-			continue;
+		{
+			if (args.size() > fn->type->parameters.size())
+				continue;
+		}
 		vector<int> ranks;
 		vector<Expr> conv_args = args;
+		if (conv_args.size() < fn->type->parameters.size())
+		{
+			const vector<Expr>& defaults = default_arguments_[fn];
+			for (size_t j = conv_args.size(); j < fn->type->parameters.size(); ++j)
+				conv_args.push_back(defaults[j]);
+		}
 		bool ok = true;
 		for (size_t j = 0; j < fn->type->parameters.size(); ++j)
 		{
-			Conversion conv = convert_to(args[j], fn->type->parameters[j]);
+			Conversion conv = convert_to(conv_args[j], fn->type->parameters[j]);
 			if (!conv.viable)
 			{
 				ok = false;
@@ -199,6 +244,8 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		out.has_constant_value = true;
 		out.constant_value = constant ? 1 : 0;
 		out.null_pointer_constant = constant ? false : true;
+		out.node.token_text = constant ? "1" : "0";
+		annotate_expr_node(out);
 		return out;
 	}
 	vector<Expr> converted;
@@ -208,10 +255,13 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	Expr out;
 	if (direct != NULL)
 	{
+		if (deleted_functions_.find(direct) != deleted_functions_.end())
+			throw runtime_error("call to deleted function");
 		out.type = direct->type->base;
 		out.category = call_category(out.type);
 		out.node = Node("call-expression " + value_category_name(out.category) +
 		                " " + pa11::describe_type(out.type));
+		out.node.direct_call = direct;
 		add_child(out.node, Node("callee " + qualified_decl_name(direct) +
 		                         " " + pa11::describe_type(direct->type)));
 	}
@@ -241,6 +291,7 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	for (size_t i = 0; i < converted.size(); ++i)
 		add_child(out.node, converted[i].node);
 	out.valid = true;
+	annotate_expr_node(out);
 	return out;
 }
 

@@ -4,6 +4,7 @@
 #include "pa10_ast.h"
 #include "pa11_types.h"
 #include "pa12_semantics.h"
+#include "pa14_lowir.h"
 #include "tool_help_text.h"
 
 #include <cstdlib>
@@ -449,8 +450,13 @@ int run_emit_semantics_mode(const vector<string> & args)
 
 int run_emit_lowir_mode(const vector<string> & args)
 {
-  parse_source_output_invocation(args, true);
-  return run_unimplemented_mode("--emit-lowir", "PA14");
+  string outfile;
+  vector<string> srcfiles;
+  parse_source_output_invocation(args, true, &outfile, &srcfiles);
+  pa14::Options options;
+  options.preprocess = make_preproc_options();
+  pa14::emit_lowir(srcfiles, outfile, options);
+  return EXIT_SUCCESS;
 }
 
 int run_driver_mode(const vector<string> & args)
