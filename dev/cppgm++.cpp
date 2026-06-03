@@ -1,9 +1,11 @@
 // Student-facing scaffold for the PA10+ `cppgm++` binary.
 
 #include "exceptions.h"
+#include "pa10_ast.h"
 #include "tool_help_text.h"
 
 #include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -178,7 +180,9 @@ EmitMode parse_emit_mode(vector<string> & args)
 }
 
 void parse_source_output_invocation(const vector<string> & args,
-                                    bool allow_lowir_options)
+                                    bool allow_lowir_options,
+                                    string * outfile,
+                                    vector<string> * inputs_out)
 {
   bool explicit_outfile = false;
   vector<string> inputs;
@@ -186,6 +190,9 @@ void parse_source_output_invocation(const vector<string> & args,
   for(size_t i = 0; i < args.size(); ++i) {
     if(args[i] == "-o") {
       consume_required_option_argument(args, i, "-o", "output file");
+      if(outfile != nullptr) {
+        *outfile = args[i];
+      }
       explicit_outfile = true;
       continue;
     }
@@ -209,6 +216,38 @@ void parse_source_output_invocation(const vector<string> & args,
   if(!explicit_outfile || inputs.empty()) {
     throw logic_error("invalid usage");
   }
+  if(inputs_out != nullptr) {
+    *inputs_out = inputs;
+  }
+}
+
+void parse_source_output_invocation(const vector<string> & args,
+                                    bool allow_lowir_options)
+{
+  parse_source_output_invocation(args, allow_lowir_options, nullptr, nullptr);
+}
+
+preproc::Options make_preproc_options()
+{
+  time_t now = time(NULL);
+  tm * local = localtime(&now);
+  if(local == NULL) {
+    throw runtime_error("cannot read build time");
+  }
+  char * text = asctime(local);
+  if(text == NULL) {
+    throw runtime_error("cannot format build time");
+  }
+  const string stamp(text);
+  if(stamp.size() < 24) {
+    throw runtime_error("invalid build time");
+  }
+
+  preproc::Options options;
+  options.author = "Vishvananda Ishaya";
+  options.build_date = stamp.substr(4, 6) + " " + stamp.substr(20, 4);
+  options.build_time = stamp.substr(11, 8);
+  return options;
 }
 
 bool consume_preprocess_option(const vector<string> & args, size_t & i)
@@ -375,8 +414,13 @@ int run_unimplemented_mode(const char * feature,
 
 int run_emit_ast_mode(const vector<string> & args)
 {
-  parse_source_output_invocation(args, false);
-  return run_unimplemented_mode("--emit-ast", "PA10");
+  string outfile;
+  vector<string> srcfiles;
+  parse_source_output_invocation(args, false, &outfile, &srcfiles);
+  pa10::Options options;
+  options.preprocess = make_preproc_options();
+  pa10::emit_ast(srcfiles, outfile, options);
+  return EXIT_SUCCESS;
 }
 
 int run_emit_types_mode(const vector<string> & args)
