@@ -29,7 +29,7 @@ bool PA5GetFileId(const string& path, PA5FileId& out_fileid)
 		unsigned long int dev;
 		unsigned long int ino;
 		long int unused[16];
-	} data;
+	} data = {};
 
 	int res = syscall(4, path.c_str(), &data);
 	out_fileid = make_pair(data.dev, data.ino);
@@ -75,6 +75,7 @@ vector<PPToken> SliceTokens(const vector<PPToken>& tokens,
                             size_t end)
 {
 	vector<PPToken> out;
+	out.reserve(end - begin);
 	for (size_t i = begin; i < end; ++i)
 		out.push_back(tokens[i]);
 	return out;
@@ -131,7 +132,7 @@ class Preprocessor
 {
 public:
 	explicit Preprocessor(const Options& options)
-		: options_(options), line_delta_(0)
+		: line_delta_(0)
 	{
 		macros_.initialize_predefined_macros(options.author,
 		                                     options.build_date,
@@ -146,7 +147,6 @@ public:
 	}
 
 private:
-	Options options_;
 	macro::MacroProcessor macros_;
 	set<PA5FileId> once_files_;
 	vector<IfFrame> if_stack_;
@@ -474,6 +474,7 @@ private:
 	vector<PPToken> execute_pragma_operators(const vector<PPToken>& tokens)
 	{
 		vector<PPToken> out;
+		out.reserve(tokens.size());
 		for (size_t pos = 0; pos < tokens.size();)
 		{
 			if (!IsIdentifier(tokens[pos], "_Pragma"))
