@@ -86,6 +86,13 @@ string scalar_lowir_type(TypePtr type)
 	    bare->kind == TypeKind::Function ||
 	    bare->kind == TypeKind::Array)
 		return "ptr";
+	if (bare->kind == TypeKind::Record)
+	{
+		ostringstream out;
+		out << "obj<" << pa11::type_size(bare) << "x" << pa11::type_align(bare)
+		    << ">";
+		return out.str();
+	}
 	if (bare->kind == TypeKind::Enum)
 	{
 		switch (pa11::type_size(bare))
@@ -180,6 +187,13 @@ string slot_lowir_type(TypePtr type)
 	if (is_reference(type))
 		return "ptr";
 	if (bare->kind == TypeKind::Array)
+	{
+		ostringstream out;
+		out << "obj<" << pa11::type_size(bare) << "x" << pa11::type_align(bare)
+		    << ">";
+		return out.str();
+	}
+	if (bare->kind == TypeKind::Record)
 	{
 		ostringstream out;
 		out << "obj<" << pa11::type_size(bare) << "x" << pa11::type_align(bare)

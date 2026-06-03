@@ -38,6 +38,8 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 		}
 		else if (!type_id_context && at_simple_ignored_specifier())
 		{
+			if (at(KW_STATIC))
+				specs.static_decl = true;
 			++pos_;
 			saw_any = true;
 		}
@@ -183,18 +185,33 @@ TypePtr Parser::parse_class_specifier()
 	type->scope = class_scope;
 	expect(OP_LBRACE);
 	scopes_.push_back(class_scope);
-	parse_class_body(class_scope);
+	parse_class_body(class_scope, key == KW_CLASS);
 	scopes_.pop_back();
 	expect(OP_RBRACE);
+	pa11::layout_record_type(type);
 	return type;
 }
 
-void Parser::parse_class_body(Scope* class_scope)
+void Parser::parse_class_body(Scope* class_scope, bool default_private)
 {
+	class_private_access_.push_back(default_private);
 	while (!at(OP_RBRACE))
 	{
-		if (consume(KW_PUBLIC) || consume(KW_PRIVATE) || consume(KW_PROTECTED))
+		if (consume(KW_PUBLIC))
 		{
+			class_private_access_.back() = false;
+			expect(OP_COLON);
+			continue;
+		}
+		if (consume(KW_PRIVATE))
+		{
+			class_private_access_.back() = true;
+			expect(OP_COLON);
+			continue;
+		}
+		if (consume(KW_PROTECTED))
+		{
+			class_private_access_.back() = true;
 			expect(OP_COLON);
 			continue;
 		}
@@ -212,6 +229,7 @@ void Parser::parse_class_body(Scope* class_scope)
 		}
 		(void)class_scope;
 	}
+	class_private_access_.pop_back();
 }
 
 TypePtr Parser::parse_enum_specifier()

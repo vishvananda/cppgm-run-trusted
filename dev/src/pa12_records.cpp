@@ -9,10 +9,12 @@ namespace internal {
 
 TypePtr Parser::make_member_function_type(Scope* class_scope, TypePtr type)
 {
-	TypePtr class_type = pa11::make_record_type(class_scope->name,
-	                                            "struct",
-	                                            true,
-	                                            class_scope);
+	TypePtr class_type = pa11::record_type_for_scope(class_scope);
+	if (class_type.get() == NULL)
+		class_type = pa11::make_record_type(class_scope->name,
+		                                    "struct",
+		                                    true,
+		                                    class_scope);
 	if (type->cv & pa11::CV_CONST)
 		class_type = pa11::make_cv(class_type, pa11::CV_CONST);
 	vector<TypePtr> params;

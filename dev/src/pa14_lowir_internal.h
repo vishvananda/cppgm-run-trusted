@@ -51,6 +51,17 @@ struct FunctionOut
 	vector<Block> blocks;
 };
 
+struct InitAction
+{
+	string target;
+	string kind;
+	string symbol;
+
+	InitAction() {}
+	InitAction(const string& t, const string& k, const string& s)
+		: target(t), kind(k), symbol(s) {}
+};
+
 bool starts_with(const string& text, const string& prefix);
 TypePtr object_type(TypePtr type);
 TypePtr strip_for_value(TypePtr type);
@@ -80,9 +91,20 @@ struct ProgramLowerer
 	set<string> declared_functions;
 	map<string, string> string_literals;
 	vector<pair<string, vector<unsigned char> > > string_defs;
+	map<const Binding*, const Node*> inline_definitions;
+	map<const Binding*, string> function_declarations_by_binding;
+	vector<const Binding*> pending_inline_definitions;
+	vector<InitAction> init_actions;
+	bool needs_empty_init_function;
 
+	ProgramLowerer();
 	string symbol_for(const Binding* binding);
 	string string_symbol(const string& token_text);
+	void register_inline_definition(const Node& node);
+	void register_function_declaration(const Node& node);
+	void demand_function_declaration(const Binding* binding);
+	void demand_inline_function(const Binding* binding);
+	void emit_pending_inline_definitions();
 	void collect_translation_unit(const Node& root);
 	void collect_node(const Node& node);
 	void emit_global(const Node& node);

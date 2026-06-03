@@ -223,6 +223,9 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			else
 				add_child(out, node);
 		}
+		else if (current_scope()->kind == ScopeKind::Class &&
+		         !node.children.empty())
+			extra_lowir_nodes_.push_back(node.children.back());
 		return;
 	}
 
@@ -340,6 +343,8 @@ bool Parser::parse_constructor_like_member()
 		return false;
 	if (current().source != current_scope()->name)
 		return false;
+	if (!lookahead(OP_LPAREN, 1))
+		return false;
 	++pos_;
 	if (at(OP_LPAREN))
 		skip_balanced(OP_LPAREN, OP_RPAREN);
@@ -375,12 +380,22 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 
 	if (specs.constexpr_decl && !pa11::is_reference_type(type))
 		type = pa11::make_cv(type, pa11::CV_CONST);
-	if (target->kind == ScopeKind::Class && type->kind == pa11::TypeKind::Function)
+	if (target->kind == ScopeKind::Class &&
+	    type->kind == pa11::TypeKind::Function &&
+	    !specs.static_decl)
 		type = make_member_function_type(target, type);
 	if (type->kind == pa11::TypeKind::Function || function_definition)
 	{
 		Binding* function = add_value(target, BindingKind::Function, qname.name, type);
 		function->language_linkage = current_language_linkage();
+		function->is_static_member =
+			target->kind == ScopeKind::Class && specs.static_decl;
+		function->is_inline_definition =
+			function_definition && current_scope()->kind == ScopeKind::Class;
+		function->is_private =
+			target->kind == ScopeKind::Class &&
+			!class_private_access_.empty() &&
+			class_private_access_.back();
 		const Suffix* suffix = declarator_function_suffix(declarator);
 		if (suffix != NULL)
 		{
@@ -401,6 +416,12 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 
 	Binding* variable = add_value(target, BindingKind::Variable, qname.name, type);
 	variable->language_linkage = current_language_linkage();
+	variable->is_static_member =
+		target->kind == ScopeKind::Class && specs.static_decl;
+	variable->is_private =
+		target->kind == ScopeKind::Class &&
+		!class_private_access_.empty() &&
+		class_private_access_.back();
 	Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
 	var.type = type;

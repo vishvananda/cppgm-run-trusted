@@ -127,7 +127,10 @@ Type::Type(TypeKind k)
 	  scoped_enum(false),
 	  complete(true),
 	  enum_underlying(FT_INT),
-	  scope(NULL)
+	  scope(NULL),
+	  record_size(0),
+	  record_align(1),
+	  layout_valid(false)
 {
 }
 
@@ -139,7 +142,11 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  aliased_binding(NULL),
 	  language_linkage("cpp"),
 	  has_constant(false),
-	  constant_value(0)
+	  constant_value(0),
+	  is_static_member(false),
+	  is_inline_definition(false),
+	  is_private(false),
+	  member_offset(0)
 {
 }
 
@@ -451,7 +458,9 @@ uint64_t type_size(const TypePtr& type)
 	{
 		if (!bare->complete)
 			throw runtime_error("incomplete class type");
-		return 1;
+		if (!bare->layout_valid)
+			layout_record_type(bare);
+		return bare->record_size;
 	}
 	throw runtime_error("incomplete object type");
 }
@@ -465,9 +474,72 @@ uint64_t type_align(const TypePtr& type)
 	{
 		if (!bare->complete)
 			throw runtime_error("incomplete class type");
-		return 1;
+		if (!bare->layout_valid)
+			layout_record_type(bare);
+		return bare->record_align;
 	}
 	return type_size(bare);
+}
+
+void layout_record_type(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	if (bare->kind != TypeKind::Record)
+		throw runtime_error("layout target is not a record");
+	if (!bare->complete)
+		throw runtime_error("incomplete class type");
+	if (bare->layout_valid)
+		return;
+	bare->fields.clear();
+	uint64_t offset = 0;
+	uint64_t align = 1;
+	if (bare->scope != NULL)
+	{
+		for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+		{
+			Binding* member = bare->scope->binding_order[i];
+			if (member->kind != BindingKind::Variable || member->is_static_member)
+				continue;
+			uint64_t member_align = type_align(member->type);
+			uint64_t member_size = type_size(member->type);
+			if (member_align == 0)
+				member_align = 1;
+			uint64_t padding = offset % member_align;
+			if (padding != 0)
+				offset += member_align - padding;
+			member->member_offset = offset;
+			bare->fields.push_back(member);
+			offset += member_size;
+			align = max(align, member_align);
+		}
+	}
+	if (offset == 0)
+		offset = 1;
+	uint64_t tail = offset % align;
+	if (tail != 0)
+		offset += align - tail;
+	bare->record_size = offset;
+	bare->record_align = align;
+	bare->layout_valid = true;
+}
+
+TypePtr record_type_for_scope(Scope* scope)
+{
+	if (scope == NULL || scope->kind != ScopeKind::Class || scope->parent == NULL)
+		return TypePtr();
+	for (size_t i = 0; i < scope->parent->binding_order.size(); ++i)
+	{
+		Binding* binding = scope->parent->binding_order[i];
+		if (binding->kind != BindingKind::Type &&
+		    binding->kind != BindingKind::TypeAlias)
+			continue;
+		if (binding->type.get() == NULL)
+			continue;
+		TypePtr bare = strip_cv(binding->type);
+		if (bare->kind == TypeKind::Record && bare->scope == scope)
+			return bare;
+	}
+	return TypePtr();
 }
 
 Scope* create_child_scope(Scope* parent, ScopeKind kind, const string& name)

@@ -248,6 +248,32 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		annotate_expr_node(out);
 		return out;
 	}
+	if (!callee.overloads.empty() &&
+	    callee.node.line.compare(0, 17, "member-expression") == 0 &&
+	    !callee.node.children.empty())
+	{
+		bool needs_this = false;
+		for (size_t i = 0; i < callee.overloads.size(); ++i)
+		{
+			Binding* candidate = callee.overloads[i];
+			if (candidate->owner != NULL &&
+			    candidate->owner->kind == ScopeKind::Class &&
+			    !candidate->is_static_member)
+				needs_this = true;
+		}
+		if (needs_this)
+		{
+			Expr object;
+			object.node = callee.node.children[0];
+			object.type = object.node.type;
+			object.category = object.node.category;
+			object.binding = object.node.binding;
+			object.valid = true;
+			Expr this_arg = callee.node.has_op && callee.node.op == OP_ARROW
+				? object : make_address_expr("&", object);
+			args.insert(args.begin(), this_arg);
+		}
+	}
 	vector<Expr> converted;
 	Binding* direct = NULL;
 	if (!callee.overloads.empty())

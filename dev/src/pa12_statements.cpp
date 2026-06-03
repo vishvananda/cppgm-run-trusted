@@ -14,8 +14,28 @@ void Parser::parse_function_body(Binding* function,
 	if (function_node.children.empty())
 		throw runtime_error("missing function node");
 	Node& fn = function_node.children.back();
+	Scope* lexical_parent =
+		function->owner != NULL && function->owner->kind == ScopeKind::Class
+		? function->owner : current_scope();
 	Scope* function_scope =
-		pa11::create_child_scope(current_scope(), ScopeKind::Function, function->name);
+		pa11::create_child_scope(lexical_parent, ScopeKind::Function, function->name);
+	if (function->owner != NULL &&
+	    function->owner->kind == ScopeKind::Class &&
+	    !function->is_static_member)
+	{
+		if (function->type->parameters.empty())
+			throw runtime_error("member function missing this parameter");
+		TypePtr this_type = function->type->parameters[0];
+		Binding* this_binding =
+			pa11::add_binding(function_scope,
+			                  BindingKind::Parameter,
+			                  "this",
+			                  this_type);
+		Node this_node("parameter this " + pa11::describe_type(this_type));
+		this_node.binding = this_binding;
+		this_node.type = this_type;
+		add_child(fn, this_node);
+	}
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	if (suffix != NULL)
 	{

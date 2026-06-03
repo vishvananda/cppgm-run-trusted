@@ -5,6 +5,11 @@
 namespace pa14 {
 namespace internal {
 
+ProgramLowerer::ProgramLowerer()
+	: needs_empty_init_function(false)
+{
+}
+
 string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
 {
 	TypePtr bare = pa11::strip_cv(strip_for_value(type));
@@ -69,26 +74,34 @@ void ProgramLowerer::emit_global(const Node& node)
 	TypePtr type = node.binding->type;
 	ostringstream out;
 	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind == TypeKind::Array)
+	if (bare->kind == TypeKind::Array || bare->kind == TypeKind::Record)
 	{
 		vector<string> metadata;
 		if (node.binding->language_linkage == "c")
 			metadata.push_back("linkage=c");
 		metadata.push_back("binding=strong");
 		out << "global @" << name << metadata_suffix(metadata) << " = {\n";
-		TypePtr elem = bare->base;
-		if (!node.children.empty() &&
-		    starts_with(node.children[0].line, "braced-init-list"))
+		if (bare->kind == TypeKind::Record)
 		{
-			for (size_t i = 0; i < node.children[0].children.size(); ++i)
-				out << "  " << global_data_item(elem, node.children[0].children[i])
-				    << "\n";
-			if (!bare->unknown_bound)
-				for (size_t i = node.children[0].children.size(); i < bare->bound; ++i)
-					out << "  zero " << pa11::type_size(elem) << "\n";
+			out << "  zero " << pa11::type_size(type) << "\n";
+			needs_empty_init_function = true;
 		}
 		else
-			out << "  zero " << pa11::type_size(type) << "\n";
+		{
+			TypePtr elem = bare->base;
+			if (!node.children.empty() &&
+		    starts_with(node.children[0].line, "braced-init-list"))
+			{
+				for (size_t i = 0; i < node.children[0].children.size(); ++i)
+					out << "  " << global_data_item(elem, node.children[0].children[i])
+					    << "\n";
+				if (!bare->unknown_bound)
+					for (size_t i = node.children[0].children.size(); i < bare->bound; ++i)
+						out << "  zero " << pa11::type_size(elem) << "\n";
+			}
+			else
+				out << "  zero " << pa11::type_size(type) << "\n";
+		}
 		out << "}";
 	}
 	else
@@ -99,7 +112,27 @@ void ProgramLowerer::emit_global(const Node& node)
 		metadata.push_back("binding=strong");
 		out << "global @" << name << " : " << scalar_lowir_type(type)
 		    << metadata_suffix(metadata) << " = ";
-		if (node.children.empty())
+		if (is_reference(type))
+		{
+			out << "zero";
+			if (!node.children.empty())
+			{
+				const Node& init = node.children[0];
+				if (starts_with(init.line, "id-expression") &&
+				    init.binding != NULL)
+					init_actions.push_back(
+						InitAction(name, "addr", symbol_for(init.binding)));
+				else if (starts_with(init.line, "unary-expression") &&
+				         init.has_op && init.op == OP_STAR &&
+				         !init.children.empty() &&
+				         init.children[0].binding != NULL)
+					init_actions.push_back(
+						InitAction(name,
+						           "load_ptr",
+						           symbol_for(init.children[0].binding)));
+			}
+		}
+		else if (node.children.empty())
 			out << "zero";
 		else if (starts_with(node.children[0].line, "literal") &&
 		         node.children[0].token_text == "nullptr")
@@ -130,41 +163,112 @@ void ProgramLowerer::collect_node(const Node& node)
 	{
 		if (node.token_text == "deleted")
 			return;
-		Binding* binding = node.binding;
-		if (binding == NULL)
-			return;
-		string name = symbol_for(binding);
-		ostringstream out;
-		out << "declare function @" << name << "(";
-		for (size_t i = 0; i < binding->type->parameters.size(); ++i)
-		{
-			if (i != 0)
-				out << ", ";
-			out << "%arg" << i << " : "
-			    << lowir_parameter(binding->type->parameters[i]);
-		}
-		out << ") -> " << scalar_lowir_type(binding->type->base);
-		vector<string> metadata;
-		if (binding->type->variadic)
-			metadata.push_back("arity=variadic");
-		if (binding->language_linkage == "c")
-			metadata.push_back("linkage=c");
-		metadata.push_back("binding=strong");
-		out << metadata_suffix(metadata);
-		if (declared_functions.insert(name).second)
-			declares.push_back(out.str());
+		register_function_declaration(node);
 		return;
 	}
 	if (starts_with(node.line, "function-definition "))
 	{
+		if (node.binding != NULL && node.binding->is_inline_definition)
+		{
+			register_inline_definition(node);
+			return;
+		}
 		if (node.binding != NULL)
 			defined_functions.insert(symbol_for(node.binding));
 		FunctionLowerer lowerer(*this, node);
 		functions.push_back(lowerer.lower());
+		emit_pending_inline_definitions();
 		return;
 	}
 	for (size_t i = 0; i < node.children.size(); ++i)
 		collect_node(node.children[i]);
+}
+
+void ProgramLowerer::register_function_declaration(const Node& node)
+{
+	Binding* binding = node.binding;
+	if (binding == NULL)
+		return;
+	string name = symbol_for(binding);
+	if (function_declarations_by_binding.find(binding) !=
+	    function_declarations_by_binding.end())
+		return;
+	ostringstream out;
+	out << "declare function @" << name << "(";
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+	{
+		if (i != 0)
+			out << ", ";
+		out << "%arg" << i << " : "
+		    << lowir_parameter(binding->type->parameters[i]);
+	}
+	out << ") -> " << scalar_lowir_type(binding->type->base);
+	vector<string> metadata;
+	if (binding->type->variadic)
+		metadata.push_back("arity=variadic");
+	if (binding->language_linkage == "c")
+		metadata.push_back("linkage=c");
+	metadata.push_back("binding=strong");
+	out << metadata_suffix(metadata);
+	function_declarations_by_binding[binding] = out.str();
+}
+
+void ProgramLowerer::register_inline_definition(const Node& node)
+{
+	if (node.binding == NULL)
+		return;
+	inline_definitions[node.binding] = &node;
+}
+
+void ProgramLowerer::demand_function_declaration(const Binding* binding)
+{
+	if (binding == NULL)
+		return;
+	string name = symbol_for(binding);
+	if (defined_functions.find(name) != defined_functions.end() ||
+	    declared_functions.find(name) != declared_functions.end())
+		return;
+	map<const Binding*, string>::const_iterator found =
+		function_declarations_by_binding.find(binding);
+	if (found == function_declarations_by_binding.end())
+		return;
+	declared_functions.insert(name);
+	declares.push_back(found->second);
+}
+
+void ProgramLowerer::demand_inline_function(const Binding* binding)
+{
+	if (binding == NULL || !binding->is_inline_definition)
+		return;
+	string name = symbol_for(binding);
+	if (defined_functions.find(name) != defined_functions.end())
+		return;
+	for (size_t i = 0; i < pending_inline_definitions.size(); ++i)
+		if (pending_inline_definitions[i] == binding)
+			return;
+	map<const Binding*, const Node*>::const_iterator found =
+		inline_definitions.find(binding);
+	if (found != inline_definitions.end())
+		pending_inline_definitions.push_back(binding);
+}
+
+void ProgramLowerer::emit_pending_inline_definitions()
+{
+	while (!pending_inline_definitions.empty())
+	{
+		const Binding* binding = pending_inline_definitions.front();
+		pending_inline_definitions.erase(pending_inline_definitions.begin());
+		map<const Binding*, const Node*>::const_iterator found =
+			inline_definitions.find(binding);
+		if (found == inline_definitions.end())
+			continue;
+		string name = symbol_for(binding);
+		if (defined_functions.find(name) != defined_functions.end())
+			continue;
+		defined_functions.insert(name);
+		FunctionLowerer lowerer(*this, *found->second);
+		functions.push_back(lowerer.lower());
+	}
 }
 
 void ProgramLowerer::collect_translation_unit(const Node& root)
@@ -217,6 +321,30 @@ void ProgramLowerer::write(const string& outfile) const
 		else
 			out << "\n";
 	}
+	if ((needs_empty_init_function || !init_actions.empty()) &&
+	    defined_functions.find("__cppgm_init") == defined_functions.end())
+	{
+		if (!functions.empty())
+			out << "\n";
+		out << "function @__cppgm_init() -> void [role=init, binding=internal] {\n";
+		out << "  block ^entry:\n";
+		int temp = 0;
+		for (size_t i = 0; i < init_actions.size(); ++i)
+		{
+			++temp;
+			string tmp = "%t" + to_string(temp);
+			if (init_actions[i].kind == "load_ptr")
+				out << "    " << tmp << " = load ptr @"
+				    << init_actions[i].symbol << "\n";
+			else
+				out << "    " << tmp << " = addr @"
+				    << init_actions[i].symbol << "\n";
+			out << "    store ptr " << tmp << ", @"
+			    << init_actions[i].target << "\n";
+		}
+		out << "    return void\n";
+		out << "}\n";
+	}
 }
 
 
@@ -233,6 +361,9 @@ void emit_lowir(const vector<string>& srcfiles,
 		pa12_options.preprocess = options.preprocess;
 		pa12::internal::Parser parser(srcfiles[i], pa12_options);
 		parser.parse_translation_unit();
+		const vector<internal::Node>& extra = parser.extra_lowir_nodes();
+		for (size_t j = 0; j < extra.size(); ++j)
+			program.register_inline_definition(extra[j]);
 		program.collect_translation_unit(parser.root());
 	}
 	program.write(outfile);

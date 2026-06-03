@@ -51,7 +51,10 @@ Expr::Expr()
 }
 
 DeclSpecs::DeclSpecs()
-	: typedef_decl(false), constexpr_decl(false), cv(pa11::CV_NONE)
+	: typedef_decl(false),
+	  constexpr_decl(false),
+	  static_decl(false),
+	  cv(pa11::CV_NONE)
 {
 }
 
@@ -141,6 +144,11 @@ const Node& Parser::root() const
 const vector<Node>& Parser::generated_nodes() const
 {
 	return generated_nodes_;
+}
+
+const vector<Node>& Parser::extra_lowir_nodes() const
+{
+	return extra_lowir_nodes_;
 }
 
 Scope* Parser::current_scope() const

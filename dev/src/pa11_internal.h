@@ -39,6 +39,7 @@ enum class TypeKind
 };
 
 struct Scope;
+struct Binding;
 struct Type;
 typedef shared_ptr<Type> TypePtr;
 
@@ -59,6 +60,10 @@ struct Type
 	bool complete;
 	EFundamentalType enum_underlying;
 	Scope* scope;
+	vector<Binding*> fields;
+	uint64_t record_size;
+	uint64_t record_align;
+	bool layout_valid;
 
 	explicit Type(TypeKind k);
 };
@@ -86,6 +91,10 @@ struct Binding
 	string language_linkage;
 	bool has_constant;
 	uint64_t constant_value;
+	bool is_static_member;
+	bool is_inline_definition;
+	bool is_private;
+	uint64_t member_offset;
 
 	Binding(BindingKind k, const string& n, Scope* o);
 };
@@ -173,6 +182,8 @@ bool same_type(const TypePtr& left, const TypePtr& right);
 string describe_type(const TypePtr& type);
 uint64_t type_size(const TypePtr& type);
 uint64_t type_align(const TypePtr& type);
+void layout_record_type(TypePtr type);
+TypePtr record_type_for_scope(Scope* scope);
 
 Scope* create_child_scope(Scope* parent,
                           ScopeKind kind,

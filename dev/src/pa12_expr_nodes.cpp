@@ -95,6 +95,38 @@ bool compound_assignment_rhs_viable(ETokenType op, TypePtr lhs, TypePtr rhs)
 	return false;
 }
 
+Expr make_this_id_expr(Binding* binding)
+{
+	Expr out;
+	out.binding = binding;
+	out.type = binding->type;
+	out.category = ValueCategory::LValue;
+	out.valid = true;
+	out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
+	                " this");
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr make_constant_binding_expr(Binding* binding, TypePtr type)
+{
+	Expr out;
+	out.binding = binding;
+	out.type = type;
+	out.category = ValueCategory::PRValue;
+	out.valid = true;
+	out.constant_expression = true;
+	out.has_constant_value = true;
+	out.constant_value = binding->constant_value;
+	out.null_pointer_constant = binding->constant_value == 0;
+	out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
+	                " " + to_string(binding->constant_value));
+	out.node.binding = binding;
+	out.node.token_text = to_string(binding->constant_value);
+	annotate_expr_node(out);
+	return out;
+}
+
 }  // namespace
 
 Expr Parser::make_id_expr(const QualifiedName& name)
@@ -161,6 +193,26 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 	}
 	if (!out.overloads.empty())
 		binding = out.overloads[0];
+	Binding* this_binding =
+		pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
+	if (!name.qualified &&
+	    this_binding != NULL &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    !binding->is_static_member)
+	{
+		Expr this_expr = make_this_id_expr(this_binding);
+		return make_member_expr(this_expr, binding->name, "->");
+	}
+	if (binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    binding->is_static_member &&
+	    binding->kind == BindingKind::Variable &&
+	    binding->has_constant)
+	{
+		return make_constant_binding_expr(binding,
+		                                  expression_object_type(binding->type));
+	}
 	out.binding = binding;
 	out.type = expression_object_type(binding->type);
 	if (binding->kind == BindingKind::Function)
@@ -380,8 +432,78 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		throw runtime_error("member access on non-record");
 	vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
-	if (found.empty() || found[0]->kind == BindingKind::Function)
-		throw runtime_error("unsupported member function access");
+	if (found.empty())
+		throw runtime_error("member not found");
+	Binding* this_binding =
+		pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
+	bool current_member_of_owner = false;
+	if (this_binding != NULL)
+	{
+		TypePtr this_type = pa11::strip_cv(expression_object_type(this_binding->type));
+		if (this_type->kind == pa11::TypeKind::Pointer)
+		{
+			TypePtr cls = pa11::strip_cv(this_type->base);
+			current_member_of_owner = cls->scope == found[0]->owner;
+		}
+	}
+	if (found[0]->is_private && !current_member_of_owner)
+		throw runtime_error("private member access");
+	if (found[0]->kind == BindingKind::Enumerator)
+	{
+		Expr out;
+		out.binding = found[0];
+		out.type = found[0]->type;
+		out.category = ValueCategory::PRValue;
+		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = found[0]->constant_value;
+		out.null_pointer_constant = found[0]->constant_value == 0;
+		out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
+		                " " + to_string(found[0]->constant_value));
+		out.node.binding = found[0];
+		out.node.token_text = to_string(found[0]->constant_value);
+		annotate_expr_node(out);
+		return out;
+	}
+	if (found[0]->kind == BindingKind::Function)
+	{
+		Expr out;
+		out.valid = true;
+		out.binding = found[0];
+		out.type = found[0]->type;
+		out.category = ValueCategory::LValue;
+		for (size_t i = 0; i < found.size(); ++i)
+			if (found[i]->kind == BindingKind::Function)
+				out.overloads.push_back(found[i]);
+		out.node = Node("member-expression lvalue " +
+		                pa11::describe_type(out.type) + " OP_DOT:" + name);
+		add_child(out.node, object.node);
+		out.node.binding = found[0];
+		out.node.has_op = true;
+		out.node.op = op == "->" ? OP_ARROW : OP_DOT;
+		out.node.token_text = name;
+		annotate_expr_node(out);
+		return out;
+	}
+	if (found[0]->is_static_member && found[0]->has_constant)
+	{
+		Expr out;
+		out.type = expression_object_type(found[0]->type);
+		out.category = ValueCategory::PRValue;
+		out.binding = found[0];
+		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = found[0]->constant_value;
+		out.null_pointer_constant = found[0]->constant_value == 0;
+		out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
+		                " " + to_string(found[0]->constant_value));
+		out.node.binding = found[0];
+		out.node.token_text = to_string(found[0]->constant_value);
+		annotate_expr_node(out);
+		return out;
+	}
 	TypePtr member_type = found[0]->type;
 	if (pa11::type_has_const(type))
 		member_type = pa11::make_cv(member_type, pa11::CV_CONST);
@@ -394,6 +516,8 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 	                pa11::describe_type(member_type) + " OP_DOT:" + name);
 	add_child(out.node, object.node);
 	out.node.binding = found[0];
+	out.node.has_op = true;
+	out.node.op = op == "->" ? OP_ARROW : OP_DOT;
 	out.node.token_text = name;
 	annotate_expr_node(out);
 	return out;

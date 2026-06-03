@@ -93,6 +93,7 @@ struct DeclSpecs
 {
 	bool typedef_decl;
 	bool constexpr_decl;
+	bool static_decl;
 	unsigned cv;
 	vector<ETokenType> builtin;
 	TypePtr named_type;
@@ -161,6 +162,7 @@ public:
 	void parse_translation_unit();
 	const Node& root() const;
 	const vector<Node>& generated_nodes() const;
+	const vector<Node>& extra_lowir_nodes() const;
 
 private:
 	vector<Token> tokens_;
@@ -169,8 +171,10 @@ private:
 	vector<Scope*> scopes_;
 	vector<TypePtr> function_returns_;
 	vector<string> language_linkages_;
+	vector<bool> class_private_access_;
 	Node root_;
 	vector<Node> generated_nodes_;
+	vector<Node> extra_lowir_nodes_;
 	int local_type_counter_;
 	set<string> generated_default_ctors_;
 	map<Binding*, vector<Expr> > default_arguments_;
@@ -202,7 +206,7 @@ private:
 	void parse_template_declaration();
 	void parse_simple_or_function_declaration(Node& out, bool emit_node);
 	bool parse_constructor_like_member();
-	void parse_class_body(Scope* class_scope);
+	void parse_class_body(Scope* class_scope, bool default_private);
 
 	DeclSpecs parse_decl_specifier_seq(bool type_id_context);
 	TypePtr type_from_decl_specs(const DeclSpecs& specs);

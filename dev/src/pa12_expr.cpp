@@ -280,6 +280,22 @@ Expr Parser::parse_primary_expression()
 		annotate_expr_node(out);
 		return out;
 	}
+	if (consume(KW_THIS))
+	{
+		Binding* binding =
+			pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
+		if (binding == NULL)
+			throw runtime_error("this outside member function");
+		Expr out;
+		out.binding = binding;
+		out.type = binding->type;
+		out.category = ValueCategory::LValue;
+		out.valid = true;
+		out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
+		                " this");
+		annotate_expr_node(out);
+		return out;
+	}
 	if (at_literal())
 		return parse_literal_expression();
 	if (consume(OP_LPAREN))
