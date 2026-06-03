@@ -371,12 +371,17 @@ struct CyEmitter
 	{
 		emit_pointer_value_to_reg(fn, ins.a, "x");
 		line("move64 z64 0");
-		for (size_t off = 0; off < ins.span.bytes; off += 8)
+		if (ins.span.bytes % 8 == 0)
 		{
-			if (off != 0)
-				line("iadd64 x64 x64 8");
-			line("move64 [x64] z64");
+			for (size_t off = 0; off < ins.span.bytes; off += 8)
+			{
+				if (off != 0)
+					line("iadd64 x64 x64 8");
+				line("move64 [x64] z64");
+			}
+			return;
 		}
+		emit_zero_bytes(ins.span.bytes, "x");
 	}
 
 	void emit_unary(const Function& fn, const Instruction& ins)
@@ -974,6 +979,11 @@ struct CyEmitter
 
 	void emit_copy_qwords(size_t bytes, const string& src, const string& dst)
 	{
+		if (bytes % 8 != 0)
+		{
+			emit_copy_bytes(bytes, src, dst);
+			return;
+		}
 		for (size_t off = 0; off < bytes; off += 8)
 		{
 			if (off != 0)
@@ -988,11 +998,56 @@ struct CyEmitter
 
 	void emit_copy_qwords_offset(size_t bytes, const string& src, const string& dst)
 	{
+		if (bytes % 8 != 0)
+		{
+			emit_copy_bytes(bytes, src, dst);
+			return;
+		}
 		for (size_t off = 0; off < bytes; off += 8)
 		{
 			line("move64 z64 " + mem_reg(src, static_cast<int>(off)));
 			line("move64 " + mem_reg(dst, static_cast<int>(off)) + " z64");
 		}
+	}
+
+	void emit_copy_bytes(size_t bytes, const string& src, const string& dst)
+	{
+		size_t off = 0;
+		while (off < bytes)
+		{
+			const size_t width = largest_copy_width(bytes - off);
+			line("move" + to_string(width * 8) + " " +
+			     reg_name("z", static_cast<int>(width * 8)) + " " +
+			     mem_reg(src, static_cast<int>(off)));
+			line("move" + to_string(width * 8) + " " +
+			     mem_reg(dst, static_cast<int>(off)) + " " +
+			     reg_name("z", static_cast<int>(width * 8)));
+			off += width;
+		}
+	}
+
+	void emit_zero_bytes(size_t bytes, const string& dst)
+	{
+		size_t off = 0;
+		while (off < bytes)
+		{
+			const size_t width = largest_copy_width(bytes - off);
+			line("move" + to_string(width * 8) + " " +
+			     mem_reg(dst, static_cast<int>(off)) + " " +
+			     reg_name("z", static_cast<int>(width * 8)));
+			off += width;
+		}
+	}
+
+	size_t largest_copy_width(size_t bytes) const
+	{
+		if (bytes >= 8)
+			return 8;
+		if (bytes >= 4)
+			return 4;
+		if (bytes >= 2)
+			return 2;
+		return 1;
 	}
 
 	void emit_global_section(const Global& global)

@@ -46,6 +46,23 @@ void validate_block(Function& fn,
                     const set<string>& blocks);
 size_t allocate_stack_slot(size_t& offset, const Type& type);
 void assign_singleton(string& slot, const string& value);
+void require_role_owner(map<string, string>& owners,
+                        const string& role,
+                        const string& name);
+
+bool is_function_role(const string& role)
+{
+	return one_of(role, {"entry", "init", "fini", "eh_unhandled",
+	                    "eh_allocate_exception", "eh_begin_catch",
+	                    "eh_call_unexpected", "eh_current_exception_type",
+	                    "eh_end_catch", "eh_rethrow", "eh_throw",
+	                    "eh_personality", "eh_resume"});
+}
+
+bool is_global_role(const string& role)
+{
+	return one_of(role, {"eh_top", "eh_value", "eh_type"});
+}
 
 void validate_function_metadata(const Metadata& metadata)
 {
@@ -75,6 +92,26 @@ void validate_function_metadata(const Metadata& metadata)
 		if (key == "return" && one_of(value, {"returns", "noreturn"}))
 			continue;
 		throw runtime_error("invalid function metadata");
+	}
+}
+
+void validate_call_signature_metadata(const Metadata& metadata)
+{
+	for (size_t i = 0; i < metadata.size(); ++i)
+	{
+		const string& key = metadata[i].key;
+		const string& value = metadata[i].value;
+		if (key == "arity" &&
+		    one_of(value, {"fixed", "variadic", "prototype_relaxed"}))
+			continue;
+		if (key == "effects" &&
+		    one_of(value, {"readnone", "readonly", "readwrite"}))
+			continue;
+		if (key == "unwind" && one_of(value, {"may", "no"}))
+			continue;
+		if (key == "return" && one_of(value, {"returns", "noreturn"}))
+			continue;
+		throw runtime_error("invalid call-signature metadata");
 	}
 }
 
@@ -287,7 +324,43 @@ void validate_call(const Function& fn, const Program& program, const Instruction
 		validate_symbol_value(fn, program, ins.args[i]);
 	for (size_t i = 0; i < ins.signature.params.size(); ++i)
 		validate_parameter_metadata(ins.signature.params[i], ins.signature.ret, i);
-	validate_function_metadata(ins.signature.metadata);
+	validate_call_signature_metadata(ins.signature.metadata);
+}
+
+void validate_pointer_or_slot_destination(const Function& fn,
+                                          const Program& program,
+                                          const Value& value,
+                                          const Span& span,
+                                          const string& context)
+{
+	const Type type = value_type(fn, program, value);
+	if (is_ptr_type(type))
+		return;
+	if (value.kind == ValueKind::Slot && stack_storage_size(type) >= span.bytes)
+		return;
+	throw runtime_error(context + " must be pointer-valued or addressable slot");
+}
+
+void validate_copyobj(const Function& fn,
+                      const Program& program,
+                      const Instruction& ins)
+{
+	const Type src = value_type(fn, program, ins.a);
+	const bool direct_object =
+	    is_obj_type(src) && src.obj_size == ins.span.bytes &&
+	    src.obj_align == ins.span.align;
+	if (!is_ptr_type(src) && !direct_object)
+		throw runtime_error("copyobj source must be pointer or matching object");
+	validate_pointer_or_slot_destination(fn, program, ins.b, ins.span,
+	                                     "copyobj destination");
+}
+
+void validate_zeroinit(const Function& fn,
+                       const Program& program,
+                       const Instruction& ins)
+{
+	validate_pointer_or_slot_destination(fn, program, ins.a, ins.span,
+	                                     "zeroinit destination");
 }
 
 void validate_instruction(Function& fn,
@@ -375,9 +448,10 @@ void validate_instruction_operands(Function& fn,
 		}
 		break;
 	case InstrKind::CopyObj:
+		validate_copyobj(fn, program, ins);
+		break;
 	case InstrKind::ZeroInit:
-		validate_symbol_value(fn, program, ins.a);
-		validate_symbol_value(fn, program, ins.b);
+		validate_zeroinit(fn, program, ins);
 		break;
 	case InstrKind::AtomicThreadFence:
 	case InstrKind::AtomicSignalFence:
@@ -519,22 +593,30 @@ void collect_top_level(Program& program)
 
 void resolve_roles(Program& program)
 {
+	map<string, string> role_owners;
+	for (size_t i = 0; i < program.globals.size(); ++i)
+	{
+		const string role = metadata_value(program.globals[i].metadata, "role");
+		if (role.empty())
+			continue;
+		if (!is_global_role(role))
+			throw runtime_error("invalid global role");
+		require_role_owner(role_owners, role, program.globals[i].name);
+	}
 	for (size_t i = 0; i < program.functions.size(); ++i)
 	{
 		const string role = metadata_value(program.functions[i].metadata, "role");
+		if (role.empty())
+			continue;
+		if (!is_function_role(role))
+			throw runtime_error("invalid function role");
+		require_role_owner(role_owners, role, program.functions[i].name);
 		if (role == "entry")
 			assign_singleton(program.entry_function, program.functions[i].name);
 		else if (role == "init")
 			assign_singleton(program.init_function, program.functions[i].name);
 		else if (role == "fini")
 			assign_singleton(program.fini_function, program.functions[i].name);
-		else if (!role.empty() &&
-		         !one_of(role, {"eh_unhandled", "eh_allocate_exception",
-		                        "eh_begin_catch", "eh_call_unexpected",
-		                        "eh_current_exception_type", "eh_end_catch",
-		                        "eh_rethrow", "eh_throw", "eh_personality",
-		                        "eh_resume"}))
-			throw runtime_error("invalid function role");
 	}
 	if (program.entry_function.empty() &&
 	    program.function_by_name.find("@main") != program.function_by_name.end())
@@ -554,6 +636,14 @@ void assign_singleton(string& slot, const string& value)
 	if (!slot.empty())
 		throw runtime_error("duplicate singleton role");
 	slot = value;
+}
+
+void require_role_owner(map<string, string>& owners,
+                        const string& role,
+                        const string& name)
+{
+	if (!owners.insert(make_pair(role, name)).second)
+		throw runtime_error("duplicate singleton role");
 }
 
 void validate_tls_wrappers(const Program& program)
