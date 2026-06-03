@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 using namespace std;
 
@@ -180,6 +182,60 @@ enum ETokenType
 extern const map<EFundamentalType, string> FundamentalTypeToStringMap;
 extern const unordered_map<string, ETokenType> StringToTokenTypeMap;
 extern const map<ETokenType, string> TokenTypeToStringMap;
+
+enum class LiteralEncoding
+{
+	Ordinary,
+	U8,
+	U,
+	UpperU,
+	L
+};
+
+struct IntegerLiteralInfo
+{
+	EFundamentalType type;
+	unsigned long long value;
+	bool user_defined;
+	string ud_suffix;
+	string prefix;
+};
+
+struct CharacterLiteralInfo
+{
+	LiteralEncoding encoding;
+	EFundamentalType type;
+	uint32_t code_point;
+	string ud_suffix;
+};
+
+bool IsAsciiDigit(char c);
+bool IsOctalDigit(char c);
+bool IsHexDigitChar(char c);
+int HexDigitValue(char c);
+bool IsValidUdSuffix(const string& suffix);
+bool FundamentalTypeIsUnsigned(EFundamentalType type);
+bool AnalyzeIntegerLiteral(const string& source, IntegerLiteralInfo& out);
+bool AnalyzeCharacterLiteral(const string& source,
+                             bool user_defined,
+                             CharacterLiteralInfo& out);
+bool DecodeUtf8At(const string& s, size_t& pos, uint32_t& cp);
+bool IsValidCodePoint(uint32_t cp);
+bool DecodeOrdinaryBody(const string& s,
+                        size_t begin,
+                        size_t end,
+                        vector<uint32_t>& code_points);
+size_t PrefixLengthForQuotedLiteral(const string& source,
+                                    char quote,
+                                    LiteralEncoding& encoding);
+bool FindOrdinaryClosingQuote(const string& source,
+                              size_t quote_pos,
+                              char quote,
+                              size_t& close_pos);
+void AppendByte(vector<unsigned char>& bytes, uint32_t value);
+void AppendUint16(vector<unsigned char>& bytes, uint32_t value);
+void AppendUint32(vector<unsigned char>& bytes, uint32_t value);
+void AppendUtf8CodePoint(vector<unsigned char>& bytes, uint32_t cp);
 
 char ValueToHexChar(int c);
 string HexDump(const void* pdata, size_t nbytes);

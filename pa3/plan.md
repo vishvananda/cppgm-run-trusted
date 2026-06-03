@@ -17,8 +17,9 @@ preprocessor controlling expression, and phase 1-3 failures still return
   events, splits logical lines, performs the PA3 subset of PA2 token
   conversion, and evaluates controlling expressions using typed values.
 - Keep `dev/ctrlexpr.cpp` as the command-line entry point only.
-- Reuse `posttoken_support` for token and fundamental-type tables.  Do not
-  recover semantics from PA2 debug text.
+- Reuse `posttoken_support` for token tables, fundamental-type tables, and
+  typed integer/character literal analysis.  Do not recover semantics from PA2
+  debug text.
 - Link `ctrlexpr` against `pptoken_lib`, `posttoken_support`, and the PA3
   support module through `dev/frontend_source_sets.mk`.
 
@@ -47,6 +48,29 @@ preprocessor controlling expression, and phase 1-3 failures still return
   such as division by zero or invalid shifts are suppressed.  The conditional
   result type is still determined from both branches.
 
+## Architecture Review
+
+The implemented PA3 path follows the planned split.  `dev/ctrlexpr.cpp` is a
+thin entry point that owns only the PA3 mock `defined` predicate and process
+exit behavior.  `dev/src/ctrlexpr_support.cpp` owns line collection from
+`IPPTokenStream`, PA3 token conversion, recursive-descent parsing, expression
+evaluation, short-circuit activity tracking, and output formatting.
+
+Earlier-stage ownership is preserved.  Phase 1-3 source normalization and
+preprocessing-token recognition still live in `dev/src/pptoken_lib.cpp`.
+Shared PA2 token facts and literal facts now live in
+`dev/src/posttoken_support.{h,cpp}`: both `dev/posttoken.cpp` and PA3 consume
+the same integer suffix/type selection, character literal decoding, code-point
+validation, user-defined suffix recognition, and literal byte helpers.  PA3
+uses these typed facts directly and rejects user-defined, floating, string,
+array, or otherwise non-integral literals without parsing PA2 debug output.
+
+No fallback compiler path, reference binary shell-out, embedded payload,
+runtime trampoline, template binary, or test-name gate is present in the PA3
+implementation.  `dev/frontend_source_sets.mk` links `ctrlexpr` only against
+`pptoken_lib`, `posttoken_support`, and `ctrlexpr_support`, so the checked
+source set contains the whole PA3 implementation.
+
 ## Validation
 
 - Use `make test-report ACTIVE_TEST_REPORT_PAS='pa3'` for focused PA3
@@ -57,3 +81,20 @@ preprocessor controlling expression, and phase 1-3 failures still return
   - `make test-report-through-pa3`
   - `perl scripts/cppgm_file_audit.pl --stage pa3 --paths dev/src`
   - a cohesive commit and clean `git status --short`.
+
+## Final Architecture Review
+
+Audit cleanup removed the duplicated integer and character literal parsers from
+`dev/posttoken.cpp` and `dev/src/ctrlexpr_support.cpp`.  The final architecture
+has one shared owner for PA2 literal classification in `posttoken_support` and
+one PA3 owner for controlling-expression parsing/evaluation in
+`ctrlexpr_support`.  This keeps semantic facts available as structured types
+instead of stringly PA2 output, while avoiding downstream recovery or parallel
+literal-rule maintenance.
+
+The parser remains a single-pass recursive-descent parser over one logical
+line's token vector.  Binary precedence levels use loops, conditional
+expressions recurse only where the grammar requires it, and inactive branches
+are still parsed while runtime-only arithmetic errors are suppressed.  The
+audit found no remaining ownership, file-audit, performance, fallback, or
+test-specific blockers in the PA3 path.
