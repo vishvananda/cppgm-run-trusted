@@ -44,3 +44,42 @@ continues.
 - Finish with:
   - `make test-report-through-pa2`
   - `perl scripts/cppgm_file_audit.pl --stage pa2 --paths dev/src`
+
+## Architecture Review
+
+The implementation matches the intended PA2 ownership split.  `posttoken` is
+implemented as a direct `IPPTokenStream` consumer in `dev/posttoken.cpp`, and
+`main` delegates phase 1-3 preprocessing-token production to
+`pptoken::run_pptoken(cin, output)`.  The PA1 lexer remains in
+`dev/src/pptoken_lib.cpp` and is linked into both `pptoken` and `posttoken`
+through `dev/frontend_source_sets.mk`.
+
+The PA2-specific support library in `dev/src/posttoken_support.cpp` owns the
+simple-token table, fundamental-type names, output formatting, hexdumps, and
+the PA2 floating decode helpers.  The `PostTokenStream` implementation owns
+post-token classification, invalid-token continuation, integer and floating
+literal grammar checks, character/string escape decoding, string literal
+concatenation, encoding-prefix and ud-suffix combination checks, ABI-width
+encoding, and EOF flushing.
+
+No reference binary, host compiler, interpreter, VM, trampoline, generated
+payload, test fixture path, timeout workaround, or alternate success path is
+used by the implementation.  The only filesystem-facing change for PA2 is the
+source-set entry that links `pptoken_lib` and `posttoken_support` into the
+`posttoken` tool.
+
+## Final Architecture Review
+
+The final audited shape remains a staged compiler increment: PA1 produces
+preprocessing tokens, PA2 consumes those tokens and emits analyzed tokens or
+`invalid` entries without aborting on post-token conversion failures.  String
+literal sequences are buffered until a non-string token or EOF, then validated
+and emitted once, which keeps phase 6 ownership localized to PA2 instead of
+recovering concatenation facts downstream.
+
+The audit cleanup kept the architecture unchanged and tightened the hot string
+literal path by reserving decoded-code-point, joined-source, and encoded-byte
+storage and by moving parsed string pieces into the pending buffer.  Required
+validation after the cleanup passed:
+`make test-report-through-pa2` and
+`perl scripts/cppgm_file_audit.pl --stage pa2 --paths dev/src`.

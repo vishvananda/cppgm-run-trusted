@@ -17,6 +17,7 @@
 #include <limits>
 #include <vector>
 #include <map>
+#include <utility>
 
 using namespace std;
 
@@ -561,6 +562,7 @@ bool DecodeOrdinaryBody(const string& s,
                         size_t end,
                         vector<uint32_t>& code_points)
 {
+	code_points.reserve(code_points.size() + (end - begin));
 	size_t pos = begin;
 	while (pos < end)
 	{
@@ -732,6 +734,7 @@ bool ParseRawStringLiteral(const string& source,
 		return false;
 	ud_suffix = source.substr(close + close_marker.size());
 	size_t pos = open + 1;
+	code_points.reserve(close - pos);
 	while (pos < close)
 	{
 		uint32_t cp = 0;
@@ -821,6 +824,7 @@ bool EncodeStringData(const vector<uint32_t>& code_points,
 	elements = 0;
 	if (encoding == LiteralEncoding::Ordinary || encoding == LiteralEncoding::U8)
 	{
+		bytes.reserve(code_points.size() * 4 + 1);
 		type = FT_CHAR;
 		for (size_t i = 0; i < code_points.size(); ++i)
 			AppendUtf8CodePoint(bytes, code_points[i]);
@@ -830,6 +834,7 @@ bool EncodeStringData(const vector<uint32_t>& code_points,
 	}
 	if (encoding == LiteralEncoding::U)
 	{
+		bytes.reserve((code_points.size() * 2 + 1) * sizeof(uint16_t));
 		type = FT_CHAR16_T;
 		for (size_t i = 0; i < code_points.size(); ++i)
 		{
@@ -859,6 +864,7 @@ bool EncodeStringData(const vector<uint32_t>& code_points,
 	}
 
 	type = encoding == LiteralEncoding::L ? FT_WCHAR_T : FT_CHAR32_T;
+	bytes.reserve((code_points.size() + 1) * sizeof(uint32_t));
 	for (size_t i = 0; i < code_points.size(); ++i)
 	{
 		if (code_points[i] > 0x10FFFF)
@@ -873,7 +879,12 @@ bool EncodeStringData(const vector<uint32_t>& code_points,
 
 string JoinSources(const vector<ParsedStringPiece>& pieces)
 {
+	size_t size = pieces.empty() ? 0 : pieces.size() - 1;
+	for (size_t i = 0; i < pieces.size(); ++i)
+		size += pieces[i].source.size();
+
 	string source;
+	source.reserve(size);
 	for (size_t i = 0; i < pieces.size(); ++i)
 	{
 		if (i != 0)
@@ -1020,7 +1031,7 @@ struct PostTokenStream : IPPTokenStream
 			piece.encoding = LiteralEncoding::Ordinary;
 			piece.valid_suffix = false;
 		}
-		pending_strings.push_back(piece);
+		pending_strings.push_back(std::move(piece));
 	}
 
 	void flush_strings()
@@ -1040,6 +1051,10 @@ struct PostTokenStream : IPPTokenStream
 		}
 
 		vector<uint32_t> code_points;
+		size_t total_code_points = 0;
+		for (size_t i = 0; i < pending_strings.size(); ++i)
+			total_code_points += pending_strings[i].code_points.size();
+		code_points.reserve(total_code_points);
 		for (size_t i = 0; i < pending_strings.size(); ++i)
 		{
 			code_points.insert(code_points.end(),
