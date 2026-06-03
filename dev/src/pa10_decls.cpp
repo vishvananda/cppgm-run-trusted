@@ -1,4 +1,4 @@
-#include "pa10_internal.h"
+#include "pa10_parser_internal.h"
 
 #include <stdexcept>
 
@@ -45,19 +45,6 @@ bool starts_qualified_nonconversion_operator(const vector<Token>& tokens,
 		++p;
 	}
 	return false;
-}
-
-bool keyword_decl_specifier_seq(const Ast& specs)
-{
-	const string prefix = "decl-specifier KW_";
-	for (size_t i = 0; i < specs->children.size(); ++i)
-	{
-		const string& line = specs->children[i]->line;
-		if (line.size() < prefix.size() ||
-		    line.substr(0, prefix.size()) != prefix)
-			return false;
-	}
-	return !specs->children.empty();
 }
 
 }  // namespace
@@ -133,15 +120,28 @@ Ast Parser::parse_namespace_definition()
 	if (identifier())
 		name = expect_identifier();
 	add_namespace_name(name);
+	const string namespace_name = qualify_namespace_name(name);
 
 	Ast node = make_ast("namespace-definition " + (name.empty() ? "<unnamed>" : name));
 	if (is_inline)
 		add_child(node, make_ast("inline"));
 	expect(OP_LBRACE);
-	push_scope();
+	namespace_stack_.push_back(namespace_name);
+	push_namespace_scope(namespace_name);
 	while (!consume(OP_RBRACE))
 		add_child(node, parse_declaration());
 	pop_scope();
+	namespace_stack_.pop_back();
+	if (is_inline && !namespace_name.empty())
+	{
+		import_namespace_types(namespace_name);
+		if (!current_namespace_name().empty())
+		{
+			const set<string>& imported = namespace_types_[namespace_name];
+			namespace_types_[current_namespace_name()].insert(imported.begin(),
+			                                                 imported.end());
+		}
+	}
 	return node;
 }
 
@@ -153,6 +153,7 @@ Ast Parser::parse_namespace_alias_definition()
 	string target = parse_id_expression_text();
 	expect(OP_SEMICOLON);
 	add_namespace_name(name);
+	record_namespace_alias(name, target);
 	Ast node = make_ast("namespace-alias-definition " + name);
 	add_child(node, make_ast("target " + target));
 	return node;
@@ -165,6 +166,7 @@ Ast Parser::parse_using()
 	{
 		string target = parse_id_expression_text();
 		expect(OP_SEMICOLON);
+		import_namespace_types(target);
 		Ast node = make_ast("using-directive");
 		add_child(node, make_ast("target " + target));
 		return node;
@@ -198,7 +200,7 @@ Ast Parser::parse_template_declaration()
 {
 	expect(KW_TEMPLATE);
 	Ast node = make_ast("template-declaration");
-	push_scope();
+	push_template_scope();
 	add_child(node, parse_template_parameter_clause());
 	add_child(node, parse_declaration());
 	pop_scope();
@@ -233,13 +235,14 @@ Ast Parser::parse_template_parameter()
 		add_child(node, make_ast("template-template-parameter"));
 		add_child(node, parse_template_parameter_clause());
 		ETokenType key = current().type;
+		string key_source = current().source;
 		expect(key);
-		add_child(node, make_ast("parameter-key " + keyword_leaf(key, TokenTypeToStringMap.at(key) == "KW_CLASS" ? "class" : current().source)));
+		add_child(node, make_ast("parameter-key " + keyword_leaf(key, key_source)));
 		if (identifier())
 		{
 			string name = expect_identifier();
 			add_child(node, make_ast("identifier " + name));
-			add_type_name(name);
+			add_template_type_name(name);
 		}
 		if (consume(OP_ASS))
 		{
@@ -262,7 +265,7 @@ Ast Parser::parse_template_parameter()
 		{
 			string name = expect_identifier();
 			add_child(node, make_ast("identifier " + name));
-			add_type_name(name);
+			add_template_type_name(name);
 		}
 		if (consume(OP_ASS))
 		{
@@ -290,7 +293,7 @@ Ast Parser::parse_template_parameter()
 	if (consume(OP_ASS))
 	{
 		Ast dflt = make_ast("default-template-argument");
-		if (!has_declarator && keyword_decl_specifier_seq(specs.specs) && literal())
+		if (!has_declarator && specs.all_specifiers_are_keywords && literal())
 		{
 			add_child(dflt, make_ast("literal TT_LITERAL:" + current().source));
 			++pos_;
@@ -343,6 +346,7 @@ Ast Parser::parse_class_specifier(bool consume_semicolon)
 
 	Ast node = make_ast(name.empty() ? "class-specifier" : "class-specifier " + name);
 	add_child(node, make_ast("class-key " + keyword_leaf(key, key_source)));
+	vector<string> base_type_names;
 	if (consume(OP_COLON))
 	{
 		Ast base = make_ast("base-clause");
@@ -365,7 +369,9 @@ Ast Parser::parse_class_specifier(bool consume_semicolon)
 				add_child(spec, make_ast("virtual " + token_leaf(current())));
 				++pos_;
 			}
-			add_child(spec, make_ast("base-name " + parse_type_name_text()));
+			string base_name = parse_type_name_text();
+			base_type_names.push_back(base_name);
+			add_child(spec, make_ast("base-name " + base_name));
 			consume(OP_DOTS);
 			add_child(base, spec);
 		}
@@ -376,7 +382,9 @@ Ast Parser::parse_class_specifier(bool consume_semicolon)
 	expect(OP_LBRACE);
 	class_stack_.push_back(unqualified_decl_name(name));
 	++class_depth_;
-	push_scope();
+	push_class_scope(name);
+	for (size_t i = 0; i < base_type_names.size(); ++i)
+		import_class_member_types(base_type_names[i]);
 	while (!consume(OP_RBRACE))
 		add_child(node, parse_member_declaration());
 	pop_scope();

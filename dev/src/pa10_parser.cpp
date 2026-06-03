@@ -1,4 +1,4 @@
-#include "pa10_internal.h"
+#include "pa10_parser_internal.h"
 
 #include <stdexcept>
 
@@ -15,6 +15,28 @@ bool mock_type_name(const string& name)
 	       name.find('T') != string::npos ||
 	       name.find('Y') != string::npos ||
 	       name.find('E') != string::npos;
+}
+
+string unqualified_type_key(const string& name)
+{
+	string stem = name;
+	size_t colon = stem.rfind("::");
+	if (colon != string::npos)
+		stem = stem.substr(colon + 2);
+	size_t end = stem.find('<');
+	if (end != string::npos)
+		stem = stem.substr(0, end);
+	if (!stem.empty() && stem[0] == '~')
+		stem = stem.substr(1);
+	return stem;
+}
+
+string qualifier_type_key(const string& name)
+{
+	size_t colon = name.rfind("::");
+	if (colon == string::npos)
+		return "";
+	return unqualified_type_key(name.substr(0, colon));
 }
 
 bool has_matching_angle(const vector<Token>& tokens, size_t p)
@@ -375,6 +397,27 @@ void Parser::push_scope()
 	scopes_.push_back(Scope());
 }
 
+void Parser::push_template_scope()
+{
+	push_scope();
+	scopes_.back().template_parameter_scope = true;
+}
+
+void Parser::push_namespace_scope(const string& name)
+{
+	push_scope();
+	scopes_.back().namespace_name = name;
+	if (!name.empty())
+		import_namespace_types(name);
+}
+
+void Parser::push_class_scope(const string& name)
+{
+	push_scope();
+	scopes_.back().class_name = unqualified_type_key(name);
+	import_class_member_types(name);
+}
+
 void Parser::pop_scope()
 {
 	if (scopes_.size() <= 1)
@@ -382,12 +425,115 @@ void Parser::pop_scope()
 	scopes_.pop_back();
 }
 
+string Parser::current_namespace_name() const
+{
+	return namespace_stack_.empty() ? string() : namespace_stack_.back();
+}
+
+string Parser::qualify_namespace_name(const string& name) const
+{
+	if (name.empty())
+		return "";
+	if (name.size() >= 2 && name.substr(0, 2) == "::")
+		return name.substr(2);
+	if (name.find("::") != string::npos)
+		return name;
+	const string current_ns = current_namespace_name();
+	return current_ns.empty() ? name : current_ns + "::" + name;
+}
+
+string Parser::resolve_namespace_name(const string& name) const
+{
+	string key = name;
+	if (key.size() >= 2 && key.substr(0, 2) == "::")
+		key = key.substr(2);
+	map<string, string>::const_iterator alias = namespace_aliases_.find(key);
+	if (alias != namespace_aliases_.end())
+		return alias->second;
+	if (namespace_types_.count(key) != 0)
+		return key;
+
+	const string qualified = qualify_namespace_name(key);
+	alias = namespace_aliases_.find(qualified);
+	if (alias != namespace_aliases_.end())
+		return alias->second;
+	if (namespace_types_.count(qualified) != 0)
+		return qualified;
+	return qualified;
+}
+
+void Parser::import_namespace_types(const string& name)
+{
+	const string resolved = resolve_namespace_name(name);
+	map<string, set<string> >::const_iterator it = namespace_types_.find(resolved);
+	if (it == namespace_types_.end())
+		return;
+	for (set<string>::const_iterator type = it->second.begin();
+	     type != it->second.end();
+	     ++type)
+	{
+		scopes_.back().types.insert(*type);
+		if (!scopes_.back().class_name.empty())
+			class_member_types_[scopes_.back().class_name].insert(*type);
+	}
+}
+
+void Parser::record_namespace_alias(const string& name, const string& target)
+{
+	if (name.empty())
+		return;
+	const string resolved = resolve_namespace_name(target);
+	namespace_aliases_[name] = resolved;
+	const string qualified = qualify_namespace_name(name);
+	namespace_aliases_[qualified] = resolved;
+}
+
+void Parser::import_class_member_types(const string& name)
+{
+	const string key = unqualified_type_key(name);
+	map<string, set<string> >::const_iterator it = class_member_types_.find(key);
+	if (it == class_member_types_.end())
+		return;
+	for (set<string>::const_iterator type = it->second.begin();
+	     type != it->second.end();
+	     ++type)
+		scopes_.back().types.insert(*type);
+}
+
+void Parser::queue_compound_type_imports_for_qualified_name(const string& name)
+{
+	const string key = qualifier_type_key(name);
+	if (!key.empty())
+		pending_compound_type_imports_.push_back(key);
+}
+
+void Parser::queue_compound_type_name_from_qualified_name(const string& name)
+{
+	if (name.find("::") == string::npos)
+		return;
+	const string key = unqualified_type_key(name);
+	if (!key.empty())
+		pending_compound_type_names_.push_back(key);
+}
+
 void Parser::add_type_name(const string& name)
 {
 	if (name.empty())
 		return;
-	for (size_t i = 0; i < scopes_.size(); ++i)
-		scopes_[i].types.insert(name);
+	size_t target = scopes_.empty() ? 0 : scopes_.size() - 1;
+	while (target > 0 && scopes_[target].template_parameter_scope)
+		--target;
+	scopes_[target].types.insert(name);
+	if (!scopes_[target].namespace_name.empty())
+		namespace_types_[scopes_[target].namespace_name].insert(name);
+	if (!scopes_[target].class_name.empty())
+		class_member_types_[scopes_[target].class_name].insert(name);
+}
+
+void Parser::add_template_type_name(const string& name)
+{
+	if (!name.empty())
+		scopes_.back().types.insert(name);
 }
 
 void Parser::add_value_name(const string& name)
@@ -472,34 +618,6 @@ string Parser::parse_balanced_text(ETokenType open, ETokenType close)
 			++pos_;
 			break;
 		}
-		out += current().source;
-		++pos_;
-	}
-	return out;
-}
-
-string Parser::collect_until_balanced(ETokenType close)
-{
-	string out;
-	int paren = 0;
-	int square = 0;
-	int brace = 0;
-	while (!eof())
-	{
-		if (paren == 0 && square == 0 && brace == 0 && simple(close))
-			break;
-		if (simple(OP_LPAREN))
-			++paren;
-		else if (simple(OP_RPAREN))
-			--paren;
-		else if (simple(OP_LSQUARE))
-			++square;
-		else if (simple(OP_RSQUARE))
-			--square;
-		else if (simple(OP_LBRACE))
-			++brace;
-		else if (simple(OP_RBRACE))
-			--brace;
 		out += current().source;
 		++pos_;
 	}
@@ -807,8 +925,31 @@ bool Parser::current_less_starts_template_id() const
 	if (name_pos > 0 &&
 	    at(name_pos - 1).kind == posttoken::TokenKind::Simple &&
 	    at(name_pos - 1).type == OP_COLON2)
-		return false;
+		return qualified_template_name_is_type(name_pos);
 	return true;
+}
+
+bool Parser::qualified_template_name_is_type(size_t name_pos) const
+{
+	if (at(name_pos).kind != posttoken::TokenKind::Identifier)
+		return false;
+	string qualifier;
+	size_t p = name_pos;
+	while (p >= 2 &&
+	       at(p - 1).kind == posttoken::TokenKind::Simple &&
+	       at(p - 1).type == OP_COLON2 &&
+	       at(p - 2).kind == posttoken::TokenKind::Identifier)
+	{
+		qualifier = at(p - 2).source +
+			(qualifier.empty() ? string() : "::" + qualifier);
+		p -= 2;
+	}
+	if (qualifier.empty())
+		return false;
+	const string resolved = resolve_namespace_name(qualifier);
+	map<string, set<string> >::const_iterator it = namespace_types_.find(resolved);
+	return it != namespace_types_.end() &&
+	       it->second.count(at(name_pos).source) != 0;
 }
 
 bool Parser::starts_declaration() const

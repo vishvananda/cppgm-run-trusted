@@ -1,4 +1,4 @@
-#include "pa10_internal.h"
+#include "pa10_parser_internal.h"
 
 #include <stdexcept>
 
@@ -6,28 +6,6 @@ using namespace std;
 
 namespace pa10 {
 namespace internal {
-
-namespace {
-
-bool is_builtin_expression_name(const string& line)
-{
-	static const char* const names[] = {
-		"bool", "char", "char16_t", "char32_t", "double", "float", "int",
-		"long", "short", "signed", "unsigned", "void", "wchar_t", "auto"
-	};
-	const string prefix = "id-expression ";
-	if (line.compare(0, prefix.size(), prefix) != 0)
-		return false;
-	string name = line.substr(prefix.size());
-	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
-	{
-		if (name == names[i])
-			return true;
-	}
-	return false;
-}
-
-}  // namespace
 
 Ast Parser::parse_statement()
 {
@@ -59,7 +37,15 @@ Ast Parser::parse_compound_statement()
 {
 	Ast node = make_ast("compound-statement");
 	expect(OP_LBRACE);
+	vector<string> pending_imports = pending_compound_type_imports_;
+	vector<string> pending_names = pending_compound_type_names_;
+	pending_compound_type_imports_.clear();
+	pending_compound_type_names_.clear();
 	push_scope();
+	for (size_t i = 0; i < pending_imports.size(); ++i)
+		import_class_member_types(pending_imports[i]);
+	for (size_t i = 0; i < pending_names.size(); ++i)
+		scopes_.back().types.insert(pending_names[i]);
 	while (!consume(OP_RBRACE))
 		add_child(node, parse_block_item());
 	pop_scope();
@@ -462,7 +448,7 @@ Ast Parser::parse_postfix_suffixes(Ast expr)
 			Ast call = make_ast("call-expression");
 			add_child(call, expr);
 			add_child(call, parse_argument_list(
-				is_builtin_expression_name(expr->line) ? "paren-argument-list" :
+				expr->builtin_type_expression ? "paren-argument-list" :
 				"argument-list",
 				OP_RPAREN));
 			expr = call;
@@ -537,7 +523,9 @@ Ast Parser::parse_primary_expression()
 	{
 		string name = current().source;
 		++pos_;
-		return make_id_expression(name);
+		Ast node = make_id_expression(name);
+		node->builtin_type_expression = true;
+		return node;
 	}
 	if (simple(KW_DECLTYPE))
 	{
@@ -684,9 +672,7 @@ Ast Parser::parse_c_style_cast_or_parenthesized()
 			Ast type = parse_type_id();
 			expect(OP_RPAREN);
 			if (simple(OP_LPAREN) &&
-			    !type->children.empty() &&
-			    !type->children[0]->children.empty() &&
-			    type->children[0]->children[0]->line.find("::") != string::npos)
+			    type->type_id_has_qualified_name)
 			{
 				pos_ = save;
 				throw runtime_error("not a c-style cast");

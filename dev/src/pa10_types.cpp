@@ -1,4 +1,4 @@
-#include "pa10_internal.h"
+#include "pa10_parser_internal.h"
 
 #include <stdexcept>
 
@@ -42,6 +42,8 @@ Ast Parser::parse_simple_or_function_declaration(bool member_context)
 			while (consume(OP_COMMA));
 			add_child(node, ctor);
 		}
+		queue_compound_type_imports_for_qualified_name(declarator.name);
+		queue_compound_type_name_from_qualified_name(specs.primary_type_name);
 		add_child(node, parse_compound_statement());
 		if (!declarator.name.empty())
 			add_value_name(declarator.name);
@@ -202,7 +204,10 @@ Ast Parser::parse_special_member(bool member_context)
 		add_child(node, ctor);
 	}
 	if (simple(OP_LBRACE))
+	{
+		queue_compound_type_imports_for_qualified_name(name);
 		add_child(node, parse_compound_statement());
+	}
 	else
 		expect(OP_SEMICOLON);
 	node->line = (is_definition ? "special-member-definition " :
@@ -230,19 +235,7 @@ DeclParse Parser::parse_decl_specifier_seq(bool type_id_context)
 		if (!consumed)
 			break;
 		consumed_any = true;
-		if (spec->line.find("KW_CONST:") == string::npos &&
-		    spec->line.find("KW_VOLATILE:") == string::npos &&
-		    spec->line.find("KW_TYPEDEF:") == string::npos &&
-		    spec->line.find("KW_EXTERN:") == string::npos &&
-		    spec->line.find("KW_STATIC:") == string::npos &&
-		    spec->line.find("KW_INLINE:") == string::npos &&
-		    spec->line.find("KW_VIRTUAL:") == string::npos &&
-		    spec->line.find("KW_CONSTEXPR:") == string::npos &&
-		    spec->line.find("KW_THREAD_LOCAL:") == string::npos &&
-		    spec->line.find("KW_FRIEND:") == string::npos &&
-		    spec->line.find("KW_MUTABLE:") == string::npos &&
-		    spec->line.find("KW_REGISTER:") == string::npos &&
-		    spec->line.find("KW_EXPLICIT:") == string::npos)
+		if (out.last_specifier_is_non_cv_type)
 			saw_non_cv_type = true;
 		add_child(out.specs, spec);
 	}
@@ -256,6 +249,7 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
                                      bool& consumed)
 {
 	consumed = true;
+	out.last_specifier_is_non_cv_type = false;
 	if (current().kind == posttoken::TokenKind::Simple &&
 	    is_decl_specifier_keyword(current().type))
 	{
@@ -268,10 +262,13 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
 		string label = type_id_context && is_cv_qualifier(token.type) ?
 			"cv-qualifier " : type_id_context && is_builtin_type(token.type) ?
 			"type-specifier " : "decl-specifier ";
+		out.last_specifier_is_non_cv_type = is_builtin_type(token.type);
 		return make_ast(label + token_leaf(token));
 	}
 	if (simple(KW_DECLTYPE))
 	{
+		out.all_specifiers_are_keywords = false;
+		out.last_specifier_is_non_cv_type = true;
 		size_t text_begin = pos_;
 		++pos_;
 		expect(OP_LPAREN);
@@ -284,6 +281,8 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
 	}
 	if (simple(KW_STRUCT) || simple(KW_CLASS) || simple(KW_UNION))
 	{
+		out.all_specifiers_are_keywords = false;
+		out.last_specifier_is_non_cv_type = true;
 		if (identifier() || simple_at(pos_ + 1, OP_LBRACE))
 			return parse_class_specifier(false);
 		ETokenType key = current().type;
@@ -301,7 +300,11 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
 		return parse_class_specifier(false);
 	}
 	if (simple(KW_ENUM))
+	{
+		out.all_specifiers_are_keywords = false;
+		out.last_specifier_is_non_cv_type = true;
 		return parse_enum_specifier(false);
+	}
 	if (simple(KW_TYPENAME) ||
 	    simple(OP_COLON2) ||
 	    (identifier() &&
@@ -314,6 +317,12 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
 		if (!type_id_context && text.find('<') == string::npos &&
 		    text.find("::") == string::npos)
 			label += "TT_IDENTIFIER:";
+		out.all_specifiers_are_keywords = false;
+		out.last_specifier_is_non_cv_type = true;
+		out.has_qualified_type_name =
+			out.has_qualified_type_name || text.find("::") != string::npos;
+		if (out.primary_type_name.empty())
+			out.primary_type_name = text;
 		return make_ast(label + text);
 	}
 	consumed = false;
@@ -323,7 +332,10 @@ Ast Parser::parse_one_decl_specifier(bool type_id_context,
 Ast Parser::parse_type_id()
 {
 	Ast node = make_ast("type-id");
-	add_child(node, parse_type_specifier_seq());
+	DeclParse specs = parse_decl_specifier_seq(true);
+	node->type_id_has_qualified_name = specs.has_qualified_type_name;
+	node->type_id_primary_name = specs.primary_type_name;
+	add_child(node, specs.specs);
 	if (starts_abstract_declarator_at(pos_))
 		add_child(node, parse_abstract_declarator());
 	return node;
@@ -616,14 +628,9 @@ void Parser::parse_function_suffixes(const Ast& node)
 		{
 			Ast trailing = parse_trailing_return_type();
 			if (node->line != "lambda-declarator" &&
-			    !trailing->children.empty() &&
-			    !trailing->children[0]->children.empty() &&
-			    !trailing->children[0]->children[0]->children.empty())
+			    !trailing->type_id_primary_name.empty())
 			{
-				string first = trailing->children[0]->children[0]->children[0]->line;
-				const string prefix = "type-name ";
-				if (first.compare(0, prefix.size(), prefix) == 0)
-					trailing->line += " " + first.substr(prefix.size());
+				trailing->line += " " + trailing->type_id_primary_name;
 			}
 			add_child(node, trailing);
 			continue;
@@ -636,7 +643,10 @@ Ast Parser::parse_trailing_return_type()
 {
 	expect(OP_ARROW);
 	Ast node = make_ast("trailing-return-type");
-	add_child(node, parse_type_id());
+	Ast type = parse_type_id();
+	node->type_id_primary_name = type->type_id_primary_name;
+	node->type_id_has_qualified_name = type->type_id_has_qualified_name;
+	add_child(node, type);
 	return node;
 }
 

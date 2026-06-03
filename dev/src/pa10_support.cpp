@@ -1,4 +1,4 @@
-#include "pa10_internal.h"
+#include "pa10_parser_internal.h"
 
 #include <fstream>
 #include <stdexcept>
@@ -10,6 +10,13 @@ using namespace std;
 
 namespace pa10 {
 namespace internal {
+
+AstNode::AstNode(const string& text)
+	: line(text),
+	  builtin_type_expression(false),
+	  type_id_has_qualified_name(false)
+{
+}
 
 Ast make_ast(const string& line)
 {
@@ -50,13 +57,21 @@ Token::Token(posttoken::TokenKind k, const string& text, ETokenType tt)
 
 DeclParse::DeclParse()
 	: has_typedef(false),
-	  has_friend(false)
+	  has_friend(false),
+	  last_specifier_is_non_cv_type(false),
+	  all_specifiers_are_keywords(true),
+	  has_qualified_type_name(false)
 {
 }
 
 DeclaratorParse::DeclaratorParse()
 	: has_parameter_clause(false),
 	  is_pack(false)
+{
+}
+
+Scope::Scope()
+	: template_parameter_scope(false)
 {
 }
 
