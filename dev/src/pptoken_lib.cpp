@@ -1,0 +1,1081 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdlib>
+#include <istream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace std;
+
+#include "IPPTokenStream.h"
+#include "pptoken_lib.h"
+
+namespace pptoken {
+namespace {
+
+struct SourceChar
+{
+  int cp;
+  size_t index;
+  int line;
+  int column;
+};
+
+struct TextChar
+{
+  int cp;
+  size_t source_index;
+  int line;
+  int column;
+  bool synthetic;
+};
+
+struct LogicalChar
+{
+  int cp;
+  size_t width;
+};
+
+enum class HeaderState
+{
+  AtLineStart,
+  Normal,
+  AfterHash,
+  AfterInclude
+};
+
+string location_message(int line, int column, const string & message)
+{
+  ostringstream out;
+  out << line << ":" << column << ":" << message;
+  return out.str();
+}
+
+string general_message(const string & message)
+{
+  return " " + message;
+}
+
+bool is_continuation(unsigned char c)
+{
+  return (c & 0xC0) == 0x80;
+}
+
+void append_utf8(int cp, string & out)
+{
+  if(cp <= 0x7F) {
+    out.push_back(static_cast<char>(cp));
+  } else if(cp <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else if(cp <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+}
+
+void advance_location(int cp, int & line, int & column)
+{
+  if(cp == '\n') {
+    ++line;
+    column = 1;
+  } else {
+    ++column;
+  }
+}
+
+int decode_utf8_at(const string & bytes, size_t i, size_t & width)
+{
+  const unsigned char c0 = static_cast<unsigned char>(bytes[i]);
+  if(c0 <= 0x7F) {
+    width = 1;
+    return c0;
+  }
+  if(c0 >= 0xC2 && c0 <= 0xDF) {
+    if(i + 1 < bytes.size() && is_continuation(bytes[i + 1])) {
+      width = 2;
+      return ((c0 & 0x1F) << 6) |
+          (static_cast<unsigned char>(bytes[i + 1]) & 0x3F);
+    }
+    return -1;
+  }
+  if(c0 >= 0xE0 && c0 <= 0xEF) {
+    if(i + 2 >= bytes.size() ||
+       !is_continuation(bytes[i + 1]) ||
+       !is_continuation(bytes[i + 2])) {
+      return -1;
+    }
+    const unsigned char c1 = static_cast<unsigned char>(bytes[i + 1]);
+    const unsigned char c2 = static_cast<unsigned char>(bytes[i + 2]);
+    const int cp = ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+    if(cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) {
+      return -1;
+    }
+    width = 3;
+    return cp;
+  }
+  if(c0 >= 0xF0 && c0 <= 0xF4) {
+    if(i + 3 >= bytes.size() ||
+       !is_continuation(bytes[i + 1]) ||
+       !is_continuation(bytes[i + 2]) ||
+       !is_continuation(bytes[i + 3])) {
+      return -1;
+    }
+    const unsigned char c1 = static_cast<unsigned char>(bytes[i + 1]);
+    const unsigned char c2 = static_cast<unsigned char>(bytes[i + 2]);
+    const unsigned char c3 = static_cast<unsigned char>(bytes[i + 3]);
+    const int cp = ((c0 & 0x07) << 18) |
+        ((c1 & 0x3F) << 12) |
+        ((c2 & 0x3F) << 6) |
+        (c3 & 0x3F);
+    if(cp < 0x10000 || cp > 0x10FFFF) {
+      return -1;
+    }
+    width = 4;
+    return cp;
+  }
+  return -1;
+}
+
+vector<SourceChar> decode_source(const string & bytes)
+{
+  vector<SourceChar> out;
+  int line = 1;
+  int column = 1;
+  size_t index = 0;
+  for(size_t i = 0; i < bytes.size();) {
+    size_t width = 0;
+    const int cp = decode_utf8_at(bytes, i, width);
+    if(cp < 0) {
+      throw runtime_error(location_message(line, column, "Invalid utf-8 character"));
+    }
+    SourceChar ch;
+    ch.cp = cp;
+    ch.index = index++;
+    ch.line = line;
+    ch.column = column;
+    out.push_back(ch);
+    advance_location(cp, line, column);
+    i += width;
+  }
+  if(!out.empty() && out[0].cp == 0xFEFF) {
+    out.erase(out.begin());
+    for(size_t i = 0; i < out.size(); ++i) {
+      out[i].index = i;
+    }
+  }
+  return out;
+}
+
+int trigraph_replacement(int c)
+{
+  switch(c) {
+    case '=': return '#';
+    case '/': return '\\';
+    case '\'': return '^';
+    case '(': return '[';
+    case ')': return ']';
+    case '!': return '|';
+    case '<': return '{';
+    case '>': return '}';
+    case '-': return '~';
+    default: return -1;
+  }
+}
+
+TextChar make_text_char(const SourceChar & source, int cp)
+{
+  TextChar ch;
+  ch.cp = cp;
+  ch.source_index = source.index;
+  ch.line = source.line;
+  ch.column = source.column;
+  ch.synthetic = false;
+  return ch;
+}
+
+vector<TextChar> apply_trigraphs(const vector<SourceChar> & source)
+{
+  vector<TextChar> out;
+  for(size_t i = 0; i < source.size();) {
+    if(i + 2 < source.size() && source[i].cp == '?' && source[i + 1].cp == '?') {
+      const int replacement = trigraph_replacement(source[i + 2].cp);
+      if(replacement >= 0) {
+        out.push_back(make_text_char(source[i], replacement));
+        i += 3;
+        continue;
+      }
+    }
+    out.push_back(make_text_char(source[i], source[i].cp));
+    ++i;
+  }
+  return out;
+}
+
+vector<TextChar> apply_line_splices(const vector<TextChar> & input)
+{
+  vector<TextChar> out;
+  for(size_t i = 0; i < input.size();) {
+    if(i + 1 < input.size() && input[i].cp == '\\' && input[i + 1].cp == '\n') {
+      i += 2;
+      continue;
+    }
+    out.push_back(input[i]);
+    ++i;
+  }
+  return out;
+}
+
+void append_final_newline(vector<TextChar> & text, const vector<SourceChar> & source)
+{
+  if(text.empty() || text.back().cp == '\n') {
+    return;
+  }
+  TextChar ch;
+  ch.cp = '\n';
+  ch.source_index = source.size();
+  ch.synthetic = true;
+  ch.line = text.back().line;
+  ch.column = text.back().column + 1;
+  text.push_back(ch);
+}
+
+vector<TextChar> translated_text(const vector<SourceChar> & source)
+{
+  vector<TextChar> text = apply_line_splices(apply_trigraphs(source));
+  append_final_newline(text, source);
+  return text;
+}
+
+bool in_range(int cp, int first, int last)
+{
+  return cp >= first && cp <= last;
+}
+
+bool is_annex_e2(int cp)
+{
+  return in_range(cp, 0x0300, 0x036F) ||
+      in_range(cp, 0x1DC0, 0x1DFF) ||
+      in_range(cp, 0x20D0, 0x20FF) ||
+      in_range(cp, 0xFE20, 0xFE2F);
+}
+
+bool is_annex_e1(int cp)
+{
+  if(cp == 0xA8 || cp == 0xAA || cp == 0xAD || cp == 0xAF ||
+     cp == 0xB7 || cp == 0x2054) {
+    return true;
+  }
+  return in_range(cp, 0xB2, 0xB5) ||
+      in_range(cp, 0xB7, 0xBA) ||
+      in_range(cp, 0xBC, 0xBE) ||
+      in_range(cp, 0xC0, 0xD6) ||
+      in_range(cp, 0xD8, 0xF6) ||
+      in_range(cp, 0xF8, 0xFF) ||
+      in_range(cp, 0x0100, 0x167F) ||
+      in_range(cp, 0x1681, 0x180D) ||
+      in_range(cp, 0x180F, 0x1FFF) ||
+      in_range(cp, 0x200B, 0x200D) ||
+      in_range(cp, 0x202A, 0x202E) ||
+      in_range(cp, 0x203F, 0x2040) ||
+      in_range(cp, 0x2060, 0x206F) ||
+      in_range(cp, 0x2070, 0x218F) ||
+      in_range(cp, 0x2460, 0x24FF) ||
+      in_range(cp, 0x2776, 0x2793) ||
+      in_range(cp, 0x2C00, 0x2DFF) ||
+      in_range(cp, 0x2E80, 0x2FFF) ||
+      in_range(cp, 0x3004, 0x3007) ||
+      in_range(cp, 0x3021, 0x302F) ||
+      in_range(cp, 0x3031, 0x303F) ||
+      in_range(cp, 0x3040, 0xD7FF) ||
+      in_range(cp, 0xF900, 0xFD3D) ||
+      in_range(cp, 0xFD40, 0xFDCF) ||
+      in_range(cp, 0xFDF0, 0xFE44) ||
+      in_range(cp, 0xFE47, 0xFFFD) ||
+      in_range(cp, 0x10000, 0x1FFFD) ||
+      in_range(cp, 0x20000, 0x2FFFD) ||
+      in_range(cp, 0x30000, 0x3FFFD) ||
+      in_range(cp, 0x40000, 0x4FFFD) ||
+      in_range(cp, 0x50000, 0x5FFFD) ||
+      in_range(cp, 0x60000, 0x6FFFD) ||
+      in_range(cp, 0x70000, 0x7FFFD) ||
+      in_range(cp, 0x80000, 0x8FFFD) ||
+      in_range(cp, 0x90000, 0x9FFFD) ||
+      in_range(cp, 0xA0000, 0xAFFFD) ||
+      in_range(cp, 0xB0000, 0xBFFFD) ||
+      in_range(cp, 0xC0000, 0xCFFFD) ||
+      in_range(cp, 0xD0000, 0xDFFFD) ||
+      in_range(cp, 0xE0000, 0xEFFFD);
+}
+
+bool is_digit(int cp)
+{
+  return cp >= '0' && cp <= '9';
+}
+
+bool is_oct_digit(int cp)
+{
+  return cp >= '0' && cp <= '7';
+}
+
+bool is_hex_digit(int cp)
+{
+  return (cp >= '0' && cp <= '9') ||
+      (cp >= 'a' && cp <= 'f') ||
+      (cp >= 'A' && cp <= 'F');
+}
+
+int hex_value(int cp)
+{
+  if(cp >= '0' && cp <= '9') {
+    return cp - '0';
+  }
+  if(cp >= 'a' && cp <= 'f') {
+    return cp - 'a' + 10;
+  }
+  if(cp >= 'A' && cp <= 'F') {
+    return cp - 'A' + 10;
+  }
+  throw logic_error("hex_value on non-hex character");
+}
+
+bool is_ascii_identifier_start(int cp)
+{
+  return (cp >= 'a' && cp <= 'z') ||
+      (cp >= 'A' && cp <= 'Z') ||
+      cp == '_';
+}
+
+bool is_identifier_start_cp(int cp)
+{
+  return is_ascii_identifier_start(cp) ||
+      (is_annex_e1(cp) && !is_annex_e2(cp));
+}
+
+bool is_identifier_body_cp(int cp)
+{
+  return is_identifier_start_cp(cp) || is_digit(cp) || is_annex_e2(cp);
+}
+
+bool is_space_no_newline(int cp)
+{
+  return cp == ' ' || cp == '\t' || cp == '\v' || cp == '\f' || cp == '\r';
+}
+
+bool is_simple_escape(int cp)
+{
+  switch(cp) {
+    case '\'':
+    case '"':
+    case '?':
+    case '\\':
+    case 'a':
+    case 'b':
+    case 'f':
+    case 'n':
+    case 'r':
+    case 't':
+    case 'v':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool is_identifier_like_operator(const string & data)
+{
+  static const char * const names[] = {
+    "new", "delete", "and", "and_eq", "bitand", "bitor", "compl",
+    "not", "not_eq", "or", "or_eq", "xor", "xor_eq"
+  };
+  for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+    if(data == names[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+class Tokenizer
+{
+public:
+  Tokenizer(const vector<SourceChar> & source,
+            const vector<TextChar> & text,
+            IPPTokenStream & output)
+      : source_(source), text_(text), output_(output), pos_(0),
+        header_state_(HeaderState::AtLineStart)
+  {
+  }
+
+  void run()
+  {
+    while(pos_ < text_.size()) {
+      if(scan_newline() || scan_whitespace_or_comment() ||
+         scan_header_name() || scan_literal() || scan_identifier() ||
+         scan_pp_number() || scan_operator()) {
+        continue;
+      }
+      scan_non_whitespace();
+    }
+    output_.emit_eof();
+  }
+
+private:
+  const vector<SourceChar> & source_;
+  const vector<TextChar> & text_;
+  IPPTokenStream & output_;
+  size_t pos_;
+  HeaderState header_state_;
+
+  bool at(size_t offset, int cp) const
+  {
+    return pos_ + offset < text_.size() && text_[pos_ + offset].cp == cp;
+  }
+
+  string error_at(size_t index, const string & message) const
+  {
+    if(index < text_.size()) {
+      return location_message(text_[index].line, text_[index].column, message);
+    }
+    if(!text_.empty()) {
+      return location_message(text_.back().line, text_.back().column, message);
+    }
+    return location_message(1, 1, message);
+  }
+
+  bool decode_ucn_at(size_t index, LogicalChar & out) const
+  {
+    if(index + 1 >= text_.size() || text_[index].cp != '\\') {
+      return false;
+    }
+    const int marker = text_[index + 1].cp;
+    const size_t digits = marker == 'u' ? 4 : marker == 'U' ? 8 : 0;
+    if(digits == 0) {
+      return false;
+    }
+    if(index + 2 + digits > text_.size()) {
+      throw runtime_error(error_at(index, "Invalid universal-character-name"));
+    }
+    int cp = 0;
+    for(size_t i = 0; i < digits; ++i) {
+      const int digit = text_[index + 2 + i].cp;
+      if(!is_hex_digit(digit)) {
+        throw runtime_error(error_at(index, "Invalid universal-character-name"));
+      }
+      cp = (cp << 4) | hex_value(digit);
+    }
+    if(cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+      throw runtime_error(error_at(index, "Invalid universal-character-name"));
+    }
+    out.cp = cp;
+    out.width = 2 + digits;
+    return true;
+  }
+
+  LogicalChar logical_at(size_t index) const
+  {
+    LogicalChar out;
+    if(index >= text_.size()) {
+      out.cp = -1;
+      out.width = 0;
+      return out;
+    }
+    if(decode_ucn_at(index, out)) {
+      return out;
+    }
+    out.cp = text_[index].cp;
+    out.width = 1;
+    return out;
+  }
+
+  void append_text_cp(size_t index, string & data) const
+  {
+    append_utf8(text_[index].cp, data);
+  }
+
+  void append_logical(size_t index, LogicalChar logical, string & data) const
+  {
+    (void)index;
+    append_utf8(logical.cp, data);
+  }
+
+  string source_slice(size_t first, size_t last) const
+  {
+    string data;
+    for(size_t i = first; i < last && i < source_.size(); ++i) {
+      append_utf8(source_[i].cp, data);
+    }
+    return data;
+  }
+
+  void note_non_whitespace_token(const string & type, const string & data)
+  {
+    if(header_state_ == HeaderState::AtLineStart) {
+      header_state_ = (type == "op" && (data == "#" || data == "%:"))
+          ? HeaderState::AfterHash
+          : HeaderState::Normal;
+      return;
+    }
+    if(header_state_ == HeaderState::AfterHash) {
+      header_state_ = (type == "identifier" && data == "include")
+          ? HeaderState::AfterInclude
+          : HeaderState::Normal;
+      return;
+    }
+    header_state_ = HeaderState::Normal;
+  }
+
+  bool scan_newline()
+  {
+    if(text_[pos_].cp != '\n') {
+      return false;
+    }
+    ++pos_;
+    output_.emit_new_line();
+    header_state_ = HeaderState::AtLineStart;
+    return true;
+  }
+
+  bool scan_whitespace_or_comment()
+  {
+    if(!is_space_no_newline(text_[pos_].cp) && !starts_comment(pos_)) {
+      return false;
+    }
+    bool consumed = false;
+    while(pos_ < text_.size()) {
+      if(is_space_no_newline(text_[pos_].cp)) {
+        consumed = true;
+        ++pos_;
+        continue;
+      }
+      if(starts_line_comment(pos_)) {
+        consumed = true;
+        pos_ += 2;
+        while(pos_ < text_.size() && text_[pos_].cp != '\n') {
+          ++pos_;
+        }
+        continue;
+      }
+      if(starts_block_comment(pos_)) {
+        consumed = true;
+        consume_block_comment();
+        continue;
+      }
+      break;
+    }
+    if(consumed) {
+      output_.emit_whitespace_sequence();
+    }
+    return consumed;
+  }
+
+  bool starts_comment(size_t index) const
+  {
+    return starts_line_comment(index) || starts_block_comment(index);
+  }
+
+  bool starts_line_comment(size_t index) const
+  {
+    return index + 1 < text_.size() &&
+        text_[index].cp == '/' &&
+        text_[index + 1].cp == '/';
+  }
+
+  bool starts_block_comment(size_t index) const
+  {
+    return index + 1 < text_.size() &&
+        text_[index].cp == '/' &&
+        text_[index + 1].cp == '*';
+  }
+
+  void consume_block_comment()
+  {
+    const size_t start = pos_;
+    pos_ += 2;
+    while(pos_ + 1 < text_.size()) {
+      if(text_[pos_].cp == '*' && text_[pos_ + 1].cp == '/') {
+        pos_ += 2;
+        return;
+      }
+      ++pos_;
+    }
+    throw runtime_error(error_at(start, "Unterminated comment"));
+  }
+
+  bool scan_header_name()
+  {
+    if(header_state_ != HeaderState::AfterInclude) {
+      return false;
+    }
+    if(text_[pos_].cp == '<') {
+      return scan_angle_header_name();
+    }
+    if(text_[pos_].cp == '"') {
+      return scan_quote_header_name();
+    }
+    return false;
+  }
+
+  bool scan_angle_header_name()
+  {
+    const size_t start = pos_;
+    string data;
+    append_text_cp(pos_++, data);
+    while(pos_ < text_.size() && text_[pos_].cp != '\n') {
+      append_text_cp(pos_, data);
+      if(text_[pos_++].cp == '>') {
+        output_.emit_header_name(data);
+        header_state_ = HeaderState::Normal;
+        return true;
+      }
+    }
+    pos_ = start;
+    return false;
+  }
+
+  bool scan_quote_header_name()
+  {
+    const size_t start = pos_;
+    string data;
+    append_text_cp(pos_++, data);
+    while(pos_ < text_.size() && text_[pos_].cp != '\n') {
+      append_text_cp(pos_, data);
+      if(text_[pos_++].cp == '"') {
+        output_.emit_header_name(data);
+        header_state_ = HeaderState::Normal;
+        return true;
+      }
+    }
+    pos_ = start;
+    return false;
+  }
+
+  bool scan_literal()
+  {
+    return scan_raw_string() || scan_string() || scan_character();
+  }
+
+  bool scan_raw_string()
+  {
+    size_t prefix_len = 0;
+    if(!raw_prefix_length(prefix_len)) {
+      return false;
+    }
+    const size_t source_start = text_[pos_].source_index;
+    const size_t source_end = parse_raw_source_end(source_start, prefix_len);
+    string data = source_slice(source_start, source_end);
+    pos_ = text_position_after_source(source_end);
+    append_identifier_suffix(data);
+    emit_string_token(data);
+    return true;
+  }
+
+  bool raw_prefix_length(size_t & prefix_len) const
+  {
+    if(at(0, 'u') && at(1, '8') && at(2, 'R') && at(3, '"')) {
+      prefix_len = 3;
+      return true;
+    }
+    if((at(0, 'u') || at(0, 'U') || at(0, 'L')) && at(1, 'R') && at(2, '"')) {
+      prefix_len = 2;
+      return true;
+    }
+    if(at(0, 'R') && at(1, '"')) {
+      prefix_len = 1;
+      return true;
+    }
+    return false;
+  }
+
+  size_t parse_raw_source_end(size_t start, size_t prefix_len) const
+  {
+    const size_t quote = start + prefix_len;
+    size_t open = quote + 1;
+    vector<int> delimiter;
+    while(open < source_.size() && source_[open].cp != '(') {
+      if(delimiter.size() == 16) {
+        throw runtime_error(general_message("raw string delimiter too long"));
+      }
+      if(!is_raw_delimiter_char(source_[open].cp)) {
+        throw runtime_error(general_message("unterminated raw string literal"));
+      }
+      delimiter.push_back(source_[open].cp);
+      ++open;
+    }
+    if(open >= source_.size()) {
+      throw runtime_error(general_message("unterminated raw string literal"));
+    }
+    for(size_t i = open + 1; i < source_.size(); ++i) {
+      if(source_[i].cp == ')' && raw_close_matches(i, delimiter)) {
+        return i + delimiter.size() + 2;
+      }
+    }
+    throw runtime_error(general_message("unterminated raw string literal"));
+  }
+
+  bool is_raw_delimiter_char(int cp) const
+  {
+    return cp != ' ' && cp != '(' && cp != ')' && cp != '\\' &&
+        cp != '\t' && cp != '\v' && cp != '\f' && cp != '\n';
+  }
+
+  bool raw_close_matches(size_t close, const vector<int> & delimiter) const
+  {
+    if(close + delimiter.size() + 1 >= source_.size()) {
+      return false;
+    }
+    for(size_t i = 0; i < delimiter.size(); ++i) {
+      if(source_[close + 1 + i].cp != delimiter[i]) {
+        return false;
+      }
+    }
+    return source_[close + 1 + delimiter.size()].cp == '"';
+  }
+
+  size_t text_position_after_source(size_t source_end) const
+  {
+    size_t i = pos_;
+    while(i < text_.size() && !text_[i].synthetic &&
+          text_[i].source_index < source_end) {
+      ++i;
+    }
+    return i;
+  }
+
+  bool scan_string()
+  {
+    size_t quote_offset = 0;
+    if(!string_quote_offset(quote_offset)) {
+      return false;
+    }
+    string data;
+    for(size_t i = 0; i <= quote_offset; ++i) {
+      append_text_cp(pos_ + i, data);
+    }
+    pos_ += quote_offset + 1;
+    scan_quoted_body('"', "Unterminated string literal", data);
+    append_identifier_suffix(data);
+    emit_string_token(data);
+    return true;
+  }
+
+  bool string_quote_offset(size_t & quote_offset) const
+  {
+    if(at(0, 'u') && at(1, '8') && at(2, '"')) {
+      quote_offset = 2;
+      return true;
+    }
+    if((at(0, 'u') || at(0, 'U') || at(0, 'L')) && at(1, '"')) {
+      quote_offset = 1;
+      return true;
+    }
+    if(at(0, '"')) {
+      quote_offset = 0;
+      return true;
+    }
+    return false;
+  }
+
+  bool scan_character()
+  {
+    size_t quote_offset = 0;
+    if(!character_quote_offset(quote_offset)) {
+      return false;
+    }
+    string data;
+    for(size_t i = 0; i <= quote_offset; ++i) {
+      append_text_cp(pos_ + i, data);
+    }
+    pos_ += quote_offset + 1;
+    scan_quoted_body('\'', "Unterminated character literal", data);
+    append_identifier_suffix(data);
+    emit_character_token(data);
+    return true;
+  }
+
+  bool character_quote_offset(size_t & quote_offset) const
+  {
+    if((at(0, 'u') || at(0, 'U') || at(0, 'L')) && at(1, '\'')) {
+      quote_offset = 1;
+      return true;
+    }
+    if(at(0, '\'')) {
+      quote_offset = 0;
+      return true;
+    }
+    return false;
+  }
+
+  void scan_quoted_body(int close_cp,
+                        const string & error_message,
+                        string & data)
+  {
+    while(pos_ < text_.size()) {
+      if(text_[pos_].cp == close_cp) {
+        append_text_cp(pos_++, data);
+        return;
+      }
+      if(text_[pos_].cp == '\n') {
+        throw runtime_error(error_at(pos_, error_message));
+      }
+      if(text_[pos_].cp == '\\') {
+        consume_escape_or_ucn(data);
+        continue;
+      }
+      LogicalChar logical = logical_at(pos_);
+      append_logical(pos_, logical, data);
+      pos_ += logical.width;
+    }
+    throw runtime_error(error_at(pos_, error_message));
+  }
+
+  void consume_escape_or_ucn(string & data)
+  {
+    LogicalChar ucn;
+    if(decode_ucn_at(pos_, ucn)) {
+      append_utf8(ucn.cp, data);
+      pos_ += ucn.width;
+      return;
+    }
+    if(pos_ + 1 >= text_.size() || text_[pos_ + 1].cp == '\n') {
+      throw runtime_error(error_at(pos_, "Invalid escape sequence"));
+    }
+    const int escaped = text_[pos_ + 1].cp;
+    if(is_simple_escape(escaped)) {
+      append_text_cp(pos_++, data);
+      append_text_cp(pos_++, data);
+      return;
+    }
+    if(is_oct_digit(escaped)) {
+      consume_octal_escape(data);
+      return;
+    }
+    if(escaped == 'x') {
+      consume_hex_escape(data);
+      return;
+    }
+    throw runtime_error(error_at(pos_, "Invalid escape sequence"));
+  }
+
+  void consume_octal_escape(string & data)
+  {
+    append_text_cp(pos_++, data);
+    for(size_t count = 0; count < 3 && pos_ < text_.size(); ++count) {
+      if(!is_oct_digit(text_[pos_].cp)) {
+        break;
+      }
+      append_text_cp(pos_++, data);
+    }
+  }
+
+  void consume_hex_escape(string & data)
+  {
+    append_text_cp(pos_++, data);
+    append_text_cp(pos_++, data);
+    if(pos_ >= text_.size() || !is_hex_digit(text_[pos_].cp)) {
+      throw runtime_error(error_at(pos_, "invalid hex escape sequence"));
+    }
+    while(pos_ < text_.size() && is_hex_digit(text_[pos_].cp)) {
+      append_text_cp(pos_++, data);
+    }
+  }
+
+  void append_identifier_suffix(string & data)
+  {
+    if(pos_ >= text_.size()) {
+      return;
+    }
+    LogicalChar first = logical_at(pos_);
+    if(!is_identifier_start_cp(first.cp)) {
+      return;
+    }
+    while(pos_ < text_.size()) {
+      LogicalChar logical = logical_at(pos_);
+      if(!is_identifier_body_cp(logical.cp)) {
+        return;
+      }
+      append_logical(pos_, logical, data);
+      pos_ += logical.width;
+    }
+  }
+
+  void emit_string_token(const string & data)
+  {
+    if(has_user_defined_suffix(data, '"')) {
+      output_.emit_user_defined_string_literal(data);
+    } else {
+      output_.emit_string_literal(data);
+    }
+    note_non_whitespace_token("literal", data);
+  }
+
+  void emit_character_token(const string & data)
+  {
+    if(has_user_defined_suffix(data, '\'')) {
+      output_.emit_user_defined_character_literal(data);
+    } else {
+      output_.emit_character_literal(data);
+    }
+    note_non_whitespace_token("literal", data);
+  }
+
+  bool has_user_defined_suffix(const string & data, char quote) const
+  {
+    return !data.empty() && data[data.size() - 1] != quote;
+  }
+
+  bool scan_identifier()
+  {
+    LogicalChar first = logical_at(pos_);
+    if(!is_identifier_start_cp(first.cp)) {
+      return false;
+    }
+    string data;
+    while(pos_ < text_.size()) {
+      LogicalChar logical = logical_at(pos_);
+      if(!is_identifier_body_cp(logical.cp)) {
+        break;
+      }
+      append_logical(pos_, logical, data);
+      pos_ += logical.width;
+    }
+    if(is_identifier_like_operator(data)) {
+      output_.emit_preprocessing_op_or_punc(data);
+      note_non_whitespace_token("op", data);
+    } else {
+      output_.emit_identifier(data);
+      note_non_whitespace_token("identifier", data);
+    }
+    return true;
+  }
+
+  bool scan_pp_number()
+  {
+    if(!starts_pp_number()) {
+      return false;
+    }
+    string data;
+    int previous = -1;
+    while(pos_ < text_.size()) {
+      LogicalChar logical = logical_at(pos_);
+      if(is_digit(logical.cp) || logical.cp == '.' ||
+         is_identifier_body_cp(logical.cp)) {
+        append_logical(pos_, logical, data);
+        previous = logical.cp;
+        pos_ += logical.width;
+        continue;
+      }
+      if((logical.cp == '+' || logical.cp == '-') &&
+         (previous == 'e' || previous == 'E')) {
+        append_logical(pos_, logical, data);
+        previous = logical.cp;
+        pos_ += logical.width;
+        continue;
+      }
+      break;
+    }
+    output_.emit_pp_number(data);
+    note_non_whitespace_token("pp-number", data);
+    return true;
+  }
+
+  bool starts_pp_number() const
+  {
+    if(pos_ >= text_.size()) {
+      return false;
+    }
+    if(is_digit(text_[pos_].cp)) {
+      return true;
+    }
+    return text_[pos_].cp == '.' &&
+        pos_ + 1 < text_.size() &&
+        is_digit(text_[pos_ + 1].cp);
+  }
+
+  bool scan_operator()
+  {
+    if(scan_angle_colon_exception()) {
+      return true;
+    }
+    static const char * const ops[] = {
+      "%:%:", ">>=", "<<=", "->*", "...", "##", "<:", ":>", "<%", "%>",
+      "%:", "::", ".*", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
+      "<<", ">>", "<=", ">=", "&&", "==", "!=", "||", "++", "--", "->",
+      "{", "}", "[", "]", "#", "(", ")", ";", ":", "?", ".", "+", "-",
+      "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ","
+    };
+    for(size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i) {
+      const string op(ops[i]);
+      if(matches_ascii(pos_, op)) {
+        pos_ += op.size();
+        output_.emit_preprocessing_op_or_punc(op);
+        note_non_whitespace_token("op", op);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool scan_angle_colon_exception()
+  {
+    if(!matches_ascii(pos_, "<::")) {
+      return false;
+    }
+    const int fourth = pos_ + 3 < text_.size() ? text_[pos_ + 3].cp : -1;
+    if(fourth == ':' || fourth == '>') {
+      return false;
+    }
+    ++pos_;
+    output_.emit_preprocessing_op_or_punc("<");
+    note_non_whitespace_token("op", "<");
+    return true;
+  }
+
+  bool matches_ascii(size_t index, const string & value) const
+  {
+    if(index + value.size() > text_.size()) {
+      return false;
+    }
+    for(size_t i = 0; i < value.size(); ++i) {
+      if(text_[index + i].cp != static_cast<unsigned char>(value[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void scan_non_whitespace()
+  {
+    if(text_[pos_].cp == '"' || text_[pos_].cp == '\'') {
+      throw runtime_error(error_at(pos_, "Invalid preprocessing token"));
+    }
+    LogicalChar logical = logical_at(pos_);
+    string data;
+    append_utf8(logical.cp, data);
+    pos_ += logical.width;
+    output_.emit_non_whitespace_char(data);
+    note_non_whitespace_token("non-whitespace", data);
+  }
+};
+
+}  // namespace
+
+void run_pptoken(istream & in, IPPTokenStream & output)
+{
+  ostringstream buffer;
+  buffer << in.rdbuf();
+  const vector<SourceChar> source = decode_source(buffer.str());
+  const vector<TextChar> text = translated_text(source);
+  Tokenizer(source, text, output).run();
+}
+
+}  // namespace pptoken
