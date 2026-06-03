@@ -134,9 +134,19 @@ set<string> BaseInvocationPaint(const PPToken& head, const MacroDefinition& macr
 	return paint;
 }
 
-bool ReplacementTokenStartsCall(const vector<PPToken>& tokens, size_t pos)
+bool UnavailableNameBlocksHere(const map<string, MacroDefinition>& macros,
+                               const string& name,
+                               bool starts_call)
 {
-	for (size_t i = pos + 1; i < tokens.size(); ++i)
+	map<string, MacroDefinition>::const_iterator it = macros.find(name);
+	if (it == macros.end() || !it->second.function_like)
+		return true;
+	return starts_call;
+}
+
+bool NextRealTokenIsOpenParen(const vector<PPToken>& tokens, size_t pos)
+{
+	for (size_t i = pos; i < tokens.size(); ++i)
 	{
 		if (IsWhitespace(tokens[i]))
 			continue;
@@ -148,13 +158,17 @@ bool ReplacementTokenStartsCall(const vector<PPToken>& tokens, size_t pos)
 void PaintOwnReplacementToken(PPToken& token,
                               const PPToken& head,
                               const MacroDefinition& macro,
+                              const map<string, MacroDefinition>& macros,
                               size_t replacement_pos)
 {
 	AddPaint(token, BaseInvocationPaint(head, macro));
 	if (!macro.function_like || !IsIdentifier(token))
 		return;
 	if (head.unavailable.count(token.text) != 0 &&
-	    ReplacementTokenStartsCall(macro.replacement, replacement_pos))
+	    UnavailableNameBlocksHere(macros,
+	                              token.text,
+	                              NextRealTokenIsOpenParen(macro.replacement,
+	                                                       replacement_pos + 1)))
 		token.unavailable.insert(token.text);
 }
 
@@ -255,7 +269,7 @@ private:
 	                      bool forwarded_through_call,
 	                      vector<MacroArgument>& arguments);
 	vector<PPToken>& expanded_argument(MacroArgument& argument);
-	vector<PPToken> process_pastes(vector<PPToken> tokens);
+	vector<PPToken> process_pastes(vector<PPToken> tokens, const PPToken& head);
 	string stringify_argument(const vector<PPToken>& raw);
 };
 
@@ -636,10 +650,10 @@ vector<PPToken> MacroProcessor::instantiate(const MacroDefinition& macro,
 		PPToken copy = token;
 		if (IsHashHash(copy))
 			copy.active_paste = true;
-		PaintOwnReplacementToken(copy, head, macro, i);
+		PaintOwnReplacementToken(copy, head, macro, macros_, i);
 		substituted.push_back(copy);
 	}
-	return process_pastes(substituted);
+	return process_pastes(substituted, head);
 }
 
 void MacroProcessor::append_parameter(vector<PPToken>& out,
@@ -674,7 +688,8 @@ vector<PPToken>& MacroProcessor::expanded_argument(MacroArgument& argument)
 	return argument.expanded;
 }
 
-vector<PPToken> MacroProcessor::process_pastes(vector<PPToken> tokens)
+vector<PPToken> MacroProcessor::process_pastes(vector<PPToken> tokens,
+                                               const PPToken& head)
 {
 	for (size_t pos = 0; pos < tokens.size(); ++pos)
 	{
@@ -697,7 +712,22 @@ vector<PPToken> MacroProcessor::process_pastes(vector<PPToken> tokens)
 		const bool right_empty = tokens[right].kind == PPTokenKind::Placemarker;
 		if (!left_empty && !right_empty)
 		{
+			set<string> paste_paint = tokens[left].unavailable;
+			paste_paint.insert(tokens[right].unavailable.begin(),
+			                   tokens[right].unavailable.end());
 			replacement = TokenizePPString(tokens[left].text + tokens[right].text);
+			for (size_t i = 0; i < replacement.size(); ++i)
+			{
+				AddPaint(replacement[i], paste_paint);
+				if (IsIdentifier(replacement[i]) &&
+				    head.unavailable.count(replacement[i].text) != 0 &&
+				    UnavailableNameBlocksHere(
+					    macros_,
+					    replacement[i].text,
+					    NextRealTokenIsOpenParen(replacement, i + 1) ||
+						    NextRealTokenIsOpenParen(tokens, right + 1)))
+					replacement[i].unavailable.insert(replacement[i].text);
+			}
 		}
 		else if (!left_empty)
 		{
