@@ -1,5 +1,6 @@
 // Student-facing scaffold for the PA30 `abimangle` binary.
 
+#include "abi_mangle.h"
 #include "exceptions.h"
 
 #include <cstdlib>
@@ -10,6 +11,40 @@
 #include <vector>
 
 using namespace std;
+
+namespace abi_mangle {
+
+AbiFactRecord parse_fact_record_words(const vector<string> & words)
+{
+  (void)words;
+  throw NotImplementedException();
+}
+
+AbiFactFile parse_fact_text(const string & text)
+{
+  (void)text;
+  throw NotImplementedException();
+}
+
+string serialize_fact_file(const AbiFactFile & file)
+{
+  (void)file;
+  throw NotImplementedException();
+}
+
+string mangle_fact_file(const AbiFactFile & file)
+{
+  (void)file;
+  throw NotImplementedException();
+}
+
+string mangle_fact_files(const vector<string> & input_paths)
+{
+  (void)input_paths;
+  throw NotImplementedException();
+}
+
+}  // namespace abi_mangle
 
 namespace {
 
@@ -55,12 +90,6 @@ AbimangleInvocation parse_invocation(int argc, char ** argv)
   return invocation;
 }
 
-string mangle_fact_files(const vector<string> & input_paths)
-{
-  (void)input_paths;
-  throw NotImplementedException();
-}
-
 int run_abimangle(int argc, char ** argv)
 {
   if(has_help_arg(argc, argv)) {
@@ -72,7 +101,7 @@ int run_abimangle(int argc, char ** argv)
   if(!out) {
     throw logic_error("unable to open output file '" + invocation.outfile + "'");
   }
-  out << mangle_fact_files(invocation.inputs);
+  out << abi_mangle::mangle_fact_files(invocation.inputs);
   return EXIT_SUCCESS;
 }
 
