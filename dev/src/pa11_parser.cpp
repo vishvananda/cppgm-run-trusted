@@ -1,8 +1,6 @@
 #include "pa11_internal.h"
 
-#include <algorithm>
 #include <stdexcept>
-#include <utility>
 #include "pa10_parser_internal.h"
 #include "preproc_support.h"
 
@@ -67,66 +65,6 @@ struct Declarator {
 	QualifiedName name;
 	Declarator() : has_name(false) {}
 };
-
-bool is_cv_token(ETokenType type)
-{
-	return type == KW_CONST || type == KW_VOLATILE;
-}
-
-bool is_storage_or_function_specifier(ETokenType type)
-{
-	return type == KW_EXTERN || type == KW_STATIC ||
-	       type == KW_THREAD_LOCAL || type == KW_INLINE ||
-	       type == KW_VIRTUAL || type == KW_FRIEND ||
-	       type == KW_MUTABLE || type == KW_REGISTER ||
-	       type == KW_EXPLICIT;
-}
-
-bool is_builtin_type_token(ETokenType type)
-{
-	switch (type)
-	{
-	case KW_CHAR: case KW_CHAR16_T: case KW_CHAR32_T: case KW_WCHAR_T:
-	case KW_BOOL: case KW_SHORT: case KW_INT: case KW_LONG:
-	case KW_SIGNED: case KW_UNSIGNED: case KW_FLOAT: case KW_DOUBLE:
-	case KW_VOID:
-		return true;
-	default:
-		return false;
-	}
-}
-
-bool contains_token(const vector<ETokenType>& tokens, ETokenType token)
-{ return find(tokens.begin(), tokens.end(), token) != tokens.end(); }
-
-size_t count_token(const vector<ETokenType>& tokens, ETokenType token)
-{ return static_cast<size_t>(count(tokens.begin(), tokens.end(), token)); }
-
-EFundamentalType fundamental_from_specs(const vector<ETokenType>& specs)
-{
-	const bool sign = contains_token(specs, KW_SIGNED);
-	const bool unsign = contains_token(specs, KW_UNSIGNED);
-	const size_t longs = count_token(specs, KW_LONG);
-	if (contains_token(specs, KW_CHAR))
-		return unsign ? FT_UNSIGNED_CHAR : (sign ? FT_SIGNED_CHAR : FT_CHAR);
-	if (contains_token(specs, KW_CHAR16_T)) return FT_CHAR16_T;
-	if (contains_token(specs, KW_CHAR32_T)) return FT_CHAR32_T;
-	if (contains_token(specs, KW_WCHAR_T)) return FT_WCHAR_T;
-	if (contains_token(specs, KW_BOOL)) return FT_BOOL;
-	if (contains_token(specs, KW_FLOAT)) return FT_FLOAT;
-	if (contains_token(specs, KW_DOUBLE))
-		return longs > 0 ? FT_LONG_DOUBLE : FT_DOUBLE;
-	if (contains_token(specs, KW_VOID)) return FT_VOID;
-	if (unsign && contains_token(specs, KW_SHORT))
-		return FT_UNSIGNED_SHORT_INT;
-	if (unsign && longs >= 2) return FT_UNSIGNED_LONG_LONG_INT;
-	if (unsign && longs == 1) return FT_UNSIGNED_LONG_INT;
-	if (unsign) return FT_UNSIGNED_INT;
-	if (contains_token(specs, KW_SHORT)) return FT_SHORT_INT;
-	if (longs >= 2) return FT_LONG_LONG_INT;
-	if (longs == 1) return FT_LONG_INT;
-	return FT_INT;
-}
 
 TypePtr apply_ptr_ops(TypePtr type, const vector<PtrOp>& ops)
 {
@@ -202,7 +140,7 @@ class Parser
 {
 public:
 	Parser(TranslationUnit& tu, const vector<Token>& tokens)
-		: tu_(tu), tokens_(tokens), pos_(0)
+		: tu_(tu), tokens_(tokens), pos_(0), declaration_committed_(false)
 	{
 		scopes_.push_back(tu_.global_scope.get());
 	}
@@ -219,6 +157,7 @@ private:
 	const vector<Token>& tokens_;
 	size_t pos_;
 	vector<Scope*> scopes_;
+	bool declaration_committed_;
 
 	Scope* current_scope() const { return scopes_.back(); }
 	Scope* global_scope() const { return tu_.global_scope.get(); }
@@ -396,7 +335,7 @@ private:
 	{
 		if (consume(KW_TEMPLATE))
 		{
-			parse_template_parameter_clause();
+			parse_isolated_template_parameter_clause();
 			if (!(consume(KW_CLASS) || consume(KW_TYPENAME)))
 				throw runtime_error("expected template template parameter kind");
 			string name = at_identifier() ? consume_identifier() : "";
@@ -423,6 +362,14 @@ private:
 		if (at_identifier())
 			++pos_;
 		parse_optional_template_default();
+	}
+
+	void parse_isolated_template_parameter_clause()
+	{
+		Scope inner(ScopeKind::TemplateParameters, "", current_scope());
+		scopes_.push_back(&inner);
+		parse_template_parameter_clause();
+		scopes_.pop_back();
 	}
 
 	void parse_optional_template_default()
@@ -574,13 +521,20 @@ private:
 		if (starts_declaration())
 		{
 			size_t save = pos_;
+			bool outer_committed = declaration_committed_;
+			declaration_committed_ = starts_definite_declaration();
 			try
 			{
 				parse_simple_or_function_declaration();
+				declaration_committed_ = outer_committed;
 				return;
 			}
 			catch (const exception&)
 			{
+				bool committed = declaration_committed_;
+				declaration_committed_ = outer_committed;
+				if (committed)
+					throw;
 				pos_ = save;
 			}
 		}
@@ -605,6 +559,17 @@ private:
 		const bool ok = try_parse_type_name(type);
 		pos_ = save;
 		return ok;
+	}
+
+	bool starts_definite_declaration() const
+	{
+		if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_DECLTYPE) ||
+		    at(KW_STRUCT) || at(KW_CLASS) || at(KW_UNION) || at(KW_ENUM))
+			return true;
+		return pos_ < tokens_.size() &&
+		       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
+		       (is_storage_or_function_specifier(tokens_[pos_].type) ||
+		        is_cv_token(tokens_[pos_].type));
 	}
 
 	void skip_statement()
@@ -805,9 +770,7 @@ private:
 		}
 		else
 		{
-			name = "__anonymous_union_type__" +
-			       to_string(tu_.anonymous_counter++) + "_" +
-			       to_string(pos_after_anonymous_class_hint());
+			name = anonymous_type_name(anonymous_record_prefix(key));
 			class_scope = create_child_scope(current_scope(), ScopeKind::Class, name);
 			type = make_record_type(name, class_tag(key), true, class_scope);
 		}
@@ -822,7 +785,22 @@ private:
 		return type;
 	}
 
-	size_t pos_after_anonymous_class_hint() const
+	string anonymous_record_prefix(ETokenType key) const
+	{
+		if (key == KW_UNION)
+			return "__anonymous_union_type__";
+		if (key == KW_CLASS)
+			return "__anonymous_class_type__";
+		return "__anonymous_struct_type__";
+	}
+
+	string anonymous_type_name(const string& prefix)
+	{
+		return prefix + to_string(tu_.anonymous_counter++) + "_" +
+		       to_string(pos_after_anonymous_brace_hint());
+	}
+
+	size_t pos_after_anonymous_brace_hint() const
 	{
 		size_t p = pos_;
 		int depth = 1;
@@ -885,21 +863,39 @@ private:
 			                          true,
 			                          scoped);
 		}
-		TypePtr type = add_or_update_enum(current_scope(),
-		                                  name,
-		                                  scoped,
-		                                  underlying,
-		                                  true,
-		                                  scoped);
-		Scope* enum_scope = scoped ? type->scope : current_scope();
 		expect(OP_LBRACE);
+		TypePtr type;
+		Scope* enum_scope = current_scope();
+		if (name.empty())
+		{
+			if (scoped)
+				throw runtime_error("anonymous scoped enum not supported");
+			name = anonymous_type_name("__anonymous_enum_type__");
+			type = make_enum_type(name, false, underlying, true, NULL);
+		}
+		else
+		{
+			type = add_or_update_enum(current_scope(),
+			                          name,
+			                          scoped,
+			                          underlying,
+			                          true,
+			                          scoped);
+			if (scoped)
+				enum_scope = type->scope;
+		}
 		uint64_t next_value = 0;
 		while (!at(OP_RBRACE))
 		{
 			string enumerator = consume_identifier();
 			uint64_t value = next_value;
 			if (consume(OP_ASS))
-				value = parse_expression().value;
+			{
+				EvalResult explicit_value = parse_expression();
+				if (!explicit_value.valid)
+					throw runtime_error("invalid enumerator initializer");
+				value = explicit_value.value;
+			}
 			Binding* binding = add_binding(enum_scope,
 			                               BindingKind::Enumerator,
 			                               enumerator,
@@ -986,6 +982,7 @@ private:
 		{
 			declarator.name = parse_id_expression_name();
 			declarator.has_name = true;
+			declaration_committed_ = true;
 			return;
 		}
 	}

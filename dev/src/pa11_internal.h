@@ -194,6 +194,11 @@ Binding* lookup_qualified(Scope* scope, const string& name, int mask);
 Scope* binding_qualifier_scope(const Binding* binding);
 bool binding_matches(const Binding* binding, int mask);
 
+bool is_cv_token(ETokenType type);
+bool is_storage_or_function_specifier(ETokenType type);
+bool is_builtin_type_token(ETokenType type);
+EFundamentalType fundamental_from_specs(const vector<ETokenType>& specs);
+
 TranslationUnit analyze_source_file(const string& srcfile,
                                     const Options& options);
 void emit_translation_unit(const TranslationUnit& tu, ostream& out);

@@ -20,7 +20,8 @@ enum XReg
 {
 	RAX = 0, RCX = 1, RDX = 2, RBX = 3,
 	RSP = 4, RBP = 5, RSI = 6, RDI = 7,
-	R8 = 8, R9 = 9, R10 = 10, R11 = 11
+	R8 = 8, R9 = 9, R10 = 10, R11 = 11,
+	RIP = -1
 };
 
 struct MemRef
@@ -36,6 +37,7 @@ struct Context
 	map<string, uint64_t>* labels;
 	uint64_t const_2_63;
 	uint64_t const_2_64;
+	uint64_t instruction_base;
 };
 
 struct Emitter
@@ -112,6 +114,12 @@ uint64_t bytes_to_u64(const vector<unsigned char>& bytes)
 
 void emit_mem_operand(Emitter& e, int reg_field, const MemRef& mem)
 {
+	if (mem.base == RIP)
+	{
+		e.modrm(0, reg_field, 5);
+		e.u32(static_cast<uint32_t>(mem.disp));
+		return;
+	}
 	const int base_low = mem.base & 7;
 	int mod = 0;
 	if (mem.disp == 0 && base_low != 5)
@@ -140,7 +148,7 @@ void emit_reg_reg(Emitter& e, int width, uint8_t opcode, int reg_field, int rm)
 void emit_reg_mem(Emitter& e, int width, uint8_t opcode, int reg, const MemRef& mem)
 {
 	e.prefix(width);
-	e.rex(width == 64, reg, 0, mem.base,
+	e.rex(width == 64, reg, 0, mem.base == RIP ? 0 : mem.base,
 	      width == 8 && reg >= 4);
 	e.u8(opcode);
 	emit_mem_operand(e, reg, mem);
@@ -187,6 +195,47 @@ void emit_mov_reg_mem(Emitter& e, int width, int dst, const MemRef& mem)
 void emit_mov_mem_reg(Emitter& e, int width, const MemRef& mem, int src)
 {
 	emit_reg_mem(e, width, width == 8 ? 0x88 : 0x89, src, mem);
+}
+
+int32_t rip_disp32(Emitter& e,
+                   const Context& ctx,
+                   int width,
+                   int reg,
+                   uint64_t target)
+{
+	const bool force_rex = width == 8 && reg >= 4;
+	const bool need_rex = force_rex || width == 64 || reg >= 8;
+	const size_t length = (width == 16 ? 1 : 0) + (need_rex ? 1 : 0) + 6;
+	const int64_t next = static_cast<int64_t>(ctx.instruction_base + e.pos() + length);
+	const int64_t disp = static_cast<int64_t>(target) - next;
+	if (disp < numeric_limits<int32_t>::min() ||
+	    disp > numeric_limits<int32_t>::max())
+		throw runtime_error("RIP-relative memory address out of range");
+	return static_cast<int32_t>(disp);
+}
+
+void emit_mov_reg_label_mem(Emitter& e,
+                            const Context& ctx,
+                            int width,
+                            int dst,
+                            uint64_t target)
+{
+	emit_mov_reg_mem(e,
+	                 width,
+	                 dst,
+	                 MemRef(RIP, rip_disp32(e, ctx, width, dst, target)));
+}
+
+void emit_mov_label_mem_reg(Emitter& e,
+                            const Context& ctx,
+                            int width,
+                            uint64_t target,
+                            int src)
+{
+	emit_mov_mem_reg(e,
+	                 width,
+	                 MemRef(RIP, rip_disp32(e, ctx, width, src, target)),
+	                 src);
 }
 
 void emit_binary_reg_reg(Emitter& e, int width, uint8_t op8, uint8_t op, int dst, int src)
@@ -330,6 +379,14 @@ uint64_t memory_base_value(const MemoryAddress& mem, const Context& ctx)
 	return value;
 }
 
+bool memory_label_value(const MemoryAddress& mem, const Context& ctx, uint64_t& value)
+{
+	if (mem.kind != AddressKind::Label)
+		return false;
+	value = memory_base_value(mem, ctx);
+	return true;
+}
+
 void emit_address_to_r11(Emitter& e, const MemoryAddress& mem, const Context& ctx)
 {
 	if (mem.kind == AddressKind::Register)
@@ -362,6 +419,12 @@ void emit_load_operand(Emitter& e, const Operand& op, int width, int dst, const 
 		emit_mov_imm_reg(e, width, dst, operand_immediate_value(op, width, ctx));
 	else
 	{
+		uint64_t label_address = 0;
+		if (memory_label_value(op.mem, ctx, label_address))
+		{
+			emit_mov_reg_label_mem(e, ctx, width, dst, label_address);
+			return;
+		}
 		emit_address_to_r11(e, op.mem, ctx);
 		emit_mov_reg_mem(e, width, dst, MemRef(R11, 0));
 	}
@@ -373,6 +436,12 @@ void emit_store_operand(Emitter& e, const Operand& op, int width, int src, const
 		emit_mov_reg_reg(e, width, cyreg_x86(op.reg), src);
 	else if (op.kind == OperandKind::Memory)
 	{
+		uint64_t label_address = 0;
+		if (memory_label_value(op.mem, ctx, label_address))
+		{
+			emit_mov_label_mem_reg(e, ctx, width, label_address, src);
+			return;
+		}
 		emit_address_to_r11(e, op.mem, ctx);
 		emit_mov_mem_reg(e, width, MemRef(R11, 0), src);
 	}
@@ -937,7 +1006,7 @@ size_t statement_payload_size(const Statement& stmt, const OpcodeDesc* desc,
 	if (desc->data_opcode)
 		return static_cast<size_t>(width_bytes(desc->data_width_bits));
 	Emitter e;
-	Context ctx = { &labels, 0, 0 };
+	Context ctx = { &labels, 0, 0, kCodeBase };
 	emit_instruction(e, stmt, ctx);
 	return e.bytes.size();
 }
@@ -1031,7 +1100,8 @@ vector<unsigned char> build_elf_image(Program& program)
 	Context ctx = {
 		&program.labels,
 		kCodeBase + program_size,
-		kCodeBase + program_size + 10
+		kCodeBase + program_size + 10,
+		kCodeBase
 	};
 	vector<unsigned char> body;
 	for (size_t i = 0; i < program.statements.size(); ++i)
@@ -1050,6 +1120,7 @@ vector<unsigned char> build_elf_image(Program& program)
 		else
 		{
 			Emitter e;
+			ctx.instruction_base = kCodeBase + stmt.offset;
 			emit_instruction(e, stmt, ctx);
 			body.insert(body.end(), e.bytes.begin(), e.bytes.end());
 		}

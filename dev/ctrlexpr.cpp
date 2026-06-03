@@ -21,6 +21,8 @@ int main(int argc, char** argv)
 {
 	(void)argc;
 	(void)argv;
+	ios::sync_with_stdio(false);
+	cin.tie(NULL);
 	try
 	{
 		ctrlexpr::run_ctrlexpr(cin, cout);

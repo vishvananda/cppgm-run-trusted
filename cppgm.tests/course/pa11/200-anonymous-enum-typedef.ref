@@ -1,0 +1,9 @@
+1 translation units
+start translation unit 1
+translation-unit
+  scope namespace <global>
+    enumerator A enum __anonymous_enum_type__0_8 2
+    type-alias E enum __anonymous_enum_type__0_8
+    variable e enum __anonymous_enum_type__0_8
+    variable arr array of 2 int
+end translation unit
