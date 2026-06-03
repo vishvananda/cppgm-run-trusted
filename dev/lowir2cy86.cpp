@@ -1,6 +1,7 @@
 // Student-facing scaffold for the PA13 `lowir2cy86` binary.
 
 #include "exceptions.h"
+#include "lowir2cy86.h"
 #include "tool_help_text.h"
 
 #include <fstream>
@@ -42,12 +43,57 @@ bool has_batch_stdin_arg(const vector<string> & args)
   return false;
 }
 
-int run_not_implemented_batch_mode()
+void parse_output_invocation(const vector<string> & args,
+                             string & outfile,
+                             vector<string> & srcfiles);
+
+vector<string> split_tab_fields(const string & line)
+{
+  vector<string> fields;
+  size_t pos = 0;
+  while(pos <= line.size()) {
+    const size_t next = line.find('\t', pos);
+    if(next == string::npos) {
+      fields.push_back(line.substr(pos));
+      break;
+    }
+    fields.push_back(line.substr(pos, next - pos));
+    pos = next + 1;
+  }
+  return fields;
+}
+
+void truncate_file(const string & path)
+{
+  ofstream out(path.c_str());
+  if(!out) {
+    throw runtime_error("cannot open output capture");
+  }
+}
+
+int run_batch_mode()
 {
   string line;
   while(getline(cin, line)) {
-    (void)line;
-    cout << "EXIT_NOT_IMPLEMENTED" << endl;
+    try {
+      const vector<string> fields = split_tab_fields(line);
+      if(fields.size() < 5) {
+        throw runtime_error("invalid batch request");
+      }
+      truncate_file(fields[0]);
+      if(fields[1] != fields[0]) {
+        truncate_file(fields[1]);
+      }
+      vector<string> args(fields.begin() + 4, fields.end());
+      string outfile;
+      vector<string> srcfiles;
+      parse_output_invocation(args, outfile, srcfiles);
+      lowir2cy86::compile_to_file(srcfiles, outfile);
+      cout << "EXIT_SUCCESS" << endl;
+    }
+    catch(const exception &) {
+      cout << "EXIT_FAILURE" << endl;
+    }
   }
   return EXIT_SUCCESS;
 }
@@ -67,7 +113,7 @@ void parse_output_invocation(const vector<string> & args,
 int run_lowir2cy86_mode(const vector<string> & args)
 {
   if(has_batch_stdin_arg(args)) {
-    return run_not_implemented_batch_mode();
+    return run_batch_mode();
   }
 
   if(has_help_arg(args)) {
@@ -79,10 +125,8 @@ int run_lowir2cy86_mode(const vector<string> & args)
   vector<string> srcfiles;
   parse_output_invocation(args, outfile, srcfiles);
 
-  (void) outfile;
-  (void) srcfiles;
-
-  throw NotImplementedException();
+  lowir2cy86::compile_to_file(srcfiles, outfile);
+  return EXIT_SUCCESS;
 }
 
 }  // namespace
