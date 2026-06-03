@@ -168,6 +168,7 @@ private:
 	pa11::TranslationUnit tu_;
 	vector<Scope*> scopes_;
 	vector<TypePtr> function_returns_;
+	vector<string> language_linkages_;
 	Node root_;
 	vector<Node> generated_nodes_;
 	int local_type_counter_;
@@ -178,6 +179,7 @@ private:
 	Scope* current_scope() const;
 	Scope* global_scope() const;
 	TypePtr current_return_type() const;
+	string current_language_linkage() const;
 
 	bool at_eof() const;
 	bool at_identifier() const;

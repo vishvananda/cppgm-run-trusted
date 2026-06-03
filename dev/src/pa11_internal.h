@@ -83,6 +83,7 @@ struct Binding
 	Scope* owner;
 	Scope* target_scope;
 	Binding* aliased_binding;
+	string language_linkage;
 	bool has_constant;
 	uint64_t constant_value;
 

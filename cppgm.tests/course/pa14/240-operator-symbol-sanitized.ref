@@ -1,0 +1,19 @@
+function @operator_plus(%a : i32, %b : i32) -> i32 [binding=strong] {
+  slot $a : i32
+  slot $b : i32
+
+  block ^entry:
+    store i32 %a, $a
+    store i32 %b, $b
+    %t1 = load i32 $a
+    %t2 = load i32 $b
+    %t3 = binary sub i32 %t1, %t2
+    return i32 %t3
+}
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  block ^entry:
+    %t1 = call i32 @operator_plus(5, 3)
+    %t2 = binary sub i32 %t1, 2
+    return i32 %t2
+}

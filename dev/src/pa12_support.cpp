@@ -160,6 +160,13 @@ TypePtr Parser::current_return_type() const
 	return function_returns_.back();
 }
 
+string Parser::current_language_linkage() const
+{
+	if (language_linkages_.empty())
+		return "cpp";
+	return language_linkages_.back();
+}
+
 bool Parser::at_eof() const
 {
 	return pos_ < tokens_.size() &&

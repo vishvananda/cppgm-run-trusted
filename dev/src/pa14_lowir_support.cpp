@@ -1,5 +1,7 @@
 #include "pa14_lowir_internal.h"
 
+#include <cctype>
+
 namespace pa14 {
 namespace internal {
 
@@ -198,6 +200,85 @@ string lowir_literal(TypePtr type, const Node& node)
 	return to_string(node.constant_value);
 }
 
+string lowir_parameter(TypePtr type)
+{
+	string out = scalar_lowir_type(type);
+	if (is_reference(type))
+		out += " [pass=reference]";
+	return out;
+}
+
+string metadata_suffix(const vector<string>& items)
+{
+	if (items.empty())
+		return "";
+	ostringstream out;
+	out << " [";
+	for (size_t i = 0; i < items.size(); ++i)
+	{
+		if (i != 0)
+			out << ", ";
+		out << items[i];
+	}
+	out << "]";
+	return out.str();
+}
+
+string sanitized_symbol_part(const string& part)
+{
+	ostringstream out;
+	for (size_t i = 0; i < part.size(); ++i)
+	{
+		const unsigned char ch = static_cast<unsigned char>(part[i]);
+		if (isalnum(ch) || ch == '_')
+			out << part[i];
+		else if (ch == '+')
+			out << "_plus";
+		else if (ch == '-')
+			out << "_minus";
+		else if (ch == '*')
+			out << "_star";
+		else if (ch == '/')
+			out << "_slash";
+		else if (ch == '%')
+			out << "_percent";
+		else if (ch == '&')
+			out << "_amp";
+		else if (ch == '|')
+			out << "_bar";
+		else if (ch == '^')
+			out << "_caret";
+		else if (ch == '~')
+			out << "_tilde";
+		else if (ch == '!')
+			out << "_bang";
+		else if (ch == '=')
+			out << "_eq";
+		else if (ch == '<')
+			out << "_lt";
+		else if (ch == '>')
+			out << "_gt";
+		else if (ch == '[')
+			out << "_lb";
+		else if (ch == ']')
+			out << "_rb";
+		else if (ch == '(')
+			out << "_lp";
+		else if (ch == ')')
+			out << "_rp";
+		else if (ch == ',')
+			out << "_comma";
+		else
+			out << "_x" << static_cast<unsigned>(ch) << "_";
+	}
+	string text = out.str();
+	if (text.empty())
+		return "_";
+	if (isdigit(static_cast<unsigned char>(text[0])))
+		text = "_" + text;
+	return text;
+}
+
 vector<string> qualified_parts(const Binding* binding)
 {
 	vector<string> parts;
@@ -222,7 +303,7 @@ string source_symbol_base(const Binding* binding)
 	{
 		if (i != 0)
 			out << "__";
-		out << parts[i];
+		out << sanitized_symbol_part(parts[i]);
 	}
 	return out.str();
 }

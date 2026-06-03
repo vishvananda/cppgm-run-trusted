@@ -1,0 +1,11 @@
+declare function @use(%arg0 : ptr [pass=reference]) -> i32 [binding=strong]
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $x : i32
+
+  block ^entry:
+    store i32 1, $x
+    %t1 = addr $x
+    %t2 = call i32 @use(%t1)
+    return i32 %t2
+}

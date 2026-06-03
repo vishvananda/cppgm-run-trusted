@@ -1,0 +1,7 @@
+declare function @sink(%arg0 : i32) -> i32 [linkage=c, binding=strong]
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  block ^entry:
+    %t1 = call i32 @sink(0)
+    return i32 %t1
+}

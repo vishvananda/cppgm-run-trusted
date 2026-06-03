@@ -97,15 +97,23 @@ FunctionOut FunctionLowerer::lower()
 		if (pname.empty())
 			pname = "__param" + to_string(i);
 		TypePtr ptype = fn_type->parameters[i];
-		header << "%" << pname << " : " << scalar_lowir_type(ptype);
-		if (is_reference(ptype))
-			header << " [pass=reference]";
+		header << "%" << pname << " : " << lowir_parameter(ptype);
 	}
 	header << ") -> " << scalar_lowir_type(fn_type->base);
+	vector<string> metadata;
+	if (fn_type->variadic)
+		metadata.push_back("arity=variadic");
+	if (binding->language_linkage == "c")
+		metadata.push_back("linkage=c");
 	if (binding->name == "main")
-		header << " [role=entry, binding=strong, keep_alias=yes]";
+	{
+		metadata.push_back("role=entry");
+		metadata.push_back("binding=strong");
+		metadata.push_back("keep_alias=yes");
+	}
 	else
-		header << " [binding=strong]";
+		metadata.push_back("binding=strong");
+	header << metadata_suffix(metadata);
 	out_.header = header.str();
 	lower_params();
 	start_block("entry");
@@ -207,12 +215,22 @@ void FunctionLowerer::lower_stmt(const Node& node)
 		lower_if(node);
 	else if (starts_with(node.line, "while-statement"))
 		lower_while(node);
+	else if (starts_with(node.line, "do-statement"))
+		lower_do(node);
 	else if (starts_with(node.line, "for-statement"))
 		lower_for(node);
 	else if (starts_with(node.line, "break-statement"))
-		terminate("jump ^" + loop_stack_.back().second);
+	{
+		if (break_targets_.empty())
+			throw runtime_error("break outside loop or switch");
+		terminate("jump ^" + break_targets_.back());
+	}
 	else if (starts_with(node.line, "continue-statement"))
-		terminate("jump ^" + loop_stack_.back().first);
+	{
+		if (continue_targets_.empty())
+			throw runtime_error("continue outside loop");
+		terminate("jump ^" + continue_targets_.back());
+	}
 	else if (starts_with(node.line, "goto-statement "))
 	{
 		string label = node.line.substr(15);
@@ -363,13 +381,34 @@ void FunctionLowerer::lower_while(const Node& node)
 	string end_block = fresh_block("while_end");
 	terminate("jump ^" + cond_block);
 	start_block(cond_block);
-	loop_stack_.push_back(make_pair(cond_block, end_block));
+	continue_targets_.push_back(cond_block);
+	break_targets_.push_back(end_block);
 	branch_on(node.children[0].children[0], body_block, end_block);
 	start_block(body_block);
 	lower_stmt(node.children[1]);
 	if (!current_->terminated)
 		terminate("jump ^" + cond_block);
-	loop_stack_.pop_back();
+	break_targets_.pop_back();
+	continue_targets_.pop_back();
+	start_block(end_block);
+}
+
+void FunctionLowerer::lower_do(const Node& node)
+{
+	string body_block = fresh_block("do_body");
+	string cond_block = fresh_block("do_cond");
+	string end_block = fresh_block("do_end");
+	terminate("jump ^" + body_block);
+	start_block(body_block);
+	continue_targets_.push_back(cond_block);
+	break_targets_.push_back(end_block);
+	lower_stmt(node.children[0]);
+	if (!current_->terminated)
+		terminate("jump ^" + cond_block);
+	start_block(cond_block);
+	branch_on(node.children[1].children[0], body_block, end_block);
+	break_targets_.pop_back();
+	continue_targets_.pop_back();
 	start_block(end_block);
 }
 
@@ -389,7 +428,8 @@ void FunctionLowerer::lower_for(const Node& node)
 	string end_block = fresh_block("for_end");
 	terminate("jump ^" + cond_block);
 	start_block(cond_block);
-	loop_stack_.push_back(make_pair(iter_block, end_block));
+	continue_targets_.push_back(iter_block);
+	break_targets_.push_back(end_block);
 	if (node.children.size() > 1 && starts_with(node.children[1].line, "condition"))
 		branch_on(node.children[1].children[0], body_block, end_block);
 	else
@@ -404,7 +444,8 @@ void FunctionLowerer::lower_for(const Node& node)
 		    !node.children[i].children.empty())
 			emit_rvalue(node.children[i].children[0]);
 	terminate("jump ^" + cond_block);
-	loop_stack_.pop_back();
+	break_targets_.pop_back();
+	continue_targets_.pop_back();
 	start_block(end_block);
 }
 
@@ -412,6 +453,8 @@ void FunctionLowerer::lower_switch_items(const Node& node,
                                          vector<pair<string, const Node*> >& cases,
                                          const Node*& default_node)
 {
+	if (starts_with(node.line, "switch-statement"))
+		return;
 	if (starts_with(node.line, "case-statement"))
 		cases.push_back(make_pair(lowir_literal(node.children[0].type, node.children[0]),
 		                          &node));
@@ -423,7 +466,17 @@ void FunctionLowerer::lower_switch_items(const Node& node,
 
 void FunctionLowerer::lower_switch(const Node& node)
 {
-	Value selector = emit_rvalue(node.children[0].children[0]);
+	const Node& condition = node.children[0].children[0];
+	Value selector;
+	if (starts_with(condition.line, "condition-declaration"))
+	{
+		if (condition.children.empty())
+			throw runtime_error("empty switch condition declaration");
+		lower_variable_decl(condition.children[0]);
+		selector = emit_rvalue(condition.children[0]);
+	}
+	else
+		selector = emit_rvalue(condition);
 	vector<pair<string, const Node*> > cases;
 	const Node* default_node = NULL;
 	lower_switch_items(node.children[1], cases, default_node);
@@ -451,11 +504,11 @@ void FunctionLowerer::lower_switch(const Node& node)
 	for (size_t i = 0; i < cases.size(); ++i)
 		sw << ", " << cases[i].first << ":^" << case_blocks[i];
 	terminate(sw.str());
-	loop_stack_.push_back(make_pair(end, end));
+	break_targets_.push_back(end);
 	lower_stmt(node.children[1]);
 	if (!current_->terminated)
 		terminate("jump ^" + end);
-	loop_stack_.pop_back();
+	break_targets_.pop_back();
 	for (size_t i = 0; i < installed.size(); ++i)
 		switch_labels_.erase(installed[i]);
 	start_block(end);
@@ -1118,7 +1171,7 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		{
 			if (i != 0)
 				call << ", ";
-			call << "%arg" << i << " : " << scalar_lowir_type(callee_type->parameters[i]);
+			call << "%arg" << i << " : " << lowir_parameter(callee_type->parameters[i]);
 		}
 		call << ") -> " << ret;
 	}

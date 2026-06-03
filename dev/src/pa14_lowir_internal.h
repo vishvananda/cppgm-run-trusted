@@ -63,6 +63,8 @@ TypePtr lowir_integral_promotion(TypePtr type);
 TypePtr lowir_common_type(TypePtr left, TypePtr right);
 string slot_lowir_type(TypePtr type);
 string lowir_literal(TypePtr type, const Node& node);
+string lowir_parameter(TypePtr type);
+string metadata_suffix(const vector<string>& items);
 vector<string> qualified_parts(const Binding* binding);
 string source_symbol_base(const Binding* binding);
 
@@ -75,6 +77,7 @@ struct ProgramLowerer
 	map<string, int> used_symbols;
 	map<string, string> function_symbols;
 	set<string> defined_functions;
+	set<string> declared_functions;
 	map<string, string> string_literals;
 	vector<pair<string, vector<unsigned char> > > string_defs;
 
@@ -103,7 +106,8 @@ private:
 	Block* current_;
 	map<const Binding*, string> slots_;
 	map<string, int> slot_names_;
-	vector<pair<string, string> > loop_stack_;
+	vector<string> break_targets_;
+	vector<string> continue_targets_;
 	map<string, string> labels_;
 	map<const Node*, string> switch_labels_;
 	int temp_counter_;
@@ -127,6 +131,7 @@ private:
 	void lower_variable_decl(const Node& var);
 	void lower_if(const Node& node);
 	void lower_while(const Node& node);
+	void lower_do(const Node& node);
 	void lower_for(const Node& node);
 	void lower_return(const Node& node);
 	void lower_expr_stmt(const Node& node);

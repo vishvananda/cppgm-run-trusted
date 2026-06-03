@@ -71,7 +71,11 @@ void ProgramLowerer::emit_global(const Node& node)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind == TypeKind::Array)
 	{
-		out << "global @" << name << " [binding=strong] = {\n";
+		vector<string> metadata;
+		if (node.binding->language_linkage == "c")
+			metadata.push_back("linkage=c");
+		metadata.push_back("binding=strong");
+		out << "global @" << name << metadata_suffix(metadata) << " = {\n";
 		TypePtr elem = bare->base;
 		if (!node.children.empty() &&
 		    starts_with(node.children[0].line, "braced-init-list"))
@@ -89,8 +93,12 @@ void ProgramLowerer::emit_global(const Node& node)
 	}
 	else
 	{
+		vector<string> metadata;
+		if (node.binding->language_linkage == "c")
+			metadata.push_back("linkage=c");
+		metadata.push_back("binding=strong");
 		out << "global @" << name << " : " << scalar_lowir_type(type)
-		    << " [binding=strong] = ";
+		    << metadata_suffix(metadata) << " = ";
 		if (node.children.empty())
 			out << "zero";
 		else if (starts_with(node.children[0].line, "literal") &&
@@ -133,12 +141,18 @@ void ProgramLowerer::collect_node(const Node& node)
 			if (i != 0)
 				out << ", ";
 			out << "%arg" << i << " : "
-			    << scalar_lowir_type(binding->type->parameters[i]);
+			    << lowir_parameter(binding->type->parameters[i]);
 		}
 		out << ") -> " << scalar_lowir_type(binding->type->base);
+		vector<string> metadata;
 		if (binding->type->variadic)
-			out << " [arity=variadic]";
-		declares.push_back(out.str());
+			metadata.push_back("arity=variadic");
+		if (binding->language_linkage == "c")
+			metadata.push_back("linkage=c");
+		metadata.push_back("binding=strong");
+		out << metadata_suffix(metadata);
+		if (declared_functions.insert(name).second)
+			declares.push_back(out.str());
 		return;
 	}
 	if (starts_with(node.line, "function-definition "))

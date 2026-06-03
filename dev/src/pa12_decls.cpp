@@ -124,16 +124,27 @@ void Parser::parse_using_family(Node& out)
 void Parser::parse_linkage_specification(Node& out)
 {
 	expect(KW_EXTERN);
+	string language = current_language_linkage();
 	if (at_literal())
+	{
+		if (current().source == "\"C\"")
+			language = "c";
+		else if (current().source == "\"C++\"")
+			language = "cpp";
 		++pos_;
+	}
 	if (consume(OP_LBRACE))
 	{
+		language_linkages_.push_back(language);
 		while (!at(OP_RBRACE))
 			parse_declaration_into(out);
+		language_linkages_.pop_back();
 		expect(OP_RBRACE);
 		return;
 	}
+	language_linkages_.push_back(language);
 	parse_simple_or_function_declaration(out, true);
+	language_linkages_.pop_back();
 }
 
 void Parser::parse_template_declaration()
@@ -369,6 +380,7 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	if (type->kind == pa11::TypeKind::Function || function_definition)
 	{
 		Binding* function = add_value(target, BindingKind::Function, qname.name, type);
+		function->language_linkage = current_language_linkage();
 		const Suffix* suffix = declarator_function_suffix(declarator);
 		if (suffix != NULL)
 		{
@@ -388,6 +400,7 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	}
 
 	Binding* variable = add_value(target, BindingKind::Variable, qname.name, type);
+	variable->language_linkage = current_language_linkage();
 	Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
 	var.type = type;

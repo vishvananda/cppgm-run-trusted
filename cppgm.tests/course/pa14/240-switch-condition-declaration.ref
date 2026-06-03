@@ -1,0 +1,27 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $out : i32
+  slot $x : i32
+
+  block ^entry:
+    store i32 0, $out
+    store i32 1, $x
+    %t1 = load i32 $x
+    jump ^switch_dispatch_1
+
+  block ^switch_dispatch_1:
+    switch %t1, ^switch_default_4, 1:^switch_case_3
+
+  block ^switch_case_3:
+    %t2 = load i32 $x
+    store i32 %t2, $out
+    jump ^switch_end_2
+
+  block ^switch_default_4:
+    store i32 2, $out
+    jump ^switch_end_2
+
+  block ^switch_end_2:
+    %t3 = load i32 $out
+    %t4 = binary sub i32 %t3, 1
+    return i32 %t4
+}

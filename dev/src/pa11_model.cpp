@@ -137,6 +137,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  owner(o),
 	  target_scope(NULL),
 	  aliased_binding(NULL),
+	  language_linkage("cpp"),
 	  has_constant(false),
 	  constant_value(0)
 {
