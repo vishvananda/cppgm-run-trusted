@@ -1,0 +1,262 @@
+#include "pa12_internal.h"
+
+#include <fstream>
+#include <ostream>
+#include <stdexcept>
+
+using namespace std;
+
+namespace pa12 {
+namespace internal {
+
+Node::Node()
+{
+}
+
+Node::Node(const string& text) : line(text)
+{
+}
+
+QualifiedName::QualifiedName()
+	: qualifier(NULL), qualified(false)
+{
+}
+
+Expr::Expr()
+	: category(ValueCategory::PRValue),
+	  binding(NULL),
+	  valid(false),
+	  null_pointer_constant(false)
+{
+}
+
+DeclSpecs::DeclSpecs()
+	: typedef_decl(false), constexpr_decl(false), cv(pa11::CV_NONE)
+{
+}
+
+PtrOp::PtrOp(PtrKind k, unsigned flags)
+	: kind(k), cv(flags)
+{
+}
+
+PtrOp::PtrOp(TypePtr class_type, unsigned flags)
+	: kind(PtrKind::MemberPointer), cv(flags), member_class(class_type)
+{
+}
+
+Suffix::Suffix(SuffixKind k)
+	: kind(k),
+	  unknown_bound(false),
+	  bound(0),
+	  variadic(false),
+	  function_cv(pa11::CV_NONE)
+{
+}
+
+Declarator::Declarator() : has_name(false)
+{
+}
+
+Conversion::Conversion() : viable(false), rank(1000000)
+{
+}
+
+Conversion::Conversion(bool ok, int cost, const Expr& converted)
+	: viable(ok), rank(cost), expr(converted)
+{
+}
+
+void add_child(Node& parent, const Node& child)
+{
+	parent.children.push_back(child);
+}
+
+void dump_node(ostream& out, const Node& node, int depth)
+{
+	for (int i = 0; i < depth; ++i)
+		out << "  ";
+	out << node.line << '\n';
+	for (size_t i = 0; i < node.children.size(); ++i)
+		dump_node(out, node.children[i], depth + 1);
+}
+
+Parser::Parser(const string& srcfile, const Options& options)
+	: pos_(0),
+	  root_("translation-unit"),
+	  local_type_counter_(0)
+{
+	pa10::Options pa10_options;
+	pa10_options.preprocess = options.preprocess;
+	tokens_ = pa10::internal::collect_source_tokens(srcfile, pa10_options);
+
+	tu_.srcfile = srcfile;
+	tu_.global_scope.reset(new Scope(ScopeKind::Namespace, "", NULL));
+	scopes_.push_back(tu_.global_scope.get());
+	pa11::add_binding(global_scope(),
+	                  BindingKind::Type,
+	                  "nullptr_t",
+	                  pa11::make_fundamental(FT_NULLPTR_T));
+}
+
+const Node& Parser::root() const
+{
+	return root_;
+}
+
+const vector<Node>& Parser::generated_nodes() const
+{
+	return generated_nodes_;
+}
+
+Scope* Parser::current_scope() const
+{
+	return scopes_.back();
+}
+
+Scope* Parser::global_scope() const
+{
+	return tu_.global_scope.get();
+}
+
+TypePtr Parser::current_return_type() const
+{
+	if (function_returns_.empty())
+		return TypePtr();
+	return function_returns_.back();
+}
+
+bool Parser::at_eof() const
+{
+	return pos_ < tokens_.size() &&
+	       tokens_[pos_].kind == posttoken::TokenKind::EndOfFile;
+}
+
+bool Parser::at_identifier() const
+{
+	return pos_ < tokens_.size() &&
+	       tokens_[pos_].kind == posttoken::TokenKind::Identifier;
+}
+
+bool Parser::at_literal() const
+{
+	return pos_ < tokens_.size() &&
+	       tokens_[pos_].kind == posttoken::TokenKind::Literal;
+}
+
+bool Parser::at(ETokenType type) const
+{
+	return pos_ < tokens_.size() &&
+	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
+	       tokens_[pos_].type == type;
+}
+
+bool Parser::lookahead(ETokenType type, size_t offset) const
+{
+	size_t index = pos_ + offset;
+	return index < tokens_.size() &&
+	       tokens_[index].kind == posttoken::TokenKind::Simple &&
+	       tokens_[index].type == type;
+}
+
+bool Parser::consume(ETokenType type)
+{
+	if (!at(type))
+		return false;
+	++pos_;
+	return true;
+}
+
+void Parser::expect(ETokenType type)
+{
+	if (!consume(type))
+		throw runtime_error("unexpected token");
+}
+
+void Parser::expect_eof()
+{
+	if (!at_eof())
+		throw runtime_error("expected end of file");
+}
+
+string Parser::consume_identifier()
+{
+	if (!at_identifier())
+		throw runtime_error("expected identifier before '" + current().source + "'");
+	return tokens_[pos_++].source;
+}
+
+string Parser::consume_literal()
+{
+	if (!at_literal())
+		throw runtime_error("expected literal");
+	return tokens_[pos_++].source;
+}
+
+const Token& Parser::current() const
+{
+	if (pos_ >= tokens_.size())
+		throw runtime_error("token cursor out of range");
+	return tokens_[pos_];
+}
+
+const Token& Parser::at_token(size_t index) const
+{
+	if (index >= tokens_.size())
+		throw runtime_error("token index out of range");
+	return tokens_[index];
+}
+
+void Parser::parse_translation_unit()
+{
+	while (!at_eof())
+		parse_declaration_into(root_);
+	expect_eof();
+}
+
+void Parser::skip_balanced(ETokenType open, ETokenType close)
+{
+	expect(open);
+	int depth = 1;
+	while (depth > 0 && !at_eof())
+	{
+		if (consume(open))
+			++depth;
+		else if (consume(close))
+			--depth;
+		else
+			++pos_;
+	}
+}
+
+}  // namespace internal
+
+void emit_semantics(const vector<string>& srcfiles,
+                    const string& outfile,
+                    const Options& options)
+{
+	ofstream out(outfile.c_str());
+	if (!out)
+		throw runtime_error("cannot open output file");
+
+	vector<unique_ptr<internal::Parser> > parsers;
+	for (size_t i = 0; i < srcfiles.size(); ++i)
+	{
+		unique_ptr<internal::Parser> parser(new internal::Parser(srcfiles[i], options));
+		parser->parse_translation_unit();
+		parsers.push_back(std::move(parser));
+	}
+
+	out << parsers.size() << " translation units\n";
+	for (size_t i = 0; i < parsers.size(); ++i)
+	{
+		out << "start translation unit " << (i + 1) << '\n';
+		internal::dump_node(out, parsers[i]->root(), 0);
+		const vector<internal::Node>& generated = parsers[i]->generated_nodes();
+		for (size_t j = 0; j < generated.size(); ++j)
+			internal::dump_node(out, generated[j], 1);
+		out << "end translation unit\n";
+	}
+}
+
+}  // namespace pa12

@@ -120,6 +120,7 @@ Type::Type(TypeKind k)
 	: kind(k),
 	  fundamental(FT_INT),
 	  cv(CV_NONE),
+	  member_class(),
 	  unknown_bound(false),
 	  bound(0),
 	  variadic(false),
@@ -135,6 +136,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  name(n),
 	  owner(o),
 	  target_scope(NULL),
+	  aliased_binding(NULL),
 	  has_constant(false),
 	  constant_value(0)
 {
@@ -234,6 +236,17 @@ TypePtr make_function(TypePtr result,
 	type->base = result;
 	type->parameters = normalized;
 	type->variadic = variadic;
+	return type;
+}
+
+TypePtr make_member_pointer(TypePtr class_type, TypePtr member_type)
+{
+	TypePtr bare = strip_cv(class_type);
+	if (bare->kind != TypeKind::Record)
+		throw runtime_error("member pointer class type is not a record");
+	TypePtr type = new_type(TypeKind::MemberPointer);
+	type->member_class = bare;
+	type->base = member_type;
 	return type;
 }
 
@@ -357,7 +370,10 @@ bool same_type(const TypePtr& left, const TypePtr& right)
 		       left->bound == right->bound &&
 		       same_type(left->base, right->base);
 	if (left->kind == TypeKind::Function)
-		return same_function_type(left, right);
+		return left->cv == right->cv && same_function_type(left, right);
+	if (left->kind == TypeKind::MemberPointer)
+		return same_type(left->member_class, right->member_class) &&
+		       same_type(left->base, right->base);
 	if (left->kind == TypeKind::Record ||
 	    left->kind == TypeKind::Enum ||
 	    left->kind == TypeKind::TemplateParameter ||
@@ -392,7 +408,15 @@ string describe_type(const TypePtr& type)
 	case TypeKind::Function:
 		return "function of (" +
 		       join_parameter_types(type->parameters, type->variadic) +
-		       ") returning " + describe_type(type->base);
+		       ")" +
+		       (type->cv == CV_CONST ? " const" :
+		        (type->cv == CV_VOLATILE ? " volatile" :
+		         (type->cv == (CV_CONST | CV_VOLATILE) ?
+		          " const volatile" : ""))) +
+		       " returning " + describe_type(type->base);
+	case TypeKind::MemberPointer:
+		return "member-pointer of " + describe_type(type->member_class) +
+		       " to " + describe_type(type->base);
 	case TypeKind::Record:
 		return type->tag + " " + type->name;
 	case TypeKind::Enum:
@@ -411,7 +435,8 @@ uint64_t type_size(const TypePtr& type)
 	TypePtr bare = strip_cv(type);
 	if (bare->kind == TypeKind::Fundamental)
 		return fundamental_size(bare->fundamental);
-	if (bare->kind == TypeKind::Pointer || is_reference_type(bare))
+	if (bare->kind == TypeKind::Pointer || is_reference_type(bare) ||
+	    bare->kind == TypeKind::MemberPointer)
 		return 8;
 	if (bare->kind == TypeKind::Array)
 	{
@@ -519,6 +544,7 @@ Binding* add_using_declaration(Scope* scope,
 		throw runtime_error("invalid using declaration");
 	Binding* binding = add_binding(scope, target->kind, name, target->type);
 	binding->target_scope = target->target_scope;
+	binding->aliased_binding = const_cast<Binding*>(target);
 	binding->has_constant = target->has_constant;
 	binding->constant_value = target->constant_value;
 	return binding;

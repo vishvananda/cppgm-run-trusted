@@ -1,0 +1,156 @@
+#include "pa12_internal.h"
+
+#include <stdexcept>
+
+using namespace std;
+
+namespace pa12 {
+namespace internal {
+
+QualifiedName Parser::parse_id_expression_name()
+{
+	QualifiedName name;
+	if (at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1)))
+	{
+		string spelling;
+		name.qualifier = parse_nested_name_specifier(&spelling);
+		name.spelling = spelling;
+		name.qualified = true;
+	}
+	if (consume(KW_OPERATOR))
+		name.name = "operator_" + consume_identifier();
+	else
+		name.name = consume_identifier();
+	if (name.qualified)
+		name.spelling += name.name;
+	else
+		name.spelling = name.name;
+	return name;
+}
+
+Scope* Parser::parse_nested_name_specifier(string* spelling)
+{
+	Scope* scope = NULL;
+	string text;
+	if (consume(OP_COLON2))
+	{
+		scope = global_scope();
+		text = "::";
+	}
+	else
+	{
+		string root = consume_identifier();
+		expect(OP_COLON2);
+		Binding* binding =
+			pa11::lookup_unqualified(current_scope(), root, pa11::LOOKUP_QUALIFIER);
+		scope = resolve_qualifier(binding);
+		if (scope == NULL)
+			throw runtime_error("qualified lookup root not found");
+		text = root + "::";
+	}
+	while (at_identifier() && lookahead(OP_COLON2, 1))
+	{
+		string component = consume_identifier();
+		expect(OP_COLON2);
+		vector<Binding*> found =
+			lookup_qualified_set(scope, component, pa11::LOOKUP_QUALIFIER);
+		if (found.empty())
+			throw runtime_error("qualified lookup component not found");
+		scope = resolve_qualifier(found[0]);
+		if (scope == NULL)
+			throw runtime_error("qualified lookup component not a scope");
+		text += component + "::";
+	}
+	if (spelling != NULL)
+		*spelling = text;
+	return scope;
+}
+
+Scope* Parser::parse_qualified_namespace_specifier()
+{
+	string spelling;
+	Scope* qualifier = NULL;
+	if (at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1)))
+		qualifier = parse_nested_name_specifier(&spelling);
+	string name = consume_identifier();
+	vector<Binding*> found = qualifier != NULL
+		? lookup_qualified_set(qualifier, name, pa11::LOOKUP_NAMESPACE)
+		: lookup_unqualified_set(current_scope(), name, pa11::LOOKUP_NAMESPACE);
+	if (found.empty())
+		throw runtime_error("namespace specifier not found");
+	Scope* scope = resolve_qualifier(found[0]);
+	if (scope == NULL || scope->kind != ScopeKind::Namespace)
+		throw runtime_error("namespace specifier is not namespace");
+	return scope;
+}
+
+bool Parser::is_assignment_operator(ETokenType& op) const
+{
+	if (current().kind != posttoken::TokenKind::Simple)
+		return false;
+	switch (current().type)
+	{
+	case OP_ASS:
+	case OP_PLUSASS:
+	case OP_MINUSASS:
+	case OP_STARASS:
+	case OP_DIVASS:
+	case OP_MODASS:
+	case OP_XORASS:
+	case OP_BANDASS:
+	case OP_BORASS:
+	case OP_LSHIFTASS:
+	case OP_RSHIFTASS:
+		op = current().type;
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool Parser::binary_operator(ETokenType& op, int& prec) const
+{
+	if (current().kind != posttoken::TokenKind::Simple)
+		return false;
+	op = current().type;
+	if (current().type == OP_GT && current().split_rshift &&
+	    pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].split_rshift &&
+	    tokens_[pos_ + 1].split_group == current().split_group)
+		op = OP_RSHIFT;
+	switch (op)
+	{
+	case OP_LOR: prec = 1; return true;
+	case OP_LAND: prec = 2; return true;
+	case OP_BOR: prec = 3; return true;
+	case OP_XOR: prec = 4; return true;
+	case OP_AMP: prec = 5; return true;
+	case OP_EQ: case OP_NE: prec = 6; return true;
+	case OP_LT: case OP_GT: case OP_LE: case OP_GE: prec = 7; return true;
+	case OP_LSHIFT: case OP_RSHIFT: prec = 8; return true;
+	case OP_PLUS: case OP_MINUS: prec = 9; return true;
+	case OP_STAR: case OP_DIV: case OP_MOD: prec = 10; return true;
+	default:
+		return false;
+	}
+}
+
+bool Parser::expression_starts_type_name(TypePtr& type)
+{
+	size_t save = pos_;
+	try
+	{
+		DeclSpecs specs = parse_decl_specifier_seq(true);
+		type = type_from_decl_specs(specs);
+		if (at(OP_LPAREN))
+			return true;
+	}
+	catch (const exception&)
+	{
+	}
+	pos_ = save;
+	type.reset();
+	return false;
+}
+
+}  // namespace internal
+}  // namespace pa12

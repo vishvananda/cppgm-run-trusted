@@ -31,6 +31,7 @@ enum class TypeKind
 	RValueReference,
 	Array,
 	Function,
+	MemberPointer,
 	Record,
 	Enum,
 	TemplateParameter,
@@ -47,6 +48,7 @@ struct Type
 	EFundamentalType fundamental;
 	unsigned cv;
 	TypePtr base;
+	TypePtr member_class;
 	bool unknown_bound;
 	uint64_t bound;
 	vector<TypePtr> parameters;
@@ -80,6 +82,7 @@ struct Binding
 	TypePtr type;
 	Scope* owner;
 	Scope* target_scope;
+	Binding* aliased_binding;
 	bool has_constant;
 	uint64_t constant_value;
 
@@ -146,6 +149,7 @@ TypePtr make_array(TypePtr element, bool unknown, uint64_t bound);
 TypePtr make_function(TypePtr result,
                       const vector<TypePtr>& parameters,
                       bool variadic);
+TypePtr make_member_pointer(TypePtr class_type, TypePtr member_type);
 TypePtr make_record_type(const string& name,
                          const string& tag,
                          bool complete,

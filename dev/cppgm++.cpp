@@ -3,6 +3,7 @@
 #include "exceptions.h"
 #include "pa10_ast.h"
 #include "pa11_types.h"
+#include "pa12_semantics.h"
 #include "tool_help_text.h"
 
 #include <cstdlib>
@@ -437,8 +438,13 @@ int run_emit_types_mode(const vector<string> & args)
 
 int run_emit_semantics_mode(const vector<string> & args)
 {
-  parse_source_output_invocation(args, false);
-  return run_unimplemented_mode("--emit-semantics", "PA12");
+  string outfile;
+  vector<string> srcfiles;
+  parse_source_output_invocation(args, false, &outfile, &srcfiles);
+  pa12::Options options;
+  options.preprocess = make_preproc_options();
+  pa12::emit_semantics(srcfiles, outfile, options);
+  return EXIT_SUCCESS;
 }
 
 int run_emit_lowir_mode(const vector<string> & args)
