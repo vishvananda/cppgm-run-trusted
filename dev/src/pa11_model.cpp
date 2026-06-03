@@ -111,6 +111,16 @@ Binding* lookup_in_scope(Scope* scope,
 		if (found != NULL)
 			return found;
 	}
+	TypePtr record = record_type_for_scope(scope);
+	TypePtr base = record.get() != NULL && record->base.get() != NULL
+		? strip_cv(record->base) : TypePtr();
+	if (base.get() != NULL && base->kind == TypeKind::Record &&
+	    base->scope != NULL)
+	{
+		Binding* found = lookup_in_scope(base->scope, name, mask, seen);
+		if (found != NULL)
+			return found;
+	}
 	return NULL;
 }
 
@@ -145,8 +155,18 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  constant_value(0),
 	  is_static_member(false),
 	  is_inline_definition(false),
+	  is_generated_default_constructor(false),
+	  is_explicit(false),
 	  is_private(false),
-	  member_offset(0)
+	  is_protected_member(false),
+	  is_mutable_member(false),
+	  is_hidden_friend(false),
+	  is_thread_local(false),
+	  unwind_no(false),
+	  member_offset(0),
+	  is_bit_field(false),
+	  bit_width(0),
+	  bit_offset(0)
 {
 }
 
@@ -493,17 +513,75 @@ void layout_record_type(TypePtr type)
 	bare->fields.clear();
 	uint64_t offset = 0;
 	uint64_t align = 1;
+	TypePtr direct_base = bare->base.get() != NULL ? strip_cv(bare->base) : TypePtr();
+	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
+	{
+		layout_record_type(direct_base);
+		offset = type_size(direct_base);
+		align = max<uint64_t>(align, type_align(direct_base));
+	}
 	if (bare->scope != NULL)
 	{
+		uint64_t bit_unit_offset = 0;
+		uint64_t bit_unit_size = 0;
+		uint64_t bit_used = 0;
 		for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
 		{
 			Binding* member = bare->scope->binding_order[i];
-			if (member->kind != BindingKind::Variable || member->is_static_member)
-				continue;
+				if (member->kind != BindingKind::Variable ||
+				    member->is_static_member ||
+				    member->aliased_binding != NULL)
+					continue;
 			uint64_t member_align = type_align(member->type);
 			uint64_t member_size = type_size(member->type);
 			if (member_align == 0)
 				member_align = 1;
+			if (member->is_bit_field)
+			{
+				uint64_t unit_bits = member_size * 8;
+				if (member->bit_width == 0)
+				{
+					if (bit_used != 0)
+						offset = bit_unit_offset + bit_unit_size;
+					uint64_t padding = offset % member_align;
+					if (padding != 0)
+						offset += member_align - padding;
+					bit_used = 0;
+					bit_unit_size = 0;
+					align = max(align, member_align);
+					continue;
+				}
+				if (bit_used == 0)
+				{
+					uint64_t padding = offset % member_align;
+					if (padding != 0)
+						offset += member_align - padding;
+					bit_unit_offset = offset;
+					bit_unit_size = member_size;
+				}
+				if (bit_used + member->bit_width > unit_bits)
+				{
+					offset = bit_unit_offset + bit_unit_size;
+					uint64_t padding = offset % member_align;
+					if (padding != 0)
+						offset += member_align - padding;
+					bit_unit_offset = offset;
+					bit_unit_size = member_size;
+					bit_used = 0;
+				}
+				member->member_offset = bit_unit_offset;
+				member->bit_offset = bit_used;
+				bare->fields.push_back(member);
+				bit_used += member->bit_width;
+				align = max(align, member_align);
+				continue;
+			}
+			if (bit_used != 0)
+			{
+				offset = bit_unit_offset + bit_unit_size;
+				bit_used = 0;
+				bit_unit_size = 0;
+			}
 			uint64_t padding = offset % member_align;
 			if (padding != 0)
 				offset += member_align - padding;
@@ -512,6 +590,8 @@ void layout_record_type(TypePtr type)
 			offset += member_size;
 			align = max(align, member_align);
 		}
+		if (bit_used != 0)
+			offset = bit_unit_offset + bit_unit_size;
 	}
 	if (offset == 0)
 		offset = 1;
@@ -620,6 +700,11 @@ Binding* add_using_declaration(Scope* scope,
 	binding->aliased_binding = const_cast<Binding*>(target);
 	binding->has_constant = target->has_constant;
 	binding->constant_value = target->constant_value;
+	binding->is_static_member = target->is_static_member;
+	binding->is_generated_default_constructor =
+		target->is_generated_default_constructor;
+	binding->is_mutable_member = target->is_mutable_member;
+	binding->is_thread_local = target->is_thread_local;
 	return binding;
 }
 

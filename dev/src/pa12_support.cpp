@@ -46,17 +46,23 @@ Expr::Expr()
 	  has_constant_value(false),
 	  constant_value(0),
 	  builtin_constant_p(false),
-	  braced_init_list(false)
+	  braced_init_list(false),
+	  copy_initialization(false)
 {
 }
 
-DeclSpecs::DeclSpecs()
-	: typedef_decl(false),
-	  constexpr_decl(false),
-	  static_decl(false),
-	  cv(pa11::CV_NONE)
-{
-}
+	DeclSpecs::DeclSpecs()
+		: typedef_decl(false),
+		  constexpr_decl(false),
+		  static_decl(false),
+		  mutable_decl(false),
+		  friend_decl(false),
+		  extern_decl(false),
+		  thread_local_decl(false),
+		  auto_decl(false),
+		  cv(pa11::CV_NONE)
+	{
+	}
 
 PtrOp::PtrOp(PtrKind k, unsigned flags)
 	: kind(k), cv(flags)
@@ -78,11 +84,17 @@ Suffix::Suffix(SuffixKind k)
 	  unknown_bound(false),
 	  bound(0),
 	  variadic(false),
-	  function_cv(pa11::CV_NONE)
+	  function_cv(pa11::CV_NONE),
+	  noexcept_decl(false),
+	  trailing_return()
 {
 }
 
 Declarator::Declarator() : has_name(false)
+{
+}
+
+PendingFunctionBody::PendingFunctionBody() : function(NULL), body_pos(0)
 {
 }
 

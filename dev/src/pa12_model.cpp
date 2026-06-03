@@ -29,11 +29,23 @@ void collect_in_scope(Scope* scope,
 		for (size_t i = 0; i < it->second.size(); ++i)
 		{
 			if (pa11::binding_matches(it->second[i], mask))
+			{
+				if (it->second[i]->is_hidden_friend)
+					continue;
 				out.push_back(it->second[i]);
+			}
 		}
 	}
 	for (size_t i = 0; i < scope->using_directives.size(); ++i)
 		collect_in_scope(scope->using_directives[i], name, mask, seen, out);
+	if (!out.empty())
+		return;
+	TypePtr record = pa11::record_type_for_scope(scope);
+	TypePtr base = record.get() != NULL && record->base.get() != NULL
+		? pa11::strip_cv(record->base) : TypePtr();
+	if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
+	    base->scope != NULL)
+		collect_in_scope(base->scope, name, mask, seen, out);
 }
 
 bool type_is_floating(TypePtr type)
@@ -97,7 +109,25 @@ bool cv_contains(unsigned target, unsigned source)
 	return (target & source) == source;
 }
 
-bool qualification_compatible(TypePtr target, TypePtr source)
+int record_base_distance_impl(TypePtr source, TypePtr target)
+{
+	TypePtr t = pa11::strip_cv(target);
+	int distance = 0;
+	for (TypePtr s = pa11::strip_cv(source);
+	     s.get() != NULL && s->kind == pa11::TypeKind::Record;
+	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
+	{
+		if (pa11::same_type(s, t))
+			return distance;
+		++distance;
+	}
+	return 1000000;
+}
+
+bool qualification_compatible_impl(TypePtr target,
+                                   TypePtr source,
+                                   int pointer_depth,
+                                   bool intermediate_const)
 {
 	unsigned target_cv = cv_flags(target);
 	unsigned source_cv = cv_flags(source);
@@ -105,13 +135,37 @@ bool qualification_compatible(TypePtr target, TypePtr source)
 	TypePtr s = pa11::strip_cv(source);
 	if (!cv_contains(target_cv, source_cv))
 		return false;
+	if (pointer_depth > 1 && ((target_cv & ~source_cv) != 0) &&
+	    !intermediate_const)
+		return false;
 	if (t->kind == pa11::TypeKind::Array && s->kind == pa11::TypeKind::Array)
 		return t->unknown_bound == s->unknown_bound &&
 		       t->bound == s->bound &&
-		       qualification_compatible(t->base, s->base);
+		       qualification_compatible_impl(t->base,
+		                                     s->base,
+		                                     pointer_depth,
+		                                     intermediate_const);
 	if (t->kind == pa11::TypeKind::Pointer && s->kind == pa11::TypeKind::Pointer)
-		return qualification_compatible(t->base, s->base);
-	return pa11::same_type(t, s);
+	{
+		bool next_intermediate = intermediate_const;
+		if (pointer_depth > 0)
+			next_intermediate =
+				next_intermediate && ((target_cv & pa11::CV_CONST) != 0);
+		return qualification_compatible_impl(t->base,
+		                                     s->base,
+		                                     pointer_depth + 1,
+		                                     next_intermediate);
+	}
+	if (pa11::same_type(t, s))
+		return true;
+	if (t->kind == pa11::TypeKind::Record && s->kind == pa11::TypeKind::Record)
+		return record_base_distance_impl(s, t) < 1000000;
+	return false;
+}
+
+bool qualification_compatible(TypePtr target, TypePtr source)
+{
+	return qualification_compatible_impl(target, source, 0, true);
 }
 
 }  // namespace
@@ -145,7 +199,9 @@ TypePtr Parser::apply_suffixes(TypePtr type, const vector<Suffix>& suffixes)
 			vector<TypePtr> params;
 			for (size_t j = 0; j < suffix.parameters.size(); ++j)
 				params.push_back(suffix.parameters[j].type);
-			type = pa11::make_function(type, params, suffix.variadic);
+			TypePtr result = suffix.trailing_return.get() != NULL
+				? suffix.trailing_return : type;
+			type = pa11::make_function(result, params, suffix.variadic);
 			type->cv = suffix.function_cv;
 		}
 	}
@@ -193,6 +249,14 @@ Binding* Parser::add_alias(Scope* scope, const string& name, TypePtr type)
 {
 	Binding* binding = pa11::add_binding(scope, BindingKind::TypeAlias, name, type);
 	binding->target_scope = type.get() != NULL ? type->scope : NULL;
+	binding->is_private =
+		scope->kind == ScopeKind::Class &&
+		!class_private_access_.empty() &&
+		class_private_access_.back();
+	binding->is_protected_member =
+		scope->kind == ScopeKind::Class &&
+		!class_protected_access_.empty() &&
+		class_protected_access_.back();
 	return binding;
 }
 
@@ -202,6 +266,47 @@ Binding* Parser::add_value(Scope* scope,
                            TypePtr type)
 {
 	return pa11::add_binding(scope, kind, name, type);
+}
+
+Binding* Parser::add_function_binding(Scope* scope,
+                                      const string& name,
+                                      TypePtr type,
+                                      bool hidden_friend)
+{
+	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
+	if (it != scope->members.end())
+	{
+		for (size_t i = 0; i < it->second.size(); ++i)
+		{
+			Binding* binding = it->second[i];
+			if (binding->kind == BindingKind::Function &&
+			    pa11::same_type(binding->type, type))
+			{
+				if (!hidden_friend)
+					binding->is_hidden_friend = false;
+				return binding;
+			}
+		}
+	}
+	Binding* binding = add_value(scope, BindingKind::Function, name, type);
+	binding->is_hidden_friend = hidden_friend;
+	return binding;
+}
+
+void Parser::add_friend_function(Scope* class_scope, Binding* function)
+{
+	vector<Binding*>& friends = class_friend_functions_[class_scope];
+	if (find(friends.begin(), friends.end(), function) == friends.end())
+		friends.push_back(function);
+}
+
+void Parser::add_friend_class(Scope* class_scope, TypePtr type)
+{
+	vector<TypePtr>& friends = class_friend_classes_[class_scope];
+	for (size_t i = 0; i < friends.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(friends[i]), pa11::strip_cv(type)))
+			return;
+	friends.push_back(type);
 }
 
 TypePtr Parser::add_record(Scope* scope,
@@ -282,6 +387,14 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 	return vector<Binding*>();
 }
 
+Scope* Parser::nearest_namespace_scope(Scope* scope) const
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur->kind == ScopeKind::Namespace)
+			return cur;
+	return global_scope();
+}
+
 vector<Binding*> Parser::resolve_name_set(const QualifiedName& name, int mask)
 {
 	if (name.qualifier != NULL)
@@ -330,6 +443,90 @@ bool Parser::types_reference_compatible(TypePtr target, TypePtr source) const
 	return qualification_compatible(target, source);
 }
 
+int Parser::record_base_distance(TypePtr source, TypePtr target) const
+{
+	return record_base_distance_impl(source, target);
+}
+
+bool Parser::active_function_matches(Binding* function) const
+{
+	if (active_functions_.empty() || function == NULL)
+		return false;
+	Binding* active = active_functions_.back();
+	if (active == function)
+		return true;
+	return active->owner == function->owner &&
+	       active->name == function->name &&
+	       pa11::same_type(active->type, function->type);
+}
+
+bool Parser::active_context_has_class_access(Scope* class_scope) const
+{
+	if (class_scope == NULL)
+		return false;
+	Binding* active = active_functions_.empty() ? NULL : active_functions_.back();
+	Scope* active_class =
+		active != NULL && active->owner != NULL &&
+		active->owner->kind == ScopeKind::Class ? active->owner : NULL;
+	if (active_class == class_scope)
+		return true;
+	for (Scope* parent = active_class != NULL ? active_class->parent : NULL;
+	     parent != NULL;
+	     parent = parent->parent)
+	{
+		if (parent == class_scope)
+			return true;
+	}
+	TypePtr class_type = pa11::record_type_for_scope(class_scope);
+	if (active_class != NULL && class_type.get() != NULL)
+	{
+		TypePtr active_type = pa11::record_type_for_scope(active_class);
+		if (active_type.get() != NULL &&
+		    record_base_distance(active_type, class_type) < 1000000)
+			return true;
+	}
+	map<Scope*, vector<Binding*> >::const_iterator fit =
+		class_friend_functions_.find(class_scope);
+	if (fit != class_friend_functions_.end())
+	{
+		for (size_t i = 0; i < fit->second.size(); ++i)
+			if (active_function_matches(fit->second[i]))
+				return true;
+	}
+	if (active_class == NULL)
+		return false;
+	map<Scope*, vector<TypePtr> >::const_iterator cit =
+		class_friend_classes_.find(class_scope);
+	if (cit == class_friend_classes_.end())
+		return false;
+	for (size_t i = 0; i < cit->second.size(); ++i)
+	{
+		TypePtr friend_type = pa11::strip_cv(cit->second[i]);
+		if (friend_type->kind == pa11::TypeKind::Record &&
+		    friend_type->scope == active_class)
+			return true;
+	}
+	return false;
+}
+
+bool Parser::member_access_allowed(Binding* member, TypePtr object_record) const
+{
+	if (member == NULL)
+		return true;
+	if (member->is_private && !active_context_has_class_access(member->owner))
+		return false;
+	if (!member->is_protected_member)
+		return true;
+	if (active_context_has_class_access(member->owner))
+		return true;
+	TypePtr object = object_record.get() != NULL
+		? pa11::strip_cv(object_record) : TypePtr();
+	if (object.get() != NULL && object->kind == pa11::TypeKind::Record &&
+	    active_context_has_class_access(object->scope))
+		return true;
+	return false;
+}
+
 bool Parser::type_can_bind_reference(TypePtr target, const Expr& expr) const
 {
 	TypePtr source = expression_object_type(expr.type);
@@ -361,7 +558,7 @@ bool Parser::pointer_conversion_viable(TypePtr source, TypePtr target) const
 		return false;
 	TypePtr src_pointee = src->base;
 	TypePtr dst_pointee = dst->base;
-	if (types_reference_compatible(dst_pointee, src_pointee))
+	if (qualification_compatible(target, source))
 		return true;
 	TypePtr bare_dst = pa11::strip_cv(dst_pointee);
 	if (bare_dst->kind != pa11::TypeKind::Fundamental ||
@@ -387,13 +584,24 @@ int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
 		return 2;
 	if (type_is_arithmetic(src) && type_is_arithmetic(dst))
 		return 2;
-	if (type_is_pointer(src) && type_is_pointer(dst) &&
-	    pointer_conversion_viable(src, dst))
-		return 2;
+	if (type_is_pointer(src) && type_is_pointer(dst))
+	{
+		if (pointer_conversion_viable(src, dst))
+		{
+			TypePtr src_pointee = pa11::strip_cv(src)->base;
+			TypePtr dst_pointee = pa11::strip_cv(dst)->base;
+			int cv_rank =
+				(cv_flags(dst_pointee) & ~cv_flags(src_pointee)) != 0 ? 1 : 0;
+			int distance = record_base_distance(src_pointee, dst_pointee);
+			if (distance < 1000000)
+				return distance + cv_rank;
+			return 4 + cv_rank;
+		}
+	}
 	if (type_is_pointer(src) &&
 	    pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental &&
 	    pa11::strip_cv(dst)->fundamental == FT_BOOL)
-		return 3;
+		return 6;
 	return 1000000;
 }
 

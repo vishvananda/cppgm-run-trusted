@@ -5,6 +5,7 @@
 #include "pa12_internal.h"
 
 #include <map>
+#include <functional>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -62,6 +63,23 @@ struct InitAction
 		: target(t), kind(k), symbol(s) {}
 };
 
+struct Cleanup
+{
+	Binding* binding;
+	TypePtr type;
+
+	Cleanup() : binding(NULL) {}
+	Cleanup(Binding* b, TypePtr t) : binding(b), type(t) {}
+};
+
+struct PendingConstructorConversion
+{
+	size_t index;
+	Value value;
+	TypePtr from;
+	TypePtr to;
+};
+
 bool starts_with(const string& text, const string& prefix);
 TypePtr object_type(TypePtr type);
 TypePtr strip_for_value(TypePtr type);
@@ -82,6 +100,7 @@ string source_symbol_base(const Binding* binding);
 struct ProgramLowerer
 {
 	vector<string> declares;
+	vector<string> global_declares;
 	vector<string> globals;
 	vector<FunctionOut> functions;
 	map<const Binding*, string> symbols;
@@ -89,13 +108,19 @@ struct ProgramLowerer
 	map<string, string> function_symbols;
 	set<string> defined_functions;
 	set<string> declared_functions;
+	set<string> defined_globals;
+	set<string> declared_globals;
 	map<string, string> string_literals;
 	vector<pair<string, vector<unsigned char> > > string_defs;
 	map<const Binding*, const Node*> inline_definitions;
 	map<const Binding*, string> function_declarations_by_binding;
 	vector<const Binding*> pending_inline_definitions;
 	vector<InitAction> init_actions;
+	vector<Node> global_init_variables;
+	vector<Node> global_fini_variables;
+	vector<unique_ptr<Binding> > synthetic_bindings;
 	bool needs_empty_init_function;
+	bool needs_eh_declarations;
 
 	ProgramLowerer();
 	string symbol_for(const Binding* binding);
@@ -103,8 +128,12 @@ struct ProgramLowerer
 	void register_inline_definition(const Node& node);
 	void register_function_declaration(const Node& node);
 	void demand_function_declaration(const Binding* binding);
+	void demand_global_declaration(const Binding* binding);
+	void ensure_thread_local_wrapper(const string& global_name);
+	void ensure_eh_declarations();
 	void demand_inline_function(const Binding* binding);
 	void emit_pending_inline_definitions();
+	void emit_global_lifecycle_functions();
 	void collect_translation_unit(const Node& root);
 	void collect_node(const Node& node);
 	void emit_global(const Node& node);
@@ -130,11 +159,14 @@ private:
 	map<string, int> slot_names_;
 	vector<string> break_targets_;
 	vector<string> continue_targets_;
+	vector<vector<Cleanup> > cleanups_;
+	set<uint64_t> initialized_bitfield_storage_;
 	map<string, string> labels_;
 	map<const Node*, string> switch_labels_;
 	int temp_counter_;
 	int block_counter_;
 	int aux_slot_counter_;
+	int eh_try_depth_;
 
 	void add_slot(const string& name, const string& type);
 	string slot_for(const Binding* binding);
@@ -151,12 +183,65 @@ private:
 	void lower_compound(const Node& node);
 	void lower_decl_stmt(const Node& node);
 	void lower_variable_decl(const Node& var);
+	void lower_global_variable_init(const Node& var);
+	void lower_global_variable_fini(const Node& var);
+	void lower_destructor_for_object(const function<Value()>& addr_for,
+	                                 TypePtr type);
+	void lower_scope_destructor_for_object(const function<Value()>& addr_for,
+	                                       TypePtr type);
+	void lower_member_fini(const Node& node);
+	void lower_base_fini(const Node& node);
+	void lower_member_init(const Node& node);
+	void lower_bitfield_member_init(const Node& node,
+	                                Value value,
+	                                const function<Value()>& member_addr);
+	void lower_base_init(const Node& node);
+	void lower_aggregate_init(const function<Value()>& addr_for,
+	                          TypePtr type,
+	                          const Node& init);
+	void lower_direct_array_init(Value base, TypePtr type, const Node& init);
+	Value direct_array_element_addr(Value base, TypePtr elem, size_t index);
+	void lower_aggregate_elements(const function<Value()>& addr_for,
+	                              TypePtr type,
+	                              const vector<Node>& clauses,
+	                              size_t& index);
+	void lower_object_init(const function<Value()>& addr_for,
+	                       TypePtr type,
+	                       const Node& init);
+	void lower_base_zero_init(const function<Value()>& addr_for, TypePtr type);
+	void lower_zero_init(const function<Value()>& addr_for, TypePtr type);
+	void lower_default_init(const function<Value()>& addr_for, TypePtr type);
+	void lower_storage_zero(Value addr, uint64_t size);
+	void lower_constructor_call(const function<Value()>& addr_for,
+	                            Binding* ctor,
+	                            const vector<const Node*>& args);
+	void lower_record_reference_constructor_argument(
+		const Node& arg,
+		TypePtr param,
+		vector<string>& lowered,
+		vector<pair<Value, TypePtr> >& temp_cleanups,
+		vector<PendingConstructorConversion>& pending_conversions);
+	void emit_constructor_call_with_cleanups(
+		Binding* ctor,
+		vector<string>& lowered,
+		const vector<pair<Value, TypePtr> >& temp_cleanups,
+		const vector<PendingConstructorConversion>& pending_conversions);
+	void emit_temporary_cleanups(const vector<pair<Value, TypePtr> >& temps);
+	bool lower_string_array_init(const function<Value()>& addr_for,
+	                             TypePtr type,
+	                             const Node& init);
 	void lower_if(const Node& node);
 	void lower_while(const Node& node);
 	void lower_do(const Node& node);
 	void lower_for(const Node& node);
 	void lower_return(const Node& node);
+	void register_cleanup(Binding* binding, TypePtr type);
+	void emit_scope_cleanups(vector<Cleanup>& scope);
+	void emit_all_cleanups();
+	bool has_active_cleanups() const;
+	void emit_unwind_cleanups();
 	void lower_expr_stmt(const Node& node);
+	void lower_discarded_expr(const Node& expr);
 	void lower_switch(const Node& node);
 	void lower_switch_items(const Node& node,
 	                        vector<pair<string, const Node*> >& cases,
@@ -164,13 +249,37 @@ private:
 
 	Value emit_rvalue(const Node& expr);
 	Value emit_lvalue_addr(const Node& expr);
+	Value emit_member_lvalue_addr(const Node& expr);
 	Value emit_literal(const Node& expr);
 	Value emit_id_rvalue(const Node& expr);
 	Value emit_binary(const Node& expr);
+	Value emit_logical_binary(const Node& expr);
+	Value emit_pointer_index_binary(const Node& expr,
+	                                Value lhs,
+	                                Value rhs,
+	                                TypePtr lhs_type,
+	                                TypePtr rhs_type);
+	Value emit_pointer_difference(const Node& expr,
+	                              Value lhs,
+	                              Value rhs,
+	                              TypePtr lhs_type);
 	Value emit_assignment(const Node& expr);
 	Value emit_unary(const Node& expr);
 	Value emit_postfix(const Node& expr);
 	Value emit_call(const Node& expr);
+	void lower_call_argument(const Node& arg, TypePtr param, vector<string>& args);
+	void lower_reference_call_argument(const Node& arg,
+	                                   TypePtr param,
+	                                   vector<string>& args);
+	void lower_value_call_argument(const Node& arg,
+	                               TypePtr param,
+	                               vector<string>& args);
+	bool lower_temporary_record_pointer_argument(const Node& arg,
+	                                             TypePtr param,
+	                                             vector<string>& args);
+	void lower_record_value_argument(const Node& arg,
+	                                 TypePtr param,
+	                                 vector<string>& args);
 	Value emit_subscript_addr(const Node& expr);
 	Value emit_cast(const Node& expr);
 	Value emit_conditional(const Node& expr);
@@ -180,6 +289,9 @@ private:
 	Value bool_value(Value value, TypePtr type);
 	Value ensure_pointer(Value storage);
 	void branch_logical_operand(const Node& expr, const string& yes, const string& no);
+	void branch_with_unwind_cleanups(const Node& expr,
+	                                 const string& yes,
+	                                 const string& no);
 	void branch_on(const Node& expr, const string& yes, const string& no);
 };
 

@@ -11,6 +11,18 @@ void Parser::parse_function_body(Binding* function,
                                  const Declarator& declarator,
                                  Node& function_node)
 {
+	vector<ParameterInfo> parameters;
+	const Suffix* suffix = declarator_function_suffix(declarator);
+	if (suffix != NULL)
+		parameters = suffix->parameters;
+	parse_function_body_from_parameters(function, parameters, function_node);
+}
+
+void Parser::parse_function_body_from_parameters(
+	Binding* function,
+	const vector<ParameterInfo>& parameters,
+	Node& function_node)
+{
 	if (function_node.children.empty())
 		throw runtime_error("missing function node");
 	Node& fn = function_node.children.back();
@@ -36,39 +48,60 @@ void Parser::parse_function_body(Binding* function,
 		this_node.type = this_type;
 		add_child(fn, this_node);
 	}
-	const Suffix* suffix = declarator_function_suffix(declarator);
-	if (suffix != NULL)
+	for (size_t i = 0; i < parameters.size(); ++i)
 	{
-		for (size_t i = 0; i < suffix->parameters.size(); ++i)
+		string name = parameters[i].name;
+		if (!name.empty())
 		{
-			string name = suffix->parameters[i].name;
-			if (!name.empty())
-			{
-				Binding* param =
-					pa11::add_binding(function_scope,
-					                  BindingKind::Parameter,
-					                  name,
-					                  suffix->parameters[i].type);
-				Node param_node("parameter " + name + " " +
-				                pa11::describe_type(suffix->parameters[i].type));
-				param_node.binding = param;
-				param_node.type = suffix->parameters[i].type;
-				add_child(fn, param_node);
-			}
-			else
-			{
-				Node param_node("parameter  " +
-				                pa11::describe_type(suffix->parameters[i].type));
-				param_node.type = suffix->parameters[i].type;
-				add_child(fn, param_node);
-			}
+			Binding* param =
+				pa11::add_binding(function_scope,
+				                  BindingKind::Parameter,
+				                  name,
+				                  parameters[i].type);
+			Node param_node("parameter " + name + " " +
+			                pa11::describe_type(parameters[i].type));
+			param_node.binding = param;
+			param_node.type = parameters[i].type;
+			add_child(fn, param_node);
+		}
+		else
+		{
+			Node param_node("parameter  " +
+			                pa11::describe_type(parameters[i].type));
+			param_node.type = parameters[i].type;
+			add_child(fn, param_node);
 		}
 	}
 	scopes_.push_back(function_scope);
 	function_returns_.push_back(function->type->base);
+	active_functions_.push_back(function);
 	add_child(fn, parse_compound_statement());
+	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
+}
+
+void Parser::parse_pending_member_bodies(Scope* class_scope)
+{
+	map<Scope*, vector<PendingFunctionBody> >::iterator found =
+		pending_member_bodies_.find(class_scope);
+	if (found == pending_member_bodies_.end())
+		return;
+	vector<PendingFunctionBody> pending = found->second;
+	pending_member_bodies_.erase(found);
+	size_t saved = pos_;
+	for (size_t i = 0; i < pending.size(); ++i)
+	{
+		pos_ = pending[i].body_pos;
+		Node wrapper;
+		add_child(wrapper, pending[i].node);
+		parse_function_body_from_parameters(pending[i].function,
+		                                    pending[i].parameters,
+		                                    wrapper);
+		if (!wrapper.children.empty())
+			extra_lowir_nodes_.push_back(wrapper.children.back());
+	}
+	pos_ = saved;
 }
 
 Node Parser::parse_compound_statement()

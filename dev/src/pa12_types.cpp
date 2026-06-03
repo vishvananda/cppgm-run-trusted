@@ -36,10 +36,24 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 			specs.constexpr_decl = true;
 			saw_any = true;
 		}
+		else if (!type_id_context && consume(KW_MUTABLE))
+		{
+			specs.mutable_decl = true;
+			saw_any = true;
+		}
+		else if (!type_id_context && consume(KW_FRIEND))
+		{
+			specs.friend_decl = true;
+			saw_any = true;
+		}
 		else if (!type_id_context && at_simple_ignored_specifier())
 		{
 			if (at(KW_STATIC))
 				specs.static_decl = true;
+			if (at(KW_EXTERN))
+				specs.extern_decl = true;
+			if (at(KW_THREAD_LOCAL))
+				specs.thread_local_decl = true;
 			++pos_;
 			saw_any = true;
 		}
@@ -50,7 +64,11 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 		}
 		else if (at_simple_builtin())
 		{
-			specs.builtin.push_back(tokens_[pos_++].type);
+			if (at(KW_AUTO))
+				specs.auto_decl = true;
+			else
+				specs.builtin.push_back(tokens_[pos_].type);
+			++pos_;
 			saw_any = true;
 			saw_non_cv_type = true;
 		}
@@ -88,6 +106,7 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 TypePtr Parser::type_from_decl_specs(const DeclSpecs& specs)
 {
 	TypePtr type = specs.named_type.get() != NULL ? specs.named_type :
+		specs.auto_decl ? pa11::make_fundamental(FT_VOID) :
 		pa11::make_fundamental(pa11::fundamental_from_specs(specs.builtin));
 	return pa11::make_cv(type, specs.cv);
 }
@@ -141,7 +160,7 @@ TypePtr Parser::parse_class_specifier()
 	string name;
 	if (at_identifier())
 		name = consume_identifier();
-	if (!at(OP_LBRACE))
+	if (!at(OP_LBRACE) && !at(OP_COLON))
 	{
 		if (name.empty())
 			throw runtime_error("anonymous class declaration is not a type");
@@ -178,16 +197,31 @@ TypePtr Parser::parse_class_specifier()
 			  "_" + to_string(p + 1)
 			: make_local_type_name("__local_type");
 	}
+	TypePtr direct_base;
+	if (consume(OP_COLON))
+	{
+		if (at(KW_PUBLIC) || at(KW_PRIVATE) || at(KW_PROTECTED))
+			++pos_;
+		if (!try_parse_type_name(direct_base) ||
+		    pa11::strip_cv(direct_base)->kind != pa11::TypeKind::Record)
+			throw runtime_error("invalid base class");
+	}
 	Scope* class_scope =
 		pa11::create_child_scope(current_scope(), ScopeKind::Class, name);
 	TypePtr type =
 		add_record(current_scope(), name, class_tag(key), true, class_scope);
 	type->scope = class_scope;
+	type->base = direct_base;
 	expect(OP_LBRACE);
 	scopes_.push_back(class_scope);
 	parse_class_body(class_scope, key == KW_CLASS);
 	scopes_.pop_back();
 	expect(OP_RBRACE);
+	for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+		if (extra_lowir_nodes_[i].binding != NULL &&
+		    extra_lowir_nodes_[i].binding->owner == class_scope)
+			resolve_pending_member_initializers(class_scope,
+			                                    extra_lowir_nodes_[i]);
 	pa11::layout_record_type(type);
 	return type;
 }
@@ -195,40 +229,57 @@ TypePtr Parser::parse_class_specifier()
 void Parser::parse_class_body(Scope* class_scope, bool default_private)
 {
 	class_private_access_.push_back(default_private);
+	class_protected_access_.push_back(false);
 	while (!at(OP_RBRACE))
 	{
+		if (consume(OP_SEMICOLON))
+			continue;
 		if (consume(KW_PUBLIC))
 		{
 			class_private_access_.back() = false;
+			class_protected_access_.back() = false;
 			expect(OP_COLON);
 			continue;
 		}
 		if (consume(KW_PRIVATE))
 		{
 			class_private_access_.back() = true;
+			class_protected_access_.back() = false;
 			expect(OP_COLON);
 			continue;
 		}
 		if (consume(KW_PROTECTED))
 		{
-			class_private_access_.back() = true;
+			class_private_access_.back() = false;
+			class_protected_access_.back() = true;
 			expect(OP_COLON);
 			continue;
 		}
+		if (at(KW_USING))
+		{
+			Node ignored;
+			parse_using_family(ignored);
+			continue;
+		}
+		if (parse_friend_declaration())
+			continue;
 		Node ignored;
 		size_t save = pos_;
 		try
 		{
 			parse_simple_or_function_declaration(ignored, false);
 		}
-		catch (const exception&)
-		{
-			pos_ = save;
-			if (!parse_constructor_like_member())
-				throw;
-		}
+			catch (const exception&)
+			{
+				pos_ = save;
+				if (!parse_constructor_like_member() &&
+				    !parse_destructor_like_member())
+					throw;
+			}
 		(void)class_scope;
 	}
+	parse_pending_member_bodies(class_scope);
+	class_protected_access_.pop_back();
 	class_private_access_.pop_back();
 }
 
@@ -311,7 +362,17 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		pos_ = save;
 		return false;
 	}
-	out = found[0]->type;
+	Binding* binding = found[0];
+	if (binding->is_private || binding->is_protected_member)
+	{
+		if (binding->is_private &&
+		    !active_context_has_class_access(binding->owner))
+			throw runtime_error("private type access");
+		if (binding->is_protected_member &&
+		    !active_context_has_class_access(binding->owner))
+			throw runtime_error("protected type access");
+	}
+	out = binding->type;
 	return true;
 }
 
@@ -404,6 +465,13 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes)
 			suffixes.push_back(parse_array_suffix());
 		else if (at(OP_LPAREN))
 		{
+			if (pos_ + 1 < tokens_.size() &&
+			    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier &&
+			    pa11::lookup_unqualified(current_scope(),
+			                             tokens_[pos_ + 1].source,
+			                             pa11::LOOKUP_VARIABLE |
+			                             pa11::LOOKUP_PARAMETER) != NULL)
+				return;
 			size_t save = pos_;
 			try
 			{
@@ -458,10 +526,23 @@ void Parser::parse_function_suffix_tail(Suffix& suffix)
 		}
 		if (consume(OP_AMP) || consume(OP_LAND))
 			continue;
-		if (consume(KW_NOEXCEPT) || consume(KW_THROW))
+		if (consume(KW_NOEXCEPT))
 		{
+			suffix.noexcept_decl = true;
 			if (at(OP_LPAREN))
 				skip_balanced(OP_LPAREN, OP_RPAREN);
+			continue;
+		}
+		if (consume(KW_THROW))
+		{
+			suffix.noexcept_decl = true;
+			if (at(OP_LPAREN))
+				skip_balanced(OP_LPAREN, OP_RPAREN);
+			continue;
+		}
+		if (consume(OP_ARROW))
+		{
+			suffix.trailing_return = parse_type_id();
 			continue;
 		}
 		break;
@@ -539,6 +620,10 @@ bool Parser::starts_declaration()
 	    at(KW_STATIC) || at(KW_DECLTYPE) || starts_class_key() || at(KW_ENUM))
 		return true;
 	if (at_simple_cv() || at_simple_builtin())
+		return true;
+	if (at_identifier() &&
+	    pos_ + 1 < tokens_.size() &&
+	    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier)
 		return true;
 	if (!at_identifier() && !at(OP_COLON2))
 		return false;

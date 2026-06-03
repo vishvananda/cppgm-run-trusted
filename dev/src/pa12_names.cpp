@@ -38,6 +38,8 @@ string Parser::consume_operator_function_name()
 		expect(OP_RSQUARE);
 		return "operator[]";
 	}
+	if (at_literal())
+		return "operator" + consume_literal();
 	if (current().kind != posttoken::TokenKind::Simple)
 		throw runtime_error("expected operator token");
 	string name = "operator" + current().source;
@@ -170,9 +172,19 @@ bool Parser::binary_operator(ETokenType& op, int& prec) const
 	case OP_LSHIFT: case OP_RSHIFT: prec = 8; return true;
 	case OP_PLUS: case OP_MINUS: prec = 9; return true;
 	case OP_STAR: case OP_DIV: case OP_MOD: prec = 10; return true;
+	case OP_ARROWSTAR: prec = 11; return true;
 	default:
 		return false;
 	}
+}
+
+string Parser::operator_function_name(ETokenType type, const string& source) const
+{
+	if (type == OP_LPAREN)
+		return "operator()";
+	if (type == OP_LSQUARE)
+		return "operator[]";
+	return "operator" + source;
 }
 
 bool Parser::expression_starts_type_name(TypePtr& type)
@@ -182,7 +194,7 @@ bool Parser::expression_starts_type_name(TypePtr& type)
 	{
 		DeclSpecs specs = parse_decl_specifier_seq(true);
 		type = type_from_decl_specs(specs);
-		if (at(OP_LPAREN))
+		if (at(OP_LPAREN) || at(OP_LBRACE))
 			return true;
 	}
 	catch (const exception&)

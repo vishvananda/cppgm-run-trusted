@@ -93,8 +93,18 @@ struct Binding
 	uint64_t constant_value;
 	bool is_static_member;
 	bool is_inline_definition;
+	bool is_generated_default_constructor;
+	bool is_explicit;
 	bool is_private;
+	bool is_protected_member;
+	bool is_mutable_member;
+	bool is_hidden_friend;
+	bool is_thread_local;
+	bool unwind_no;
 	uint64_t member_offset;
+	bool is_bit_field;
+	uint64_t bit_width;
+	uint64_t bit_offset;
 
 	Binding(BindingKind k, const string& n, Scope* o);
 };

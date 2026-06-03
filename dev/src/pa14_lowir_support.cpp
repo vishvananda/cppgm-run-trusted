@@ -123,7 +123,7 @@ string scalar_lowir_type(TypePtr type)
 	case FT_DOUBLE: return "f64";
 	case FT_LONG_DOUBLE: return "f80";
 	case FT_VOID: return "void";
-	case FT_NULLPTR_T: return "ptr";
+	case FT_NULLPTR_T: return "i64";
 	case FT_WCHAR_T: return "i32";
 	case FT_CHAR16_T: return "u16";
 	case FT_CHAR32_T: return "u32";
@@ -330,7 +330,9 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 	string base = source_symbol_base(binding);
 	if (binding->kind == BindingKind::Function)
 	{
-		string key = base + " " + pa11::describe_type(binding->type);
+		string key = base + " " +
+		             string(binding->is_static_member ? "static " : "nonstatic ") +
+		             pa11::describe_type(binding->type);
 		map<string, string>::const_iterator fit = function_symbols.find(key);
 		if (fit != function_symbols.end())
 		{
@@ -345,7 +347,12 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 		name += "__ov" + to_string(count);
 	symbols[binding] = name;
 	if (binding->kind == BindingKind::Function)
-		function_symbols[base + " " + pa11::describe_type(binding->type)] = name;
+	{
+		string key = base + " " +
+		             string(binding->is_static_member ? "static " : "nonstatic ") +
+		             pa11::describe_type(binding->type);
+		function_symbols[key] = name;
+	}
 	return name;
 }
 

@@ -36,7 +36,7 @@ bool is_builtin_type_token(ETokenType type)
 	case KW_CHAR: case KW_CHAR16_T: case KW_CHAR32_T: case KW_WCHAR_T:
 	case KW_BOOL: case KW_SHORT: case KW_INT: case KW_LONG:
 	case KW_SIGNED: case KW_UNSIGNED: case KW_FLOAT: case KW_DOUBLE:
-	case KW_VOID:
+	case KW_VOID: case KW_AUTO:
 		return true;
 	default:
 		return false;

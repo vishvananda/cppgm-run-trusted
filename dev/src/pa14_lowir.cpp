@@ -2,6 +2,19 @@
 
 namespace pa14 {
 namespace internal {
+namespace {
+
+bool node_contains_call_expression(const Node& node)
+{
+	if (starts_with(node.line, "call-expression"))
+		return true;
+	for (size_t i = 0; i < node.children.size(); ++i)
+		if (node_contains_call_expression(node.children[i]))
+			return true;
+	return false;
+}
+
+}  // namespace
 
 FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn)
 	: program_(program),
@@ -9,7 +22,8 @@ FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn)
 	  current_(NULL),
 	  temp_counter_(0),
 	  block_counter_(0),
-	  aux_slot_counter_(0)
+	  aux_slot_counter_(0),
+	  eh_try_depth_(0)
 {
 }
 
@@ -105,7 +119,13 @@ FunctionOut FunctionLowerer::lower()
 		metadata.push_back("arity=variadic");
 	if (binding->language_linkage == "c")
 		metadata.push_back("linkage=c");
-	if (binding->name == "main")
+	if (binding->unwind_no)
+		metadata.push_back("unwind=no");
+	if (binding->name == "__cppgm_init")
+		metadata.push_back("role=init");
+	else if (binding->name == "__cppgm_fini")
+		metadata.push_back("role=fini");
+	else if (binding->name == "main")
 	{
 		metadata.push_back("role=entry");
 		metadata.push_back("binding=strong");
@@ -191,6 +211,11 @@ void FunctionLowerer::lower_param_stores()
 		if (pname.empty())
 			pname = "__param" + to_string(param_index);
 		TypePtr ptype = fn_type->parameters[param_index];
+		if (pa11::strip_cv(ptype)->kind == TypeKind::Record)
+		{
+			++param_index;
+			continue;
+		}
 		instr("store " + scalar_lowir_type(ptype) + " %" + pname +
 		      ", $" + pname);
 		++param_index;
@@ -199,16 +224,38 @@ void FunctionLowerer::lower_param_stores()
 
 void FunctionLowerer::lower_compound(const Node& node)
 {
+	cleanups_.push_back(vector<Cleanup>());
 	for (size_t i = 0; i < node.children.size(); ++i)
 		lower_stmt(node.children[i]);
+	if (current_ != NULL && !current_->terminated)
+		emit_scope_cleanups(cleanups_.back());
+	cleanups_.pop_back();
 }
 
 void FunctionLowerer::lower_stmt(const Node& node)
 {
 	if (starts_with(node.line, "compound-statement"))
 		lower_compound(node);
+	else if (starts_with(node.line, "base-init-action"))
+		lower_base_init(node);
+	else if (starts_with(node.line, "member-init-action"))
+		lower_member_init(node);
+	else if (starts_with(node.line, "base-fini-action"))
+		lower_base_fini(node);
+	else if (starts_with(node.line, "member-fini-action"))
+		lower_member_fini(node);
 	else if (starts_with(node.line, "simple-declaration"))
 		lower_decl_stmt(node);
+	else if (starts_with(node.line, "global-init-variable"))
+	{
+		if (!node.children.empty())
+			lower_global_variable_init(node.children[0]);
+	}
+	else if (starts_with(node.line, "global-fini-variable"))
+	{
+		if (!node.children.empty())
+			lower_global_variable_fini(node.children[0]);
+	}
 	else if (starts_with(node.line, "return-statement"))
 		lower_return(node);
 	else if (starts_with(node.line, "expression-statement"))
@@ -286,75 +333,6 @@ void FunctionLowerer::lower_decl_stmt(const Node& node)
 		lower_variable_decl(node.children[i]);
 }
 
-void FunctionLowerer::lower_variable_decl(const Node& var)
-{
-	if (!starts_with(var.line, "variable ") || var.binding == NULL)
-		return;
-	string slot = slot_for(var.binding);
-	if (var.children.empty())
-		return;
-	TypePtr type = var.binding->type;
-	if (starts_with(var.children[0].line, "constructor-action"))
-	{
-		ensure_pointer(emit_lvalue_addr(var));
-		return;
-	}
-	if (pa11::strip_cv(type)->kind == TypeKind::Record &&
-	    starts_with(var.children[0].line, "braced-init-list"))
-	{
-		ensure_pointer(emit_lvalue_addr(var));
-		Value base = ensure_pointer(emit_lvalue_addr(var));
-		TypePtr record = pa11::strip_cv(type);
-		pa11::layout_record_type(record);
-		for (size_t j = 0; j < var.children[0].children.size() &&
-		     j < record->fields.size(); ++j)
-		{
-			Binding* field = record->fields[j];
-			string addr = fresh_temp();
-			instr(addr + " = index i8 [projection=field] " + base.text +
-			      ", " + to_string(field->member_offset));
-			Value value = convert_value(emit_rvalue(var.children[0].children[j]),
-			                            var.children[0].children[j].type,
-			                            field->type);
-			instr("store " + scalar_lowir_type(field->type) + " " +
-			      value.text + ", " + addr);
-		}
-		return;
-	}
-	if (pa11::strip_cv(type)->kind == TypeKind::Array &&
-	    starts_with(var.children[0].line, "braced-init-list"))
-	{
-		Value base = ensure_pointer(emit_lvalue_addr(var));
-		TypePtr elem = pa11::strip_cv(type)->base;
-		for (size_t j = 0; j < var.children[0].children.size(); ++j)
-		{
-			Value target = base;
-			if (j != 0)
-			{
-				string tmp = fresh_temp();
-				instr(tmp + " = index i8 " + base.text + ", " +
-				      to_string(j * pa11::type_size(elem)));
-				target = Value("ptr", tmp);
-			}
-			Value value = convert_value(emit_rvalue(var.children[0].children[j]),
-			                            var.children[0].children[j].type,
-			                            elem);
-			instr("store " + scalar_lowir_type(elem) + " " + value.text +
-			      ", " + target.text);
-		}
-		return;
-	}
-	if (is_reference(type))
-		instr("store ptr " + ensure_pointer(emit_lvalue_addr(var.children[0])).text +
-		      ", $" + slot);
-	else
-	{
-		Value init = emit_rvalue(var.children[0]);
-		init = convert_value(init, var.children[0].type, type);
-		instr("store " + scalar_lowir_type(type) + " " + init.text + ", $" + slot);
-	}
-}
-
 void FunctionLowerer::lower_return(const Node& node)
 {
 	TypePtr ret = fn_.binding->type->base;
@@ -362,23 +340,65 @@ void FunctionLowerer::lower_return(const Node& node)
 	{
 		if (!node.children.empty())
 			emit_rvalue(node.children[0]);
+		emit_all_cleanups();
 		terminate("return void");
 		return;
 	}
 	if (is_reference(ret))
 	{
-		Value addr = emit_lvalue_addr(node.children[0]);
+		Value addr = ensure_pointer(emit_lvalue_addr(node.children[0]));
+		addr = convert_value(addr,
+		                     pa11::make_pointer(object_type(node.children[0].type)),
+		                     pa11::make_pointer(ret->base));
+		emit_all_cleanups();
 		terminate("return ptr " + addr.text);
 		return;
 	}
-	Value value = convert_value(emit_rvalue(node.children[0]), node.children[0].type, ret);
+	Value raw = emit_rvalue(node.children[0]);
+	TypePtr raw_type = node.children[0].type;
+	if (fn_.binding->is_inline_definition &&
+	    !raw.text.empty() && raw.text[0] != '%' &&
+	    raw.text[0] != '$' && raw.text[0] != '@' &&
+	    pa11::is_integral_or_bool_type(node.children[0].type) &&
+	    pa11::is_integral_or_bool_type(ret) &&
+	    pa11::type_size(ret) != pa11::type_size(node.children[0].type))
+	{
+		string src = scalar_lowir_type(strip_for_value(node.children[0].type));
+		string dst = scalar_lowir_type(ret);
+		string tmp = fresh_temp();
+		string op = pa11::type_size(ret) < pa11::type_size(node.children[0].type)
+			? "trunc" : is_unsigned_type(node.children[0].type) ? "zext" : "sext";
+		instr(tmp + " = convert " + op + " " + dst + " " + src + " " +
+		      raw.text);
+		raw = Value(dst, tmp);
+		raw_type = ret;
+	}
+	Value value = convert_value(raw, raw_type, ret);
+	emit_all_cleanups();
 	terminate("return " + scalar_lowir_type(ret) + " " + value.text);
 }
 
 void FunctionLowerer::lower_expr_stmt(const Node& node)
 {
 	if (!node.children.empty())
-		emit_rvalue(node.children[0]);
+		lower_discarded_expr(node.children[0]);
+}
+
+void FunctionLowerer::lower_discarded_expr(const Node& expr)
+{
+	if (starts_with(expr.line, "call-expression") && is_reference(expr.type))
+	{
+		emit_call(expr);
+		return;
+	}
+	if (starts_with(expr.line, "binary-expression") &&
+	    expr.has_op && expr.op == OP_COMMA)
+	{
+		emit_rvalue(expr.children[0]);
+		lower_discarded_expr(expr.children[1]);
+		return;
+	}
+	emit_rvalue(expr);
 }
 
 void FunctionLowerer::lower_if(const Node& node)
@@ -445,11 +465,11 @@ void FunctionLowerer::lower_for(const Node& node)
 {
 	if (!node.children[0].children.empty())
 	{
-		const Node& init = node.children[0].children[0];
-		if (starts_with(init.line, "simple-declaration"))
-			lower_stmt(init);
-		else
-			emit_rvalue(init);
+			const Node& init = node.children[0].children[0];
+			if (starts_with(init.line, "simple-declaration"))
+				lower_stmt(init);
+			else
+				lower_discarded_expr(init);
 	}
 	string cond_block = fresh_block("for_cond");
 	string body_block = fresh_block("for_body");
@@ -471,7 +491,7 @@ void FunctionLowerer::lower_for(const Node& node)
 	for (size_t i = 0; i < node.children.size(); ++i)
 		if (starts_with(node.children[i].line, "iteration") &&
 		    !node.children[i].children.empty())
-			emit_rvalue(node.children[i].children[0]);
+				lower_discarded_expr(node.children[i].children[0]);
 	terminate("jump ^" + cond_block);
 	break_targets_.pop_back();
 	continue_targets_.pop_back();
@@ -571,8 +591,10 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	TypePtr object = object_type(expr.type);
 	if (object->kind == TypeKind::Array &&
 	    expr.binding->owner != NULL &&
-	    expr.binding->owner->kind == ScopeKind::Namespace)
+	    (expr.binding->owner->kind == ScopeKind::Namespace ||
+	     expr.binding->is_static_member))
 	{
+		program_.demand_global_declaration(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
 		string decay = fresh_temp();
@@ -594,8 +616,28 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		instr(tmp + " = unary decay ptr " + addr.text);
 		return Value("ptr", tmp);
 	}
+	string value_low_type = scalar_lowir_type(value_type);
+	if (expr.binding != NULL && expr.binding->is_bit_field)
+		value_low_type = "i" + to_string(pa11::type_size(value_type) * 8);
 	string tmp = fresh_temp();
-	instr(tmp + " = load " + scalar_lowir_type(value_type) + " " + addr.text);
+	instr(tmp + " = load " + value_low_type + " " + addr.text);
+	if (expr.binding != NULL && expr.binding->is_bit_field)
+	{
+		string value = tmp;
+		if (expr.binding->bit_offset != 0)
+		{
+			string shifted = fresh_temp();
+			instr(shifted + " = binary ushr " + value_low_type +
+			      " " + value + ", " + to_string(expr.binding->bit_offset));
+			value = shifted;
+		}
+		uint64_t mask = expr.binding->bit_width >= 64
+			? ~uint64_t(0) : ((uint64_t(1) << expr.binding->bit_width) - 1);
+		string masked = fresh_temp();
+		instr(masked + " = binary and " + value_low_type +
+		      " " + value + ", " + to_string(mask));
+		tmp = masked;
+	}
 	return Value(scalar_lowir_type(value_type), tmp);
 }
 
@@ -612,41 +654,31 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		if (is_reference(expr.binding->type))
 		{
 			string tmp = fresh_temp();
-			if (expr.binding->owner != NULL &&
-			    expr.binding->owner->kind == ScopeKind::Namespace)
+			if (expr.binding->is_static_member ||
+			    (expr.binding->owner != NULL &&
+			     expr.binding->owner->kind == ScopeKind::Namespace))
+			{
+				program_.demand_global_declaration(expr.binding);
 				instr(tmp + " = load ptr @" + program_.symbol_for(expr.binding));
+			}
 			else
 				instr(tmp + " = load ptr $" + slot_for(expr.binding));
 			return Value("ptr", tmp);
 		}
-		if (expr.binding->owner != NULL &&
-		    expr.binding->owner->kind == ScopeKind::Namespace)
+		if (expr.binding->is_static_member ||
+		    (expr.binding->owner != NULL &&
+		     expr.binding->owner->kind == ScopeKind::Namespace))
+		{
+			program_.demand_global_declaration(expr.binding);
 			return Value("ptr", "@" + program_.symbol_for(expr.binding));
+		}
 		string slot = slot_for(expr.binding);
 		return Value("ptr", "$" + slot);
 	}
 	if (starts_with(expr.line, "variable ") && expr.binding != NULL)
 		return Value("ptr", "$" + slot_for(expr.binding));
 	if (starts_with(expr.line, "member-expression") && expr.binding != NULL)
-	{
-		if (expr.binding->is_static_member)
-		{
-			if (expr.binding->owner != NULL &&
-			    expr.binding->owner->kind == ScopeKind::Namespace)
-				return Value("ptr", "@" + program_.symbol_for(expr.binding));
-			throw runtime_error("unsupported static member storage");
-		}
-		if (expr.children.empty())
-			throw runtime_error("member expression missing object");
-		Value base = expr.has_op && expr.op == OP_ARROW
-			? emit_rvalue(expr.children[0])
-			: emit_lvalue_addr(expr.children[0]);
-		base = ensure_pointer(base);
-		string tmp = fresh_temp();
-		instr(tmp + " = index i8 [projection=field] " + base.text +
-		      ", " + to_string(expr.binding->member_offset));
-		return Value("ptr", tmp);
-	}
+		return emit_member_lvalue_addr(expr);
 	if (starts_with(expr.line, "unary-expression") && expr.has_op &&
 	    expr.op == OP_STAR)
 		return emit_rvalue(expr.children[0]);
@@ -675,7 +707,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	if (starts_with(expr.line, "conditional-expression"))
 		return emit_conditional(expr);
 	if (starts_with(expr.line, "call-expression") && is_reference(expr.type))
-		return emit_rvalue(expr);
+		return emit_call(expr);
 	if (starts_with(expr.line, "assignment-expression") &&
 	    expr.has_op && (expr.op == OP_INC || expr.op == OP_DEC))
 		return emit_lvalue_addr(expr.children[0]);
@@ -685,6 +717,54 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	    starts_with(expr.line, "id-expression xvalue"))
 		return emit_lvalue_addr(expr.children.empty() ? expr : expr.children[0]);
 	throw runtime_error("unsupported lvalue expression");
+}
+
+Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
+{
+	if (expr.binding->is_static_member)
+	{
+		program_.demand_global_declaration(expr.binding);
+		return Value("ptr", "@" + program_.symbol_for(expr.binding));
+	}
+	if (expr.children.empty())
+		throw runtime_error("member expression missing object");
+	Value base = expr.has_op && expr.op == OP_ARROW
+		? emit_rvalue(expr.children[0])
+		: emit_lvalue_addr(expr.children[0]);
+	base = ensure_pointer(base);
+	TypePtr object_record = expr.has_op && expr.op == OP_ARROW
+		? pa11::strip_cv(strip_for_value(expr.children[0].type))
+		: pa11::strip_cv(object_type(expr.children[0].type));
+	if (object_record.get() != NULL &&
+	    object_record->kind == TypeKind::Pointer)
+		object_record = pa11::strip_cv(object_record->base);
+	TypePtr owner_record = pa11::record_type_for_scope(expr.binding->owner);
+	if (object_record.get() != NULL &&
+	    object_record->kind == TypeKind::Record &&
+	    owner_record.get() != NULL &&
+	    !pa11::same_type(object_record, owner_record))
+	{
+		TypePtr direct_base = object_record->base.get() != NULL
+			? pa11::strip_cv(object_record->base) : TypePtr();
+		if (direct_base.get() != NULL &&
+		    pa11::same_type(direct_base, owner_record))
+		{
+			string base_tmp = fresh_temp();
+			instr(base_tmp + " = index i8 [projection=base_subobject] " +
+			      base.text + ", 0");
+			base = Value("ptr", base_tmp);
+		}
+	}
+	string tmp = fresh_temp();
+	instr(tmp + " = index i8 [projection=field] " + base.text +
+	      ", " + to_string(expr.binding->member_offset));
+	if (is_reference(expr.binding->type))
+	{
+		string ref = fresh_temp();
+		instr(ref + " = load ptr " + tmp);
+		return Value("ptr", ref);
+	}
+	return Value("ptr", tmp);
 }
 
 Value FunctionLowerer::emit_subscript_addr(const Node& expr)
@@ -698,6 +778,17 @@ Value FunctionLowerer::emit_subscript_addr(const Node& expr)
 		base = emit_rvalue(expr.children[0]);
 	base = ensure_pointer(base);
 	Value index = emit_rvalue(expr.children[1]);
+	TypePtr object = pa11::strip_cv(object_type(expr.type));
+	if (object->kind == TypeKind::Record)
+	{
+		string scaled = fresh_temp();
+		instr(scaled + " = binary mul i64 " + index.text + ", " +
+		      to_string(pa11::type_size(object)));
+		string tmp = fresh_temp();
+		instr(tmp + " = index i8 [projection=array_element] " + base.text +
+		      ", " + scaled);
+		return Value("ptr", tmp);
+	}
 	string tmp = fresh_temp();
 	string elem = scalar_lowir_type(expr.type);
 	instr(tmp + " = index " + elem +
@@ -722,7 +813,67 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 	if (starts_with(expr.line, "postfix-expression"))
 		return emit_postfix(expr);
 	if (starts_with(expr.line, "call-expression"))
-		return emit_call(expr);
+	{
+		Value value = emit_call(expr);
+		if (is_reference(expr.type))
+		{
+			TypePtr value_type = strip_for_value(expr.type);
+			string tmp = fresh_temp();
+			instr(tmp + " = load " + scalar_lowir_type(value_type) +
+			      " " + value.text);
+			return Value(scalar_lowir_type(value_type), tmp);
+		}
+		return value;
+	}
+	if (starts_with(expr.line, "new-expression"))
+	{
+		Value size_value;
+		if (expr.binding != NULL)
+		{
+			TypePtr object = pa11::strip_cv(pa11::strip_cv(expr.type)->base);
+			string size_tmp = fresh_temp();
+			instr(size_tmp + " = convert sext i64 i32 " +
+			      to_string(pa11::type_size(object)));
+			size_value = Value("i64", size_tmp);
+		}
+		Value storage = ensure_pointer(emit_rvalue(expr.children[0]));
+		if (expr.binding != NULL)
+		{
+			program_.demand_function_declaration(expr.binding);
+			string call_tmp = fresh_temp();
+			instr(call_tmp + " = call ptr @" + program_.symbol_for(expr.binding) +
+			      "(" + size_value.text + ", " + storage.text + ")");
+			storage = Value("ptr", call_tmp);
+		}
+		Binding* ctor = expr.direct_call;
+		if (ctor != NULL)
+		{
+			program_.demand_function_declaration(ctor);
+			program_.demand_inline_function(ctor);
+			vector<string> lowered;
+			lowered.push_back(storage.text);
+			for (size_t i = 1; i < expr.children.size(); ++i)
+			{
+				TypePtr param = ctor->type->parameters[i];
+				lowered.push_back(convert_value(emit_rvalue(expr.children[i]),
+				                                expr.children[i].type,
+				                                param).text);
+			}
+			ostringstream call;
+			call << "call void @" << program_.symbol_for(ctor) << "(";
+			for (size_t i = 0; i < lowered.size(); ++i)
+			{
+				if (i != 0)
+					call << ", ";
+				call << lowered[i];
+			}
+			call << ")";
+			instr(call.str());
+		}
+		return convert_value(storage,
+		                     expr.children[0].type,
+		                     expr.type);
+	}
 	if (starts_with(expr.line, "subscript-expression"))
 	{
 		Value addr = emit_subscript_addr(expr);
@@ -745,6 +896,23 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 		instr(tmp + " = const i64 " + expr.token_text);
 		return Value("i64", tmp);
 	}
+	if (starts_with(expr.line, "pseudo-destructor-expression"))
+	{
+		if (expr.direct_call != NULL && !expr.children.empty())
+		{
+			program_.demand_function_declaration(expr.direct_call);
+			program_.demand_inline_function(expr.direct_call);
+			Value addr = expr.has_op && expr.op == OP_ARROW
+				? emit_rvalue(expr.children[0])
+				: emit_lvalue_addr(expr.children[0]);
+			addr = ensure_pointer(addr);
+			instr("call void @" + program_.symbol_for(expr.direct_call) +
+			      "(" + addr.text + ")");
+		}
+		else if (!expr.children.empty())
+			emit_rvalue(expr.children[0]);
+		return Value("void", "");
+	}
 	throw runtime_error("unsupported rvalue expression: " + expr.line);
 }
 
@@ -752,17 +920,34 @@ Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to)
 {
 	string dst = scalar_lowir_type(to);
 	string src = scalar_lowir_type(strip_for_value(from));
+	TypePtr from_bare = pa11::strip_cv(strip_for_value(from));
+	TypePtr to_bare = pa11::strip_cv(strip_for_value(to));
+	if (from_bare->kind == TypeKind::Fundamental &&
+	    from_bare->fundamental == FT_NULLPTR_T &&
+	    to_bare->kind == TypeKind::Pointer)
+	{
+		string tmp = fresh_temp();
+		instr(tmp + " = copy ptr " + value.text);
+		return Value(dst, tmp);
+	}
 	if (dst == src)
 	{
-		TypePtr from_bare = pa11::strip_cv(strip_for_value(from));
-		TypePtr to_bare = pa11::strip_cv(strip_for_value(to));
-		if (from_bare->kind == TypeKind::Fundamental &&
-		    from_bare->fundamental == FT_NULLPTR_T &&
+		if (from_bare->kind == TypeKind::Pointer &&
 		    to_bare->kind == TypeKind::Pointer)
 		{
-			string tmp = fresh_temp();
-			instr(tmp + " = copy ptr " + value.text);
-			return Value(dst, tmp);
+			TypePtr from_pointee = pa11::strip_cv(from_bare->base);
+			TypePtr to_pointee = pa11::strip_cv(to_bare->base);
+			if (from_pointee->kind == TypeKind::Record &&
+			    to_pointee->kind == TypeKind::Record &&
+			    from_pointee->base.get() != NULL &&
+			    pa11::same_type(pa11::strip_cv(from_pointee->base),
+			                    to_pointee))
+			{
+				string tmp = fresh_temp();
+				instr(tmp + " = index i8 [projection=base_subobject] " +
+				      value.text + ", 0");
+				return Value("ptr", tmp);
+			}
 		}
 		return Value(dst, value.text);
 	}
@@ -846,6 +1031,27 @@ void FunctionLowerer::branch_logical_operand(const Node& expr,
 	branch_on(expr, yes, no);
 }
 
+void FunctionLowerer::branch_with_unwind_cleanups(const Node& expr,
+                                                  const string& yes,
+                                                  const string& no)
+{
+	string dispatch = fresh_block("call_unwind_dispatch");
+	string end = fresh_block("call_unwind_end");
+	instr("eh_try ^" + dispatch);
+	++eh_try_depth_;
+	Value cond = emit_rvalue(expr);
+	if (is_float_type(expr.type))
+		cond = bool_value(cond, expr.type);
+	--eh_try_depth_;
+	instr("eh_end");
+	terminate("jump ^" + end);
+	start_block(dispatch);
+	emit_unwind_cleanups();
+	terminate("resume");
+	start_block(end);
+	terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
+}
+
 Value FunctionLowerer::emit_binary(const Node& expr)
 {
 	if (expr.has_op && expr.op == OP_COMMA)
@@ -854,68 +1060,18 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 		return emit_rvalue(expr.children[1]);
 	}
 	if (expr.has_op && (expr.op == OP_LAND || expr.op == OP_LOR))
-	{
-		string slot = fresh_aux_slot(expr.op == OP_LAND ? "land" : "lor", "i64");
-		string rhs = fresh_block(expr.op == OP_LAND ? "land_rhs" : "lor_rhs");
-		string sh = fresh_block(expr.op == OP_LAND ? "land_short" : "lor_short");
-		string end = fresh_block(expr.op == OP_LAND ? "land_end" : "lor_end");
-		if (expr.op == OP_LAND)
-			branch_logical_operand(expr.children[0], rhs, sh);
-		else
-			branch_logical_operand(expr.children[0], sh, rhs);
-		start_block(rhs);
-		Value rv = bool_value(emit_rvalue(expr.children[1]), expr.children[1].type);
-		instr("store i64 " + rv.text + ", $" + slot);
-		terminate("jump ^" + end);
-		start_block(sh);
-		instr("store i64 " + string(expr.op == OP_LAND ? "0" : "1") +
-		      ", $" + slot);
-		terminate("jump ^" + end);
-		start_block(end);
-		string tmp = fresh_temp();
-		instr(tmp + " = load i64 $" + slot);
-		return Value("i64", tmp);
-	}
+		return emit_logical_binary(expr);
 	Value lhs = emit_rvalue(expr.children[0]);
 	Value rhs = emit_rvalue(expr.children[1]);
 	TypePtr lhs_type = strip_for_value(expr.children[0].type);
 	TypePtr rhs_type = strip_for_value(expr.children[1].type);
 	if ((expr.op == OP_PLUS || expr.op == OP_MINUS) &&
 	    scalar_lowir_type(expr.type) == "ptr")
-	{
-		const bool left_ptr = pa11::strip_cv(lhs_type)->kind == TypeKind::Pointer;
-		Value base = left_ptr ? lhs : rhs;
-		Value offset = left_ptr ? rhs : lhs;
-		TypePtr ptr_type = left_ptr ? lhs_type : rhs_type;
-		uint64_t scale = pa11::type_size(pa11::strip_cv(ptr_type)->base);
-		if (scale != 1)
-		{
-			string mul = fresh_temp();
-			instr(mul + " = binary mul i64 " + offset.text + ", " +
-			      to_string(scale));
-			offset = Value("i64", mul);
-		}
-		if (expr.op == OP_MINUS)
-		{
-			string neg = fresh_temp();
-			instr(neg + " = binary sub i64 0, " + offset.text);
-			offset = Value("i64", neg);
-		}
-		string tmp = fresh_temp();
-		instr(tmp + " = index i8 " + base.text + ", " + offset.text);
-		return Value("ptr", tmp);
-	}
+		return emit_pointer_index_binary(expr, lhs, rhs, lhs_type, rhs_type);
 	if (expr.op == OP_MINUS &&
 	    pa11::strip_cv(lhs_type)->kind == TypeKind::Pointer &&
 	    pa11::strip_cv(rhs_type)->kind == TypeKind::Pointer)
-	{
-		string diff = fresh_temp();
-		instr(diff + " = binary sub ptr " + lhs.text + ", " + rhs.text);
-		string tmp = fresh_temp();
-		uint64_t scale = pa11::type_size(pa11::strip_cv(lhs_type)->base);
-		instr(tmp + " = binary div i64 " + diff + ", " + to_string(scale));
-		return Value("i64", tmp);
-	}
+		return emit_pointer_difference(expr, lhs, rhs, lhs_type);
 	string op;
 	bool cmp = false;
 	switch (expr.op)
@@ -955,8 +1111,18 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 		op = is_unsigned_type(op_type) ? "ugt" : "gt";
 	else if (expr.op == OP_GE)
 		op = is_unsigned_type(op_type) ? "uge" : "ge";
-	lhs = convert_binary_value(lhs, expr.children[0].type, op_type);
-	rhs = convert_binary_value(rhs, expr.children[1].type, op_type);
+	if (cmp && scalar_lowir_type(op_type) == "ptr")
+	{
+		if (scalar_lowir_type(strip_for_value(expr.children[0].type)) != "ptr")
+			lhs = convert_binary_value(lhs, expr.children[0].type, op_type);
+		if (scalar_lowir_type(strip_for_value(expr.children[1].type)) != "ptr")
+			rhs = convert_binary_value(rhs, expr.children[1].type, op_type);
+	}
+	else
+	{
+		lhs = convert_binary_value(lhs, expr.children[0].type, op_type);
+		rhs = convert_binary_value(rhs, expr.children[1].type, op_type);
+	}
 	string type = scalar_lowir_type(op_type);
 	string tmp = fresh_temp();
 	instr(tmp + " = " + string(cmp ? "cmp " : "binary ") + op + " " +
@@ -973,6 +1139,35 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 		Value rhs = emit_rvalue(expr.children[1]);
 		rhs = convert_binary_value(rhs, expr.children[1].type, lhs_type);
 		Value addr = emit_lvalue_addr(expr.children[0]);
+		if (expr.children[0].binding != NULL &&
+		    expr.children[0].binding->is_bit_field)
+		{
+			Binding* field = expr.children[0].binding;
+			string low_type = scalar_lowir_type(lhs_type);
+			uint64_t mask = field->bit_width >= 64
+				? ~uint64_t(0) : ((uint64_t(1) << field->bit_width) - 1);
+			string masked = fresh_temp();
+			instr(masked + " = binary and " + low_type + " " +
+			      rhs.text + ", " + to_string(mask));
+			string shifted = masked;
+			uint64_t storage_mask = mask << field->bit_offset;
+			if (field->bit_offset != 0)
+			{
+				shifted = fresh_temp();
+				instr(shifted + " = binary shl " + low_type + " " +
+				      masked + ", " + to_string(field->bit_offset));
+			}
+			string oldv = fresh_temp();
+			instr(oldv + " = load " + low_type + " " + addr.text);
+			string cleared = fresh_temp();
+			instr(cleared + " = binary and " + low_type + " " + oldv +
+			      ", " + to_string(~storage_mask));
+			string merged = fresh_temp();
+			instr(merged + " = binary or " + low_type + " " + cleared +
+			      ", " + shifted);
+			instr("store " + low_type + " " + merged + ", " + addr.text);
+			return rhs;
+		}
 		instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text +
 		      ", " + addr.text);
 		return rhs;
@@ -1146,7 +1341,12 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 {
 	if (pa11::is_void_type(expr.type))
 	{
-		emit_rvalue(expr.children[0]);
+		if (expr.children[0].category == ValueCategory::LValue &&
+		    pa11::strip_cv(object_type(expr.children[0].type))->kind ==
+		    TypeKind::Record)
+			ensure_pointer(emit_lvalue_addr(expr.children[0]));
+		else
+			emit_rvalue(expr.children[0]);
 		return Value("void", "");
 	}
 	if (is_reference(expr.type))
@@ -1165,93 +1365,6 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 	                     expr.type);
 }
 
-Value FunctionLowerer::emit_call(const Node& expr)
-{
-	Binding* direct = expr.direct_call;
-	size_t arg_start = direct != NULL ? 1 : 1;
-	string callee;
-	TypePtr callee_type;
-	if (direct != NULL)
-	{
-		program_.demand_function_declaration(direct);
-		program_.demand_inline_function(direct);
-		callee = "@" + program_.symbol_for(direct);
-		callee_type = direct->type;
-	}
-	else
-	{
-		callee_type = strip_for_value(expr.children[0].type);
-		if (pa11::strip_cv(callee_type)->kind == TypeKind::Pointer)
-			callee_type = pa11::strip_cv(callee_type)->base;
-	}
-	vector<string> args;
-	for (size_t i = arg_start; i < expr.children.size(); ++i)
-	{
-		bool variadic_extra = i - arg_start >= callee_type->parameters.size();
-		TypePtr param = !variadic_extra
-			? callee_type->parameters[i - arg_start] : expr.children[i].type;
-		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
-			param = pa11::make_fundamental(FT_DOUBLE);
-		if (is_reference(param))
-		{
-			if (expr.children[i].category == ValueCategory::LValue)
-				args.push_back(ensure_pointer(emit_lvalue_addr(expr.children[i])).text);
-			else
-			{
-				string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
-				Value value = convert_value(emit_rvalue(expr.children[i]),
-				                            expr.children[i].type,
-				                            param->base);
-				instr("store " + scalar_lowir_type(param->base) + " " +
-				      value.text + ", $" + slot);
-				string addr = fresh_temp();
-				instr(addr + " = addr $" + slot);
-				args.push_back(addr);
-			}
-		}
-		else
-			args.push_back(convert_value(emit_rvalue(expr.children[i]),
-			                             expr.children[i].type,
-			                             param).text);
-	}
-	if (direct == NULL)
-	{
-		Value cv = emit_rvalue(expr.children[0]);
-		callee = cv.text;
-	}
-	ostringstream call;
-	string ret = scalar_lowir_type(callee_type->base);
-	string tmp;
-	if (ret == "void")
-		call << "call void ";
-	else
-	{
-		tmp = fresh_temp();
-		call << tmp << " = call " << ret << " ";
-	}
-	call << callee << "(";
-	for (size_t i = 0; i < args.size(); ++i)
-	{
-		if (i != 0)
-			call << ", ";
-		call << args[i];
-	}
-	call << ")";
-	if (direct == NULL)
-	{
-		call << " as (";
-		for (size_t i = 0; i < callee_type->parameters.size(); ++i)
-		{
-			if (i != 0)
-				call << ", ";
-			call << "%arg" << i << " : " << lowir_parameter(callee_type->parameters[i]);
-		}
-		call << ") -> " << ret;
-	}
-	instr(call.str());
-	return Value(ret, tmp);
-}
-
 Value FunctionLowerer::emit_conditional(const Node& expr)
 {
 	string type = expr.category == ValueCategory::LValue ? "ptr" :
@@ -1265,7 +1378,7 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 	string end = fresh_block(expr.category == ValueCategory::LValue ?
 	                         "condaddr_end" : "cond_end");
 	Value cond = emit_rvalue(expr.children[0]);
-	if (is_float_type(expr.children[0].type) || cond.type == "ptr")
+	if (is_float_type(expr.children[0].type))
 		cond = bool_value(cond, expr.children[0].type);
 	terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
 	start_block(yes);
@@ -1274,6 +1387,10 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 		: convert_value(emit_rvalue(expr.children[1]),
 		                expr.children[1].type,
 		                expr.type);
+	if (expr.category == ValueCategory::LValue)
+		yv = convert_value(yv,
+		                   pa11::make_pointer(object_type(expr.children[1].type)),
+		                   pa11::make_pointer(expr.type));
 	instr("store " + type + " " + yv.text + ", $" + slot);
 	terminate("jump ^" + end);
 	start_block(no);
@@ -1282,6 +1399,10 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 		: convert_value(emit_rvalue(expr.children[2]),
 		                expr.children[2].type,
 		                expr.type);
+	if (expr.category == ValueCategory::LValue)
+		nv = convert_value(nv,
+		                   pa11::make_pointer(object_type(expr.children[2].type)),
+		                   pa11::make_pointer(expr.type));
 	instr("store " + type + " " + nv.text + ", $" + slot);
 	terminate("jump ^" + end);
 	start_block(end);
@@ -1298,7 +1419,7 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 	string no = fresh_block("cond_else");
 	string end = fresh_block("cond_end");
 	Value cond = emit_rvalue(expr.children[0]);
-	if (is_float_type(expr.children[0].type) || cond.type == "ptr")
+	if (is_float_type(expr.children[0].type))
 		cond = bool_value(cond, expr.children[0].type);
 	terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
 	start_block(yes);
@@ -1327,7 +1448,7 @@ void FunctionLowerer::branch_on(const Node& expr, const string& yes, const strin
 			throw runtime_error("empty condition declaration");
 		lower_variable_decl(expr.children[0]);
 		Value cond = emit_rvalue(expr.children[0]);
-		if (is_float_type(expr.children[0].type) || cond.type == "ptr")
+		if (is_float_type(expr.children[0].type))
 			cond = bool_value(cond, expr.children[0].type);
 		terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
 		return;
@@ -1350,8 +1471,14 @@ void FunctionLowerer::branch_on(const Node& expr, const string& yes, const strin
 		branch_on(expr.children[1], yes, no);
 		return;
 	}
+	if (eh_try_depth_ == 0 && has_active_cleanups() &&
+	    node_contains_call_expression(expr))
+	{
+		branch_with_unwind_cleanups(expr, yes, no);
+		return;
+	}
 	Value cond = emit_rvalue(expr);
-	if (is_float_type(expr.type) || cond.type == "ptr")
+	if (is_float_type(expr.type))
 		cond = bool_value(cond, expr.type);
 	terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
 }

@@ -28,6 +28,15 @@ bool is_function_reference(TypePtr type)
 	       type->base->kind == pa11::TypeKind::Function;
 }
 
+Binding* canonical_function_binding(Binding* binding)
+{
+	while (binding != NULL &&
+	       binding->kind == BindingKind::Function &&
+	       binding->aliased_binding != NULL)
+		binding = binding->aliased_binding;
+	return binding;
+}
+
 }  // namespace
 
 Conversion Parser::convert_to(const Expr& expr, TypePtr target)
@@ -43,6 +52,39 @@ Conversion Parser::convert_reference(const Expr& expr, TypePtr target)
 	Expr selected = select_overload_expr(expr, target);
 	if (!type_can_bind_reference(target, selected))
 	{
+		TypePtr record = pa11::strip_cv(target->base);
+		if (target->kind == pa11::TypeKind::LValueReference &&
+		    pa11::type_has_const(target->base) &&
+		    record->kind == pa11::TypeKind::Record &&
+		    record->scope != NULL)
+		{
+			map<string, vector<Binding*> >::const_iterator found =
+				record->scope->members.find(record->scope->name);
+			if (found != record->scope->members.end())
+			{
+				for (size_t i = 0; i < found->second.size(); ++i)
+				{
+					Binding* ctor = found->second[i];
+					if (ctor->kind != BindingKind::Function ||
+					    ctor->is_explicit ||
+					    ctor->type->parameters.size() != 2)
+						continue;
+					Conversion arg =
+						convert_to(selected, ctor->type->parameters[1]);
+					if (!arg.viable)
+						continue;
+					Expr temporary;
+					temporary.valid = true;
+					temporary.type = target->base;
+					temporary.category = ValueCategory::PRValue;
+					temporary.braced_init_list = true;
+					temporary.node = Node("braced-init-list");
+					add_child(temporary.node, arg.expr.node);
+					annotate_expr_node(temporary);
+					return Conversion(true, arg.rank + 3, temporary);
+				}
+			}
+		}
 		if (target->kind != pa11::TypeKind::LValueReference ||
 		    !pa11::type_has_const(target->base))
 			return Conversion();
@@ -58,8 +100,11 @@ Conversion Parser::convert_reference(const Expr& expr, TypePtr target)
 		annotate_expr_node(converted);
 		return Conversion(true, conv.rank + 1, converted);
 	}
-	int rank = pa11::same_type(expression_object_type(selected.type), target->base)
-		? 0 : 1;
+	int rank = record_base_distance(expression_object_type(selected.type),
+	                                target->base);
+	if (rank >= 1000000)
+		rank = pa11::same_type(expression_object_type(selected.type),
+		                       target->base) ? 0 : 1;
 	if (target->kind == pa11::TypeKind::RValueReference &&
 	    selected.category != ValueCategory::LValue)
 		rank = 0;
@@ -162,7 +207,8 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 		for (size_t j = 0; j < i; ++j)
 		{
 			if (overloads[j]->type->kind == pa11::TypeKind::Function &&
-			    pa11::same_type(overloads[j]->type, fn->type))
+			    pa11::same_type(overloads[j]->type, fn->type) &&
+			    overloads[j]->is_static_member == fn->is_static_member)
 				duplicate = true;
 		}
 		if (duplicate)
@@ -201,7 +247,16 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 		bool ok = true;
 		for (size_t j = 0; j < fn->type->parameters.size(); ++j)
 		{
-			Conversion conv = convert_to(conv_args[j], fn->type->parameters[j]);
+			Conversion conv;
+			try
+			{
+				conv = convert_to(conv_args[j], fn->type->parameters[j]);
+			}
+			catch (const runtime_error&)
+			{
+				ok = false;
+				break;
+			}
 			if (!conv.viable)
 			{
 				ok = false;
@@ -225,11 +280,26 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 	if (best == NULL || ambiguous)
 		throw runtime_error("cannot resolve call overload");
 	converted = best_args;
-	return best;
+	return canonical_function_binding(best);
 }
 
 Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 {
+	TypePtr callee_object = pa11::strip_cv(expression_object_type(callee.type));
+	if (callee.overloads.empty() &&
+	    callee_object->kind == pa11::TypeKind::Record &&
+	    callee_object->scope != NULL)
+	{
+		vector<Binding*> members =
+			lookup_qualified_set(callee_object->scope,
+			                     "operator()",
+			                     pa11::LOOKUP_FUNCTION);
+		if (!members.empty())
+		{
+			Expr member = make_member_expr(callee, "operator()", ".");
+			return make_call_expr(member, args);
+		}
+	}
 	if (callee.builtin_constant_p)
 	{
 		if (args.size() != 1)
@@ -294,6 +364,7 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	else
 	{
 		TypePtr callee_type = expression_object_type(callee.type);
+		callee_type = pa11::strip_cv(callee_type);
 		if (callee_type->kind == pa11::TypeKind::Pointer)
 			callee_type = callee_type->base;
 		if (callee_type->kind != pa11::TypeKind::Function)
