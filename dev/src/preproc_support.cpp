@@ -532,12 +532,19 @@ void run_preproc(const vector<string>& srcfiles,
 	for (size_t i = 0; i < srcfiles.size(); ++i)
 	{
 		out << "sof " << srcfiles[i] << '\n';
-		vector<PPToken> tokens;
-		Preprocessor processor(options);
-		processor.process_source_file(srcfiles[i], tokens);
+		vector<PPToken> tokens = preprocess_source_file(srcfiles[i], options);
 		if (!posttoken::emit_posttokens_checked(tokens, out))
 			throw runtime_error("invalid token");
 	}
+}
+
+vector<PPToken> preprocess_source_file(const string& srcfile,
+                                       const Options& options)
+{
+	vector<PPToken> tokens;
+	Preprocessor processor(options);
+	processor.process_source_file(srcfile, tokens);
+	return tokens;
 }
 
 }  // namespace preproc

@@ -5,8 +5,10 @@
 #include <stdexcept>
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
+#include <ctime>
 
-#include "exceptions.h"
+#include "recog_support.h"
 
 using namespace std;
 
@@ -35,42 +37,42 @@ bool PA6_IsNamespaceName(const string& identifier)
 	return identifier.find('N') != string::npos;
 }
 
-bool HasBatchStdinArg(int argc, char** argv)
+namespace
 {
-	for (int i = 1; i < argc; i++)
-	{
-		if (string(argv[i]) == "--batch-stdin")
-			return true;
-	}
-	return false;
+
+preproc::Options MakePreprocOptions()
+{
+	time_t now = time(NULL);
+	tm* local = localtime(&now);
+	if (local == NULL)
+		throw runtime_error("cannot read build time");
+	char* text = asctime(local);
+	if (text == NULL)
+		throw runtime_error("cannot format build time");
+	const string stamp(text);
+	if (stamp.size() < 24)
+		throw runtime_error("invalid build time");
+
+	preproc::Options options;
+	options.author = "Vishvananda Ishaya";
+	options.build_date = stamp.substr(4, 6) + " " + stamp.substr(20, 4);
+	options.build_time = stamp.substr(11, 8);
+	return options;
 }
 
-int RunNotImplementedBatchMode()
+recog::Options MakeRecogOptions()
 {
-	string line;
-	while (getline(cin, line))
-	{
-		(void)line;
-		cout << "EXIT_NOT_IMPLEMENTED" << endl;
-	}
-	return EXIT_SUCCESS;
+	recog::Options options;
+	options.preprocess = MakePreprocOptions();
+	return options;
 }
 
-void DoRecog(istream& in)
-{
-	if (/* TODO: implement PA6 */ false)
-		return;
-	else
-		throw NotImplementedException();
-};
+}  // namespace
 
 int main(int argc, char** argv)
 {
 	try
 	{
-		if (HasBatchStdinArg(argc, argv))
-			return RunNotImplementedBatchMode();
-
 		vector<string> args;
 
 		for (int i = 1; i < argc; i++)
@@ -85,6 +87,7 @@ int main(int argc, char** argv)
 		ofstream out(outfile);
 
 		out << "recog " << nsrcfiles << endl;
+		const recog::Options options = MakeRecogOptions();
 
 		for (size_t i = 0; i < nsrcfiles; i++)
 		{
@@ -92,13 +95,8 @@ int main(int argc, char** argv)
 
 			try
 			{
-				ifstream in(srcfile);
-				DoRecog(in);
-				out << srcfile << " OK" << endl;
-			}
-			catch (const NotImplementedException& e)
-			{
-				throw;
+				bool ok = recog::recognize_source_file(srcfile, options);
+				out << srcfile << (ok ? " OK" : " BAD") << endl;
 			}
 			catch (const exception& e)
 			{
@@ -107,14 +105,10 @@ int main(int argc, char** argv)
 			}
 		}
 	}
-	catch (const NotImplementedException& e)
-	{
-		cerr << "ERROR: " << e.what() << endl;
-		return CPPGM_EXIT_NOT_IMPLEMENTED;
-	}
 	catch (exception& e)
 	{
 		cerr << "ERROR: " << e.what() << endl;
 		return EXIT_FAILURE;
 	}
+	return EXIT_SUCCESS;
 }

@@ -41,7 +41,8 @@ struct ParsedStringPiece
 	vector<uint32_t> code_points;
 };
 
-void EmitIntegerValue(DebugPostTokenOutputStream& output,
+template <class Output>
+void EmitIntegerValue(Output& output,
                       const string& source,
                       EFundamentalType type,
                       unsigned long long value)
@@ -137,7 +138,8 @@ bool ParseFloatingCore(const string& s, size_t& end)
 	return end > 0;
 }
 
-void EmitFloatingLiteral(DebugPostTokenOutputStream& output,
+template <class Output>
+void EmitFloatingLiteral(Output& output,
                          const string& source,
                          char suffix)
 {
@@ -372,13 +374,106 @@ bool ValidUdSuffixCombination(const vector<ParsedStringPiece>& pieces,
 	return true;
 }
 
-struct PostTokenStream : IPPTokenStream
+struct CollectPostTokenOutputStream
 {
-	DebugPostTokenOutputStream output;
+	vector<posttoken::Token>* tokens;
+
+	explicit CollectPostTokenOutputStream(vector<posttoken::Token>& out)
+		: tokens(&out)
+	{
+	}
+
+	void emit_invalid(const string& source)
+	{
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::Invalid, source));
+	}
+
+	void emit_simple(const string& source, ETokenType token_type)
+	{
+		tokens->push_back(posttoken::Token(source, token_type));
+	}
+
+	void emit_identifier(const string& source)
+	{
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::Identifier, source));
+	}
+
+	void emit_literal(const string& source,
+	                  EFundamentalType type,
+	                  const void* data,
+	                  size_t nbytes)
+	{
+		(void)type;
+		(void)data;
+		(void)nbytes;
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::Literal, source));
+	}
+
+	void emit_literal_array(const string& source,
+	                        size_t num_elements,
+	                        EFundamentalType type,
+	                        const void* data,
+	                        size_t nbytes)
+	{
+		(void)num_elements;
+		emit_literal(source, type, data, nbytes);
+	}
+
+	void emit_user_defined_literal_character(const string& source,
+	                                         const string& ud_suffix,
+	                                         EFundamentalType type,
+	                                         const void* data,
+	                                         size_t nbytes)
+	{
+		(void)ud_suffix;
+		emit_literal(source, type, data, nbytes);
+	}
+
+	void emit_user_defined_literal_string_array(const string& source,
+	                                            const string& ud_suffix,
+	                                            size_t num_elements,
+	                                            EFundamentalType type,
+	                                            const void* data,
+	                                            size_t nbytes)
+	{
+		(void)ud_suffix;
+		(void)num_elements;
+		emit_literal(source, type, data, nbytes);
+	}
+
+	void emit_user_defined_literal_integer(const string& source,
+	                                       const string& ud_suffix,
+	                                       const string& prefix)
+	{
+		(void)ud_suffix;
+		(void)prefix;
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::Literal, source));
+	}
+
+	void emit_user_defined_literal_floating(const string& source,
+	                                        const string& ud_suffix,
+	                                        const string& prefix)
+	{
+		(void)ud_suffix;
+		(void)prefix;
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::Literal, source));
+	}
+
+	void emit_eof()
+	{
+		tokens->push_back(posttoken::Token(posttoken::TokenKind::EndOfFile, ""));
+	}
+};
+
+template <class Output>
+struct BasicPostTokenStream : IPPTokenStream
+{
+	Output output;
 	vector<ParsedStringPiece> pending_strings;
 	bool invalid_seen;
 
-	explicit PostTokenStream(ostream& out) : output(out), invalid_seen(false)
+	explicit BasicPostTokenStream(const Output& out)
+		: output(out), invalid_seen(false)
 	{
 	}
 
@@ -609,7 +704,19 @@ void emit_posttokens(const vector<PPToken>& tokens, ostream& out)
 
 bool emit_posttokens_checked(const vector<PPToken>& tokens, ostream& out)
 {
-	PostTokenStream output(out);
+	DebugPostTokenOutputStream debug(out);
+	BasicPostTokenStream<DebugPostTokenOutputStream> output(debug);
+	EmitPPTokens(tokens, output);
+	output.emit_eof();
+	return !output.invalid_seen;
+}
+
+bool collect_posttokens_checked(const vector<PPToken>& tokens,
+                                vector<Token>& out)
+{
+	out.clear();
+	CollectPostTokenOutputStream collector(out);
+	BasicPostTokenStream<CollectPostTokenOutputStream> output(collector);
 	EmitPPTokens(tokens, output);
 	output.emit_eof();
 	return !output.invalid_seen;
@@ -617,7 +724,8 @@ bool emit_posttokens_checked(const vector<PPToken>& tokens, ostream& out)
 
 void run_posttoken(istream& in)
 {
-	PostTokenStream output(cout);
+	DebugPostTokenOutputStream debug(cout);
+	BasicPostTokenStream<DebugPostTokenOutputStream> output(debug);
 	pptoken::run_pptoken(in, output);
 }
 
