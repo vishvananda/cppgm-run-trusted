@@ -224,6 +224,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		{
 			has_init = true;
 			init.valid = true;
+			init.braced_init_list = true;
 			init.node = Node("braced-init-list");
 			while (!at(OP_RBRACE))
 			{
@@ -243,6 +244,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	{
 		has_init = true;
 		init.valid = true;
+		init.braced_init_list = true;
 		init.node = Node("braced-init-list");
 		while (!at(OP_RBRACE))
 		{
@@ -351,7 +353,7 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	if (init != NULL)
 	{
-		if (init->node.line == "braced-init-list")
+		if (init->braced_init_list)
 		{
 			Node list = init->node;
 			list.line += " lvalue " + pa11::describe_type(type);
@@ -363,6 +365,12 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 			if (!conv.viable)
 				throw runtime_error("invalid initializer conversion");
 			add_child(var, conv.expr.node);
+			if ((specs.constexpr_decl || pa11::type_has_const(type)) &&
+			    conv.expr.has_constant_value)
+			{
+				variable->has_constant = true;
+				variable->constant_value = conv.expr.constant_value;
+			}
 		}
 	}
 	else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record)

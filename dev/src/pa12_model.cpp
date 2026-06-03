@@ -354,8 +354,10 @@ bool Parser::pointer_conversion_viable(TypePtr source, TypePtr target) const
 	if (types_reference_compatible(dst_pointee, src_pointee))
 		return true;
 	TypePtr bare_dst = pa11::strip_cv(dst_pointee);
-	return bare_dst->kind == pa11::TypeKind::Fundamental &&
-	       bare_dst->fundamental == FT_VOID;
+	if (bare_dst->kind != pa11::TypeKind::Fundamental ||
+	    bare_dst->fundamental != FT_VOID)
+		return false;
+	return cv_contains(cv_flags(dst_pointee), cv_flags(src_pointee));
 }
 
 int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
@@ -450,15 +452,6 @@ string Parser::qualified_decl_name(const Binding* binding) const
 	return out.str();
 }
 
-string Parser::qualified_type_name(TypePtr type) const
-{
-	TypePtr bare = pa11::strip_cv(type);
-	if ((bare->kind != pa11::TypeKind::Record &&
-	     bare->kind != pa11::TypeKind::Enum) || bare->scope == NULL)
-		return bare->name;
-	return bare->name;
-}
-
 string Parser::scoped_type_display_name(Scope* owner, const string& name) const
 {
 	vector<string> parts;
@@ -487,11 +480,6 @@ string Parser::make_local_type_name(const string& prefix)
 {
 	++local_type_counter_;
 	return prefix + to_string(local_type_counter_);
-}
-
-string Parser::anonymous_type_name(const string& prefix) const
-{
-	return prefix + to_string(pos_);
 }
 
 string Parser::op_leaf(ETokenType type, const string& source) const

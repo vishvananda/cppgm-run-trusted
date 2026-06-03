@@ -243,18 +243,10 @@ TypePtr Parser::parse_enum_specifier()
 		uint64_t value = next_value;
 		if (consume(OP_ASS))
 		{
-			if (at_literal())
-			{
-				IntegerLiteralInfo info;
-				string source = consume_literal();
-				if (AnalyzeIntegerLiteral(source, info))
-					value = info.value;
-			}
-			else
-			{
-				Expr explicit_value = parse_assignment_expression();
-				(void)explicit_value;
-			}
+			Expr explicit_value = parse_assignment_expression();
+			if (!explicit_value.has_constant_value)
+				throw runtime_error("invalid enumerator initializer");
+			value = explicit_value.constant_value;
 		}
 		Binding* binding =
 			pa11::add_binding(enum_scope, BindingKind::Enumerator, enumerator, type);
@@ -411,20 +403,10 @@ Suffix Parser::parse_array_suffix()
 		suffix.unknown_bound = true;
 		return suffix;
 	}
-	if (at_literal())
-	{
-		IntegerLiteralInfo info;
-		string source = consume_literal();
-		if (!AnalyzeIntegerLiteral(source, info) || info.value == 0)
-			throw runtime_error("invalid array bound");
-		suffix.bound = info.value;
-	}
-	else
-	{
-		Expr bound = parse_expression();
-		(void)bound;
-		suffix.bound = 1;
-	}
+	Expr bound = parse_expression();
+	if (!bound.has_constant_value || bound.constant_value == 0)
+		throw runtime_error("invalid array bound");
+	suffix.bound = bound.constant_value;
 	expect(OP_RSQUARE);
 	return suffix;
 }
@@ -531,13 +513,6 @@ bool Parser::starts_declaration()
 	return ok;
 }
 
-bool Parser::starts_definite_declaration() const
-{
-	return at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
-	       at(KW_STATIC) || at(KW_DECLTYPE) || starts_class_key() ||
-	       at(KW_ENUM) || at_simple_cv();
-}
-
 bool Parser::starts_class_key() const
 {
 	return at(KW_STRUCT) || at(KW_CLASS) || at(KW_UNION);
@@ -596,12 +571,6 @@ unsigned Parser::consume_cv_flag()
 		return pa11::CV_CONST;
 	expect(KW_VOLATILE);
 	return pa11::CV_VOLATILE;
-}
-
-void Parser::skip_until_template_parameter_separator()
-{
-	while (!at_eof() && !at(OP_COMMA) && !at(OP_GT))
-		++pos_;
 }
 
 }  // namespace internal

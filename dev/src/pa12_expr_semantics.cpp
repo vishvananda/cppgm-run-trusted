@@ -28,24 +28,6 @@ bool is_function_reference(TypePtr type)
 	       type->base->kind == pa11::TypeKind::Function;
 }
 
-bool node_is_constant(const Node& node)
-{
-	if (node.line.find("literal ") == 0)
-		return true;
-	if (node.line.find("binary-expression ") == 0 ||
-	    node.line.find("unary-expression prvalue ") == 0 ||
-	    node.line.find("cast-expression ") == 0)
-	{
-		for (size_t i = 0; i < node.children.size(); ++i)
-		{
-			if (!node_is_constant(node.children[i]))
-				return false;
-		}
-		return !node.children.empty();
-	}
-	return false;
-}
-
 }  // namespace
 
 Conversion Parser::convert_to(const Expr& expr, TypePtr target)
@@ -83,6 +65,8 @@ Conversion Parser::convert_value(const Expr& expr, TypePtr target)
 	{
 		selected.type = dst;
 		selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " 0");
+		selected.constant_expression = true;
+		selected.has_constant_value = false;
 		return Conversion(true, 2, selected);
 	}
 	if (selected.null_pointer_constant &&
@@ -91,6 +75,9 @@ Conversion Parser::convert_value(const Expr& expr, TypePtr target)
 	{
 		selected.type = dst;
 		selected.node = Node("literal prvalue nullptr_t 0");
+		selected.constant_expression = true;
+		selected.has_constant_value = true;
+		selected.constant_value = 0;
 		return Conversion(true, 2, selected);
 	}
 	if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental &&
@@ -198,14 +185,19 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 
 Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 {
-	if (callee.node.line.find("__builtin_constant_p") != string::npos)
+	if (callee.builtin_constant_p)
 	{
+		if (args.size() != 1)
+			throw runtime_error("wrong argument count");
 		Expr out;
 		out.type = pa11::make_fundamental(FT_INT);
 		out.category = ValueCategory::PRValue;
 		out.valid = true;
-		const bool constant = args.size() == 1 && node_is_constant(args[0].node);
+		const bool constant = args[0].constant_expression;
 		out.node = Node(string("literal prvalue int ") + (constant ? "1" : "0"));
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = constant ? 1 : 0;
 		out.null_pointer_constant = constant ? false : true;
 		return out;
 	}
@@ -233,6 +225,13 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		if (args.size() != callee_type->parameters.size() && !callee_type->variadic)
 			throw runtime_error("wrong argument count");
 		converted = args;
+		for (size_t i = 0; i < callee_type->parameters.size(); ++i)
+		{
+			Conversion conv = convert_to(args[i], callee_type->parameters[i]);
+			if (!conv.viable)
+				throw runtime_error("invalid argument conversion");
+			converted[i] = conv.expr;
+		}
 		out.type = callee_type->base;
 		out.category = call_category(out.type);
 		out.node = Node("call-expression " + value_category_name(out.category) +

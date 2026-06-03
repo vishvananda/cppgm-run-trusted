@@ -119,6 +119,16 @@ Expr Parser::parse_conditional_expression()
 	out.type = result_type;
 	out.category = category;
 	out.valid = true;
+	out.constant_expression = cond.constant_expression &&
+	                          yes.constant_expression &&
+	                          no.constant_expression;
+	if (cond.has_constant_value)
+	{
+		const Expr& selected = cond.constant_value != 0 ? yes : no;
+		out.has_constant_value = selected.has_constant_value;
+		out.constant_value = selected.constant_value;
+		out.null_pointer_constant = selected.null_pointer_constant;
+	}
 	out.node = Node("conditional-expression " + value_category_name(category) +
 	                " " + pa11::describe_type(result_type));
 	add_child(out.node, cond.node);
@@ -222,6 +232,9 @@ Expr Parser::parse_primary_expression()
 		Expr out;
 		out.type = pa11::make_fundamental(FT_BOOL);
 		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = 1;
 		out.node = Node("literal prvalue bool KW_TRUE:true");
 		return out;
 	}
@@ -230,6 +243,9 @@ Expr Parser::parse_primary_expression()
 		Expr out;
 		out.type = pa11::make_fundamental(FT_BOOL);
 		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = 0;
 		out.node = Node("literal prvalue bool KW_FALSE:false");
 		return out;
 	}
@@ -238,6 +254,9 @@ Expr Parser::parse_primary_expression()
 		Expr out;
 		out.type = pa11::make_fundamental(FT_NULLPTR_T);
 		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = 0;
 		out.node = Node("literal prvalue nullptr_t KW_NULLPTR:nullptr");
 		return out;
 	}
@@ -268,17 +287,24 @@ Expr Parser::parse_literal_expression()
 		                                info.elements);
 		out.type = type;
 		out.category = ValueCategory::LValue;
+		out.constant_expression = true;
 		out.node = Node("literal lvalue " + pa11::describe_type(type) + " " + source);
 		return out;
 	}
 	if (is_float_literal_text(source))
+	{
 		out.type = floating_literal_type(source);
+		out.constant_expression = true;
+	}
 	else
 	{
 		IntegerLiteralInfo info;
 		if (!AnalyzeIntegerLiteral(source, info))
 			throw runtime_error("invalid integer literal");
 		out.type = pa11::make_fundamental(info.type);
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = info.value;
 		out.null_pointer_constant = info.value == 0;
 	}
 	out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
@@ -302,24 +328,27 @@ Expr Parser::parse_cast_expression()
 
 Expr Parser::parse_type_trait_expression(ETokenType keyword)
 {
+	const bool is_sizeof = keyword == KW_SIZEOF;
 	++pos_;
 	expect(OP_LPAREN);
 	size_t save = pos_;
+	uint64_t value = 0;
 	try
 	{
 		TypePtr type = parse_type_id();
 		expect(OP_RPAREN);
-		(void)type;
+		value = is_sizeof ? pa11::type_size(type) : pa11::type_align(type);
 	}
 	catch (const exception&)
 	{
 		pos_ = save;
-		Expr ignored = parse_expression();
-		(void)ignored;
+		Expr expr = parse_expression();
 		expect(OP_RPAREN);
+		TypePtr object_type = expression_object_type(expr.type);
+		value = is_sizeof ? pa11::type_size(object_type) :
+			pa11::type_align(object_type);
 	}
-	return make_sizeof_expr(0);
-	(void)keyword;
+	return make_sizeof_expr(value);
 }
 
 Expr Parser::parse_c_style_cast_or_parenthesized()
@@ -351,6 +380,12 @@ Expr Parser::parse_functional_cast(TypePtr target)
 		Expr zero;
 		zero.type = target;
 		zero.valid = true;
+		zero.constant_expression = true;
+		if (pa11::is_integral_or_bool_type(target))
+		{
+			zero.has_constant_value = true;
+			zero.constant_value = 0;
+		}
 		zero.node = Node("literal prvalue " + pa11::describe_type(target) + " 0");
 		return zero;
 	}

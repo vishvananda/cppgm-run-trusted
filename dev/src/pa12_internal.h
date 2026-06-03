@@ -71,6 +71,11 @@ struct Expr
 	vector<Binding*> overloads;
 	bool valid;
 	bool null_pointer_constant;
+	bool constant_expression;
+	bool has_constant_value;
+	uint64_t constant_value;
+	bool builtin_constant_p;
+	bool braced_init_list;
 
 	Expr();
 };
@@ -190,7 +195,6 @@ private:
 	EFundamentalType parse_enum_underlying_type();
 	bool try_parse_type_name(TypePtr& out);
 	bool starts_declaration();
-	bool starts_definite_declaration() const;
 	bool starts_class_key() const;
 	bool starts_ptr_operator() const;
 	bool starts_declarator() const;
@@ -339,15 +343,12 @@ private:
 
 	string value_category_name(ValueCategory category) const;
 	string qualified_decl_name(const Binding* binding) const;
-	string qualified_type_name(TypePtr type) const;
 	string scoped_type_display_name(Scope* owner, const string& name) const;
 	string class_tag(ETokenType key) const;
 	string make_local_type_name(const string& prefix);
-	string anonymous_type_name(const string& prefix) const;
 	string op_leaf(ETokenType type, const string& source) const;
 	void skip_balanced(ETokenType open, ETokenType close);
 	void skip_template_parameter_clause();
-	void skip_until_template_parameter_separator();
 };
 
 void add_child(Node& parent, const Node& child);

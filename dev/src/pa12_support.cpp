@@ -26,7 +26,12 @@ Expr::Expr()
 	: category(ValueCategory::PRValue),
 	  binding(NULL),
 	  valid(false),
-	  null_pointer_constant(false)
+	  null_pointer_constant(false),
+	  constant_expression(false),
+	  has_constant_value(false),
+	  constant_value(0),
+	  builtin_constant_p(false),
+	  braced_init_list(false)
 {
 }
 

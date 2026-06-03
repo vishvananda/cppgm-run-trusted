@@ -6,6 +6,96 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool type_is_floating(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	return bare->kind == pa11::TypeKind::Fundamental &&
+	       (bare->fundamental == FT_FLOAT ||
+	        bare->fundamental == FT_DOUBLE ||
+	        bare->fundamental == FT_LONG_DOUBLE);
+}
+
+bool type_is_arithmetic(TypePtr type)
+{
+	return pa11::is_integral_or_bool_type(type) || type_is_floating(type);
+}
+
+bool type_is_pointer(TypePtr type)
+{
+	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
+}
+
+bool top_level_const(TypePtr type)
+{
+	return type->kind == pa11::TypeKind::Cv &&
+	       (type->cv & pa11::CV_CONST) != 0;
+}
+
+bool constant_binary_value(ETokenType op,
+                           uint64_t lhs,
+                           uint64_t rhs,
+                           uint64_t& out)
+{
+	switch (op)
+	{
+	case OP_PLUS: out = lhs + rhs; return true;
+	case OP_MINUS: out = lhs - rhs; return true;
+	case OP_STAR: out = lhs * rhs; return true;
+	case OP_DIV:
+		if (rhs == 0) return false;
+		out = lhs / rhs;
+		return true;
+	case OP_MOD:
+		if (rhs == 0) return false;
+		out = lhs % rhs;
+		return true;
+	case OP_XOR: out = lhs ^ rhs; return true;
+	case OP_AMP: out = lhs & rhs; return true;
+	case OP_BOR: out = lhs | rhs; return true;
+	case OP_LSHIFT:
+		if (rhs >= 64) return false;
+		out = lhs << rhs;
+		return true;
+	case OP_RSHIFT:
+		if (rhs >= 64) return false;
+		out = lhs >> rhs;
+		return true;
+	case OP_EQ: out = lhs == rhs ? 1 : 0; return true;
+	case OP_NE: out = lhs != rhs ? 1 : 0; return true;
+	case OP_LT: out = lhs < rhs ? 1 : 0; return true;
+	case OP_GT: out = lhs > rhs ? 1 : 0; return true;
+	case OP_LE: out = lhs <= rhs ? 1 : 0; return true;
+	case OP_GE: out = lhs >= rhs ? 1 : 0; return true;
+	case OP_LAND: out = (lhs != 0 && rhs != 0) ? 1 : 0; return true;
+	case OP_LOR: out = (lhs != 0 || rhs != 0) ? 1 : 0; return true;
+	case OP_COMMA: out = rhs; return true;
+	default:
+		return false;
+	}
+}
+
+bool compound_assignment_rhs_viable(ETokenType op, TypePtr lhs, TypePtr rhs)
+{
+	TypePtr left = pa11::strip_cv(lhs);
+	TypePtr right = pa11::strip_cv(rhs);
+	if (op == OP_PLUSASS || op == OP_MINUSASS)
+	{
+		if (left->kind == pa11::TypeKind::Pointer)
+			return pa11::is_integral_or_bool_type(right);
+		return type_is_arithmetic(left) && type_is_arithmetic(right);
+	}
+	if (op == OP_STARASS || op == OP_DIVASS)
+		return type_is_arithmetic(left) && type_is_arithmetic(right);
+	if (op == OP_MODASS || op == OP_XORASS || op == OP_BANDASS ||
+	    op == OP_BORASS || op == OP_LSHIFTASS || op == OP_RSHIFTASS)
+		return pa11::is_integral_or_bool_type(left) &&
+		       pa11::is_integral_or_bool_type(right);
+	return false;
+}
+
+}  // namespace
 
 Expr Parser::make_id_expr(const QualifiedName& name)
 {
@@ -17,6 +107,7 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		                               false);
 		out.category = ValueCategory::LValue;
 		out.valid = true;
+		out.builtin_constant_p = true;
 		out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 		                " __builtin_constant_p");
 		return out;
@@ -56,6 +147,9 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		out.category = ValueCategory::PRValue;
 		out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
 		                " " + to_string(binding->constant_value));
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = binding->constant_value;
 		out.null_pointer_constant = binding->constant_value == 0;
 		return out;
 	}
@@ -71,7 +165,12 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 	out.node = Node("id-expression " + value_category_name(out.category) + " " +
 	                pa11::describe_type(out.type) + " " + spelling);
 	if (binding->has_constant)
+	{
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = binding->constant_value;
 		out.null_pointer_constant = binding->constant_value == 0;
+	}
 	return out;
 }
 
@@ -94,6 +193,18 @@ Expr Parser::make_binary_expr(ETokenType op,
 	out.type = type;
 	out.category = ValueCategory::PRValue;
 	out.valid = true;
+	out.constant_expression = lhs.constant_expression && rhs.constant_expression;
+	if (lhs.has_constant_value && rhs.has_constant_value)
+	{
+		uint64_t value = 0;
+		if (constant_binary_value(op, lhs.constant_value, rhs.constant_value, value))
+		{
+			out.has_constant_value = true;
+			out.constant_value = value;
+			out.null_pointer_constant = value == 0 &&
+				pa11::is_integral_or_bool_type(out.type);
+		}
+	}
 	out.node = Node("binary-expression prvalue " + pa11::describe_type(type) +
 	                " " + op_leaf(op, text));
 	add_child(out.node, lhs.node);
@@ -106,15 +217,31 @@ Expr Parser::make_assignment_expr(ETokenType op,
                                   Expr lhs,
                                   Expr rhs)
 {
-	if (lhs.category != ValueCategory::LValue)
+	TypePtr lhs_type = expression_object_type(lhs.type);
+	TypePtr lhs_bare = pa11::strip_cv(lhs_type);
+	if (lhs.category != ValueCategory::LValue ||
+	    top_level_const(lhs_type) ||
+	    lhs_bare->kind == pa11::TypeKind::Array ||
+	    lhs_bare->kind == pa11::TypeKind::Function)
 		throw runtime_error("assignment lhs is not lvalue");
-	Conversion conv = convert_to(rhs, expression_object_type(lhs.type));
-	if (!conv.viable && op == OP_ASS)
-		throw runtime_error("invalid assignment conversion");
-	if (!conv.viable)
+	Conversion conv;
+	if (op == OP_ASS)
+	{
+		conv = convert_to(rhs, lhs_type);
+		if (!conv.viable)
+			throw runtime_error("invalid assignment conversion");
+	}
+	else
+	{
+		TypePtr rhs_type = lvalue_to_rvalue_type(rhs.type);
+		if (!compound_assignment_rhs_viable(op,
+		                                    lvalue_to_rvalue_type(lhs.type),
+		                                    rhs_type))
+			throw runtime_error("invalid compound assignment conversion");
 		conv = Conversion(true, 2, rhs);
+	}
 	Expr out;
-	out.type = expression_object_type(lhs.type);
+	out.type = lhs_type;
 	out.category = ValueCategory::LValue;
 	out.valid = true;
 	out.node = Node("assignment-expression lvalue " +
@@ -142,6 +269,28 @@ Expr Parser::make_unary_expr(ETokenType op, const string& text, Expr inner)
 		out.type = expression_object_type(inner.type);
 	out.category = (op == OP_INC || op == OP_DEC) ? ValueCategory::LValue :
 		ValueCategory::PRValue;
+	out.constant_expression = out.category == ValueCategory::PRValue &&
+	                          inner.constant_expression;
+	if (inner.has_constant_value)
+	{
+		uint64_t value = inner.constant_value;
+		bool have_value = true;
+		if (op == OP_MINUS)
+			value = uint64_t(0) - value;
+		else if (op == OP_LNOT)
+			value = value == 0 ? 1 : 0;
+		else if (op == OP_COMPL)
+			value = ~value;
+		else if (op != OP_PLUS)
+			have_value = false;
+		if (have_value)
+		{
+			out.has_constant_value = true;
+			out.constant_value = value;
+			out.null_pointer_constant = value == 0 &&
+				pa11::is_integral_or_bool_type(out.type);
+		}
+	}
 	out.node = Node("unary-expression " + value_category_name(out.category) +
 	                " " + pa11::describe_type(out.type) + " " +
 	                op_leaf(op, text));
@@ -228,6 +377,11 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 	out.category = target->kind == pa11::TypeKind::RValueReference
 		? ValueCategory::XValue : ValueCategory::PRValue;
 	out.valid = true;
+	out.constant_expression = inner.constant_expression;
+	out.has_constant_value = inner.has_constant_value;
+	out.constant_value = inner.constant_value;
+	out.null_pointer_constant = inner.null_pointer_constant &&
+	                            !type_is_pointer(target);
 	if (target->kind == pa11::TypeKind::RValueReference &&
 	    inner.binding != NULL)
 	{
@@ -245,11 +399,14 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 
 Expr Parser::make_sizeof_expr(uint64_t value)
 {
-	(void)value;
 	Expr out;
 	out.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
 	out.category = ValueCategory::PRValue;
 	out.valid = true;
+	out.constant_expression = true;
+	out.has_constant_value = true;
+	out.constant_value = value;
+	out.null_pointer_constant = value == 0;
 	out.node = Node("sizeof-expression prvalue unsigned long int");
 	return out;
 }
