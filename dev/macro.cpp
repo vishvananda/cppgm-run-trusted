@@ -1,47 +1,21 @@
 // (C) 2013 CPPGM Foundation www.cppgm.org.  All rights reserved.
 
+#include <cstdlib>
+#include <exception>
 #include <iostream>
-#include <string>
 
 using namespace std;
 
-#include "exceptions.h"
-
-bool HasBatchStdinArg(int argc, char** argv)
-{
-	for (int i = 1; i < argc; i++)
-	{
-		if (string(argv[i]) == "--batch-stdin")
-			return true;
-	}
-	return false;
-}
-
-int RunNotImplementedBatchMode()
-{
-	string line;
-	while (getline(cin, line))
-	{
-		(void)line;
-		cout << "EXIT_NOT_IMPLEMENTED" << endl;
-	}
-	return EXIT_SUCCESS;
-}
+#include "macro_support.h"
 
 int main(int argc, char** argv)
 {
+	(void)argc;
+	(void)argv;
 	try
 	{
-		if (HasBatchStdinArg(argc, argv))
-			return RunNotImplementedBatchMode();
-
-		// TODO: Implement macro as per PA4 assignment description
-		throw NotImplementedException();
-	}
-	catch (const NotImplementedException& e)
-	{
-		cerr << "ERROR: " << e.what() << endl;
-		return CPPGM_EXIT_NOT_IMPLEMENTED;
+		macro::run_macro(cin);
+		return EXIT_SUCCESS;
 	}
 	catch (exception& e)
 	{

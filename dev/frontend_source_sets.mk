@@ -7,9 +7,9 @@ FRONTEND_SOURCE_SET_TARGETS := abimangle pptoken posttoken ctrlexpr macro prepro
 
 FRONTEND_OBJ_BASENAMES_abimangle :=
 FRONTEND_OBJ_BASENAMES_pptoken := pptoken_lib
-FRONTEND_OBJ_BASENAMES_posttoken := pptoken_lib posttoken_support
+FRONTEND_OBJ_BASENAMES_posttoken := pptoken_lib pp_token posttoken_support posttoken_pipeline
 FRONTEND_OBJ_BASENAMES_ctrlexpr := pptoken_lib posttoken_support ctrlexpr_support
-FRONTEND_OBJ_BASENAMES_macro :=
+FRONTEND_OBJ_BASENAMES_macro := pptoken_lib pp_token posttoken_support posttoken_pipeline macro_support
 FRONTEND_OBJ_BASENAMES_preproc :=
 FRONTEND_OBJ_BASENAMES_recog :=
 FRONTEND_OBJ_BASENAMES_nsdecl :=
