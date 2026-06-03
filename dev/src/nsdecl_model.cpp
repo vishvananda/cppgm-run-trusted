@@ -356,7 +356,10 @@ Namespace* get_or_create_named_namespace(TranslationUnit& tu,
 	if (existing != parent->named_namespaces.end())
 	{
 		if (is_inline)
+		{
 			existing->second->is_inline = true;
+			add_using_directive(parent, existing->second);
+		}
 		return existing->second;
 	}
 	unique_ptr<Namespace> child(new Namespace(name, true, is_inline, parent));

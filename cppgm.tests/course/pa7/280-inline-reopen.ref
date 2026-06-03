@@ -1,0 +1,9 @@
+1 translation units
+start translation unit course/pa7/280-inline-reopen.t
+start unnamed namespace
+variable i int
+start namespace A
+inline namespace
+end namespace
+end namespace
+end translation unit
