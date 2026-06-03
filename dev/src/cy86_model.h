@@ -57,6 +57,7 @@ struct LiteralValue
 	string source;
 	EFundamentalType type;
 	vector<unsigned char> bytes;
+	size_t alignment;
 	bool signed_integral;
 	bool unsigned_integral;
 	bool floating;

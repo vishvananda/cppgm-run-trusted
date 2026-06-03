@@ -1,0 +1,5 @@
+data_start: data8 0;
+s: "abc";
+start:
+	isub64 t64 s data_start;
+	syscall1 t64 60 t64;

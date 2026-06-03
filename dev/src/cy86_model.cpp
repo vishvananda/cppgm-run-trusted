@@ -101,6 +101,7 @@ LiteralValue make_integer_literal(const string& source,
 	LiteralValue out;
 	out.source = source;
 	out.type = type;
+	out.alignment = fundamental_size(type);
 	out.signed_integral = is_signed_integral_type(type);
 	out.unsigned_integral = is_unsigned_integral_type(type);
 	out.arithmetic = true;
@@ -113,6 +114,7 @@ LiteralValue make_float_literal(const string& source, EFundamentalType type)
 	LiteralValue out;
 	out.source = source;
 	out.type = type;
+	out.alignment = fundamental_size(type);
 	out.floating = true;
 	out.arithmetic = true;
 	if (type == FT_FLOAT)
@@ -267,6 +269,7 @@ RegisterRef::RegisterRef() : base(RegisterBase::X), width_bits(0) {}
 
 LiteralValue::LiteralValue()
 	: type(FT_INT),
+	  alignment(1),
 	  signed_integral(false),
 	  unsigned_integral(false),
 	  floating(false),
@@ -387,6 +390,7 @@ LiteralValue parse_literal_value(const string& source)
 		LiteralValue out;
 		out.source = source;
 		out.type = string_info.type;
+		out.alignment = 1;
 		out.bytes = string_info.bytes;
 		return out;
 	}

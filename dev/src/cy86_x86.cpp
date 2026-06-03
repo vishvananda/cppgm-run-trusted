@@ -268,12 +268,6 @@ int cyreg_x86(const RegisterRef& reg)
 	return register_family_x86_code(reg.base);
 }
 
-bool operand_is_float_mem_only(const Operand& op)
-{
-	return op.kind == OperandKind::Memory || op.kind == OperandKind::Immediate ||
-	       op.kind == OperandKind::Register;
-}
-
 void require_integral_literal(const LiteralValue& literal)
 {
 	if (!literal.signed_integral && !literal.unsigned_integral)
@@ -284,9 +278,7 @@ void validate_address(const MemoryAddress& mem)
 {
 	if (mem.kind == AddressKind::Register && mem.reg.width_bits != 64)
 		throw runtime_error("memory address register must be 64-bit");
-	if (mem.kind == AddressKind::Literal)
-		require_integral_literal(mem.literal);
-	if (mem.has_addend)
+	if (mem.kind == AddressKind::Label && mem.has_addend)
 		require_integral_literal(mem.addend);
 }
 
@@ -302,8 +294,6 @@ void validate_operand(const Operand& op, const OperandDesc& desc)
 		throw runtime_error("no 80-bit CY86 register");
 	if (op.kind == OperandKind::Memory)
 		validate_address(op.mem);
-	if (desc.width_bits == 80 && !operand_is_float_mem_only(op))
-		throw runtime_error("invalid 80-bit operand");
 }
 
 const OpcodeDesc& checked_opcode(const Statement& stmt)
@@ -764,12 +754,10 @@ void emit_int_to_f80(Emitter& e, const Statement& stmt, int width,
 		e.u8(0x79);
 		const size_t patch = e.pos();
 		e.u8(0);
-		const size_t begin = e.pos();
 		emit_load_const_tbyte(e, ctx.const_2_64);
 		e.u8(0xde);
 		e.u8(0xc1);
 		e.patch_rel8(patch, e.pos());
-		(void)begin;
 	}
 	else
 	{
@@ -850,8 +838,7 @@ void emit_float_conversion(Emitter& e, const Statement& stmt, const Context& ctx
 		}
 		else
 		{
-			const int prefix = unsign ? 8 : 8;
-			const int width = stoi(op.substr(prefix));
+			const int width = stoi(op.substr(8));
 			emit_f80_to_int(e, stmt, width, unsign, ctx);
 		}
 		return;
@@ -938,7 +925,7 @@ vector<unsigned char> data_bytes(const Statement& stmt, const OpcodeDesc* desc,
 size_t data_align(const Statement& stmt, const OpcodeDesc* desc)
 {
 	if (stmt.kind == StatementKind::LiteralData)
-		return max<size_t>(1, stmt.literal.bytes.size());
+		return max<size_t>(1, stmt.literal.alignment);
 	return static_cast<size_t>(width_bytes(desc->data_width_bits));
 }
 

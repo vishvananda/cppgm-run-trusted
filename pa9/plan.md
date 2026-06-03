@@ -73,3 +73,52 @@ perl scripts/cppgm_file_audit.pl --stage pa9 --paths dev/src
 
 Older-assignment regressions from the through report are blockers and must be
 fixed before PA9 is considered complete.
+
+## Architecture Review
+
+The implemented PA9 path follows the staged compiler ownership boundary in this
+plan.  `dev/cy86.cpp` is CLI glue: it accepts `-o`, source files, and the
+optional `--target` argument, then builds preprocessor options and calls
+`cy86::compile_to_file`.  The current PA9 backend emits native Linux x86-64;
+`--target` is accepted for harness compatibility and is not used to select an
+alternate lowering path.
+
+`cy86_parser` preprocesses each translation unit with the PA5 pipeline,
+collects checked post-tokens, drops per-file EOF tokens, concatenates the
+streams in command-line order, and parses them into typed `Statement`,
+`Operand`, `ImmediateValue`, and `MemoryAddress` objects.  It does not parse
+from formatted output or recover facts from strings after the fact.
+
+`cy86_model` owns opcode descriptors, CY86 register parsing, literal decoding,
+literal width conversion, label immediate resolution, and literal alignment
+facts.  Scalar literal statements carry fundamental-type alignment; string
+literal statements carry byte alignment, matching the PA9 reference layout.
+
+`cy86_x86` owns semantic validation, label collection, statement layout, x86-64
+emission, and ELF construction.  It emits one writable/readable/executable ELF
+load segment at `0x400000`, with CY86 labels assigned to real virtual addresses
+inside the emitted image.  Instruction sizes are stable during the single layout
+pass because label immediates, jumps, and calls are lowered through fixed-width
+absolute loads.
+
+The lowerer emits real x86-64 instruction bytes and data bytes.  It does not
+shell out to a host compiler, execute reference binaries, embed generated
+program payloads, use an interpreter/VM, or gate behavior on test filenames or
+fixture contents.  Hot paths are linear in source tokens/statements, with small
+constant descriptor lookups and bounded per-instruction emission.
+
+## Final Architecture Review
+
+The audit cleanup kept the original architecture and fixed the issues found
+inside it rather than adding a fallback path.  Literal alignment is now a typed
+model fact, so the lowerer no longer infers alignment from encoded byte length
+and no longer over-aligns string literal arrays.  Memory-address validation now
+allows non-label literal terms to be converted as 64-bit immediates, while
+label addends retain the README-required integral validation.
+
+No skipped phases, dummy outputs, runtime payload substitutes, test-specific
+gates, timeout workarounds, file-audit bypasses, duplicated semantic ownership,
+or PA9 performance blockers remain from the reviewed implementation.  The
+remaining PA9 source layout matches the source-set wiring in
+`dev/frontend_source_sets.mk`, and new regression coverage lives under
+`cppgm.tests/course/pa9/`.
