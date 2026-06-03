@@ -210,6 +210,15 @@ struct CharacterLiteralInfo
 	string ud_suffix;
 };
 
+struct StringLiteralInfo
+{
+	LiteralEncoding encoding;
+	EFundamentalType type;
+	size_t elements;
+	vector<unsigned char> bytes;
+	string ud_suffix;
+};
+
 bool IsAsciiDigit(char c);
 bool IsOctalDigit(char c);
 bool IsHexDigitChar(char c);
@@ -220,6 +229,7 @@ bool AnalyzeIntegerLiteral(const string& source, IntegerLiteralInfo& out);
 bool AnalyzeCharacterLiteral(const string& source,
                              bool user_defined,
                              CharacterLiteralInfo& out);
+bool AnalyzeStringLiteral(const string& source, StringLiteralInfo& out);
 bool DecodeUtf8At(const string& s, size_t& pos, uint32_t& cp);
 bool IsValidCodePoint(uint32_t cp);
 bool DecodeOrdinaryBody(const string& s,

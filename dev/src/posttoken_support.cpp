@@ -324,6 +324,13 @@ struct IntegerCore
 	bool decimal;
 };
 
+struct StringPiece
+{
+	LiteralEncoding encoding;
+	string ud_suffix;
+	vector<uint32_t> code_points;
+};
+
 bool IsIdentifierSuffixBodyByte(unsigned char c)
 {
 	return c == '_' || (c >= '0' && c <= '9') ||
@@ -608,6 +615,220 @@ bool ParseCharacterLiteral(const string& source,
 	return true;
 }
 
+void SkipHorizontalSpace(const string& source, size_t& pos)
+{
+	while (pos < source.size() &&
+	       (source[pos] == ' ' || source[pos] == '\t' ||
+	        source[pos] == '\n' || source[pos] == '\r' ||
+	        source[pos] == '\f' || source[pos] == '\v'))
+		++pos;
+}
+
+string ConsumeLiteralSuffix(const string& source, size_t& pos)
+{
+	const size_t begin = pos;
+	if (pos < source.size() &&
+	    (source[pos] == '_' ||
+	     IsIdentifierSuffixBodyByte(static_cast<unsigned char>(source[pos]))))
+	{
+		while (pos < source.size() &&
+		       IsIdentifierSuffixBodyByte(static_cast<unsigned char>(source[pos])))
+			++pos;
+	}
+	return source.substr(begin, pos - begin);
+}
+
+bool StartsRawStringLiteral(const string& source,
+                            size_t pos,
+                            size_t& prefix_len,
+                            LiteralEncoding& encoding)
+{
+	if (source.compare(pos, 4, "u8R\"") == 0)
+	{
+		prefix_len = 3;
+		encoding = LiteralEncoding::U8;
+		return true;
+	}
+	if (source.compare(pos, 3, "uR\"") == 0)
+	{
+		prefix_len = 2;
+		encoding = LiteralEncoding::U;
+		return true;
+	}
+	if (source.compare(pos, 3, "UR\"") == 0)
+	{
+		prefix_len = 2;
+		encoding = LiteralEncoding::UpperU;
+		return true;
+	}
+	if (source.compare(pos, 3, "LR\"") == 0)
+	{
+		prefix_len = 2;
+		encoding = LiteralEncoding::L;
+		return true;
+	}
+	if (source.compare(pos, 2, "R\"") == 0)
+	{
+		prefix_len = 1;
+		encoding = LiteralEncoding::Ordinary;
+		return true;
+	}
+	return false;
+}
+
+bool ParseRawStringPiece(const string& source, size_t& pos, StringPiece& piece)
+{
+	size_t prefix_len = 0;
+	if (!StartsRawStringLiteral(source, pos, prefix_len, piece.encoding))
+		return false;
+	const size_t delimiter_begin = pos + prefix_len + 1;
+	const size_t open = source.find('(', delimiter_begin);
+	if (open == string::npos)
+		return false;
+	const string delimiter =
+		source.substr(delimiter_begin, open - delimiter_begin);
+	const string close_marker = ")" + delimiter + "\"";
+	const size_t close = source.find(close_marker, open + 1);
+	if (close == string::npos)
+		return false;
+	size_t scan = open + 1;
+	while (scan < close)
+	{
+		uint32_t cp = 0;
+		if (!DecodeUtf8At(source, scan, cp) || !IsValidCodePoint(cp))
+			return false;
+		piece.code_points.push_back(cp);
+	}
+	pos = close + close_marker.size();
+	piece.ud_suffix = ConsumeLiteralSuffix(source, pos);
+	return piece.ud_suffix.empty() || IsValidUdSuffix(piece.ud_suffix);
+}
+
+bool ParseOrdinaryStringPiece(const string& source,
+                              size_t& pos,
+                              StringPiece& piece)
+{
+	const string tail = source.substr(pos);
+	const size_t prefix_len =
+		PrefixLengthForQuotedLiteral(tail, '"', piece.encoding);
+	if (prefix_len == string::npos)
+		return false;
+	const size_t quote_pos = pos + prefix_len;
+	size_t close_pos = 0;
+	if (!FindOrdinaryClosingQuote(source, quote_pos, '"', close_pos))
+		return false;
+	if (!DecodeOrdinaryBody(source, quote_pos + 1, close_pos, piece.code_points))
+		return false;
+	pos = close_pos + 1;
+	piece.ud_suffix = ConsumeLiteralSuffix(source, pos);
+	return piece.ud_suffix.empty() || IsValidUdSuffix(piece.ud_suffix);
+}
+
+bool ParseStringPiece(const string& source, size_t& pos, StringPiece& piece)
+{
+	piece.ud_suffix.clear();
+	piece.code_points.clear();
+	SkipHorizontalSpace(source, pos);
+	if (pos >= source.size())
+		return false;
+	if (ParseRawStringPiece(source, pos, piece))
+		return true;
+	return ParseOrdinaryStringPiece(source, pos, piece);
+}
+
+bool ChooseStringEncoding(const vector<StringPiece>& pieces,
+                          LiteralEncoding& encoding)
+{
+	bool have_prefixed = false;
+	encoding = LiteralEncoding::Ordinary;
+	for (size_t i = 0; i < pieces.size(); ++i)
+	{
+		if (pieces[i].encoding == LiteralEncoding::Ordinary)
+			continue;
+		if (!have_prefixed)
+		{
+			encoding = pieces[i].encoding;
+			have_prefixed = true;
+		}
+		else if (encoding != pieces[i].encoding)
+			return false;
+	}
+	return true;
+}
+
+bool CombineStringSuffixes(const vector<StringPiece>& pieces, string& ud_suffix)
+{
+	ud_suffix.clear();
+	for (size_t i = 0; i < pieces.size(); ++i)
+	{
+		if (pieces[i].ud_suffix.empty())
+			continue;
+		if (ud_suffix.empty())
+			ud_suffix = pieces[i].ud_suffix;
+		else if (ud_suffix != pieces[i].ud_suffix)
+			return false;
+	}
+	return true;
+}
+
+bool EncodeStringLiteralBytes(const vector<uint32_t>& code_points,
+                              LiteralEncoding encoding,
+                              EFundamentalType& type,
+                              size_t& elements,
+                              vector<unsigned char>& bytes)
+{
+	bytes.clear();
+	elements = 0;
+	if (encoding == LiteralEncoding::Ordinary ||
+	    encoding == LiteralEncoding::U8)
+	{
+		type = FT_CHAR;
+		for (size_t i = 0; i < code_points.size(); ++i)
+			AppendUtf8CodePoint(bytes, code_points[i]);
+		AppendByte(bytes, 0);
+		elements = bytes.size();
+		return true;
+	}
+	if (encoding == LiteralEncoding::U)
+	{
+		type = FT_CHAR16_T;
+		for (size_t i = 0; i < code_points.size(); ++i)
+		{
+			const uint32_t cp = code_points[i];
+			if (cp <= 0xFFFF)
+			{
+				if (cp >= 0xD800 && cp <= 0xDFFF)
+					return false;
+				AppendUint16(bytes, cp);
+				++elements;
+			}
+			else if (cp <= 0x10FFFF)
+			{
+				const uint32_t v = cp - 0x10000;
+				AppendUint16(bytes, 0xD800 + (v >> 10));
+				AppendUint16(bytes, 0xDC00 + (v & 0x3FF));
+				elements += 2;
+			}
+			else
+				return false;
+		}
+		AppendUint16(bytes, 0);
+		++elements;
+		return true;
+	}
+	type = encoding == LiteralEncoding::L ? FT_WCHAR_T : FT_CHAR32_T;
+	for (size_t i = 0; i < code_points.size(); ++i)
+	{
+		if (code_points[i] > 0x10FFFF)
+			return false;
+		AppendUint32(bytes, code_points[i]);
+		++elements;
+	}
+	AppendUint32(bytes, 0);
+	++elements;
+	return true;
+}
+
 }  // namespace
 
 bool IsAsciiDigit(char c)
@@ -736,6 +957,37 @@ bool AnalyzeCharacterLiteral(const string& source,
 	out.code_point = cp;
 	out.ud_suffix = ud_suffix;
 	return true;
+}
+
+bool AnalyzeStringLiteral(const string& source, StringLiteralInfo& out)
+{
+	vector<StringPiece> pieces;
+	size_t pos = 0;
+	for (;;)
+	{
+		SkipHorizontalSpace(source, pos);
+		if (pos >= source.size())
+			break;
+		StringPiece piece;
+		if (!ParseStringPiece(source, pos, piece))
+			return false;
+		pieces.push_back(piece);
+	}
+	if (pieces.empty())
+		return false;
+	if (!ChooseStringEncoding(pieces, out.encoding) ||
+	    !CombineStringSuffixes(pieces, out.ud_suffix))
+		return false;
+	vector<uint32_t> code_points;
+	for (size_t i = 0; i < pieces.size(); ++i)
+		code_points.insert(code_points.end(),
+		                   pieces[i].code_points.begin(),
+		                   pieces[i].code_points.end());
+	return EncodeStringLiteralBytes(code_points,
+	                                out.encoding,
+	                                out.type,
+	                                out.elements,
+	                                out.bytes);
 }
 
 bool DecodeUtf8At(const string& s, size_t& pos, uint32_t& cp)
