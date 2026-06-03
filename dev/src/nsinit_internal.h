@@ -122,6 +122,7 @@ struct InitPlan
 	Entity* address_entity;
 	StringLiteral* address_string;
 	Temporary* address_temporary;
+	bool constant;
 
 	InitPlan();
 };
@@ -135,6 +136,7 @@ struct Entity
 	Namespace* target_namespace;
 	StorageClass storage;
 	bool declared_extern;
+	bool is_thread_local;
 	bool is_constexpr;
 	bool is_inline;
 	bool is_definition;
@@ -300,6 +302,7 @@ Entity* add_variable(TranslationUnit& tu,
                      const string& name,
                      TypePtr type,
                      StorageClass storage,
+                     bool is_thread_local,
                      bool is_constexpr,
                      bool is_definition,
                      const Initializer* initializer,

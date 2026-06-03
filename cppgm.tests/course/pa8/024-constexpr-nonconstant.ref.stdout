@@ -1,0 +1,13 @@
+ERROR: unsupported constexpr variable initializer at cppgm.tests/course/pa8/024-constexpr-nonconstant.t.1:2:15 [top-level declaration 1 kind=simple-declaration ast={simple-declaration
+  decl-specifier-seq
+    decl-specifier KW_CONSTEXPR:constexpr
+    decl-specifier KW_INT:int
+  init-declarator-list
+    init-declarator
+      declarator
+        identifier x
+      initializer
+        id-expression y
+}]
+Diagnostic context:
+collect_simple_declaration [constexpr int x=y;] at cppgm.tests/course/pa8/024-constexpr-nonconstant.t.1:2:1

@@ -1,0 +1,1 @@
+ERROR: invalid initializer [target pointer to char] [source array of 2 const char] [init "x"]

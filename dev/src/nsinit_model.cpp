@@ -207,7 +207,8 @@ Expr::Expr(ExprKind k)
 InitPlan::InitPlan()
 	: address_entity(NULL),
 	  address_string(NULL),
-	  address_temporary(NULL)
+	  address_temporary(NULL),
+	  constant(true)
 {
 }
 
@@ -218,6 +219,7 @@ Entity::Entity(EntityKind k, const string& n, Namespace* o)
 	  target_namespace(NULL),
 	  storage(StorageClass::None),
 	  declared_extern(false),
+	  is_thread_local(false),
 	  is_constexpr(false),
 	  is_inline(false),
 	  is_definition(false),
@@ -636,6 +638,7 @@ Entity* add_variable(TranslationUnit& tu,
                      const string& name,
                      TypePtr type,
                      StorageClass storage,
+                     bool is_thread_local,
                      bool is_constexpr,
                      bool is_definition,
                      const Initializer* initializer,
@@ -662,6 +665,8 @@ Entity* add_variable(TranslationUnit& tu,
 		}
 		existing->declared_extern =
 			existing->declared_extern || storage == StorageClass::Extern;
+		existing->is_thread_local =
+			existing->is_thread_local || is_thread_local;
 		existing->is_constexpr = existing->is_constexpr || is_constexpr;
 		if (is_definition)
 		{
@@ -679,6 +684,7 @@ Entity* add_variable(TranslationUnit& tu,
 	entity->type = type;
 	entity->storage = storage;
 	entity->declared_extern = storage == StorageClass::Extern;
+	entity->is_thread_local = is_thread_local;
 	entity->is_constexpr = is_constexpr;
 	entity->is_definition = is_definition;
 	entity->has_initializer = initializer != NULL;

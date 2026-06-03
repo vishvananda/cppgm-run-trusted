@@ -36,6 +36,7 @@ struct DeclSpecs
 	bool typedef_decl;
 	bool constexpr_decl;
 	bool inline_decl;
+	bool thread_local_decl;
 	StorageClass storage;
 	unsigned cv;
 	vector<ETokenType> builtin;
@@ -45,6 +46,7 @@ struct DeclSpecs
 		: typedef_decl(false),
 		  constexpr_decl(false),
 		  inline_decl(false),
+		  thread_local_decl(false),
 		  storage(StorageClass::None),
 		  cv(CV_NONE)
 	{
@@ -104,9 +106,7 @@ bool is_cv_token(ETokenType type)
 
 bool is_storage_token(ETokenType type)
 {
-	return type == KW_STATIC ||
-	       type == KW_THREAD_LOCAL ||
-	       type == KW_EXTERN;
+	return type == KW_STATIC || type == KW_EXTERN;
 }
 
 bool is_builtin_type_token(ETokenType type)
@@ -559,6 +559,13 @@ private:
 	                      TypePtr type,
 	                      shared_ptr<Expr> init)
 	{
+		if (specs.constexpr_decl)
+		{
+			if (!init.get())
+				throw runtime_error("constexpr variable requires initializer");
+			if (!is_reference_type(type))
+				type = make_cv(type, CV_CONST);
+		}
 		if (is_void_type(type))
 			throw runtime_error("object of void type");
 		const bool definition =
@@ -578,7 +585,8 @@ private:
 			initializer_ptr = &initializer;
 		}
 		add_variable(tu_, target, name, type, specs.storage,
-		             specs.constexpr_decl, definition, initializer_ptr,
+		             specs.thread_local_decl, specs.constexpr_decl,
+		             definition, initializer_ptr,
 		             next_order());
 	}
 
@@ -602,6 +610,11 @@ private:
 			else if (consume(KW_INLINE))
 			{
 				specs.inline_decl = true;
+				saw_any = true;
+			}
+			else if (consume(KW_THREAD_LOCAL))
+			{
+				specs.thread_local_decl = true;
 				saw_any = true;
 			}
 			else if (at_simple_storage())
@@ -644,8 +657,6 @@ private:
 	{
 		if (consume(KW_STATIC))
 			return StorageClass::Static;
-		if (consume(KW_THREAD_LOCAL))
-			return StorageClass::ThreadLocal;
 		expect(KW_EXTERN);
 		return StorageClass::Extern;
 	}

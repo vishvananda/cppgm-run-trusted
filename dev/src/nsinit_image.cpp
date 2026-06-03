@@ -116,27 +116,6 @@ void append_raw_bytes(vector<unsigned char>& out, const void* data, size_t size)
 	out.insert(out.end(), begin, begin + size);
 }
 
-void append_float_bytes(vector<unsigned char>& out,
-                        EFundamentalType dest,
-                        const string& source)
-{
-	if (dest == FT_FLOAT)
-	{
-		float value = PA2Decode_float(source);
-		append_raw_bytes(out, &value, sizeof(value));
-	}
-	else if (dest == FT_DOUBLE)
-	{
-		double value = PA2Decode_double(source);
-		append_raw_bytes(out, &value, sizeof(value));
-	}
-	else
-	{
-		long double value = PA2Decode_long_double(source);
-		append_raw_bytes(out, &value, sizeof(value));
-	}
-}
-
 bool string_array_compatible(TypePtr dest, StringLiteral* literal)
 {
 	TypePtr element = strip_cv(dest->base);
@@ -147,6 +126,110 @@ bool string_array_compatible(TypePtr dest, StringLiteral* literal)
 		       element->fundamental == FT_SIGNED_CHAR ||
 		       element->fundamental == FT_UNSIGNED_CHAR;
 	return element->fundamental == literal->element_type;
+}
+
+unsigned top_level_cv(TypePtr type)
+{
+	return type->kind == TypeKind::Cv ? type->cv : CV_NONE;
+}
+
+bool same_unqualified_type(TypePtr left, TypePtr right)
+{
+	return same_type(strip_cv(left), strip_cv(right));
+}
+
+bool cv_qualification_convertible(TypePtr dest, TypePtr source)
+{
+	return same_unqualified_type(dest, source) &&
+	       (top_level_cv(source) & ~top_level_cv(dest)) == 0;
+}
+
+TypePtr string_literal_lvalue_type(const ExprValue& value)
+{
+	TypePtr bare = strip_cv(value.type);
+	if (!value.string_literal || bare->kind != TypeKind::Array)
+		return value.type;
+	return make_array(make_cv(bare->base, CV_CONST),
+	                  bare->unknown_bound,
+	                  bare->bound);
+}
+
+TypePtr effective_lvalue_type(const ExprValue& value)
+{
+	if (value.string_literal)
+		return string_literal_lvalue_type(value);
+	return value.type;
+}
+
+bool is_arithmetic_fundamental(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	return is_integral_or_bool_type(bare) || is_floating_type(bare);
+}
+
+bool is_nullptr_type(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	return bare->kind == TypeKind::Fundamental &&
+	       bare->fundamental == FT_NULLPTR_T;
+}
+
+bool decode_floating_value(const ExprValue& value, long double& out)
+{
+	if (!value.known_floating)
+		return false;
+	out = PA2Decode_long_double(value.floating_source);
+	return true;
+}
+
+void append_converted_integer(vector<unsigned char>& bytes,
+                              TypePtr dest,
+                              uint64_t value)
+{
+	TypePtr bare = strip_cv(dest);
+	if (bare->kind == TypeKind::Fundamental &&
+	    bare->fundamental == FT_BOOL)
+		value = value == 0 ? 0 : 1;
+	append_integer_le(bytes, value, type_size(dest));
+}
+
+void append_converted_float(vector<unsigned char>& bytes,
+                            TypePtr dest,
+                            long double value)
+{
+	TypePtr bare = strip_cv(dest);
+	if (bare->fundamental == FT_FLOAT)
+	{
+		float out = static_cast<float>(value);
+		append_raw_bytes(bytes, &out, sizeof(out));
+	}
+	else if (bare->fundamental == FT_DOUBLE)
+	{
+		double out = static_cast<double>(value);
+		append_raw_bytes(bytes, &out, sizeof(out));
+	}
+	else
+	{
+		long double out = value;
+		append_raw_bytes(bytes, &out, sizeof(out));
+	}
+}
+
+bool null_pointer_constant_expr(const shared_ptr<Expr>& expr)
+{
+	if (!expr.get())
+		return false;
+	if (expr->kind == ExprKind::Paren)
+		return null_pointer_constant_expr(expr->inner);
+	if (expr->kind == ExprKind::NullptrLiteral)
+		return true;
+	if (expr->kind == ExprKind::BoolLiteral)
+		return !expr->bool_value;
+	if (expr->kind != ExprKind::Literal)
+		return false;
+	ExprValue value = eval_expression(expr);
+	uint64_t integer = 0;
+	return expr_value_to_integer_constant(value, integer) && integer == 0;
 }
 
 StringLiteral* expr_string_literal(const shared_ptr<Expr>& expr)
@@ -197,55 +280,184 @@ InitPlan build_reference_initializer(Program& program,
                                      TypePtr dest,
                                      const shared_ptr<Expr>& expr)
 {
+	if (dest->kind == TypeKind::RValueReference)
+		throw runtime_error("invalid reference initializer");
 	ExprValue value = eval_expression(expr);
+	if (!value.valid)
+		throw runtime_error("invalid reference initializer");
 	InitPlan init;
 	init.bytes.resize(8, 0);
 	if (value.category == ValueCategory::Lvalue &&
 	    (value.address_entity != NULL || value.address_string != NULL))
 	{
+		if (!cv_qualification_convertible(dest->base,
+		                                  effective_lvalue_type(value)))
+			throw runtime_error("invalid reference initializer");
 		init.address_entity = value.address_entity;
 		init.address_string = value.address_string;
 		return init;
 	}
 	if (!type_has_const(dest->base))
 		throw runtime_error("invalid reference initializer");
+	if (!cv_qualification_convertible(dest->base, value.type))
+		throw runtime_error("invalid reference initializer");
 	Temporary* temp = create_temporary(program, dest->base, expr);
 	init.address_temporary = temp;
 	return init;
 }
 
+struct PointerSource
+{
+	TypePtr pointee;
+	Entity* entity;
+	StringLiteral* literal;
+	bool is_function;
+	bool constant;
+
+	PointerSource()
+		: entity(NULL),
+		  literal(NULL),
+		  is_function(false),
+		  constant(false)
+	{
+	}
+};
+
+bool entity_is_top_level_const(Entity* entity)
+{
+	return entity != NULL && (top_level_cv(entity->type) & CV_CONST) != 0;
+}
+
+bool pointer_source_from_value(const ExprValue& value, PointerSource& source)
+{
+	if (!value.valid || value.category != ValueCategory::Lvalue)
+		return false;
+	TypePtr value_type = effective_lvalue_type(value);
+	TypePtr bare = strip_cv(value_type);
+	if (bare->kind == TypeKind::Array)
+	{
+		source.pointee = bare->base;
+		source.entity = value.address_entity;
+		source.literal = value.address_string;
+		source.constant = true;
+		return source.entity != NULL || source.literal != NULL;
+	}
+	if (bare->kind == TypeKind::Function)
+	{
+		source.pointee = bare;
+		source.entity = value.address_entity;
+		source.is_function = true;
+		source.constant = true;
+		return source.entity != NULL;
+	}
+	if (bare->kind == TypeKind::Pointer)
+	{
+		source.pointee = bare->base;
+		source.entity = value.address_entity;
+		source.constant = value.address_entity != NULL &&
+		                  (value.address_entity->is_constexpr ||
+		                   entity_is_top_level_const(value.address_entity));
+		return source.entity != NULL;
+	}
+	return false;
+}
+
+bool pointer_pointee_compatible(TypePtr dest_pointee,
+                                const PointerSource& source)
+{
+	TypePtr bare_dest = strip_cv(dest_pointee);
+	if (source.is_function)
+		return bare_dest->kind == TypeKind::Function &&
+		       same_type(bare_dest, source.pointee);
+	if (bare_dest->kind == TypeKind::Fundamental &&
+	    bare_dest->fundamental == FT_VOID)
+		return (top_level_cv(source.pointee) & ~top_level_cv(dest_pointee)) == 0;
+	return cv_qualification_convertible(dest_pointee, source.pointee);
+}
+
 InitPlan build_pointer_initializer(TypePtr dest, const shared_ptr<Expr>& expr)
 {
-	(void)dest;
 	ExprValue value = eval_expression(expr);
-	Entity* entity = NULL;
-	StringLiteral* literal = NULL;
-	bool is_null = false;
 	InitPlan init;
 	init.bytes.resize(8, 0);
-	if (expr_value_to_pointer_target(value, entity, literal, is_null))
+	if (!value.valid)
+		throw runtime_error("invalid pointer initializer");
+	if (null_pointer_constant_expr(expr))
+		return init;
+	PointerSource source;
+	if (!pointer_source_from_value(value, source))
+		throw runtime_error("invalid pointer initializer");
+	TypePtr bare_dest = strip_cv(dest);
+	if (!pointer_pointee_compatible(bare_dest->base, source))
+		throw runtime_error("invalid pointer initializer");
+	init.address_entity = source.entity;
+	init.address_string = source.literal;
+	init.constant = source.constant;
+	return init;
+}
+
+bool fundamental_source_valid(TypePtr dest, const ExprValue& value)
+{
+	(void)dest;
+	return value.valid &&
+	       (is_arithmetic_fundamental(value.type) || is_nullptr_type(value.type));
+}
+
+InitPlan build_integral_initializer(TypePtr dest, const ExprValue& value)
+{
+	InitPlan init;
+	if (!fundamental_source_valid(dest, value))
+		throw runtime_error("invalid integral initializer");
+	if (is_nullptr_type(value.type))
 	{
-		if (!is_null)
-		{
-			init.address_entity = entity;
-			init.address_string = literal;
-		}
+		append_converted_integer(init.bytes, dest, 0);
 		return init;
 	}
-	if (value.category == ValueCategory::Lvalue &&
-	    value.address_entity != NULL &&
-	    eval_entity_pointer_constant(value.address_entity,
-	                                 entity,
-	                                 literal,
-	                                 is_null))
+	uint64_t integer = 0;
+	if (expr_value_to_integer_constant(value, integer))
 	{
-		if (!is_null)
-		{
-			init.address_entity = entity;
-			init.address_string = literal;
-		}
+		append_converted_integer(init.bytes, dest, integer);
 		return init;
 	}
+	long double floating = 0.0;
+	if (decode_floating_value(value, floating))
+	{
+		append_converted_integer(init.bytes,
+		                         dest,
+		                         static_cast<uint64_t>(floating));
+		return init;
+	}
+	init.bytes.resize(type_size(dest), 0);
+	init.constant = false;
+	return init;
+}
+
+InitPlan build_floating_initializer(TypePtr dest, const ExprValue& value)
+{
+	InitPlan init;
+	if (!fundamental_source_valid(dest, value))
+		throw runtime_error("invalid floating initializer");
+	if (is_nullptr_type(value.type))
+	{
+		append_converted_float(init.bytes, dest, 0.0);
+		return init;
+	}
+	uint64_t integer = 0;
+	if (expr_value_to_integer_constant(value, integer))
+	{
+		append_converted_float(init.bytes,
+		                       dest,
+		                       static_cast<long double>(integer));
+		return init;
+	}
+	long double floating = 0.0;
+	if (decode_floating_value(value, floating))
+	{
+		append_converted_float(init.bytes, dest, floating);
+		return init;
+	}
+	init.bytes.resize(type_size(dest), 0);
+	init.constant = false;
 	return init;
 }
 
@@ -253,31 +465,11 @@ InitPlan build_fundamental_initializer(TypePtr dest,
                                        const shared_ptr<Expr>& expr)
 {
 	ExprValue value = eval_expression(expr);
-	InitPlan init;
-	TypePtr bare = strip_cv(dest);
 	if (is_integral_or_bool_type(dest))
-	{
-		uint64_t integer = 0;
-		if (expr_value_to_integer_constant(value, integer))
-			append_integer_le(init.bytes, integer, type_size(dest));
-		else
-			init.bytes.resize(type_size(dest), 0);
-		return init;
-	}
+		return build_integral_initializer(dest, value);
 	if (is_floating_type(dest))
-	{
-		if (value.known_floating)
-			append_float_bytes(init.bytes, bare->fundamental, value.floating_source);
-		else if (value.known_integer)
-		{
-			const string source = to_string(value.integer);
-			append_float_bytes(init.bytes, bare->fundamental, source);
-		}
-		else
-			init.bytes.resize(type_size(dest), 0);
-		return init;
-	}
-	return zero_init(dest);
+		return build_floating_initializer(dest, value);
+	throw runtime_error("invalid fundamental initializer");
 }
 
 InitPlan build_string_array_initializer(TypePtr dest, StringLiteral* literal)
@@ -300,7 +492,7 @@ InitPlan build_array_initializer(Program&,
 	StringLiteral* literal = expr_string_literal(expr);
 	if (literal != NULL)
 		return build_string_array_initializer(dest, literal);
-	return zero_init(dest);
+	throw runtime_error("invalid array initializer");
 }
 
 InitPlan build_object_initializer(Program& program,
@@ -331,7 +523,7 @@ size_t object_size(LinkedEntity* entity)
 size_t object_align(LinkedEntity* entity)
 {
 	if (entity->kind == EntityKind::Function)
-		return 4;
+		return 1;
 	return type_align(entity->type);
 }
 
@@ -490,6 +682,8 @@ void analyze_program_initializers(Program& program)
 				? definition->initializer.expr
 				: shared_ptr<Expr>());
 		resize_to_type(linked->init, definition->type);
+		if (definition->is_constexpr && !linked->init.constant)
+			throw runtime_error("constexpr initializer is not constant");
 	}
 }
 
