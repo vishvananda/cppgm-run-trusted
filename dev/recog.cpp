@@ -12,31 +12,6 @@
 
 using namespace std;
 
-bool PA6_IsClassName(const string& identifier)
-{
-	return identifier.find('C') != string::npos;
-}
-
-bool PA6_IsTemplateName(const string& identifier)
-{
-	return identifier.find('T') != string::npos;
-}
-
-bool PA6_IsTypedefName(const string& identifier)
-{
-	return identifier.find('Y') != string::npos;
-}
-
-bool PA6_IsEnumName(const string& identifier)
-{
-	return identifier.find('E') != string::npos;
-}
-
-bool PA6_IsNamespaceName(const string& identifier)
-{
-	return identifier.find('N') != string::npos;
-}
-
 namespace
 {
 
@@ -85,6 +60,8 @@ int main(int argc, char** argv)
 		size_t nsrcfiles = args.size() - 2;
 
 		ofstream out(outfile);
+		if (!out)
+			throw runtime_error("cannot open output file");
 
 		out << "recog " << nsrcfiles << endl;
 		const recog::Options options = MakeRecogOptions();

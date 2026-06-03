@@ -1,6 +1,8 @@
 #include "recog_support.h"
 
 #include <algorithm>
+#include <cctype>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <set>
@@ -82,6 +84,15 @@ struct SpecResult
 {
 	State state;
 	bool saw_non_cv_type;
+};
+
+enum class MockNameCategory
+{
+	Class,
+	Template,
+	Typedef,
+	Enum,
+	Namespace
 };
 
 bool operator<(const State& a, const State& b)
@@ -327,9 +338,35 @@ Grammar LoadGrammar(const vector<string>& lines)
 	return grammar;
 }
 
-bool ContainsChar(const string& text, char c)
+char MockNameCategoryLetter(MockNameCategory category)
 {
-	return text.find(c) != string::npos;
+	switch (category)
+	{
+	case MockNameCategory::Class:
+		return 'C';
+	case MockNameCategory::Template:
+		return 'T';
+	case MockNameCategory::Typedef:
+		return 'Y';
+	case MockNameCategory::Enum:
+		return 'E';
+	case MockNameCategory::Namespace:
+		return 'N';
+	}
+	throw logic_error("unknown mock name category");
+}
+
+bool IdentifierHasMockNameCategory(const string& identifier,
+                                   MockNameCategory category)
+{
+	return identifier.find(MockNameCategoryLetter(category)) != string::npos;
+}
+
+bool TokenHasMockNameCategory(const RecogToken& token,
+                              MockNameCategory category)
+{
+	return token.identifier &&
+	       IdentifierHasMockNameCategory(token.source, category);
 }
 
 bool IsTerminalSymbol(const string& symbol)
@@ -357,20 +394,6 @@ bool IsBuiltinSimpleType(const string& symbol)
 		"KW_CHAR", "KW_CHAR16_T", "KW_CHAR32_T", "KW_WCHAR_T",
 		"KW_BOOL", "KW_SHORT", "KW_INT", "KW_LONG", "KW_SIGNED",
 		"KW_UNSIGNED", "KW_FLOAT", "KW_DOUBLE", "KW_VOID", "KW_AUTO"
-	};
-	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
-	{
-		if (symbol == names[i])
-			return true;
-	}
-	return false;
-}
-
-bool IsNoTypeDeclSpecifier(const string& symbol)
-{
-	static const char* const names[] = {
-		"storage-class-specifier", "function-specifier",
-		"KW_FRIEND", "KW_TYPEDEF", "KW_CONSTEXPR"
 	};
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
 	{
@@ -424,9 +447,16 @@ void AppendPostToken(const posttoken::Token& token,
 vector<RecogToken> ConvertTokens(const vector<posttoken::Token>& tokens)
 {
 	vector<RecogToken> out;
+	out.reserve(tokens.size());
 	for (size_t i = 0; i < tokens.size(); ++i)
 		AppendPostToken(tokens[i], out);
 	return out;
+}
+
+const Grammar& Pa6Grammar()
+{
+	static const Grammar grammar = LoadGrammar(pa6_grammar_lines());
+	return grammar;
 }
 
 class Parser
@@ -462,13 +492,13 @@ private:
 		if (name == "class-name")
 			return parse_class_name(state);
 		if (name == "enum-name")
-			return parse_identifier_category(state, 'E');
+			return parse_identifier_category(state, MockNameCategory::Enum);
 		if (name == "namespace-name")
-			return parse_identifier_category(state, 'N');
+			return parse_identifier_category(state, MockNameCategory::Namespace);
 		if (name == "template-name")
-			return parse_identifier_category(state, 'T');
+			return parse_identifier_category(state, MockNameCategory::Template);
 		if (name == "typedef-name")
-			return parse_identifier_category(state, 'Y');
+			return parse_identifier_category(state, MockNameCategory::Typedef);
 		if (name == "type-name")
 			return parse_type_name(state);
 		if (name == "unqualified-id")
@@ -603,6 +633,8 @@ private:
 		vector<State> out;
 		if (state.angle_stack.empty() || state.pos >= tokens_.size())
 			return out;
+		if (state.angle_stack.back() != state.bracket_depth)
+			return out;
 		const string& symbol = tokens_[state.pos].symbol;
 		if (symbol != "OP_GT" &&
 		    symbol != "ST_RSHIFT_1" &&
@@ -659,12 +691,11 @@ private:
 	}
 
 	vector<State> parse_identifier_category(const State& state,
-	                                        char category) const
+	                                        MockNameCategory category) const
 	{
 		vector<State> out;
 		if (state.pos < tokens_.size() &&
-		    tokens_[state.pos].identifier &&
-		    ContainsChar(tokens_[state.pos].source, category))
+		    TokenHasMockNameCategory(tokens_[state.pos], category))
 		{
 			State next = state;
 			++next.pos;
@@ -679,9 +710,10 @@ private:
 		if (state.pos >= tokens_.size() || !tokens_[state.pos].identifier)
 			return out;
 		const string& name = tokens_[state.pos].source;
-		if (!ContainsChar(name, 'C'))
+		if (!IdentifierHasMockNameCategory(name, MockNameCategory::Class))
 			return out;
-		if (ContainsChar(name, 'T') && next_token_is("OP_LT", state.pos))
+		if (IdentifierHasMockNameCategory(name, MockNameCategory::Template) &&
+		    next_token_is("OP_LT", state.pos))
 			return parse_nonterminal("simple-template-id", state);
 		State next = state;
 		++next.pos;
@@ -692,8 +724,7 @@ private:
 	vector<State> parse_type_name(const State& state)
 	{
 		if (state.pos < tokens_.size() &&
-		    tokens_[state.pos].identifier &&
-		    ContainsChar(tokens_[state.pos].source, 'T') &&
+		    TokenHasMockNameCategory(tokens_[state.pos], MockNameCategory::Template) &&
 		    next_token_is("OP_LT", state.pos))
 			return parse_nonterminal("simple-template-id", state);
 		return parse_generic_nonterminal("type-name", state);
@@ -702,8 +733,7 @@ private:
 	vector<State> parse_unqualified_id(const State& state)
 	{
 		if (state.pos < tokens_.size() &&
-		    tokens_[state.pos].identifier &&
-		    ContainsChar(tokens_[state.pos].source, 'T') &&
+		    TokenHasMockNameCategory(tokens_[state.pos], MockNameCategory::Template) &&
 		    next_token_is("OP_LT", state.pos))
 			return parse_nonterminal("template-id", state);
 		return parse_generic_nonterminal("unqualified-id", state);
@@ -747,15 +777,14 @@ private:
 	                          const State& state,
 	                          bool saw_non_cv_type)
 	{
-		for (map<string, Rule>::const_iterator it = grammar_.rules.begin();
-		     it != grammar_.rules.end();
-		     ++it)
-		{
-			if (!IsNoTypeDeclSpecifier(it->first))
-				continue;
-			vector<State> states = parse_nonterminal(it->first, state);
-			append_spec_states(out, states, saw_non_cv_type);
-		}
+		static const char* const nonterminals[] = {
+			"storage-class-specifier", "function-specifier"
+		};
+		for (size_t i = 0; i < sizeof(nonterminals) / sizeof(nonterminals[0]); ++i)
+			append_spec_states(out,
+			                   parse_nonterminal(nonterminals[i], state),
+			                   saw_non_cv_type);
+
 		static const char* const terminals[] = {
 			"KW_FRIEND", "KW_TYPEDEF", "KW_CONSTEXPR"
 		};
@@ -889,7 +918,7 @@ bool recognize_source_file(const string& srcfile, const Options& options)
 	vector<posttoken::Token> post_tokens;
 	if (!posttoken::collect_posttokens_checked(pp_tokens, post_tokens))
 		return false;
-	Grammar grammar = LoadGrammar(pa6_grammar_lines());
+	const Grammar& grammar = Pa6Grammar();
 	vector<RecogToken> tokens = ConvertTokens(post_tokens);
 	Parser parser(grammar, tokens);
 	return parser.parse_translation_unit();
