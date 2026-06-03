@@ -251,7 +251,7 @@ void ProgramLowerer::emit_global(const Node& node)
 		{
 			TypePtr elem = bare->base;
 			if (!node.children.empty() &&
-		    starts_with(node.children[0].line, "braced-init-list"))
+			    starts_with(node.children[0].line, "braced-init-list"))
 			{
 				for (size_t i = 0; i < node.children[0].children.size(); ++i)
 					out << "  " << global_data_item(elem, node.children[0].children[i])
@@ -564,20 +564,20 @@ void ProgramLowerer::emit_pending_inline_definitions()
 		pending_inline_definitions.erase(pending_inline_definitions.begin());
 		map<const Binding*, const Node*>::const_iterator found =
 			inline_definitions.find(binding);
-			if (found == inline_definitions.end())
-				continue;
-			const Binding* base_ctor = first_base_default_constructor(binding);
-			if (base_ctor != NULL &&
-			    defined_functions.find(symbol_for(base_ctor)) ==
-			    defined_functions.end() &&
-			    inline_definitions.find(base_ctor) != inline_definitions.end())
-			{
-				pending_inline_definitions.insert(pending_inline_definitions.begin(),
-				                                  binding);
-				demand_inline_function(base_ctor);
-				continue;
-			}
-			string name = symbol_for(binding);
+		if (found == inline_definitions.end())
+			continue;
+		const Binding* base_ctor = first_base_default_constructor(binding);
+		if (base_ctor != NULL &&
+		    defined_functions.find(symbol_for(base_ctor)) ==
+		    defined_functions.end() &&
+		    inline_definitions.find(base_ctor) != inline_definitions.end())
+		{
+			pending_inline_definitions.insert(pending_inline_definitions.begin(),
+			                                  binding);
+			demand_inline_function(base_ctor);
+			continue;
+		}
+		string name = symbol_for(binding);
 		if (defined_functions.find(name) != defined_functions.end())
 			continue;
 		defined_functions.insert(name);

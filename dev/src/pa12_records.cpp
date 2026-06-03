@@ -83,7 +83,7 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 				default_member_initializers_.find(field);
 			if (init != default_member_initializers_.end())
 				init_actions.push_back(make_member_init_action(field, &init->second));
-				else
+			else
 			{
 				TypePtr field_bare = pa11::strip_cv(field->type);
 				if (ensure_default_constructor(field->type) != NULL ||
@@ -91,16 +91,16 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 				     ensure_default_constructor(field_bare->base) != NULL))
 					init_actions.push_back(make_member_init_action(field, NULL));
 				else if (field_bare->kind == pa11::TypeKind::Record &&
-			         field_bare->scope != NULL)
-			{
-				map<string, vector<Binding*> >::const_iterator ctors =
-					field_bare->scope->members.find(field_bare->scope->name);
-				if (ctors != field_bare->scope->members.end() &&
-				    !ctors->second.empty())
-					throw runtime_error("member has no default constructor");
+				         field_bare->scope != NULL)
+				{
+					map<string, vector<Binding*> >::const_iterator ctors =
+						field_bare->scope->members.find(field_bare->scope->name);
+					if (ctors != field_bare->scope->members.end() &&
+					    !ctors->second.empty())
+						throw runtime_error("member has no default constructor");
+				}
 			}
 		}
-	}
 	}
 	bool has_declared_constructor = false;
 	if (bare->scope != NULL)

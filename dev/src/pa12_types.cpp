@@ -269,13 +269,13 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		{
 			parse_simple_or_function_declaration(ignored, false);
 		}
-			catch (const exception&)
-			{
-				pos_ = save;
-				if (!parse_constructor_like_member() &&
-				    !parse_destructor_like_member())
-					throw;
-			}
+		catch (const exception&)
+		{
+			pos_ = save;
+			if (!parse_constructor_like_member() &&
+			    !parse_destructor_like_member())
+				throw;
+		}
 		(void)class_scope;
 	}
 	parse_pending_member_bodies(class_scope);

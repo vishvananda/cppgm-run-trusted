@@ -38,3 +38,44 @@ semantics and polymorphism to later stages.
 - Run `perl scripts/cppgm_file_audit.pl --stage pa15 --paths dev/src` before
   completion.
 - Commit cohesive passing checkpoints and leave the worktree clean.
+
+## Architecture Review
+
+The implemented PA15 stage follows the intended PA14 extension path rather than
+adding a separate backend. Class layout lives in the PA11 `Type` record state:
+`layout_record_type` computes and caches field order, offsets, bit-field
+positions, size, alignment, and the single direct base. PA12 owns name lookup,
+access checks, friend/hidden-friend state, `this` binding, member expression
+selection, constructor/destructor discovery, and generated lifetime action
+nodes. The LowIR lowerer consumes those bindings and type facts; field and base
+projections use `Binding::member_offset`, `Binding::bit_offset`, and the direct
+base at offset zero instead of recovering offsets from emitted text.
+
+The PA15 helper model is demand-driven. Inline member functions, generated
+default constructors, aggregate constructors, destructors, and namespace-scope
+init/fini helpers are registered by binding and emitted only when the parsed
+program requires them. Local cleanups are represented as scoped cleanup stacks
+in `FunctionLowerer`; global lifetime is collected into `@__cppgm_init` and
+`@__cppgm_fini` bodies only when runtime initialization or finalization is
+needed. New PA14 lowering implementation files are present in
+`dev/frontend_source_sets.mk`.
+
+Performance review found no full-suite walks, fixture-name gates, or repeated
+whole-translation-unit recomputation in the PA15 paths. The remaining scans are
+bounded to current scope/member vectors, direct-base chains, or initializer
+clauses. Layout and helper emission use cached `layout_valid` state and
+generated-helper sets to avoid repeated layout and duplicate helper bodies.
+
+## Final Architecture Review
+
+The audited implementation keeps the PA15 ownership boundary intact: PA11 owns
+type/layout facts, PA12 owns semantic binding and lifetime-action construction,
+and PA14 owns LowIR presentation and helper emission. The review did not find
+interpreter, VM, trampoline, template-binary, embedded-payload, reference-tool,
+timeout, or test-fixture substitutes in the PA15 source surface.
+
+Audit cleanup was limited to misleading indentation in the PA12 declaration,
+record-helper, class-body, and PA14 initializer/lifecycle lowering code. The
+cleanup did not change the semantic model or output contract, but it makes the
+audited constructor/destructor and aggregate-initialization control flow match
+the actual block structure for future stages.

@@ -465,11 +465,11 @@ void FunctionLowerer::lower_for(const Node& node)
 {
 	if (!node.children[0].children.empty())
 	{
-			const Node& init = node.children[0].children[0];
-			if (starts_with(init.line, "simple-declaration"))
-				lower_stmt(init);
-			else
-				lower_discarded_expr(init);
+		const Node& init = node.children[0].children[0];
+		if (starts_with(init.line, "simple-declaration"))
+			lower_stmt(init);
+		else
+			lower_discarded_expr(init);
 	}
 	string cond_block = fresh_block("for_cond");
 	string body_block = fresh_block("for_body");
@@ -491,7 +491,7 @@ void FunctionLowerer::lower_for(const Node& node)
 	for (size_t i = 0; i < node.children.size(); ++i)
 		if (starts_with(node.children[i].line, "iteration") &&
 		    !node.children[i].children.empty())
-				lower_discarded_expr(node.children[i].children[0]);
+			lower_discarded_expr(node.children[i].children[0]);
 	terminate("jump ^" + cond_block);
 	break_targets_.pop_back();
 	continue_targets_.pop_back();

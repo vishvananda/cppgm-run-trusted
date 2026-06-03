@@ -401,9 +401,9 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		{
 			has_init = true;
 			init = parse_expression();
-			}
-			if (has_init)
-				init.copy_initialization = true;
+		}
+		if (has_init)
+			init.copy_initialization = true;
 	}
 	else if ((brace_init = consume(OP_LBRACE)))
 	{
@@ -451,11 +451,11 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		bool next_has_init = false;
 		if (consume(OP_ASS))
 		{
-				next_has_init = true;
-				next_init = at(OP_LBRACE) ? parse_braced_init_list() :
-					parse_expression();
-				next_init.copy_initialization = true;
-			}
+			next_has_init = true;
+			next_init = at(OP_LBRACE) ? parse_braced_init_list() :
+				parse_expression();
+			next_init.copy_initialization = true;
+		}
 		declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
 	}
 	expect(OP_SEMICOLON);
@@ -797,8 +797,8 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 				}
 				expect(OP_RPAREN);
 			}
-				if (direct_base.get() != NULL &&
-				    initializer_names_direct_base(class_scope, direct_base, name))
+			if (direct_base.get() != NULL &&
+			    initializer_names_direct_base(class_scope, direct_base, name))
 			{
 				explicit_base_action =
 					make_base_init_action(direct_base,
@@ -1138,14 +1138,14 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 		target->kind == ScopeKind::Class &&
 		!class_protected_access_.empty() &&
 		class_protected_access_.back();
-		if (target->kind == ScopeKind::Class)
-		{
-			TypePtr record = pa11::record_type_for_scope(target);
-			if (record.get() != NULL)
-				record->layout_valid = false;
-		}
-		ensure_default_destructor(type);
-		Node var("variable " + qname.name + " " + pa11::describe_type(type));
+	if (target->kind == ScopeKind::Class)
+	{
+		TypePtr record = pa11::record_type_for_scope(target);
+		if (record.get() != NULL)
+			record->layout_valid = false;
+	}
+	ensure_default_destructor(type);
+	Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
 	var.type = type;
 	if (specs.extern_decl && target->kind == ScopeKind::Namespace && init == NULL)

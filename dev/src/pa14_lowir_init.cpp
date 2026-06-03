@@ -182,8 +182,8 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 					return base;
 				}
 				return ensure_pointer(emit_lvalue_addr(var));
-				};
-				lower_default_init(addr_for, var.binding->type);
+			};
+			lower_default_init(addr_for, var.binding->type);
 			register_cleanup(var.binding, var.binding->type);
 		}
 		return;
@@ -553,11 +553,11 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 				instr(addr + " = index i8 [projection=base_subobject] " +
 				      base.text + ", 0");
 				return Value("ptr", addr);
-				};
-				if (index >= clauses.size())
-					lower_base_zero_init(addr_for, bare->base);
-				else
-				{
+			};
+			if (index >= clauses.size())
+				lower_base_zero_init(addr_for, bare->base);
+			else
+			{
 				const Node& child = clauses[index];
 				if (is_brace_elision_aggregate(bare->base) &&
 				    !starts_with(child.line, "braced-init-list"))
@@ -622,28 +622,28 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 	}
 	TypePtr elem = bare->base;
 	uint64_t count = bare->unknown_bound ? clauses.size() - index : bare->bound;
-		for (size_t i = 0; i < count; ++i)
-		{
-			function<Value()> elem_addr = [this, addr_for, elem, i]() {
-				Value base = addr_for();
-				string decay = fresh_temp();
-				instr(decay + " = unary decay ptr " + base.text);
-				if (pa11::strip_cv(elem)->kind == TypeKind::Record)
-				{
-					string scaled = fresh_temp();
-					instr(scaled + " = binary mul i64 " + to_string(i) +
-					      ", " + to_string(pa11::type_size(elem)));
-					string addr = fresh_temp();
-					instr(addr + " = index i8 [projection=array_element] " +
-				      decay + ", " + scaled);
-					return Value("ptr", addr);
-				}
+	for (size_t i = 0; i < count; ++i)
+	{
+		function<Value()> elem_addr = [this, addr_for, elem, i]() {
+			Value base = addr_for();
+			string decay = fresh_temp();
+			instr(decay + " = unary decay ptr " + base.text);
+			if (pa11::strip_cv(elem)->kind == TypeKind::Record)
+			{
+				string scaled = fresh_temp();
+				instr(scaled + " = binary mul i64 " + to_string(i) +
+				      ", " + to_string(pa11::type_size(elem)));
 				string addr = fresh_temp();
-				instr(addr + " = index " + scalar_lowir_type(elem) +
-				      " [projection=array_element] " + decay + ", " +
-				      to_string(i));
+				instr(addr + " = index i8 [projection=array_element] " +
+				      decay + ", " + scaled);
 				return Value("ptr", addr);
-			};
+			}
+			string addr = fresh_temp();
+			instr(addr + " = index " + scalar_lowir_type(elem) +
+			      " [projection=array_element] " + decay + ", " +
+			      to_string(i));
+			return Value("ptr", addr);
+		};
 		if (index >= clauses.size())
 		{
 			lower_zero_init(elem_addr, elem);
@@ -671,28 +671,26 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 				args.push_back(&init.children[i]);
 			lower_constructor_call(addr_for, init.direct_call, args);
 			return;
-			}
-			if (pa11::strip_cv(type)->kind == TypeKind::Record)
+		}
+		if (pa11::strip_cv(type)->kind == TypeKind::Record)
+		{
+			Binding* ctor = find_constructor(type, init.children.size());
+			if (ctor != NULL && !init.children.empty())
 			{
-				Binding* ctor = find_constructor(type, init.children.size());
-				if (ctor != NULL && !init.children.empty())
-				{
-					vector<const Node*> args;
-					for (size_t i = 0; i < init.children.size(); ++i)
-						args.push_back(&init.children[i]);
-					lower_constructor_call(addr_for, ctor, args);
-					return;
-				}
-			}
-			if (is_brace_elision_aggregate(type))
-			{
-				lower_aggregate_init(addr_for, type, init);
+				vector<const Node*> args;
+				for (size_t i = 0; i < init.children.size(); ++i)
+					args.push_back(&init.children[i]);
+				lower_constructor_call(addr_for, ctor, args);
 				return;
 			}
-			if (pa11::strip_cv(type)->kind == TypeKind::Record)
-			{
-				throw runtime_error("no matching constructor");
-			}
+		}
+		if (is_brace_elision_aggregate(type))
+		{
+			lower_aggregate_init(addr_for, type, init);
+			return;
+		}
+		if (pa11::strip_cv(type)->kind == TypeKind::Record)
+			throw runtime_error("no matching constructor");
 		if (init.children.empty())
 		{
 			lower_zero_init(addr_for, type);
@@ -812,8 +810,8 @@ void FunctionLowerer::lower_zero_init(const function<Value()>& addr_for, TypePtr
 		if (has_inline_constructor(type))
 			throw runtime_error("no default constructor");
 		pa11::layout_record_type(bare);
-			if (bare->base.get() != NULL)
-				lower_base_zero_init(addr_for, bare->base);
+		if (bare->base.get() != NULL)
+			lower_base_zero_init(addr_for, bare->base);
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
 			Binding* field = bare->fields[i];
@@ -1046,14 +1044,14 @@ void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for,
 				TypePtr to_ptr = pa11::make_pointer(param->base);
 				lowered.push_back(convert_value(addr, from_ptr, to_ptr).text);
 			}
-				else if (pa11::strip_cv(param->base)->kind == TypeKind::Record &&
-				         pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record)
-					lower_record_reference_constructor_argument(
-						arg,
-						param,
-						lowered,
-						temp_cleanups,
-						pending_conversions);
+			else if (pa11::strip_cv(param->base)->kind == TypeKind::Record &&
+			         pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record)
+				lower_record_reference_constructor_argument(
+					arg,
+					param,
+					lowered,
+					temp_cleanups,
+					pending_conversions);
 			else
 			{
 				string slot = fresh_aux_slot("refarg",
@@ -1170,15 +1168,15 @@ void FunctionLowerer::lower_member_init(const Node& node)
 	};
 	if (!node.children.empty() &&
 	    starts_with(node.children[0].line, "braced-init-list"))
+	{
+		if (node.direct_call != NULL)
 		{
-			if (node.direct_call != NULL)
-			{
-				if (no_op_generated_default_constructor(node.direct_call,
-				                                        node.binding->type))
-					return;
-				Value addr = member_addr();
-				if (node.direct_call->is_generated_default_constructor)
-					lower_storage_zero(addr, pa11::type_size(node.binding->type));
+			if (no_op_generated_default_constructor(node.direct_call,
+			                                        node.binding->type))
+				return;
+			Value addr = member_addr();
+			if (node.direct_call->is_generated_default_constructor)
+				lower_storage_zero(addr, pa11::type_size(node.binding->type));
 			function<Value()> same_addr = [addr]() {
 				return addr;
 			};
@@ -1219,14 +1217,14 @@ void FunctionLowerer::lower_member_init(const Node& node)
 		call << ")";
 		instr(call.str());
 		return;
-		}
-		if (node.children.empty())
-		{
-			if (pa11::strip_cv(node.binding->type)->kind == TypeKind::Array)
-				lower_default_init(member_addr, node.binding->type);
-			return;
-		}
-		if (is_reference(node.binding->type))
+	}
+	if (node.children.empty())
+	{
+		if (pa11::strip_cv(node.binding->type)->kind == TypeKind::Array)
+			lower_default_init(member_addr, node.binding->type);
+		return;
+	}
+	if (is_reference(node.binding->type))
 	{
 		Value target = ensure_pointer(emit_lvalue_addr(node.children[0]));
 		instr("store ptr " + target.text + ", " + member_addr().text);

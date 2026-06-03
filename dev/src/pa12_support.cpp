@@ -51,18 +51,18 @@ Expr::Expr()
 {
 }
 
-	DeclSpecs::DeclSpecs()
-		: typedef_decl(false),
-		  constexpr_decl(false),
-		  static_decl(false),
-		  mutable_decl(false),
-		  friend_decl(false),
-		  extern_decl(false),
-		  thread_local_decl(false),
-		  auto_decl(false),
-		  cv(pa11::CV_NONE)
-	{
-	}
+DeclSpecs::DeclSpecs()
+	: typedef_decl(false),
+	  constexpr_decl(false),
+	  static_decl(false),
+	  mutable_decl(false),
+	  friend_decl(false),
+	  extern_decl(false),
+	  thread_local_decl(false),
+	  auto_decl(false),
+	  cv(pa11::CV_NONE)
+{
+}
 
 PtrOp::PtrOp(PtrKind k, unsigned flags)
 	: kind(k), cv(flags)
