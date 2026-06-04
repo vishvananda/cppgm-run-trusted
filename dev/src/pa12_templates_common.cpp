@@ -18,6 +18,8 @@ bool template_argument_has_template_parameter(
 		       template_type_has_template_parameter(
 			       arg.type,
 			       record_template_arguments);
+	if (arg.kind == TemplateArgumentKind::Template)
+		return arg.template_declaration == NULL;
 	for (size_t i = 0; i < arg.pack.size(); ++i)
 		if (template_argument_has_template_parameter(
 			    arg.pack[i],

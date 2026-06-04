@@ -76,6 +76,8 @@ string typeinfo_component_for_argument(
 			return "Lii0E";
 		return template_value_typeinfo_component(arg.type, arg.value);
 	}
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return to_string(arg.template_name.size()) + arg.template_name;
 	string out;
 	for (size_t i = 0; i < arg.pack.size(); ++i)
 		out += typeinfo_component_for_argument(arg.pack[i]);

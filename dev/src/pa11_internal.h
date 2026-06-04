@@ -48,6 +48,7 @@ enum class TemplateInstanceArgumentKind
 {
 	Type,
 	Value,
+	Template,
 	Pack
 };
 
@@ -55,6 +56,7 @@ struct TemplateInstanceArgument
 {
 	TemplateInstanceArgumentKind kind;
 	TypePtr type;
+	string template_name;
 	uint64_t value;
 	bool dependent;
 	vector<TemplateInstanceArgument> pack;
@@ -63,6 +65,7 @@ struct TemplateInstanceArgument
 	static TemplateInstanceArgument type_arg(TypePtr type);
 	static TemplateInstanceArgument value_arg(TypePtr type, uint64_t value);
 	static TemplateInstanceArgument dependent_value_arg(TypePtr type);
+	static TemplateInstanceArgument template_arg(const string& name);
 	static TemplateInstanceArgument pack_arg(
 		const vector<TemplateInstanceArgument>& values);
 };

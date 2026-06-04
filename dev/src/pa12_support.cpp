@@ -43,6 +43,7 @@ QualifiedName::QualifiedName()
 
 TemplateArgument::TemplateArgument()
 	: kind(TemplateArgumentKind::Type),
+	  template_declaration(NULL),
 	  value(0),
 	  dependent(false),
 	  pack_expansion(false)
@@ -72,6 +73,14 @@ TemplateArgument TemplateArgument::dependent_value_arg(TypePtr type)
 	arg.kind = TemplateArgumentKind::Value;
 	arg.type = type;
 	arg.dependent = true;
+	return arg;
+}
+
+TemplateArgument TemplateArgument::template_arg(TemplateDeclaration* declaration)
+{
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Template;
+	arg.template_declaration = declaration;
 	return arg;
 }
 
@@ -459,6 +468,11 @@ void Parser::parse_translation_unit()
 					{
 						if (arg.dependent ||
 						    type_is_template_dependent(arg.type))
+							dependent = true;
+					}
+					else if (arg.kind == TemplateArgumentKind::Template)
+					{
+						if (arg.template_declaration == NULL)
 							dependent = true;
 					}
 					else

@@ -666,9 +666,11 @@ string template_argument_symbol_part(
 			return arg.value != 0 ? "true" : "false";
 		if (bare.get() != NULL && bare->kind == TypeKind::Enum)
 			return "__" + template_type_symbol_text(bare) + "_" +
-			       template_value_symbol_text(arg.value);
+		       template_value_symbol_text(arg.value);
 		return "_" + template_value_symbol_text(arg.value);
 	}
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return "tmpl_" + template_display_symbol_text(arg.template_name);
 	string out;
 	for (size_t i = 0; i < arg.pack.size(); ++i)
 	{

@@ -47,6 +47,7 @@ struct TemplateValidationState
 	size_t template_declaration_count;
 	vector<TemplateDeclaration> template_values;
 	map<Scope*, map<string, TemplateDeclaration*> > class_templates;
+	map<Scope*, map<string, TemplateDeclaration*> > alias_templates;
 	map<Scope*, map<string, vector<TemplateDeclaration*> > > function_templates;
 	map<pair<TemplateDeclaration*, string>, TemplateDeclaration*>
 		member_class_templates;
@@ -148,6 +149,7 @@ void TemplateValidationState::save_template_tables(Parser& parser)
 	for (size_t i = 0; i < parser.template_declarations_.size(); ++i)
 		template_values.push_back(*parser.template_declarations_[i]);
 	class_templates = parser.class_templates_;
+	alias_templates = parser.alias_templates_;
 	function_templates = parser.function_templates_;
 	member_class_templates = parser.member_class_templates_;
 	member_function_templates = parser.member_function_templates_;
@@ -236,6 +238,7 @@ void TemplateValidationState::restore_template_tables(
 	for (size_t i = 0; i < template_values.size(); ++i)
 		*parser.template_declarations_[i] = template_values[i];
 	parser.class_templates_ = class_templates;
+	parser.alias_templates_ = alias_templates;
 	parser.function_templates_ = function_templates;
 	parser.member_class_templates_ = member_class_templates;
 	parser.member_function_templates_ = member_function_templates;
@@ -287,6 +290,20 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 				if (!declaration->parameters[i].name.empty())
 					subst[declaration->parameters[i].name] = param;
 			}
+		}
+		else if (declaration->parameters[i].kind ==
+		         TemplateParameterKind::TemplateTemplate)
+		{
+			TemplateArgument arg = TemplateArgument::template_arg(NULL);
+			if (declaration->parameters[i].is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(arg);
+				arg = TemplateArgument::pack_arg(pack);
+			}
+			args.push_back(arg);
+			if (!declaration->parameters[i].name.empty())
+				value_subst[declaration->parameters[i].name] = arg;
 		}
 		else
 		{
@@ -359,7 +376,8 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		    string(err.what()) == "invalid initializer conversion" ||
 		    string(err.what()) == "invalid array bound" ||
 		    string(err.what()) == "decltype qualifier is not a scope" ||
-		    string(err.what()) == "qualified lookup root not found")
+		    string(err.what()) == "qualified lookup root not found" ||
+		    string(err.what()) == "function template not found")
 			return;
 		throw;
 	}

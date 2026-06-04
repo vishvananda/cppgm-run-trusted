@@ -74,13 +74,17 @@ enum class TemplateArgumentKind
 {
 	Type,
 	Value,
+	Template,
 	Pack
 };
+
+struct TemplateDeclaration;
 
 struct TemplateArgument
 {
 	TemplateArgumentKind kind;
 	TypePtr type;
+	TemplateDeclaration* template_declaration;
 	uint64_t value;
 	bool dependent;
 	bool pack_expansion;
@@ -90,6 +94,7 @@ struct TemplateArgument
 	static TemplateArgument type_arg(TypePtr type);
 	static TemplateArgument value_arg(TypePtr type, uint64_t value);
 	static TemplateArgument dependent_value_arg(TypePtr type);
+	static TemplateArgument template_arg(TemplateDeclaration* declaration);
 	static TemplateArgument pack_arg(const vector<TemplateArgument>& values);
 };
 
@@ -228,6 +233,7 @@ struct TemplateParameterInfo
 	TemplateParameterKind kind;
 	string name;
 	TypePtr type;
+	vector<TemplateParameterInfo> template_parameters;
 	bool is_pack;
 	bool has_default;
 	size_t default_begin;
@@ -241,7 +247,8 @@ enum class TemplateDeclarationKind
 	Unknown,
 	Class,
 	Function,
-	Variable
+	Variable,
+	Alias
 };
 
 struct TemplateDeclaration
@@ -375,6 +382,7 @@ private:
 	vector<Binding*> defaulted_move_assignments_;
 	vector<unique_ptr<TemplateDeclaration> > template_declarations_;
 	map<Scope*, map<string, TemplateDeclaration*> > class_templates_;
+	map<Scope*, map<string, TemplateDeclaration*> > alias_templates_;
 	map<Scope*, map<string, vector<TemplateDeclaration*> > > function_templates_;
 	map<Scope*, map<string, vector<TemplateDeclaration*> > > variable_templates_;
 	map<pair<TemplateDeclaration*, string>, TemplateDeclaration*> member_class_templates_;
@@ -424,11 +432,11 @@ private:
 		vector<TemplateParameterInfo> parse_template_parameter_clause();
 		TemplateParameterInfo parse_template_parameter_info();
 		void skip_template_parameter_default(TemplateParameterInfo& parameter);
-			TemplateDeclaration* register_template_declaration(
-				const vector<TemplateParameterInfo>& parameters,
-				size_t decl_begin,
-				size_t decl_end);
+				TemplateDeclaration* register_template_declaration(
+					const vector<TemplateParameterInfo>& parameters,
+					size_t decl_begin, size_t decl_end);
 			void register_class_template(TemplateDeclaration* declaration);
+			void register_alias_template(TemplateDeclaration* declaration);
 			void register_function_template(TemplateDeclaration* declaration);
 			void register_explicit_function_template_specialization(
 				TemplateDeclaration* declaration,
@@ -437,17 +445,16 @@ private:
 				const vector<map<string, TypePtr> >& save_subst,
 				const vector<map<string, TemplateArgument> >& save_value_subst);
 			bool register_constructor_template(TemplateDeclaration* declaration);
-		bool register_static_member_variable_template(
-			TemplateDeclaration* declaration);
+		bool register_static_member_variable_template(TemplateDeclaration* declaration);
 		size_t skip_template_declaration_body(size_t begin) const;
-		bool find_template_type_substitution(const string& name,
-		                                     TypePtr& out) const;
+		bool find_template_type_substitution(const string& name, TypePtr& out) const;
 		bool find_template_value_substitution(const string& name,
 		                                      TemplateArgument& out) const;
-		bool find_function_parameter_pack_substitution(
-			const string& name,
-			vector<Binding*>& out) const;
-			bool parse_template_argument_list(vector<TemplateArgument>& arguments);
+		bool find_function_parameter_pack_substitution(const string& name,
+		                                               vector<Binding*>& out) const;
+				bool try_parse_template_template_argument(TemplateArgument& out);
+				TemplateArgument parse_non_type_template_argument_expression();
+				bool parse_template_argument_list(vector<TemplateArgument>& arguments);
 			vector<TemplateArgument> expand_template_argument_pack(
 				const TemplateArgument& argument) const;
 			void append_completed_template_pack_argument(
@@ -468,8 +475,10 @@ private:
 		string template_specialization_name(
 			TemplateDeclaration* declaration,
 			const vector<TemplateArgument>& arguments) const;
-		TemplateDeclaration* find_class_template(Scope* scope,
-		                                         const string& name);
+			TemplateDeclaration* find_class_template(Scope* scope, const string& name);
+			TemplateDeclaration* find_alias_template(Scope* scope, const string& name);
+			TypePtr instantiate_alias_template(TemplateDeclaration* declaration,
+			                                   const vector<TemplateArgument>& arguments);
 		TypePtr instantiate_class_template(TemplateDeclaration* declaration,
 		                                   const vector<TemplateArgument>& arguments);
 	void complete_template_record(TypePtr type);

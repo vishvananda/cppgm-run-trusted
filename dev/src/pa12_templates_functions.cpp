@@ -123,14 +123,19 @@ Binding* Parser::instantiate_function_template(
 				if (type_is_template_dependent(arg.type))
 					dependent = true;
 			}
-			else if (arg.kind == TemplateArgumentKind::Value)
-			{
-				if (arg.dependent || type_is_template_dependent(arg.type))
-					dependent = true;
-			}
-			else
-			{
-				for (size_t p = 0; p < arg.pack.size(); ++p)
+				else if (arg.kind == TemplateArgumentKind::Value)
+				{
+					if (arg.dependent || type_is_template_dependent(arg.type))
+						dependent = true;
+				}
+				else if (arg.kind == TemplateArgumentKind::Template)
+				{
+					if (arg.template_declaration == NULL)
+						dependent = true;
+				}
+				else
+				{
+					for (size_t p = 0; p < arg.pack.size(); ++p)
 					pending.push_back(arg.pack[p]);
 			}
 		}
@@ -280,15 +285,20 @@ bool Parser::deduce_template_type(TypePtr pattern,
 							if (type_is_template_dependent(arg.type))
 								pattern_dependent = true;
 						}
-						else if (arg.kind == TemplateArgumentKind::Value)
-						{
-							if (arg.dependent ||
-							    type_is_template_dependent(arg.type))
-								pattern_dependent = true;
-						}
-						else
-						{
-							for (size_t p = 0; p < arg.pack.size(); ++p)
+							else if (arg.kind == TemplateArgumentKind::Value)
+							{
+								if (arg.dependent ||
+								    type_is_template_dependent(arg.type))
+									pattern_dependent = true;
+							}
+							else if (arg.kind == TemplateArgumentKind::Template)
+							{
+								if (arg.template_declaration == NULL)
+									pattern_dependent = true;
+							}
+							else
+							{
+								for (size_t p = 0; p < arg.pack.size(); ++p)
 								pending.push_back(arg.pack[p]);
 						}
 					}
@@ -413,16 +423,20 @@ bool Parser::deduce_function_template_arguments(
 				TemplateArgument pack_arg =
 					explicit_arguments[explicit_index++];
 				for (size_t p = 0; p < pack_arg.pack.size(); ++p)
-				{
-					if (declaration->parameters[i].kind ==
-						    TemplateParameterKind::Type &&
-					    pack_arg.pack[p].kind != TemplateArgumentKind::Type)
-						return false;
-					if (declaration->parameters[i].kind ==
-						    TemplateParameterKind::NonType &&
-					    pack_arg.pack[p].kind != TemplateArgumentKind::Value)
-						return false;
-				}
+					{
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::Type &&
+						    pack_arg.pack[p].kind != TemplateArgumentKind::Type)
+							return false;
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::NonType &&
+						    pack_arg.pack[p].kind != TemplateArgumentKind::Value)
+							return false;
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::TemplateTemplate &&
+						    pack_arg.pack[p].kind != TemplateArgumentKind::Template)
+							return false;
+					}
 				fixed_arguments[pname] = pack_arg;
 				if (declaration->parameters[i].kind ==
 				    TemplateParameterKind::Type)
@@ -445,17 +459,21 @@ bool Parser::deduce_function_template_arguments(
 					expand_template_argument_pack(
 						explicit_arguments[explicit_index++]);
 				for (size_t p = 0; p < expansion.size(); ++p)
-				{
-					if (declaration->parameters[i].kind ==
-						    TemplateParameterKind::Type &&
-					    expansion[p].kind != TemplateArgumentKind::Type)
-						return false;
-					if (declaration->parameters[i].kind ==
-						    TemplateParameterKind::NonType &&
-					    expansion[p].kind != TemplateArgumentKind::Value)
-						return false;
-					pack.push_back(expansion[p]);
-				}
+					{
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::Type &&
+						    expansion[p].kind != TemplateArgumentKind::Type)
+							return false;
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::NonType &&
+						    expansion[p].kind != TemplateArgumentKind::Value)
+							return false;
+						if (declaration->parameters[i].kind ==
+							    TemplateParameterKind::TemplateTemplate &&
+						    expansion[p].kind != TemplateArgumentKind::Template)
+							return false;
+						pack.push_back(expansion[p]);
+					}
 			}
 			TemplateArgument pack_arg = TemplateArgument::pack_arg(pack);
 			fixed_arguments[pname] = pack_arg;
@@ -475,12 +493,18 @@ bool Parser::deduce_function_template_arguments(
 			fixed[pname] = explicit_arg.type;
 			fixed_arguments[pname] = explicit_arg;
 		}
-		else
-		{
-			if (explicit_arg.kind != TemplateArgumentKind::Value)
-				return false;
-			fixed_arguments[pname] = explicit_arg;
-		}
+			else
+			{
+				if (declaration->parameters[i].kind ==
+				    TemplateParameterKind::TemplateTemplate)
+				{
+					if (explicit_arg.kind != TemplateArgumentKind::Template)
+						return false;
+				}
+				else if (explicit_arg.kind != TemplateArgumentKind::Value)
+					return false;
+				fixed_arguments[pname] = explicit_arg;
+			}
 	}
 	if (explicit_index != explicit_arguments.size())
 		return false;

@@ -499,6 +499,11 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 			parse_static_assert_declaration();
 			continue;
 		}
+		if (at(KW_TEMPLATE))
+		{
+			parse_template_declaration();
+			continue;
+		}
 		if (parse_friend_declaration())
 			continue;
 		Node ignored;
@@ -669,6 +674,11 @@ bool Parser::try_parse_type_name(TypePtr& out)
 							    type_is_template_dependent(arg.type))
 								dependent_root = true;
 						}
+						else if (arg.kind == TemplateArgumentKind::Template)
+						{
+							if (arg.template_declaration == NULL)
+								dependent_root = true;
+						}
 						else
 						{
 							for (size_t p = 0; p < arg.pack.size(); ++p)
@@ -751,8 +761,33 @@ bool Parser::try_parse_type_name(TypePtr& out)
 	}
 	if (at(OP_LT))
 	{
-		TemplateDeclaration* templ = find_class_template(qualifier, name);
-		if (templ != NULL)
+		if (qualifier == NULL)
+		{
+			TemplateArgument subst;
+			if (find_template_value_substitution(name, subst) &&
+			    subst.kind == TemplateArgumentKind::Template)
+			{
+				vector<TemplateArgument> arguments;
+				parse_template_argument_list(arguments);
+				if (subst.template_declaration != NULL)
+					out = instantiate_class_template(
+						subst.template_declaration,
+						arguments);
+				else
+					out = pa11::make_template_parameter_type(name + "<>");
+				return true;
+			}
+			}
+			TemplateDeclaration* alias = find_alias_template(qualifier, name);
+			if (alias != NULL)
+			{
+				vector<TemplateArgument> arguments;
+				parse_template_argument_list(arguments);
+				out = instantiate_alias_template(alias, arguments);
+				return true;
+			}
+			TemplateDeclaration* templ = find_class_template(qualifier, name);
+			if (templ != NULL)
 		{
 			vector<TemplateArgument> arguments;
 			parse_template_argument_list(arguments);

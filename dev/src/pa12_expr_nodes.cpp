@@ -686,6 +686,8 @@ void Parser::collect_associated_hidden_friends(TypePtr type,
 					                                  name,
 					                                  seen,
 					                                  out);
+				else if (arg.kind == TemplateArgumentKind::Template)
+					;
 				else
 					for (size_t p = 0; p < arg.pack.size(); ++p)
 						pending.push_back(arg.pack[p]);
@@ -768,6 +770,31 @@ void Parser::collect_associated_namespace_functions(TypePtr type,
 					                                       name,
 					                                       seen,
 					                                       out);
+				else if (arg.kind == TemplateArgumentKind::Template)
+				{
+					TemplateDeclaration* declaration =
+						arg.template_declaration;
+					for (Scope* scope = declaration != NULL
+						     ? declaration->owner : NULL;
+					     scope != NULL;
+					     scope = scope->parent)
+					{
+						if (scope->kind != ScopeKind::Namespace)
+							continue;
+						if (!seen.insert(scope).second)
+							break;
+						vector<Binding*> found =
+							lookup_qualified_set(scope,
+							                     name,
+							                     pa11::LOOKUP_FUNCTION);
+						for (size_t f = 0; f < found.size(); ++f)
+							if (find(out.begin(),
+							         out.end(),
+							         found[f]) == out.end())
+								out.push_back(found[f]);
+						break;
+					}
+				}
 				else
 					for (size_t p = 0; p < arg.pack.size(); ++p)
 						pending.push_back(arg.pack[p]);

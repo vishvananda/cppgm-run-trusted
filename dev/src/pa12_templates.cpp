@@ -33,6 +33,8 @@ void merge_template_defaults(vector<TemplateParameterInfo>& target,
 			target[i].name = source[i].name;
 		if (source[i].type.get() != NULL)
 			target[i].type = source[i].type;
+		if (!source[i].template_parameters.empty())
+			target[i].template_parameters = source[i].template_parameters;
 		target[i].is_pack = source[i].is_pack;
 		if (source[i].has_default)
 		{
@@ -51,7 +53,18 @@ bool template_argument_kind_matches_parameter(
 		return argument.kind == TemplateArgumentKind::Type;
 	if (parameter.kind == TemplateParameterKind::NonType)
 		return argument.kind == TemplateArgumentKind::Value;
-	return false;
+	if (argument.kind != TemplateArgumentKind::Template ||
+	    argument.template_declaration == NULL)
+		return false;
+	const vector<TemplateParameterInfo>& params =
+		argument.template_declaration->parameters;
+	if (params.size() != parameter.template_parameters.size())
+		return false;
+	for (size_t i = 0; i < params.size(); ++i)
+		if (params[i].kind != parameter.template_parameters[i].kind ||
+		    params[i].is_pack != parameter.template_parameters[i].is_pack)
+			return false;
+	return true;
 }
 
 Binding* find_matching_function(Scope* scope,
@@ -73,6 +86,31 @@ Binding* find_matching_function(Scope* scope,
 	return NULL;
 }
 
+void collect_template_parameter_placeholders(
+	const vector<TemplateParameterInfo>& parameters,
+	map<string, TypePtr>& parameter_types,
+	map<string, TemplateArgument>& parameter_values)
+{
+	for (size_t i = 0; i < parameters.size(); ++i)
+	{
+		const TemplateParameterInfo& parameter = parameters[i];
+		if (parameter.name.empty())
+			continue;
+		if (parameter.kind == TemplateParameterKind::Type)
+			parameter_types[parameter.name] =
+				pa11::make_template_parameter_type(parameter.name);
+		else if (parameter.kind == TemplateParameterKind::NonType)
+			parameter_values[parameter.name] =
+				TemplateArgument::dependent_value_arg(
+					parameter.type.get() != NULL
+					? parameter.type
+					: pa11::make_fundamental(FT_INT));
+		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
+			parameter_values[parameter.name] =
+				TemplateArgument::template_arg(NULL);
+	}
+}
+
 }  // namespace
 
 vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
@@ -80,10 +118,14 @@ vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
 	vector<TemplateParameterInfo> parameters;
 	expect(OP_LT);
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
 	template_type_substitutions_.push_back(map<string, TypePtr>());
+	template_value_substitutions_.push_back(map<string, TemplateArgument>());
 	if (consume(OP_GT))
 	{
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		return parameters;
 	}
 	for (;;)
@@ -94,11 +136,16 @@ vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
 		    parameter.kind == TemplateParameterKind::Type)
 			template_type_substitutions_.back()[parameter.name] =
 				pa11::make_template_parameter_type(parameter.name);
+		else if (!parameter.name.empty() &&
+		         parameter.kind == TemplateParameterKind::TemplateTemplate)
+			template_value_substitutions_.back()[parameter.name] =
+				TemplateArgument::template_arg(NULL);
 		if (!consume(OP_COMMA))
 			break;
 	}
 	expect(OP_GT);
 	template_type_substitutions_ = save_subst;
+	template_value_substitutions_ = save_value_subst;
 	return parameters;
 }
 
@@ -108,7 +155,7 @@ TemplateParameterInfo Parser::parse_template_parameter_info()
 	if (consume(KW_TEMPLATE))
 	{
 		parameter.kind = TemplateParameterKind::TemplateTemplate;
-		skip_template_parameter_clause();
+		parameter.template_parameters = parse_template_parameter_clause();
 		if (!consume(KW_CLASS) && !consume(KW_TYPENAME))
 			throw runtime_error("unsupported template template parameter");
 		parameter.is_pack = consume(OP_DOTS);
@@ -301,24 +348,59 @@ TemplateDeclaration* Parser::register_template_declaration(
 	pos_ = decl_begin;
 	if (starts_class_key())
 		register_class_template(declaration);
+	else if (at(KW_USING))
+		register_alias_template(declaration);
 	else
 		register_function_template(declaration);
 	pos_ = save;
 	return declaration;
 }
 
+void Parser::register_alias_template(TemplateDeclaration* declaration)
+{
+	declaration->kind = TemplateDeclarationKind::Alias;
+	expect(KW_USING);
+	if (!at_identifier())
+		throw runtime_error("expected alias template name");
+	declaration->name = consume_identifier();
+	declaration->has_definition = true;
+	expect(OP_ASS);
+	declaration->owner = current_scope();
+	TemplateDeclaration*& slot =
+		alias_templates_[declaration->owner][declaration->name];
+	if (slot == NULL)
+		slot = declaration;
+	else
+	{
+		merge_template_defaults(slot->parameters, declaration->parameters);
+		slot->lexical_scope = declaration->lexical_scope;
+		slot->decl_begin = declaration->decl_begin;
+		slot->decl_end = declaration->decl_end;
+		slot->has_definition = true;
+	}
+}
+
 void Parser::register_class_template(TemplateDeclaration* declaration)
 {
 	declaration->kind = TemplateDeclarationKind::Class;
 	map<string, TypePtr> parameter_types;
+	map<string, TemplateArgument> parameter_values;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 		if (!declaration->parameters[i].name.empty() &&
 		    declaration->parameters[i].kind == TemplateParameterKind::Type)
 			parameter_types[declaration->parameters[i].name] =
 				pa11::make_template_parameter_type(
 					declaration->parameters[i].name);
+		else if (!declaration->parameters[i].name.empty() &&
+		         declaration->parameters[i].kind ==
+		         TemplateParameterKind::TemplateTemplate)
+			parameter_values[declaration->parameters[i].name] =
+				TemplateArgument::template_arg(NULL);
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
 	template_type_substitutions_.push_back(parameter_types);
+	template_value_substitutions_.push_back(parameter_values);
 	ETokenType key = current().type;
 	declaration->tag = class_tag(key);
 	++pos_;
@@ -373,6 +455,7 @@ void Parser::register_class_template(TemplateDeclaration* declaration)
 			throw runtime_error("class template specialization without primary");
 		primary->class_specialization_declarations.push_back(declaration);
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		if (declaration->has_definition)
 			validate_class_template_definition(declaration);
 		return;
@@ -409,6 +492,7 @@ void Parser::register_class_template(TemplateDeclaration* declaration)
 		}
 	}
 	template_type_substitutions_ = save_subst;
+	template_value_substitutions_ = save_value_subst;
 	if (declaration->has_definition)
 	{
 		validate_class_template_definition(declaration);
@@ -486,19 +570,9 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 	declaration->kind = TemplateDeclarationKind::Function;
 	map<string, TypePtr> parameter_types;
 	map<string, TemplateArgument> parameter_values;
-	for (size_t i = 0; i < declaration->parameters.size(); ++i)
-		if (!declaration->parameters[i].name.empty() &&
-		    declaration->parameters[i].kind == TemplateParameterKind::Type)
-			parameter_types[declaration->parameters[i].name] =
-				pa11::make_template_parameter_type(
-					declaration->parameters[i].name);
-		else if (!declaration->parameters[i].name.empty() &&
-		         declaration->parameters[i].kind == TemplateParameterKind::NonType)
-			parameter_values[declaration->parameters[i].name] =
-				TemplateArgument::dependent_value_arg(
-					declaration->parameters[i].type.get() != NULL
-					? declaration->parameters[i].type
-					: pa11::make_fundamental(FT_INT));
+	collect_template_parameter_placeholders(declaration->parameters,
+	                                        parameter_types,
+	                                        parameter_values);
 
 	size_t save_pos = pos_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
@@ -550,9 +624,13 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 			}
 		declaration->owner = target;
 		declaration->name = qname.name;
+		if (target->kind == ScopeKind::Class && !specs.static_decl)
+			type = make_member_function_type(target, type);
 		declaration->generic_function_type = type;
 		Binding* placeholder =
 			add_function_binding(target, qname.name, type, false);
+		placeholder->is_static_member =
+			target->kind == ScopeKind::Class && specs.static_decl;
 		declaration->placeholder = placeholder;
 		const Suffix* primary_suffix = declarator_function_suffix(declarator);
 		if (primary_suffix != NULL)
@@ -601,17 +679,26 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 {
 	map<string, TypePtr> parameter_types;
+	map<string, TemplateArgument> parameter_values;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 		if (!declaration->parameters[i].name.empty() &&
 		    declaration->parameters[i].kind == TemplateParameterKind::Type)
 			parameter_types[declaration->parameters[i].name] =
 				pa11::make_template_parameter_type(
 					declaration->parameters[i].name);
+		else if (!declaration->parameters[i].name.empty() &&
+		         declaration->parameters[i].kind ==
+		         TemplateParameterKind::TemplateTemplate)
+			parameter_values[declaration->parameters[i].name] =
+				TemplateArgument::template_arg(NULL);
 
 	size_t save_pos = pos_;
 	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
 	template_type_substitutions_.push_back(parameter_types);
+	template_value_substitutions_.push_back(parameter_values);
 	pos_ = declaration->decl_begin;
 	bool matched_constructor = false;
 	try
@@ -682,6 +769,7 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 			                                    qname.name)]
 				.push_back(declaration);
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		return true;
@@ -689,6 +777,7 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 	catch (const exception&)
 	{
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		if (matched_constructor)
@@ -826,6 +915,106 @@ bool Parser::find_function_parameter_pack_substitution(
 	return false;
 }
 
+bool Parser::try_parse_template_template_argument(TemplateArgument& out)
+{
+	size_t save = pos_;
+	Scope* qualifier = NULL;
+	if (at(OP_COLON2) ||
+	    (at_identifier() && lookahead(OP_COLON2, 1)))
+	{
+		try
+		{
+			qualifier = parse_nested_name_specifier(NULL);
+		}
+		catch (const exception&)
+		{
+			pos_ = save;
+			return false;
+		}
+		consume(KW_TEMPLATE);
+	}
+	if (!at_identifier())
+	{
+		pos_ = save;
+		return false;
+	}
+	string name = consume_identifier();
+	if (at(OP_LT) || (!at(OP_COMMA) && !at(OP_GT) && !at(OP_DOTS)))
+	{
+		pos_ = save;
+		return false;
+	}
+	if (qualifier == NULL)
+	{
+		TemplateArgument subst;
+		if (find_template_value_substitution(name, subst) &&
+		    subst.kind == TemplateArgumentKind::Template)
+		{
+			out = subst;
+			return true;
+		}
+	}
+	TemplateDeclaration* declaration = find_class_template(qualifier, name);
+	if (declaration == NULL)
+	{
+		pos_ = save;
+		return false;
+	}
+	out = TemplateArgument::template_arg(declaration);
+	return true;
+}
+
+TemplateArgument Parser::parse_non_type_template_argument_expression()
+{
+	++template_argument_expression_depth_;
+	Expr expr;
+	try
+	{
+		expr = parse_assignment_expression();
+	}
+	catch (...)
+	{
+		--template_argument_expression_depth_;
+		throw;
+	}
+	--template_argument_expression_depth_;
+	if (expr.valid && !expr.has_constant_value)
+	{
+		ConstexprValue value;
+		if (try_evaluate_constexpr_expr(expr.node, value) &&
+		    !value.is_object)
+		{
+			expr.has_constant_value = true;
+			expr.constant_value = value.int_value;
+			expr.node.has_constant_value = true;
+			expr.node.constant_value = value.int_value;
+		}
+	}
+	if (expr.valid && !expr.has_constant_value)
+	{
+		try
+		{
+			Conversion conv =
+				convert_to(expr, pa11::make_fundamental(FT_BOOL));
+			if (conv.viable && !conv.expr.has_constant_value)
+			{
+				ConstexprValue value;
+				if (try_evaluate_constexpr_expr(conv.expr.node, value))
+					apply_constexpr_value(conv.expr, value);
+			}
+			if (conv.viable && conv.expr.has_constant_value)
+				expr = conv.expr;
+		}
+		catch (const runtime_error&)
+		{
+		}
+	}
+	if (!expr.has_constant_value)
+		throw runtime_error("invalid non-type template argument");
+	return TemplateArgument::value_arg(expression_object_type(expr.type),
+	                                   expr.constant_value);
+}
+
 bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 {
 	if (!consume(OP_LT))
@@ -851,6 +1040,15 @@ bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 		catch (const exception&)
 		{
 			pos_ = save;
+			TemplateArgument template_argument;
+			if (try_parse_template_template_argument(template_argument))
+			{
+				template_argument.pack_expansion = consume(OP_DOTS);
+				arguments.push_back(template_argument);
+				if (!consume(OP_COMMA))
+					break;
+				continue;
+			}
 			if (at_identifier() && lookahead(OP_DOTS, 1))
 			{
 				string pack_name = consume_identifier();
@@ -886,54 +1084,8 @@ bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 					continue;
 				}
 			}
-			++template_argument_expression_depth_;
-			Expr expr;
-			try
-			{
-				expr = parse_assignment_expression();
-			}
-			catch (...)
-			{
-				--template_argument_expression_depth_;
-				throw;
-			}
-			--template_argument_expression_depth_;
-			if (expr.valid && !expr.has_constant_value)
-			{
-				ConstexprValue value;
-				if (try_evaluate_constexpr_expr(expr.node, value) &&
-				    !value.is_object)
-				{
-					expr.has_constant_value = true;
-					expr.constant_value = value.int_value;
-					expr.node.has_constant_value = true;
-					expr.node.constant_value = value.int_value;
-				}
-			}
-			if (expr.valid && !expr.has_constant_value)
-			{
-				try
-					{
-						Conversion conv =
-							convert_to(expr, pa11::make_fundamental(FT_BOOL));
-						if (conv.viable && !conv.expr.has_constant_value)
-						{
-							ConstexprValue value;
-							if (try_evaluate_constexpr_expr(conv.expr.node, value))
-								apply_constexpr_value(conv.expr, value);
-						}
-						if (conv.viable && conv.expr.has_constant_value)
-							expr = conv.expr;
-					}
-					catch (const runtime_error&)
-				{
-				}
-			}
-			if (!expr.has_constant_value)
-				throw runtime_error("invalid non-type template argument");
 			TemplateArgument arg =
-				TemplateArgument::value_arg(expression_object_type(expr.type),
-				                            expr.constant_value);
+				parse_non_type_template_argument_expression();
 			arg.pack_expansion = consume(OP_DOTS);
 			arguments.push_back(arg);
 		}
@@ -1098,6 +1250,11 @@ TemplateArgument Parser::parse_default_template_argument(
 	{
 		if (parameter.kind == TemplateParameterKind::Type)
 			arg = TemplateArgument::type_arg(parse_type_id());
+		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
+		{
+			if (!try_parse_template_template_argument(arg))
+				throw runtime_error("invalid default template argument");
+		}
 		else
 		{
 			bool default_dependent = type_is_template_dependent(parameter.type);

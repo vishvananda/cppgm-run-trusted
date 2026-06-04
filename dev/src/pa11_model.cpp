@@ -251,6 +251,15 @@ TemplateInstanceArgument TemplateInstanceArgument::dependent_value_arg(
 	return arg;
 }
 
+TemplateInstanceArgument TemplateInstanceArgument::template_arg(
+	const string& name)
+{
+	TemplateInstanceArgument arg;
+	arg.kind = TemplateInstanceArgumentKind::Template;
+	arg.template_name = name;
+	return arg;
+}
+
 TemplateInstanceArgument TemplateInstanceArgument::pack_arg(
 	const vector<TemplateInstanceArgument>& values)
 {
