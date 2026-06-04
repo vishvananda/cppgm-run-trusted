@@ -38,6 +38,30 @@ bool record_has_aggregate_blocking_constructor(TypePtr record)
 	return false;
 }
 
+bool string_literal_initializes_array(TypePtr type,
+                                      const Expr& init,
+                                      uint64_t* elements)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Array ||
+	    init.node.token_text.empty() ||
+	    init.node.token_text[init.node.token_text.size() - 1] != '"')
+		return false;
+	TypePtr elem = pa11::strip_cv(bare->base);
+	if (elem->kind != pa11::TypeKind::Fundamental)
+		return false;
+	StringLiteralInfo info;
+	if (!AnalyzeStringLiteral(init.node.token_text, info) ||
+	    !info.ud_suffix.empty() ||
+	    elem->fundamental != info.type)
+		return false;
+	if (!bare->unknown_bound && bare->bound < info.elements)
+		return false;
+	if (elements != NULL)
+		*elements = info.elements;
+	return true;
+}
+
 bool record_has_nonpublic_field(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -186,6 +210,11 @@ void Parser::parse_declaration_into(Node& out)
 		parse_using_family(out);
 		return;
 	}
+	if (at(KW_STATIC_ASSERT))
+	{
+		parse_static_assert_declaration();
+		return;
+	}
 	if (at(KW_EXTERN) && lookahead(OP_LBRACE, 1))
 	{
 		parse_linkage_specification(out);
@@ -203,6 +232,68 @@ void Parser::parse_declaration_into(Node& out)
 		return;
 	}
 	parse_simple_or_function_declaration(out, true);
+}
+
+void Parser::parse_static_assert_declaration()
+{
+	expect(KW_STATIC_ASSERT);
+	expect(OP_LPAREN);
+	bool dependent_context = false;
+	for (size_t i = 0; i < template_type_substitutions_.size(); ++i)
+		for (map<string, TypePtr>::const_iterator it =
+			     template_type_substitutions_[i].begin();
+		     it != template_type_substitutions_[i].end();
+		     ++it)
+			if (type_is_template_dependent(it->second))
+				dependent_context = true;
+	for (size_t i = 0; i < template_value_substitutions_.size(); ++i)
+		for (map<string, TemplateArgument>::const_iterator it =
+			     template_value_substitutions_[i].begin();
+		     it != template_value_substitutions_[i].end();
+		     ++it)
+			if (it->second.dependent ||
+			    type_is_template_dependent(it->second.type))
+				dependent_context = true;
+	size_t condition_begin = pos_;
+	Expr condition;
+	try
+	{
+		condition = parse_assignment_expression();
+	}
+	catch (const exception&)
+	{
+		if (!dependent_context)
+			throw;
+		pos_ = condition_begin;
+		int paren = 0;
+		while (!at_eof())
+		{
+			if (paren == 0 && at(OP_RPAREN))
+				break;
+			if (at(OP_LPAREN))
+				++paren;
+			else if (at(OP_RPAREN))
+				--paren;
+			++pos_;
+		}
+		expect(OP_RPAREN);
+		expect(OP_SEMICOLON);
+		return;
+	}
+	string message;
+	if (consume(OP_COMMA))
+	{
+		if (!at_literal())
+			throw runtime_error("expected static_assert message");
+		message = current().source;
+		++pos_;
+	}
+	expect(OP_RPAREN);
+	expect(OP_SEMICOLON);
+	if (!condition.has_constant_value)
+		return;
+	if (condition.constant_value == 0)
+		throw runtime_error("static_assert failed " + message);
 }
 
 void Parser::parse_namespace_or_alias(Node& out)
@@ -1174,6 +1265,15 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	{
 		vector<Expr> defaults;
 		vector<string> names;
+		bool use_parameter_name_override =
+			override_function_parameter_names_;
+		vector<string> parameter_name_override =
+			function_parameter_name_override_;
+		if (use_parameter_name_override)
+		{
+			override_function_parameter_names_ = false;
+			function_parameter_name_override_.clear();
+		}
 		map<Binding*, vector<Expr> >::const_iterator old_defaults =
 			default_arguments_.find(function);
 		map<Binding*, vector<string> >::const_iterator old_names =
@@ -1185,15 +1285,25 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		}
 		for (size_t i = 0; i < suffix->parameters.size(); ++i)
 		{
+			if (suffix->parameters[i].type.get() == NULL)
+				continue;
 			Expr default_value = suffix->parameters[i].default_value;
 			string parameter_name = suffix->parameters[i].name;
 			size_t slot = names.size();
+			size_t override_slot =
+				nonstatic_member_function &&
+				parameter_name_override.size() == suffix->parameters.size()
+				? i : slot;
 			if (!default_value.valid &&
 			    old_defaults != default_arguments_.end() &&
 			    slot < old_defaults->second.size())
 				default_value = old_defaults->second[slot];
-			if (parameter_name.empty() &&
-			    old_names != function_parameter_names_.end() &&
+			if (use_parameter_name_override &&
+			    override_slot < parameter_name_override.size() &&
+			    !parameter_name_override[override_slot].empty())
+				parameter_name = parameter_name_override[override_slot];
+			else if (parameter_name.empty() &&
+			         old_names != function_parameter_names_.end() &&
 			    slot < old_names->second.size())
 				parameter_name = old_names->second[slot];
 			defaults.push_back(default_value);
@@ -1201,6 +1311,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		}
 		default_arguments_[function] = defaults;
 		function_parameter_names_[function] = names;
+		if (use_parameter_name_override)
+			override_function_parameter_name_bindings_.insert(function);
 	}
 	string keyword = function_definition ? "function-definition " :
 		"function-declaration ";
@@ -1212,170 +1324,6 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	return function;
 }
 
-void Parser::apply_braced_variable_initializer(Scope* target,
-                                               Binding* variable,
-                                               TypePtr type,
-                                               const Expr& init,
-                                               Node& var)
-{
-	Node list = init.node;
-	if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record)
-	{
-		vector<Expr> args;
-		for (size_t i = 0; i < init.node.children.size(); ++i)
-		{
-			Expr arg;
-			arg.valid = true;
-			arg.node = init.node.children[i];
-			arg.type = arg.node.type;
-			arg.category = arg.node.category;
-			arg.binding = arg.node.binding;
-			args.push_back(arg);
-		}
-		try
-		{
-			Expr constructed =
-				make_constructor_init_expr(type, args, init.copy_initialization);
-			list = constructed.node;
-		}
-		catch (const runtime_error& err)
-		{
-			if (string(err.what()) != "no matching constructor")
-				throw;
-		}
-	}
-	ensure_aggregate_constructors_for_init(type, list);
-	list.line += " lvalue " + pa11::describe_type(type);
-	list.type = type;
-	if (target->kind == ScopeKind::Class && !variable->is_static_member)
-		default_member_initializers_[variable] = list;
-	add_child(var, list);
-}
-
-void Parser::apply_record_variable_initializer(Scope* target,
-                                               Binding* variable,
-                                               TypePtr type,
-                                               const Expr& init,
-                                               Node& var)
-{
-	Expr constructed;
-	TypePtr src_record = pa11::strip_cv(expression_object_type(init.type));
-	TypePtr dst_record = pa11::strip_cv(type);
-	if (src_record->kind == pa11::TypeKind::Record &&
-	    pa11::same_type(src_record, dst_record) &&
-	    init.category == ValueCategory::PRValue)
-	{
-		constructed = init;
-		if (target->kind == ScopeKind::Class && !variable->is_static_member)
-			default_member_initializers_[variable] = constructed.node;
-		add_child(var, constructed.node);
-		return;
-	}
-	try
-	{
-		vector<Expr> args;
-		args.push_back(init);
-		constructed = make_constructor_init_expr(type, args, init.copy_initialization);
-	}
-	catch (const runtime_error& err)
-	{
-		if (string(err.what()) != "no matching constructor")
-			throw;
-		if (src_record->kind != pa11::TypeKind::Record ||
-		    !pa11::same_type(src_record, dst_record))
-			throw;
-		bool declared_copy_or_move = false;
-		bool trivial_defaulted_match = false;
-		if (dst_record->scope != NULL)
-		{
-			map<string, vector<Binding*> >::const_iterator found =
-				dst_record->scope->members.find(dst_record->scope->name);
-			if (found != dst_record->scope->members.end())
-				for (size_t i = 0; i < found->second.size(); ++i)
-				{
-					Binding* ctor = found->second[i];
-					if (ctor->kind == BindingKind::Function &&
-					    ctor->type->kind == pa11::TypeKind::Function &&
-					    ctor->type->parameters.size() == 2 &&
-					    pa11::is_reference_type(ctor->type->parameters[1]) &&
-					    pa11::same_type(
-						    pa11::strip_cv(ctor->type->parameters[1]->base),
-						    dst_record))
-					{
-						TypePtr param = ctor->type->parameters[1];
-						if (ctor->is_defaulted &&
-						    !ctor->is_inline_definition &&
-						    ((init.category == ValueCategory::XValue &&
-						      param->kind == pa11::TypeKind::RValueReference) ||
-						     (init.category != ValueCategory::XValue &&
-						      param->kind == pa11::TypeKind::LValueReference)))
-							trivial_defaulted_match = true;
-						else
-							declared_copy_or_move = true;
-					}
-				}
-		}
-		if (declared_copy_or_move && !trivial_defaulted_match)
-			throw;
-		constructed = init;
-	}
-	if (target->kind == ScopeKind::Class && !variable->is_static_member)
-		default_member_initializers_[variable] = constructed.node;
-	add_child(var, constructed.node);
-}
-
-void Parser::apply_scalar_variable_initializer(const DeclSpecs& specs,
-                                               Scope* target,
-                                               Binding* variable,
-                                               TypePtr type,
-                                               const Expr& init,
-                                               Node& var)
-{
-	Conversion conv = convert_to(init, type);
-	if (!conv.viable)
-		throw runtime_error("invalid initializer conversion");
-	if (target->kind == ScopeKind::Class && !variable->is_static_member)
-		default_member_initializers_[variable] = conv.expr.node;
-	add_child(var, conv.expr.node);
-	if ((specs.constexpr_decl || pa11::type_has_const(type)) &&
-	    conv.expr.has_constant_value)
-	{
-		variable->has_constant = true;
-		variable->constant_value = conv.expr.constant_value;
-	}
-}
-
-void Parser::apply_variable_initializer(const DeclSpecs& specs,
-                                        Scope* target,
-                                        Binding* variable,
-                                        TypePtr type,
-                                        const Expr* init,
-                                        Node& var)
-{
-	if (init != NULL &&
-	    init->copy_initialization &&
-	    pa11::strip_cv(type)->kind == pa11::TypeKind::Record)
-		validate_record_copy_initialization(type, *init);
-	if (init != NULL)
-	{
-		if (init->braced_init_list)
-		{
-			apply_braced_variable_initializer(target, variable, type, *init, var);
-			return;
-		}
-		if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record)
-		{
-			apply_record_variable_initializer(target, variable, type, *init, var);
-			return;
-		}
-		apply_scalar_variable_initializer(specs, target, variable, type, *init, var);
-	}
-	else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record &&
-	         ensure_default_constructor(type) != NULL)
-	{
-		add_child(var, default_constructor_action(variable));
-	}
-}
 
 Binding* Parser::declare_one(const DeclSpecs& specs,
                              TypePtr base,
@@ -1395,13 +1343,23 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 		return alias;
 	}
 
-	if (specs.constexpr_decl && !pa11::is_reference_type(type))
+	if (specs.constexpr_decl &&
+	    !pa11::is_reference_type(type) &&
+	    type->kind != pa11::TypeKind::Function)
 		type = pa11::make_cv(type, pa11::CV_CONST);
 	if (init != NULL &&
 	    init->braced_init_list &&
 	    type->kind == pa11::TypeKind::Array &&
 	    type->unknown_bound)
 		type = pa11::make_array(type->base, false, init->node.children.size());
+	if (init != NULL &&
+	    type->kind == pa11::TypeKind::Array &&
+	    type->unknown_bound)
+	{
+		uint64_t elements = 0;
+		if (string_literal_initializes_array(type, *init, &elements))
+			type = pa11::make_array(type->base, false, elements);
+	}
 	bool existing_static_member_function = false;
 	if (target->kind == ScopeKind::Class &&
 	    type->kind == pa11::TypeKind::Function &&

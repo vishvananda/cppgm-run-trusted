@@ -54,6 +54,12 @@ Value FunctionLowerer::emit_pointer_index_binary(const Node& expr,
 	uint64_t scale = pa11::type_size(pa11::strip_cv(ptr_type)->base);
 	if (scale != 1)
 	{
+		if (!offset.text.empty() && offset.text[0] == '%')
+		{
+			string copied = fresh_temp();
+			instr(copied + " = copy i64 " + offset.text);
+			offset = Value("i64", copied);
+		}
 		string mul = fresh_temp();
 		instr(mul + " = binary mul i64 " + offset.text + ", " +
 		      to_string(scale));

@@ -7,12 +7,65 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool type_contains_template_parameter_name(TypePtr type, string& name)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		name = type->name;
+		return true;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+		return type_contains_template_parameter_name(type->base, name);
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		if (type_contains_template_parameter_name(type->base, name))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (type_contains_template_parameter_name(type->parameters[i],
+			                                          name))
+				return true;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+		return type_contains_template_parameter_name(type->member_class,
+		                                             name) ||
+		       type_contains_template_parameter_name(type->base, name);
+	return false;
+}
+
+bool declaration_parameter_is_pack(TemplateDeclaration* declaration,
+                                   const string& name)
+{
+	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+		if (declaration->parameters[i].name == name &&
+		    declaration->parameters[i].is_pack)
+			return true;
+	return false;
+}
+
+bool function_parameter_pack_name(TemplateDeclaration* declaration,
+                                  TypePtr pattern,
+                                  string& name)
+{
+	if (!type_contains_template_parameter_name(pattern, name))
+		return false;
+	return declaration_parameter_is_pack(declaration, name);
+}
+
+}  // namespace
 
 Binding* Parser::instantiate_function_template(
 	TemplateDeclaration* declaration,
-	const vector<TypePtr>& arguments)
+	const vector<TemplateArgument>& arguments)
 {
-	vector<TypePtr> full_args =
+	vector<TemplateArgument> full_args =
 		complete_template_arguments(declaration, arguments);
 	string key = template_argument_key(full_args);
 	map<string, Binding*>::iterator existing =
@@ -26,17 +79,62 @@ Binding* Parser::instantiate_function_template(
 	size_t save_pos = pos_;
 	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
 	bool save_force_new_function_binding = force_new_function_binding_;
 	map<string, TypePtr> subst;
+	map<string, TemplateArgument> value_subst;
 	for (size_t i = 0; i < full_args.size() &&
 	     i < declaration->parameters.size(); ++i)
 		if (!declaration->parameters[i].name.empty())
-			subst[declaration->parameters[i].name] = full_args[i];
+		{
+			if (declaration->parameters[i].kind ==
+			    TemplateParameterKind::Type)
+			{
+				if (declaration->parameters[i].is_pack)
+				{
+					subst[declaration->parameters[i].name] =
+						pa11::make_template_parameter_type(
+							declaration->parameters[i].name);
+					value_subst[declaration->parameters[i].name] =
+						full_args[i];
+				}
+				else
+					subst[declaration->parameters[i].name] =
+						full_args[i].type;
+			}
+			else
+				value_subst[declaration->parameters[i].name] =
+					full_args[i];
+		}
 	template_type_substitutions_.push_back(subst);
+	template_value_substitutions_.push_back(value_subst);
 	bool dependent = false;
 	for (size_t i = 0; i < full_args.size(); ++i)
-		if (type_is_template_dependent(full_args[i]))
-			dependent = true;
+	{
+		vector<TemplateArgument> pending;
+		pending.push_back(full_args[i]);
+		while (!pending.empty())
+		{
+			TemplateArgument arg = pending.back();
+			pending.pop_back();
+			if (arg.kind == TemplateArgumentKind::Type)
+			{
+				if (type_is_template_dependent(arg.type))
+					dependent = true;
+			}
+			else if (arg.kind == TemplateArgumentKind::Value)
+			{
+				if (arg.dependent || type_is_template_dependent(arg.type))
+					dependent = true;
+			}
+			else
+			{
+				for (size_t p = 0; p < arg.pack.size(); ++p)
+					pending.push_back(arg.pack[p]);
+			}
+		}
+	}
 	if (dependent)
 	{
 		TypePtr type =
@@ -50,6 +148,7 @@ Binding* Parser::instantiate_function_template(
 		function_template_placeholders_[binding] = declaration;
 		declaration->completing_specializations.erase(key);
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		force_new_function_binding_ = save_force_new_function_binding;
@@ -77,12 +176,14 @@ Binding* Parser::instantiate_function_template(
 	{
 		declaration->completing_specializations.erase(key);
 		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		force_new_function_binding_ = save_force_new_function_binding;
 		throw;
 	}
 	template_type_substitutions_ = save_subst;
+	template_value_substitutions_ = save_value_subst;
 	scopes_ = save_scopes;
 	pos_ = save_pos;
 	force_new_function_binding_ = save_force_new_function_binding;
@@ -157,12 +258,35 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		type_is_template_dependent(pattern);
 	if (!pattern_dependent && pattern->kind == pa11::TypeKind::Record)
 	{
-			map<const void*, vector<TypePtr> >::const_iterator pit =
+			map<const void*, vector<TemplateArgument> >::const_iterator pit =
 				record_template_arguments_.find(pattern.get());
 			if (pit != record_template_arguments_.end())
 				for (size_t i = 0; i < pit->second.size(); ++i)
-					if (type_is_template_dependent(pit->second[i]))
-						pattern_dependent = true;
+				{
+					vector<TemplateArgument> pending;
+					pending.push_back(pit->second[i]);
+					while (!pending.empty())
+					{
+						TemplateArgument arg = pending.back();
+						pending.pop_back();
+						if (arg.kind == TemplateArgumentKind::Type)
+						{
+							if (type_is_template_dependent(arg.type))
+								pattern_dependent = true;
+						}
+						else if (arg.kind == TemplateArgumentKind::Value)
+						{
+							if (arg.dependent ||
+							    type_is_template_dependent(arg.type))
+								pattern_dependent = true;
+						}
+						else
+						{
+							for (size_t p = 0; p < arg.pack.size(); ++p)
+								pending.push_back(arg.pack[p]);
+						}
+					}
+				}
 		}
 	if (!pattern_dependent)
 		return true;
@@ -193,6 +317,15 @@ bool Parser::deduce_template_type(TypePtr pattern,
 	}
 	if (pattern->kind == pa11::TypeKind::Record)
 	{
+		if (argument->kind == pa11::TypeKind::Record)
+		{
+			const_cast<Parser*>(this)->complete_template_record(argument);
+			TypePtr base = argument->base.get() != NULL
+				? pa11::strip_cv(argument->base) : TypePtr();
+			if (base.get() != NULL &&
+			    deduce_template_type(pattern, base, deduced, fixed))
+				return true;
+		}
 		map<const void*, TemplateDeclaration*>::const_iterator pt =
 			record_template_declarations_.find(pattern.get());
 		map<const void*, TemplateDeclaration*>::const_iterator at =
@@ -201,18 +334,34 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		    at != record_template_declarations_.end() &&
 		    pt->second == at->second)
 		{
-			const vector<TypePtr>& p_args =
+			const vector<TemplateArgument>& p_args =
 				record_template_arguments_.find(pattern.get())->second;
-			const vector<TypePtr>& a_args =
+			const vector<TemplateArgument>& a_args =
 				record_template_arguments_.find(argument.get())->second;
 			if (p_args.size() != a_args.size())
 				return false;
 			for (size_t i = 0; i < p_args.size(); ++i)
-				if (!deduce_template_type(p_args[i],
-				                          a_args[i],
-				                          deduced,
-				                          fixed))
+			{
+				if (p_args[i].kind == TemplateArgumentKind::Type &&
+				    a_args[i].kind == TemplateArgumentKind::Type)
+				{
+					if (!deduce_template_type(p_args[i].type,
+					                          a_args[i].type,
+					                          deduced,
+					                          fixed))
+						return false;
+				}
+				else if (p_args[i].kind == TemplateArgumentKind::Value &&
+				         a_args[i].kind == TemplateArgumentKind::Value)
+				{
+					if (p_args[i].dependent || a_args[i].dependent)
+						continue;
+					if (p_args[i].value != a_args[i].value)
+						return false;
+				}
+				else
 					return false;
+			}
 			return true;
 		}
 	}
@@ -222,27 +371,113 @@ bool Parser::deduce_template_type(TypePtr pattern,
 bool Parser::deduce_function_template_arguments(
 	TemplateDeclaration* declaration,
 	const vector<Expr>& args,
-	const vector<TypePtr>& explicit_arguments,
-	vector<TypePtr>& out)
+	const vector<TemplateArgument>& explicit_arguments,
+	vector<TemplateArgument>& out)
 {
 	if (declaration->generic_function_type.get() == NULL ||
 	    declaration->generic_function_type->kind != pa11::TypeKind::Function)
 		return false;
-	if (explicit_arguments.size() > declaration->parameters.size())
+	bool has_template_parameter_pack = false;
+	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+		if (declaration->parameters[i].is_pack)
+			has_template_parameter_pack = true;
+	if (explicit_arguments.size() > declaration->parameters.size() &&
+	    !has_template_parameter_pack)
 		return false;
 	TypePtr fn = declaration->generic_function_type;
-	if (args.size() > fn->parameters.size() && !fn->variadic)
-		return false;
 	map<string, TypePtr> deduced;
 	map<string, TypePtr> fixed;
-	for (size_t i = 0; i < explicit_arguments.size(); ++i)
+	map<string, vector<TemplateArgument> > deduced_packs;
+	map<string, TemplateArgument> fixed_arguments;
+	size_t explicit_index = 0;
+	for (size_t i = 0;
+	     i < declaration->parameters.size() &&
+	     explicit_index < explicit_arguments.size();
+	     ++i)
 	{
 		const string& pname = declaration->parameters[i].name;
 		if (pname.empty())
 			return false;
-		deduced[pname] = explicit_arguments[i];
-		fixed[pname] = explicit_arguments[i];
+		if (declaration->parameters[i].is_pack)
+		{
+			if (explicit_index < explicit_arguments.size() &&
+			    explicit_arguments[explicit_index].kind ==
+				    TemplateArgumentKind::Pack)
+			{
+				TemplateArgument pack_arg =
+					explicit_arguments[explicit_index++];
+				for (size_t p = 0; p < pack_arg.pack.size(); ++p)
+				{
+					if (declaration->parameters[i].kind ==
+						    TemplateParameterKind::Type &&
+					    pack_arg.pack[p].kind != TemplateArgumentKind::Type)
+						return false;
+					if (declaration->parameters[i].kind ==
+						    TemplateParameterKind::NonType &&
+					    pack_arg.pack[p].kind != TemplateArgumentKind::Value)
+						return false;
+				}
+				fixed_arguments[pname] = pack_arg;
+				if (declaration->parameters[i].kind ==
+				    TemplateParameterKind::Type)
+					deduced_packs[pname] = pack_arg.pack;
+				continue;
+			}
+			size_t required_after = 0;
+			for (size_t j = i + 1; j < declaration->parameters.size(); ++j)
+				if (!declaration->parameters[j].is_pack &&
+				    !declaration->parameters[j].has_default)
+					++required_after;
+			if (explicit_index + required_after > explicit_arguments.size())
+				return false;
+			size_t take =
+				explicit_arguments.size() - explicit_index - required_after;
+			vector<TemplateArgument> pack;
+			for (size_t j = 0; j < take; ++j)
+			{
+				vector<TemplateArgument> expansion =
+					expand_template_argument_pack(
+						explicit_arguments[explicit_index++]);
+				for (size_t p = 0; p < expansion.size(); ++p)
+				{
+					if (declaration->parameters[i].kind ==
+						    TemplateParameterKind::Type &&
+					    expansion[p].kind != TemplateArgumentKind::Type)
+						return false;
+					if (declaration->parameters[i].kind ==
+						    TemplateParameterKind::NonType &&
+					    expansion[p].kind != TemplateArgumentKind::Value)
+						return false;
+					pack.push_back(expansion[p]);
+				}
+			}
+			TemplateArgument pack_arg = TemplateArgument::pack_arg(pack);
+			fixed_arguments[pname] = pack_arg;
+			if (declaration->parameters[i].kind ==
+			    TemplateParameterKind::Type)
+				deduced_packs[pname] = pack;
+			continue;
+		}
+		TemplateArgument explicit_arg =
+			explicit_arguments[explicit_index++];
+		if (declaration->parameters[i].kind ==
+		    TemplateParameterKind::Type)
+		{
+			if (explicit_arg.kind != TemplateArgumentKind::Type)
+				return false;
+			deduced[pname] = explicit_arg.type;
+			fixed[pname] = explicit_arg.type;
+			fixed_arguments[pname] = explicit_arg;
+		}
+		else
+		{
+			if (explicit_arg.kind != TemplateArgumentKind::Value)
+				return false;
+			fixed_arguments[pname] = explicit_arg;
+		}
 	}
+	if (explicit_index != explicit_arguments.size())
+		return false;
 	if (explicit_arguments.size() == declaration->parameters.size())
 	{
 		try
@@ -255,43 +490,142 @@ bool Parser::deduce_function_template_arguments(
 		}
 		return true;
 	}
-	size_t count = min(args.size(), fn->parameters.size());
-	for (size_t i = 0; i < count; ++i)
+	size_t arg_index = 0;
+	for (size_t i = 0; i < fn->parameters.size(); ++i)
 	{
 		TypePtr pattern = fn->parameters[i];
-		TypePtr argument = expression_object_type(args[i].type);
+		string pack_name;
+		bool parameter_pack =
+			function_parameter_pack_name(declaration, pattern, pack_name);
+		size_t remaining_function_parameters =
+			fn->parameters.size() - i - 1;
+		if (parameter_pack)
+		{
+			if (arg_index + remaining_function_parameters > args.size())
+				return false;
+			size_t take =
+				args.size() - arg_index - remaining_function_parameters;
+			vector<TemplateArgument> pack;
+			for (size_t j = 0; j < take; ++j)
+			{
+				const Expr& actual_expr = args[arg_index + j];
+				TypePtr argument =
+					expression_object_type(actual_expr.type);
+				TypePtr element_pattern = pattern;
+				TypePtr bare_pattern = pa11::strip_cv(element_pattern);
+				map<string, TypePtr> one;
+				if (bare_pattern->kind ==
+				    pa11::TypeKind::RValueReference &&
+				    pa11::strip_cv(bare_pattern->base)->kind ==
+					    pa11::TypeKind::TemplateParameter &&
+				    actual_expr.category == ValueCategory::LValue)
+				{
+					if (!deduce_template_type(
+						    bare_pattern->base,
+						    pa11::make_lvalue_reference(argument),
+						    one,
+						    &fixed))
+						return false;
+				}
+				else
+				{
+					if (element_pattern->kind !=
+						    pa11::TypeKind::LValueReference &&
+					    element_pattern->kind !=
+						    pa11::TypeKind::RValueReference)
+					{
+						element_pattern =
+							pa11::strip_top_level_cv(element_pattern);
+						argument =
+							lvalue_to_rvalue_type(actual_expr.type);
+					}
+					if (!deduce_template_type(element_pattern,
+					                          argument,
+					                          one,
+					                          &fixed))
+						return false;
+				}
+				map<string, TypePtr>::iterator found = one.find(pack_name);
+				if (found == one.end())
+					return false;
+				pack.push_back(TemplateArgument::type_arg(found->second));
+			}
+			deduced_packs[pack_name] = pack;
+			arg_index += take;
+			continue;
+		}
+		if (arg_index >= args.size())
+			break;
+		TypePtr argument = expression_object_type(args[arg_index].type);
 		TypePtr bare_pattern = pa11::strip_cv(pattern);
 		if (bare_pattern->kind == pa11::TypeKind::RValueReference &&
 		    pa11::strip_cv(bare_pattern->base)->kind ==
 			    pa11::TypeKind::TemplateParameter &&
-		    args[i].category == ValueCategory::LValue)
+		    args[arg_index].category == ValueCategory::LValue)
 		{
 			if (!deduce_template_type(bare_pattern->base,
 			                          pa11::make_lvalue_reference(argument),
 			                          deduced,
 			                          &fixed))
 				return false;
+			++arg_index;
 			continue;
 		}
 			if (pattern->kind != pa11::TypeKind::LValueReference &&
 			    pattern->kind != pa11::TypeKind::RValueReference)
 			{
 				pattern = pa11::strip_top_level_cv(pattern);
-				argument = lvalue_to_rvalue_type(args[i].type);
+				argument = lvalue_to_rvalue_type(args[arg_index].type);
 			}
 		if (!deduce_template_type(pattern, argument, deduced, &fixed))
 			return false;
+		++arg_index;
 	}
-		vector<TypePtr> explicit_args;
-		for (size_t i = 0; i < declaration->parameters.size(); ++i)
+	if (arg_index != args.size() && !fn->variadic)
+		return false;
+	vector<TemplateArgument> explicit_args;
+	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+	{
+		const string& pname = declaration->parameters[i].name;
+		if (declaration->parameters[i].is_pack)
 		{
-			const string& pname = declaration->parameters[i].name;
+			map<string, TemplateArgument>::iterator fixed_pack =
+				fixed_arguments.find(pname);
+			if (fixed_pack != fixed_arguments.end())
+				explicit_args.push_back(fixed_pack->second);
+			else
+			{
+				map<string, vector<TemplateArgument> >::iterator found =
+					deduced_packs.find(pname);
+				if (found == deduced_packs.end())
+					explicit_args.push_back(
+						TemplateArgument::pack_arg(
+							vector<TemplateArgument>()));
+				else
+					explicit_args.push_back(
+						TemplateArgument::pack_arg(found->second));
+			}
+			continue;
+		}
+		if (declaration->parameters[i].kind ==
+		    TemplateParameterKind::Type)
+		{
 			map<string, TypePtr>::iterator found = deduced.find(pname);
 			if (found == deduced.end())
 				break;
+			explicit_args.push_back(
+				TemplateArgument::type_arg(found->second));
+		}
+		else
+		{
+			map<string, TemplateArgument>::iterator found =
+				fixed_arguments.find(pname);
+			if (found == fixed_arguments.end())
+				break;
 			explicit_args.push_back(found->second);
 		}
-		try
+	}
+	try
 	{
 		out = complete_template_arguments(declaration, explicit_args);
 	}
@@ -305,8 +639,8 @@ bool Parser::deduce_function_template_arguments(
 bool Parser::deduce_function_template_target_type(
 	TemplateDeclaration* declaration,
 	TypePtr target,
-	const vector<TypePtr>& explicit_arguments,
-	vector<TypePtr>& out)
+	const vector<TemplateArgument>& explicit_arguments,
+	vector<TemplateArgument>& out)
 {
 	if (declaration->generic_function_type.get() == NULL ||
 	    declaration->generic_function_type->kind != pa11::TypeKind::Function)
@@ -322,22 +656,31 @@ bool Parser::deduce_function_template_target_type(
 		const string& pname = declaration->parameters[i].name;
 		if (pname.empty())
 			return false;
-		deduced[pname] = explicit_arguments[i];
-		fixed[pname] = explicit_arguments[i];
+		if (declaration->parameters[i].kind ==
+		    TemplateParameterKind::Type)
+		{
+			if (explicit_arguments[i].kind != TemplateArgumentKind::Type)
+				return false;
+			deduced[pname] = explicit_arguments[i].type;
+			fixed[pname] = explicit_arguments[i].type;
+		}
 	}
 	if (!deduce_template_type(declaration->generic_function_type,
 	                          target,
 	                          deduced,
 	                          &fixed))
 		return false;
-	vector<TypePtr> full_args;
+	vector<TemplateArgument> full_args;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
+		if (declaration->parameters[i].kind !=
+		    TemplateParameterKind::Type)
+			break;
 		const string& pname = declaration->parameters[i].name;
 		map<string, TypePtr>::iterator found = deduced.find(pname);
 		if (found == deduced.end())
 			break;
-		full_args.push_back(found->second);
+		full_args.push_back(TemplateArgument::type_arg(found->second));
 	}
 	try
 	{

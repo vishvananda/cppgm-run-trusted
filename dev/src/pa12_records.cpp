@@ -149,6 +149,8 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 		(bare->tag == "union" ||
 		 (bare->fields.empty() && bare->base.get() == NULL)) &&
 		!has_declared_constructor;
+	if (has_declared_constructor)
+		return NULL;
 	if (init_actions.empty() && !force_trivial &&
 	    !empty_implicit_record && !bare->is_polymorphic)
 	{
@@ -1210,13 +1212,13 @@ bool Parser::initializer_names_direct_base(Scope* class_scope,
 	return false;
 }
 
-Node Parser::default_constructor_action(Binding* variable)
+Node Parser::default_constructor_action(Binding* variable, bool force_trivial)
 {
 	TypePtr bare = pa11::strip_cv(variable->type);
 	if (bare->kind != pa11::TypeKind::Record)
 		throw runtime_error("default constructor action requires record");
 	string ctor_name = bare->name + "::" + bare->name;
-	Binding* ctor = ensure_default_constructor(bare);
+	Binding* ctor = ensure_default_constructor(bare, force_trivial);
 	if (ctor == NULL)
 		throw runtime_error("missing default constructor");
 

@@ -41,9 +41,52 @@ QualifiedName::QualifiedName()
 {
 }
 
+TemplateArgument::TemplateArgument()
+	: kind(TemplateArgumentKind::Type),
+	  value(0),
+	  dependent(false),
+	  pack_expansion(false)
+{
+}
+
+TemplateArgument TemplateArgument::type_arg(TypePtr type)
+{
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Type;
+	arg.type = type;
+	return arg;
+}
+
+TemplateArgument TemplateArgument::value_arg(TypePtr type, uint64_t value)
+{
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Value;
+	arg.type = type;
+	arg.value = value;
+	return arg;
+}
+
+TemplateArgument TemplateArgument::dependent_value_arg(TypePtr type)
+{
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Value;
+	arg.type = type;
+	arg.dependent = true;
+	return arg;
+}
+
+TemplateArgument TemplateArgument::pack_arg(const vector<TemplateArgument>& values)
+{
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Pack;
+	arg.pack = values;
+	return arg;
+}
+
 Expr::Expr()
 	: category(ValueCategory::PRValue),
 	  binding(NULL),
+	  pack_expansion(false),
 	  valid(false),
 	  null_pointer_constant(false),
 	  constant_expression(false),
@@ -81,7 +124,8 @@ PtrOp::PtrOp(TypePtr class_type, unsigned flags)
 }
 
 ParameterInfo::ParameterInfo()
-	: has_default(false)
+	: is_pack_expansion(false),
+	  has_default(false)
 {
 }
 
@@ -109,7 +153,11 @@ PendingFunctionBody::PendingFunctionBody()
 }
 
 TemplateParameterInfo::TemplateParameterInfo()
-	: has_default(false), default_begin(0), default_end(0)
+	: kind(TemplateParameterKind::Type),
+	  is_pack(false),
+	  has_default(false),
+	  default_begin(0),
+	  default_end(0)
 {
 }
 
@@ -121,6 +169,7 @@ TemplateDeclaration::TemplateDeclaration()
 	decl_end(0),
 	has_definition(false),
 	constructor_template(false),
+	class_specialization(false),
 	placeholder(NULL)
 {
 }
@@ -173,7 +222,9 @@ Parser::Parser(const string& srcfile, const Options& options)
 	: pos_(0),
 	  root_("translation-unit"),
 	  local_type_counter_(0),
-	  force_new_function_binding_(false)
+	  force_new_function_binding_(false),
+	  override_function_parameter_names_(false),
+	  template_argument_expression_depth_(0)
 {
 	pa10::Options pa10_options;
 	pa10_options.preprocess = options.preprocess;
@@ -336,14 +387,37 @@ void Parser::parse_translation_unit()
 		for (size_t j = 0; j < specializations.size(); ++j)
 		{
 			TypePtr type = pa11::strip_cv(specializations[j]);
-			map<const void*, vector<TypePtr> >::const_iterator args =
+			map<const void*, vector<TemplateArgument> >::const_iterator args =
 				record_template_arguments_.find(type.get());
 			if (args == record_template_arguments_.end())
 				continue;
 			bool dependent = false;
 			for (size_t k = 0; k < args->second.size(); ++k)
-				if (type_is_template_dependent(args->second[k]))
-					dependent = true;
+			{
+				vector<TemplateArgument> pending;
+				pending.push_back(args->second[k]);
+				while (!pending.empty())
+				{
+					TemplateArgument arg = pending.back();
+					pending.pop_back();
+					if (arg.kind == TemplateArgumentKind::Type)
+					{
+						if (type_is_template_dependent(arg.type))
+							dependent = true;
+					}
+					else if (arg.kind == TemplateArgumentKind::Value)
+					{
+						if (arg.dependent ||
+						    type_is_template_dependent(arg.type))
+							dependent = true;
+					}
+					else
+					{
+						for (size_t p = 0; p < arg.pack.size(); ++p)
+							pending.push_back(arg.pack[p]);
+					}
+				}
+			}
 			if (dependent)
 				continue;
 			complete_template_record(type);

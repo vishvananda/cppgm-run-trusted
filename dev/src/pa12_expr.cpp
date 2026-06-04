@@ -56,6 +56,37 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+bool type_contains_template_parameter_name(TypePtr type, string& name)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		name = type->name;
+		return true;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+		return type_contains_template_parameter_name(type->base, name);
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		if (type_contains_template_parameter_name(type->base, name))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (type_contains_template_parameter_name(type->parameters[i],
+			                                          name))
+				return true;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+		return type_contains_template_parameter_name(type->member_class,
+		                                             name) ||
+		       type_contains_template_parameter_name(type->base, name);
+	return false;
+}
+
 size_t ordinary_string_elements(const string& source, size_t fallback)
 {
 	if (source.empty() || source[0] != '"')
@@ -186,6 +217,8 @@ Expr Parser::parse_binary_expression(int min_prec)
 	Expr lhs = parse_unary_expression();
 	for (;;)
 	{
+		if (template_argument_expression_depth_ > 0 && at(OP_GT))
+			break;
 		ETokenType op = OP_PLUS;
 		int prec = 0;
 		if (!binary_operator(op, prec) || prec < min_prec)
@@ -530,7 +563,16 @@ Expr Parser::parse_new_expression()
 				}
 			}
 		}
-		if (ctor == NULL && !type_is_template_dependent(record))
+		if (ctor == NULL && args.empty())
+			ctor = ensure_default_constructor(record, true);
+		bool dependent_new_args = false;
+		for (size_t i = 0; i < args.size(); ++i)
+			if (type_is_template_dependent(args[i].type) ||
+			    args[i].pack_expansion)
+				dependent_new_args = true;
+		if (ctor == NULL &&
+		    !type_is_template_dependent(record) &&
+		    !dependent_new_args)
 			throw runtime_error("no matching constructor for new " +
 			                    pa11::describe_type(type));
 	}
@@ -693,6 +735,23 @@ Expr Parser::parse_literal_expression()
 		IntegerLiteralInfo info;
 		if (!AnalyzeIntegerLiteral(source, info))
 			throw runtime_error("invalid integer literal");
+		if (info.user_defined)
+		{
+			QualifiedName name;
+			name.name = "operator\"\"" + info.ud_suffix;
+			name.spelling = name.name;
+			name.has_template_arguments = true;
+			vector<TemplateArgument> chars;
+			TypePtr char_type = pa11::make_fundamental(FT_CHAR);
+			for (size_t i = 0; i < info.prefix.size(); ++i)
+				chars.push_back(TemplateArgument::value_arg(
+					char_type,
+					static_cast<unsigned char>(info.prefix[i])));
+			name.template_arguments.push_back(
+				TemplateArgument::pack_arg(chars));
+			Expr callee = make_id_expr(name);
+			return make_call_expr(callee, vector<Expr>());
+		}
 		out.type = pa11::make_fundamental(info.type);
 		out.constant_expression = true;
 		out.has_constant_value = true;
@@ -724,6 +783,22 @@ Expr Parser::parse_type_trait_expression(ETokenType keyword)
 {
 	const bool is_sizeof = keyword == KW_SIZEOF;
 	++pos_;
+	if (is_sizeof && consume(OP_DOTS))
+	{
+		expect(OP_LPAREN);
+		string name = consume_identifier();
+		expect(OP_RPAREN);
+		vector<Binding*> pack;
+		if (!find_function_parameter_pack_substitution(name, pack))
+		{
+			TemplateArgument subst;
+			if (find_template_value_substitution(name, subst) &&
+			    subst.kind == TemplateArgumentKind::Pack)
+				return make_sizeof_expr(subst.pack.size());
+			throw runtime_error("parameter pack not found");
+		}
+		return make_sizeof_expr(pack.size());
+	}
 	expect(OP_LPAREN);
 	size_t save = pos_;
 	uint64_t value = 0;
@@ -811,6 +886,8 @@ Expr Parser::parse_functional_cast(TypePtr target)
 			if (!type_is_template_dependent(target))
 			{
 				init.node.direct_call = ensure_default_constructor(target, true);
+				if (init.node.direct_call == NULL)
+					throw runtime_error("no matching constructor");
 				bool force_dtor =
 					pa11::strip_cv(target)->base.get() != NULL;
 				ensure_default_destructor(target, force_dtor);
@@ -854,6 +931,16 @@ Expr Parser::parse_braced_init_list()
 		else
 		{
 			Expr child = parse_assignment_expression();
+			if (consume(OP_DOTS))
+			{
+				if (!child.pack_expansion)
+					throw runtime_error("pack expansion requires a pack");
+				for (size_t i = 0; i < child.pack.size(); ++i)
+					add_child(init.node, child.pack[i].node);
+				if (!consume(OP_COMMA))
+					break;
+				continue;
+			}
 			if (child.category == ValueCategory::PRValue)
 			{
 				TypePtr object =
@@ -876,7 +963,37 @@ vector<Expr> Parser::parse_argument_list()
 	vector<Expr> args;
 	for (;;)
 	{
-		args.push_back(parse_assignment_expression());
+		Expr arg = parse_assignment_expression();
+		if (consume(OP_DOTS))
+		{
+			if (arg.pack_expansion)
+				args.insert(args.end(), arg.pack.begin(), arg.pack.end());
+			else
+			{
+				string pack_name;
+				TemplateArgument subst;
+				if (!type_contains_template_parameter_name(arg.type,
+				                                           pack_name) ||
+				    !find_template_value_substitution(pack_name, subst) ||
+				    subst.kind != TemplateArgumentKind::Pack)
+					throw runtime_error("pack expansion requires a pack");
+				for (size_t i = 0; i < subst.pack.size(); ++i)
+				{
+					if (subst.pack[i].kind != TemplateArgumentKind::Type)
+						throw runtime_error("type pack required");
+					Expr elem = arg;
+					elem.pack_expansion = true;
+					elem.type =
+						substitute_template_type_parameter(arg.type,
+						                                   pack_name,
+						                                   subst.pack[i].type);
+					elem.node.type = elem.type;
+					args.push_back(elem);
+				}
+			}
+		}
+		else
+			args.push_back(arg);
 		if (!consume(OP_COMMA))
 			break;
 	}

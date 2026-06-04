@@ -266,7 +266,11 @@ bool no_op_generated_default_constructor(Binding* ctor, TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind == TypeKind::Record && bare->is_polymorphic)
 		return false;
-	return ctor->unwind_no || default_init_no_op(type);
+	if (bare->kind == TypeKind::Record && bare->base.get() != NULL)
+		return false;
+	if (ctor->unwind_no)
+		return true;
+	return default_init_no_op(type);
 }
 
 bool has_inline_constructor(TypePtr type)
@@ -567,6 +571,8 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 		return;
 	}
 	TypePtr type = var.binding->type;
+	if (starts_with(var.children[0].line, "no-op-initializer"))
+		return;
 	if (starts_with(var.children[0].line, "constructor-action"))
 	{
 		Binding* ctor = !var.children[0].children.empty()
@@ -585,6 +591,15 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 		return;
 	}
 	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array && is_string_literal_node(var.children[0]))
+	{
+		Value base = ensure_pointer(emit_lvalue_addr(var));
+		function<Value()> addr_for = [base]() {
+			return base;
+		};
+		lower_string_array_init(addr_for, type, var.children[0]);
+		return;
+	}
 	if ((bare->kind == TypeKind::Record || bare->kind == TypeKind::Array) &&
 	    starts_with(var.children[0].line, "braced-init-list"))
 	{

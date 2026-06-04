@@ -28,6 +28,204 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+bool type_contains_template_parameter_name(TypePtr type, string& name)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		name = type->name;
+		return true;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+		return type_contains_template_parameter_name(type->base, name);
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		if (type_contains_template_parameter_name(type->base, name))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (type_contains_template_parameter_name(type->parameters[i],
+			                                          name))
+				return true;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+		return type_contains_template_parameter_name(type->member_class,
+		                                             name) ||
+		       type_contains_template_parameter_name(type->base, name);
+	return false;
+}
+
+bool integral_type_is_unsigned(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Enum)
+	{
+		switch (bare->enum_underlying)
+		{
+		case FT_UNSIGNED_CHAR:
+		case FT_UNSIGNED_SHORT_INT:
+		case FT_UNSIGNED_INT:
+		case FT_UNSIGNED_LONG_INT:
+		case FT_UNSIGNED_LONG_LONG_INT:
+			return true;
+		default:
+			return false;
+		}
+	}
+	if (bare->kind != pa11::TypeKind::Fundamental)
+		return false;
+	switch (bare->fundamental)
+	{
+	case FT_BOOL:
+	case FT_UNSIGNED_CHAR:
+	case FT_UNSIGNED_SHORT_INT:
+	case FT_UNSIGNED_INT:
+	case FT_UNSIGNED_LONG_INT:
+	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_CHAR16_T:
+	case FT_CHAR32_T:
+		return true;
+	default:
+		return false;
+	}
+}
+
+unsigned integral_type_bits(TypePtr type)
+{
+	uint64_t bytes = pa11::type_size(pa11::strip_cv(type));
+	if (bytes >= 8)
+		return 64;
+	return static_cast<unsigned>(bytes * 8);
+}
+
+uint64_t mask_for_bits(unsigned bits)
+{
+	return bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1);
+}
+
+uint64_t normalize_integral_value(TypePtr type, uint64_t value)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (!pa11::is_integral_or_bool_type(bare) &&
+	    bare->kind != pa11::TypeKind::Enum)
+		return value;
+	return value & mask_for_bits(integral_type_bits(type));
+}
+
+int64_t signed_integral_value(TypePtr type, uint64_t value)
+{
+	unsigned bits = integral_type_bits(type);
+	uint64_t normalized = normalize_integral_value(type, value);
+	if (bits >= 64)
+		return static_cast<int64_t>(normalized);
+	uint64_t sign = uint64_t(1) << (bits - 1);
+	if ((normalized & sign) == 0)
+		return static_cast<int64_t>(normalized);
+	return static_cast<int64_t>(normalized | ~mask_for_bits(bits));
+}
+
+bool constant_binary_value(ETokenType op,
+                           TypePtr left_type,
+                           uint64_t lhs,
+                           TypePtr right_type,
+                           uint64_t rhs,
+                           TypePtr result_type,
+                           uint64_t& out)
+{
+	TypePtr common = result_type;
+	if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT ||
+	    op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR)
+		common = left_type;
+	lhs = normalize_integral_value(common, lhs);
+	rhs = normalize_integral_value(common, rhs);
+	const bool unsigned_compare = integral_type_is_unsigned(common);
+	switch (op)
+	{
+	case OP_PLUS: out = normalize_integral_value(result_type, lhs + rhs); return true;
+	case OP_MINUS: out = normalize_integral_value(result_type, lhs - rhs); return true;
+	case OP_STAR: out = normalize_integral_value(result_type, lhs * rhs); return true;
+	case OP_DIV:
+		if (rhs == 0) return false;
+		out = integral_type_is_unsigned(common)
+			? lhs / rhs
+			: static_cast<uint64_t>(
+			      signed_integral_value(common, lhs) /
+			      signed_integral_value(common, rhs));
+		out = normalize_integral_value(result_type, out);
+		return true;
+	case OP_MOD:
+		if (rhs == 0) return false;
+		out = integral_type_is_unsigned(common)
+			? lhs % rhs
+			: static_cast<uint64_t>(
+			      signed_integral_value(common, lhs) %
+			      signed_integral_value(common, rhs));
+		out = normalize_integral_value(result_type, out);
+		return true;
+	case OP_XOR: out = normalize_integral_value(result_type, lhs ^ rhs); return true;
+	case OP_AMP: out = normalize_integral_value(result_type, lhs & rhs); return true;
+	case OP_BOR: out = normalize_integral_value(result_type, lhs | rhs); return true;
+	case OP_LSHIFT:
+		if (rhs >= 64) return false;
+		out = normalize_integral_value(result_type, lhs << rhs);
+		return true;
+	case OP_RSHIFT:
+		if (rhs >= 64) return false;
+		if (integral_type_is_unsigned(common))
+			out = lhs >> rhs;
+		else
+			out = static_cast<uint64_t>(
+				signed_integral_value(common, lhs) >> rhs);
+		out = normalize_integral_value(result_type, out);
+		return true;
+	case OP_EQ:
+		out = unsigned_compare
+			? (lhs == rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) ==
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_NE:
+		out = unsigned_compare
+			? (lhs != rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) !=
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_LT:
+		out = unsigned_compare
+			? (lhs < rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) <
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_GT:
+		out = unsigned_compare
+			? (lhs > rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) >
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_LE:
+		out = unsigned_compare
+			? (lhs <= rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) <=
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_GE:
+		out = unsigned_compare
+			? (lhs >= rhs ? 1 : 0)
+			: (signed_integral_value(common, lhs) >=
+			   signed_integral_value(common, rhs) ? 1 : 0);
+		return true;
+	case OP_LAND: out = (lhs != 0 && rhs != 0) ? 1 : 0; return true;
+	case OP_LOR: out = (lhs != 0 || rhs != 0) ? 1 : 0; return true;
+	case OP_COMMA: out = normalize_integral_value(result_type, rhs); return true;
+	default:
+		return false;
+	}
+}
+
 bool top_level_const(TypePtr type)
 {
 	return type->kind == pa11::TypeKind::Cv &&
@@ -41,49 +239,6 @@ bool type_has_cv_flag(TypePtr type, unsigned flag)
 	if (type->kind == pa11::TypeKind::Array)
 		return type_has_cv_flag(type->base, flag);
 	return false;
-}
-
-bool constant_binary_value(ETokenType op,
-                           uint64_t lhs,
-                           uint64_t rhs,
-                           uint64_t& out)
-{
-	switch (op)
-	{
-	case OP_PLUS: out = lhs + rhs; return true;
-	case OP_MINUS: out = lhs - rhs; return true;
-	case OP_STAR: out = lhs * rhs; return true;
-	case OP_DIV:
-		if (rhs == 0) return false;
-		out = lhs / rhs;
-		return true;
-	case OP_MOD:
-		if (rhs == 0) return false;
-		out = lhs % rhs;
-		return true;
-	case OP_XOR: out = lhs ^ rhs; return true;
-	case OP_AMP: out = lhs & rhs; return true;
-	case OP_BOR: out = lhs | rhs; return true;
-	case OP_LSHIFT:
-		if (rhs >= 64) return false;
-		out = lhs << rhs;
-		return true;
-	case OP_RSHIFT:
-		if (rhs >= 64) return false;
-		out = lhs >> rhs;
-		return true;
-	case OP_EQ: out = lhs == rhs ? 1 : 0; return true;
-	case OP_NE: out = lhs != rhs ? 1 : 0; return true;
-	case OP_LT: out = lhs < rhs ? 1 : 0; return true;
-	case OP_GT: out = lhs > rhs ? 1 : 0; return true;
-	case OP_LE: out = lhs <= rhs ? 1 : 0; return true;
-	case OP_GE: out = lhs >= rhs ? 1 : 0; return true;
-	case OP_LAND: out = (lhs != 0 && rhs != 0) ? 1 : 0; return true;
-	case OP_LOR: out = (lhs != 0 || rhs != 0) ? 1 : 0; return true;
-	case OP_COMMA: out = rhs; return true;
-	default:
-		return false;
-	}
 }
 
 bool compound_assignment_rhs_viable(ETokenType op, TypePtr lhs, TypePtr rhs)
@@ -103,38 +258,6 @@ bool compound_assignment_rhs_viable(ETokenType op, TypePtr lhs, TypePtr rhs)
 		return pa11::is_integral_or_bool_type(left) &&
 		       pa11::is_integral_or_bool_type(right);
 	return false;
-}
-
-Expr make_this_id_expr(Binding* binding)
-{
-	Expr out;
-	out.binding = binding;
-	out.type = binding->type;
-	out.category = ValueCategory::LValue;
-	out.valid = true;
-	out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
-	                " this");
-	annotate_expr_node(out);
-	return out;
-}
-
-Expr make_constant_binding_expr(Binding* binding, TypePtr type)
-{
-	Expr out;
-	out.binding = binding;
-	out.type = type;
-	out.category = ValueCategory::PRValue;
-	out.valid = true;
-	out.constant_expression = true;
-	out.has_constant_value = true;
-	out.constant_value = binding->constant_value;
-	out.null_pointer_constant = binding->constant_value == 0;
-	out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
-	                " " + to_string(binding->constant_value));
-	out.node.binding = binding;
-	out.node.token_text = to_string(binding->constant_value);
-	annotate_expr_node(out);
-	return out;
 }
 
 }  // namespace
@@ -195,6 +318,20 @@ Expr Parser::make_builtin_id_expr(const QualifiedName& name)
 		annotate_expr_node(out);
 		return out;
 	}
+	if (!name.qualified && name.name == "__CHAR_BIT__")
+	{
+		Expr out;
+		out.type = pa11::make_fundamental(FT_INT);
+		out.category = ValueCategory::PRValue;
+		out.valid = true;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = 8;
+		out.node = Node("literal prvalue int 8");
+		out.node.token_text = "8";
+		annotate_expr_node(out);
+		return out;
+	}
 	if (!name.qualified &&
 	    (name.name == "__builtin_strlen" ||
 	     name.name == "__builtin_unreachable" ||
@@ -242,312 +379,6 @@ Expr Parser::make_builtin_id_expr(const QualifiedName& name)
 		return out;
 	}
 	return Expr();
-}
-
-Expr Parser::make_implicit_member_id_expr(const QualifiedName& name,
-                                          const vector<Binding*>& found,
-                                          Binding* binding,
-                                          Binding* this_binding)
-{
-	if ((!name.qualified ||
-	     (name.qualifier != NULL && name.qualifier->kind == ScopeKind::Class)) &&
-	    this_binding != NULL &&
-	    binding->owner != NULL &&
-	    binding->owner->kind == ScopeKind::Class &&
-	    !binding->is_static_member)
-	{
-		Expr this_expr = make_this_id_expr(this_binding);
-		if (name.qualified)
-		{
-			TypePtr this_type =
-				pa11::strip_cv(expression_object_type(this_binding->type));
-			TypePtr object_type = this_type->kind == pa11::TypeKind::Pointer
-				? this_type->base : TypePtr();
-			TypePtr object_record = object_type.get() != NULL
-				? pa11::strip_cv(object_type) : TypePtr();
-			if (!member_access_allowed(binding, object_record))
-			{
-				if (binding->is_private)
-					throw runtime_error("private member access");
-				throw runtime_error("protected member access");
-			}
-			Expr member;
-			member.valid = true;
-			member.binding = binding;
-			member.type = binding->type;
-			member.category = ValueCategory::LValue;
-			if (binding->kind == BindingKind::Function)
-			{
-				for (size_t i = 0; i < found.size(); ++i)
-					if (found[i]->kind == BindingKind::Function)
-						member.overloads.push_back(found[i]);
-			}
-			else if (object_type.get() != NULL &&
-			         pa11::type_has_const(object_type) &&
-			         !binding->is_mutable_member)
-				member.type = pa11::make_cv(member.type, pa11::CV_CONST);
-			member.node = Node("member-expression lvalue " +
-			                   pa11::describe_type(member.type) +
-			                   " OP_ARROW:" + binding->name);
-			add_child(member.node, this_expr.node);
-			member.node.binding = binding;
-			member.node.has_op = true;
-			member.node.op = OP_ARROW;
-			member.node.token_text = binding->name;
-			member.node.suppress_virtual_dispatch = true;
-			annotate_expr_node(member);
-			return member;
-		}
-		return make_member_expr(this_expr, binding->name, "->");
-	}
-	return Expr();
-}
-
-void Parser::synthesize_default_assignment_lookup(const QualifiedName& name,
-                                                  vector<Binding*>& found)
-{
-	if (!found.empty() ||
-	    !name.qualified ||
-	    name.qualifier == NULL ||
-	    name.qualifier->kind != ScopeKind::Class ||
-	    name.name != "operator=")
-		return;
-	TypePtr record = pa11::record_type_for_scope(name.qualifier);
-	if (record.get() == NULL)
-		return;
-	vector<TypePtr> params;
-	params.push_back(pa11::make_pointer(record));
-	params.push_back(
-		pa11::make_lvalue_reference(pa11::make_cv(record, pa11::CV_CONST)));
-	TypePtr fn_type =
-		pa11::make_function(pa11::make_lvalue_reference(record),
-		                    params,
-		                    false);
-	found.push_back(add_value(name.qualifier,
-	                          BindingKind::Function,
-	                          "operator=",
-	                          fn_type));
-}
-
-Expr Parser::make_missing_id_expr(const QualifiedName& name)
-{
-	Binding* this_binding =
-		pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
-	Binding* active = active_functions_.empty() ? NULL : active_functions_.back();
-	Scope* active_class =
-		active != NULL && active->owner != NULL &&
-		active->owner->kind == ScopeKind::Class ? active->owner : NULL;
-	if (!name.qualified && this_binding != NULL && active_class != NULL)
-	{
-		vector<Binding*> members =
-			lookup_qualified_set(active_class, name.name, pa11::LOOKUP_VALUE);
-		if (!members.empty())
-		{
-			Expr member =
-				make_implicit_member_id_expr(name,
-				                             members,
-				                             members[0],
-				                             this_binding);
-			if (member.valid)
-				return member;
-		}
-	}
-	if (!name.qualified && active_class != NULL)
-	{
-		vector<Binding*> members =
-			lookup_qualified_set(active_class, name.name, pa11::LOOKUP_VALUE);
-		if (!members.empty())
-		{
-			TypePtr class_type = pa11::record_type_for_scope(active_class);
-			if (class_type.get() != NULL)
-			{
-				Expr this_expr;
-				this_expr.valid = true;
-				this_expr.type = pa11::make_pointer(class_type);
-				this_expr.category = ValueCategory::LValue;
-				this_expr.node = Node("id-expression lvalue " +
-				                      pa11::describe_type(this_expr.type) +
-				                      " this");
-				annotate_expr_node(this_expr);
-				return make_member_expr(this_expr, name.name, "->");
-			}
-		}
-	}
-	string near_token = pos_ < tokens_.size() ? tokens_[pos_].source :
-	                    string("<eof>");
-	throw runtime_error("name not found: " + name.spelling +
-	                    " near '" + near_token + "'");
-}
-
-Expr Parser::make_aliased_member_variable_id_expr(Binding* binding)
-{
-	Binding* storage = binding->aliased_binding;
-	Expr out;
-	out.valid = true;
-	out.binding = binding;
-	out.type = binding->type;
-	out.category = ValueCategory::LValue;
-	out.node = Node("member-expression lvalue " +
-	                pa11::describe_type(out.type) + " " + binding->name);
-	TypePtr storage_type = expression_object_type(storage->type);
-	add_child(out.node,
-	          Node("id-expression lvalue " +
-	               pa11::describe_type(storage_type) + " " +
-	               storage->name));
-	out.node.binding = binding;
-	annotate_expr_node(out);
-	return out;
-}
-
-Expr Parser::make_enumerator_id_expr(Binding* binding)
-{
-	Expr out;
-	out.valid = true;
-	out.binding = binding;
-	out.type = binding->type;
-	out.category = ValueCategory::PRValue;
-	out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
-	                " " + to_string(binding->constant_value));
-	out.constant_expression = true;
-	out.has_constant_value = true;
-	out.constant_value = binding->constant_value;
-	out.null_pointer_constant = binding->constant_value == 0;
-	out.node.binding = binding;
-	out.node.token_text = to_string(binding->constant_value);
-	annotate_expr_node(out);
-	return out;
-}
-
-void Parser::prefer_static_qualified_overloads(const QualifiedName& name,
-                                               Expr& out,
-                                               Binding*& binding)
-{
-	if (!name.qualified ||
-	    name.qualifier == NULL ||
-	    name.qualifier->kind != ScopeKind::Class ||
-	    out.overloads.empty() ||
-	    pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER) != NULL)
-		return;
-	vector<Binding*> static_overloads;
-	for (size_t i = 0; i < out.overloads.size(); ++i)
-		if (out.overloads[i]->is_static_member)
-			static_overloads.push_back(out.overloads[i]);
-	if (static_overloads.empty())
-		return;
-	out.overloads = static_overloads;
-	binding = out.overloads[0];
-}
-
-Expr Parser::make_id_expr(const QualifiedName& name)
-{
-	Expr builtin = make_builtin_id_expr(name);
-	if (builtin.valid)
-		return builtin;
-	vector<Binding*> found = resolve_name_set(name, pa11::LOOKUP_VALUE);
-	map<Binding*, vector<TypePtr> > explicit_template_arguments;
-	if (name.has_template_arguments)
-	{
-		vector<TemplateDeclaration*> templates = find_function_templates(name);
-		found.clear();
-		for (size_t i = 0; i < templates.size(); ++i)
-		{
-			if (templates[i]->placeholder == NULL)
-				continue;
-			found.push_back(templates[i]->placeholder);
-			explicit_template_arguments[templates[i]->placeholder] =
-				name.template_arguments;
-		}
-		if (found.empty())
-			throw runtime_error("function template not found");
-	}
-	synthesize_default_assignment_lookup(name, found);
-		if (found.empty())
-			return make_missing_id_expr(name);
-		Binding* nonfunction = NULL;
-		for (size_t i = 0; i < found.size(); ++i)
-		{
-			if (found[i]->kind == BindingKind::Function)
-				continue;
-			if (nonfunction != NULL)
-			{
-				bool found_local =
-					found[i]->owner != NULL &&
-					(found[i]->owner->kind == ScopeKind::Function ||
-					 found[i]->owner->kind == ScopeKind::Block);
-				bool previous_local =
-					nonfunction->owner != NULL &&
-					(nonfunction->owner->kind == ScopeKind::Function ||
-					 nonfunction->owner->kind == ScopeKind::Block);
-				if (found_local && !previous_local)
-				{
-					nonfunction = found[i];
-					continue;
-				}
-				if (!found_local && previous_local)
-					continue;
-				if (found[i]->kind == BindingKind::Parameter &&
-				    nonfunction->kind != BindingKind::Parameter)
-				{
-					nonfunction = found[i];
-					continue;
-				}
-				if (nonfunction->kind == BindingKind::Parameter &&
-				    found[i]->kind != BindingKind::Parameter)
-					continue;
-				throw runtime_error("ambiguous name: " + name.spelling);
-			}
-			nonfunction = found[i];
-		}
-	Expr out;
-	out.valid = true;
-	out.explicit_template_arguments = explicit_template_arguments;
-	for (size_t i = 0; i < found.size(); ++i)
-	{
-		if (found[i]->kind == BindingKind::Function)
-			out.overloads.push_back(found[i]);
-	}
-	Binding* binding = found[0];
-	if (binding->aliased_binding != NULL &&
-	    binding->target_scope != NULL &&
-	    binding->kind == BindingKind::Variable)
-		return make_aliased_member_variable_id_expr(binding);
-	if (binding->kind == BindingKind::Enumerator)
-		return make_enumerator_id_expr(binding);
-	if (!out.overloads.empty())
-		binding = out.overloads[0];
-	Binding* this_binding =
-		pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
-	prefer_static_qualified_overloads(name, out, binding);
-	Expr member = make_implicit_member_id_expr(name, found, binding, this_binding);
-	if (member.valid)
-		return member;
-	if (binding->owner != NULL &&
-	    binding->owner->kind == ScopeKind::Class &&
-	    binding->is_static_member &&
-	    binding->kind == BindingKind::Variable &&
-	    binding->has_constant)
-	{
-		return make_constant_binding_expr(binding,
-		                                  expression_object_type(binding->type));
-	}
-	out.binding = binding;
-	out.type = expression_object_type(binding->type);
-	if (binding->kind == BindingKind::Function)
-		out.type = binding->type;
-	out.category = binding->kind == BindingKind::Enumerator
-		? ValueCategory::PRValue : ValueCategory::LValue;
-	string spelling = name.qualified ? name.spelling : binding->name;
-	out.node = Node("id-expression " + value_category_name(out.category) + " " +
-	                pa11::describe_type(out.type) + " " + spelling);
-	if (binding->has_constant)
-	{
-		out.constant_expression = true;
-		out.has_constant_value = true;
-		out.constant_value = binding->constant_value;
-		out.null_pointer_constant = binding->constant_value == 0;
-	}
-	annotate_expr_node(out);
-	return out;
 }
 
 Expr Parser::make_binary_expr(ETokenType op,
@@ -618,7 +449,8 @@ Expr Parser::make_binary_expr(ETokenType op,
 	}
 	if (have_builtin_converted)
 		return builtin_converted;
-	TypePtr type = usual_arithmetic_type(lhs.type, rhs.type);
+	TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type);
+	TypePtr type = arithmetic_type;
 	if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT ||
 	    op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR)
 		type = pa11::make_fundamental(FT_BOOL);
@@ -626,6 +458,8 @@ Expr Parser::make_binary_expr(ETokenType op,
 		type = pointer_arithmetic_type(op, lhs, rhs);
 	else if (op == OP_MINUS && is_pointer_difference(lhs, rhs))
 		type = pa11::make_fundamental(FT_LONG_INT);
+	else if (op == OP_LSHIFT || op == OP_RSHIFT)
+		type = usual_arithmetic_type(lhs.type, lhs.type);
 	else if (op == OP_COMMA)
 		type = rhs.type;
 	Expr out;
@@ -636,11 +470,17 @@ Expr Parser::make_binary_expr(ETokenType op,
 	if (lhs.has_constant_value && rhs.has_constant_value)
 	{
 		uint64_t value = 0;
-		if (constant_binary_value(op, lhs.constant_value, rhs.constant_value, value))
+		if (constant_binary_value(op,
+		                          arithmetic_type,
+		                          lhs.constant_value,
+		                          arithmetic_type,
+		                          rhs.constant_value,
+		                          type,
+		                          value))
 		{
 			out.has_constant_value = true;
 			out.constant_value = value;
-			out.null_pointer_constant = value == 0 &&
+			out.null_pointer_constant = out.constant_value == 0 &&
 				pa11::is_integral_or_bool_type(out.type);
 		}
 	}
@@ -825,14 +665,32 @@ void Parser::collect_associated_hidden_friends(TypePtr type,
 	if (direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record)
 		collect_associated_hidden_friends(direct_base, name, seen, out);
-	map<const void*, vector<TypePtr> >::const_iterator args =
+	map<const void*, vector<TemplateArgument> >::const_iterator args =
 		record_template_arguments_.find(bare.get());
 	if (args != record_template_arguments_.end())
 		for (size_t i = 0; i < args->second.size(); ++i)
-			collect_associated_hidden_friends(args->second[i],
-			                                  name,
-			                                  seen,
-			                                  out);
+		{
+			vector<TemplateArgument> pending;
+			pending.push_back(args->second[i]);
+			while (!pending.empty())
+			{
+				TemplateArgument arg = pending.back();
+				pending.pop_back();
+				if (arg.kind == TemplateArgumentKind::Type)
+					collect_associated_hidden_friends(arg.type,
+					                                  name,
+					                                  seen,
+					                                  out);
+				else if (arg.kind == TemplateArgumentKind::Value)
+					collect_associated_hidden_friends(arg.type,
+					                                  name,
+					                                  seen,
+					                                  out);
+				else
+					for (size_t p = 0; p < arg.pack.size(); ++p)
+						pending.push_back(arg.pack[p]);
+			}
+		}
 }
 
 void Parser::collect_associated_namespace_functions(TypePtr type,
@@ -889,14 +747,32 @@ void Parser::collect_associated_namespace_functions(TypePtr type,
 	if (direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record)
 		collect_associated_namespace_functions(direct_base, name, seen, out);
-	map<const void*, vector<TypePtr> >::const_iterator args =
+	map<const void*, vector<TemplateArgument> >::const_iterator args =
 		record_template_arguments_.find(bare.get());
 	if (args != record_template_arguments_.end())
 		for (size_t i = 0; i < args->second.size(); ++i)
-			collect_associated_namespace_functions(args->second[i],
-			                                       name,
-			                                       seen,
-			                                       out);
+		{
+			vector<TemplateArgument> pending;
+			pending.push_back(args->second[i]);
+			while (!pending.empty())
+			{
+				TemplateArgument arg = pending.back();
+				pending.pop_back();
+				if (arg.kind == TemplateArgumentKind::Type)
+					collect_associated_namespace_functions(arg.type,
+					                                       name,
+					                                       seen,
+					                                       out);
+				else if (arg.kind == TemplateArgumentKind::Value)
+					collect_associated_namespace_functions(arg.type,
+					                                       name,
+					                                       seen,
+					                                       out);
+				else
+					for (size_t p = 0; p < arg.pack.size(); ++p)
+						pending.push_back(arg.pack[p]);
+			}
+		}
 }
 
 vector<Binding*> Parser::binary_operator_candidates(ETokenType op,
@@ -1107,10 +983,8 @@ Expr Parser::make_unary_expr(ETokenType op, const string& text, Expr inner)
 	}
 	if (op == OP_LNOT)
 		out.type = pa11::make_fundamental(FT_BOOL);
-	else if (op == OP_COMPL &&
-	         pa11::strip_cv(expression_object_type(inner.type))->kind ==
-	             pa11::TypeKind::Enum)
-		out.type = pa11::make_fundamental(FT_INT);
+	else if (op == OP_PLUS || op == OP_MINUS || op == OP_COMPL)
+		out.type = usual_arithmetic_type(inner.type, inner.type);
 	else
 		out.type = expression_object_type(inner.type);
 	out.category = (op == OP_INC || op == OP_DEC) ? ValueCategory::LValue :
@@ -1132,7 +1006,7 @@ Expr Parser::make_unary_expr(ETokenType op, const string& text, Expr inner)
 		if (have_value)
 		{
 			out.has_constant_value = true;
-			out.constant_value = value;
+			out.constant_value = normalize_integral_value(out.type, value);
 			out.null_pointer_constant = value == 0 &&
 				pa11::is_integral_or_bool_type(out.type);
 		}
@@ -1398,6 +1272,38 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 
 Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 {
+	if (inner.pack_expansion)
+	{
+		string pack_name;
+		TemplateArgument subst;
+		if (!type_contains_template_parameter_name(target, pack_name) ||
+		    !find_template_value_substitution(pack_name, subst) ||
+		    subst.kind != TemplateArgumentKind::Pack ||
+		    subst.pack.size() != inner.pack.size())
+			throw runtime_error("cast pack expansion mismatch");
+		Expr out;
+		out.valid = true;
+		out.pack_expansion = true;
+		out.type = target;
+		out.category = ValueCategory::PRValue;
+		out.node = Node("pack-expression cast");
+		for (size_t i = 0; i < inner.pack.size(); ++i)
+		{
+			if (subst.pack[i].kind != TemplateArgumentKind::Type)
+				throw runtime_error("type pack required for cast");
+			TypePtr element_target =
+				substitute_template_type_parameter(target,
+				                                   pack_name,
+				                                   subst.pack[i].type);
+			Expr elem = make_cast_expr(element_target,
+			                           op_text,
+			                           inner.pack[i]);
+			out.pack.push_back(elem);
+			add_child(out.node, elem.node);
+		}
+		annotate_expr_node(out);
+		return out;
+	}
 	Expr out;
 	out.type = target;
 	out.category = target->kind == pa11::TypeKind::LValueReference
@@ -1408,7 +1314,25 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 	out.valid = true;
 	out.constant_expression = inner.constant_expression;
 	out.has_constant_value = inner.has_constant_value;
-	out.constant_value = inner.constant_value;
+	TypePtr source_object_for_constant =
+		pa11::strip_cv(expression_object_type(inner.type));
+	TypePtr target_object_for_constant = pa11::strip_cv(target);
+	if (inner.has_constant_value &&
+	    (pa11::is_integral_or_bool_type(source_object_for_constant) ||
+	     source_object_for_constant->kind == pa11::TypeKind::Enum) &&
+	    (pa11::is_integral_or_bool_type(target_object_for_constant) ||
+	     target_object_for_constant->kind == pa11::TypeKind::Enum) &&
+	    !integral_type_is_unsigned(source_object_for_constant) &&
+	    integral_type_bits(target_object_for_constant) >
+		    integral_type_bits(source_object_for_constant))
+		out.constant_value = normalize_integral_value(
+			target,
+			static_cast<uint64_t>(
+				signed_integral_value(source_object_for_constant,
+				                      inner.constant_value)));
+	else
+		out.constant_value = normalize_integral_value(target,
+		                                              inner.constant_value);
 	out.null_pointer_constant = inner.null_pointer_constant &&
 	                            !type_is_pointer(target);
 	if (target->kind == pa11::TypeKind::RValueReference &&

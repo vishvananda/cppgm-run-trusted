@@ -54,14 +54,37 @@ void Parser::parse_function_body_from_parameters(
 		function->owner != NULL &&
 		function->owner->kind == ScopeKind::Class &&
 		!function->is_static_member ? 1 : 0;
+	map<string, vector<Binding*> > parameter_packs;
 	for (size_t i = 0; i < parameters.size(); ++i)
 	{
+		if (!parameters[i].pack_expression_name.empty() &&
+		    !parameters[i].pack_name.empty())
+		{
+			TemplateArgument subst;
+			if (find_template_value_substitution(parameters[i].pack_name,
+			                                     subst) &&
+			    subst.kind == TemplateArgumentKind::Pack &&
+			    subst.pack.empty())
+			{
+				parameter_packs[parameters[i].pack_expression_name];
+				continue;
+			}
+		}
+		if (parameters[i].type.get() == NULL)
+		{
+			if (!parameters[i].pack_expression_name.empty())
+				parameter_packs[parameters[i].pack_expression_name];
+			continue;
+		}
 		string name = parameters[i].name;
 		string node_name = name;
 		size_t saved_name_index = saved_name_offset + i;
-		if (node_name.empty() &&
+		bool force_saved_name =
+			override_function_parameter_name_bindings_.count(function) != 0;
+		if ((force_saved_name || node_name.empty()) &&
 		    saved_names != function_parameter_names_.end() &&
-		    saved_name_index < saved_names->second.size())
+		    saved_name_index < saved_names->second.size() &&
+		    !saved_names->second[saved_name_index].empty())
 			node_name = saved_names->second[saved_name_index];
 		if (!name.empty())
 		{
@@ -70,7 +93,10 @@ void Parser::parse_function_body_from_parameters(
 				                  BindingKind::Parameter,
 				                  name,
 				                  parameters[i].type);
-			Node param_node("parameter " + name + " " +
+			if (!parameters[i].pack_expression_name.empty())
+				parameter_packs[parameters[i].pack_expression_name]
+					.push_back(param);
+			Node param_node("parameter " + node_name + " " +
 			                pa11::describe_type(parameters[i].type));
 			param_node.binding = param;
 			param_node.type = parameters[i].type;
@@ -87,7 +113,9 @@ void Parser::parse_function_body_from_parameters(
 	scopes_.push_back(function_scope);
 	function_returns_.push_back(function->type->base);
 	active_functions_.push_back(function);
+	function_parameter_pack_substitutions_.push_back(parameter_packs);
 	add_child(fn, parse_compound_statement());
+	function_parameter_pack_substitutions_.pop_back();
 	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
@@ -210,6 +238,11 @@ Node Parser::parse_block_item()
 		parse_namespace_or_alias(node);
 		return Node();
 	}
+	if (at(KW_STATIC_ASSERT))
+	{
+		parse_static_assert_declaration();
+		return Node();
+	}
 	if (starts_declaration())
 	{
 		size_t save = pos_;
@@ -224,6 +257,7 @@ Node Parser::parse_block_item()
 			at(KW_TYPENAME) ||
 			starts_class_key() ||
 			at(KW_ENUM) ||
+			at(KW_STATIC_ASSERT) ||
 			(at_identifier() &&
 			 pos_ + 1 < tokens_.size() &&
 			 tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier);

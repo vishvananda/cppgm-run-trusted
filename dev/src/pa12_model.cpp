@@ -77,6 +77,64 @@ bool type_is_arithmetic(TypePtr type)
 	return pa11::is_integral_or_bool_type(type) || type_is_floating(type);
 }
 
+bool integral_type_is_unsigned(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Enum)
+	{
+		switch (bare->enum_underlying)
+		{
+		case FT_UNSIGNED_CHAR:
+		case FT_UNSIGNED_SHORT_INT:
+		case FT_UNSIGNED_INT:
+		case FT_UNSIGNED_LONG_INT:
+		case FT_UNSIGNED_LONG_LONG_INT:
+			return true;
+		default:
+			return false;
+		}
+	}
+	if (bare->kind != pa11::TypeKind::Fundamental)
+		return false;
+	switch (bare->fundamental)
+	{
+	case FT_BOOL:
+	case FT_UNSIGNED_CHAR:
+	case FT_UNSIGNED_SHORT_INT:
+	case FT_UNSIGNED_INT:
+	case FT_UNSIGNED_LONG_INT:
+	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_CHAR16_T:
+	case FT_CHAR32_T:
+		return true;
+	default:
+		return false;
+	}
+}
+
+TypePtr unsigned_counterpart(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Fundamental)
+		return type;
+	switch (bare->fundamental)
+	{
+	case FT_CHAR:
+	case FT_SIGNED_CHAR:
+		return pa11::make_fundamental(FT_UNSIGNED_CHAR);
+	case FT_SHORT_INT:
+		return pa11::make_fundamental(FT_UNSIGNED_SHORT_INT);
+	case FT_INT:
+		return pa11::make_fundamental(FT_UNSIGNED_INT);
+	case FT_LONG_INT:
+		return pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
+	case FT_LONG_LONG_INT:
+		return pa11::make_fundamental(FT_UNSIGNED_LONG_LONG_INT);
+	default:
+		return type;
+	}
+}
+
 int arithmetic_rank(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -89,6 +147,9 @@ int arithmetic_rank(TypePtr type)
 	case FT_BOOL: return 1;
 	case FT_SIGNED_CHAR: case FT_UNSIGNED_CHAR: case FT_CHAR: return 1;
 	case FT_SHORT_INT: case FT_UNSIGNED_SHORT_INT: return 2;
+	case FT_WCHAR_T: return 3;
+	case FT_CHAR16_T: return 2;
+	case FT_CHAR32_T: return 3;
 	case FT_INT: case FT_UNSIGNED_INT: return 3;
 	case FT_LONG_INT: case FT_UNSIGNED_LONG_INT: return 4;
 	case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return 5;
@@ -226,7 +287,8 @@ TypePtr Parser::apply_suffixes(TypePtr type, const vector<Suffix>& suffixes)
 		{
 			vector<TypePtr> params;
 			for (size_t j = 0; j < suffix.parameters.size(); ++j)
-				params.push_back(suffix.parameters[j].type);
+				if (suffix.parameters[j].type.get() != NULL)
+					params.push_back(suffix.parameters[j].type);
 			TypePtr result = suffix.trailing_return.get() != NULL
 				? suffix.trailing_return : type;
 			type = pa11::make_function(result, params, suffix.variadic);
@@ -616,11 +678,17 @@ bool Parser::pointer_conversion_viable(TypePtr source, TypePtr target) const
 		return false;
 	TypePtr src_pointee = src->base;
 	TypePtr dst_pointee = dst->base;
+	TypePtr bare_src_pointee = pa11::strip_cv(src_pointee);
+	TypePtr bare_dst_pointee = pa11::strip_cv(dst_pointee);
+	if (bare_src_pointee->kind == pa11::TypeKind::Record)
+		const_cast<Parser*>(this)->complete_template_record(bare_src_pointee);
+	if (bare_dst_pointee->kind == pa11::TypeKind::Record)
+		const_cast<Parser*>(this)->complete_template_record(bare_dst_pointee);
 	if (qualification_compatible(target, source))
 		return true;
-	TypePtr bare_dst = pa11::strip_cv(dst_pointee);
-	if (bare_dst->kind != pa11::TypeKind::Fundamental ||
-	    bare_dst->fundamental != FT_VOID)
+	bare_dst_pointee = pa11::strip_cv(dst_pointee);
+	if (bare_dst_pointee->kind != pa11::TypeKind::Fundamental ||
+	    bare_dst_pointee->fundamental != FT_VOID)
 		return false;
 	return cv_contains(cv_flags(dst_pointee), cv_flags(src_pointee));
 }
@@ -693,9 +761,21 @@ TypePtr Parser::usual_arithmetic_type(TypePtr left, TypePtr right) const
 			pa11::make_fundamental(FT_INT);
 	if (pa11::is_integral_or_bool_type(l) && pa11::is_integral_or_bool_type(r))
 	{
-		if (arithmetic_rank(r) > arithmetic_rank(l))
-			return r;
-		return l;
+		int lrank = arithmetic_rank(l);
+		int rrank = arithmetic_rank(r);
+		bool lunsigned = integral_type_is_unsigned(l);
+		bool runsigned = integral_type_is_unsigned(r);
+		if (lunsigned == runsigned)
+			return rrank > lrank ? r : l;
+		TypePtr unsigned_type = lunsigned ? l : r;
+		TypePtr signed_type = lunsigned ? r : l;
+		int unsigned_rank = lunsigned ? lrank : rrank;
+		int signed_rank = lunsigned ? rrank : lrank;
+		if (unsigned_rank >= signed_rank)
+			return unsigned_type;
+		if (pa11::type_size(signed_type) > pa11::type_size(unsigned_type))
+			return signed_type;
+		return unsigned_counterpart(signed_type);
 	}
 	return l;
 }

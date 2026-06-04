@@ -101,7 +101,8 @@ QualifiedName Parser::parse_id_expression_name()
 			++p;
 		}
 	}
-	if (at(OP_COLON2) ||
+	if (at(KW_DECLTYPE) ||
+	    at(OP_COLON2) ||
 	    (at_identifier() &&
 	     (lookahead(OP_COLON2, 1) || template_id_qualifier)))
 	{
@@ -117,10 +118,20 @@ QualifiedName Parser::parse_id_expression_name()
 	}
 	else
 		name.name = consume_identifier();
-	if (at(OP_LT) && visible_function_template_name(name))
+	if (at(OP_LT))
 	{
-		name.has_template_arguments = true;
-		parse_template_argument_list(name.template_arguments);
+		size_t template_save = pos_;
+		try
+		{
+			name.has_template_arguments = true;
+			parse_template_argument_list(name.template_arguments);
+		}
+		catch (const exception&)
+		{
+			name.has_template_arguments = false;
+			name.template_arguments.clear();
+			pos_ = template_save;
+		}
 	}
 	if (name.qualified)
 		name.spelling += name.name;
@@ -161,7 +172,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 			TemplateDeclaration* templ = find_class_template(NULL, root);
 			if (templ != NULL)
 			{
-				vector<TypePtr> arguments;
+				vector<TemplateArgument> arguments;
 				parse_template_argument_list(arguments);
 				if (consume(OP_COLON2))
 				{
@@ -262,7 +273,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 			pos_ = save;
 			break;
 		}
-		vector<TypePtr> arguments;
+		vector<TemplateArgument> arguments;
 		parse_template_argument_list(arguments);
 		if (!consume(OP_COLON2))
 		{

@@ -19,9 +19,12 @@ struct TemplateValidationState
 	Node root;
 	vector<Node> generated_nodes;
 	vector<map<string, TypePtr> > template_type_substitutions;
+	vector<map<string, TemplateArgument> > template_value_substitutions;
 	vector<ActiveClassInstantiation> active_class_instantiations;
 	int local_type_counter;
 	bool force_new_function_binding;
+	bool override_function_parameter_names;
+	vector<string> function_parameter_name_override;
 	set<const void*> generated_default_ctors;
 	set<pair<const void*, size_t> > generated_aggregate_ctors;
 	set<const void*> generated_copy_ctors;
@@ -32,6 +35,7 @@ struct TemplateValidationState
 	map<Binding*, Node> default_member_initializers;
 	map<Binding*, vector<Expr> > default_arguments;
 	map<Binding*, vector<string> > function_parameter_names;
+	set<Binding*> override_function_parameter_name_bindings;
 	set<Binding*> deleted_functions;
 	map<const void*, Scope*> enum_owner_scopes;
 	map<Scope*, vector<Binding*> > class_friend_functions;
@@ -39,6 +43,7 @@ struct TemplateValidationState
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes;
 	vector<Binding*> defaulted_move_assignments;
+	int template_argument_expression_depth;
 	size_t template_declaration_count;
 	vector<TemplateDeclaration> template_values;
 	map<Scope*, map<string, TemplateDeclaration*> > class_templates;
@@ -51,7 +56,7 @@ struct TemplateValidationState
 		member_variable_templates;
 	map<Binding*, TemplateDeclaration*> function_template_placeholders;
 	map<const void*, TemplateDeclaration*> record_template_declarations;
-	map<const void*, vector<TypePtr> > record_template_arguments;
+	map<const void*, vector<TemplateArgument> > record_template_arguments;
 	set<TemplateDeclaration*> class_templates_with_dependent_base;
 	set<const void*> record_dependent_base_lookup_skips;
 	vector<Node> extra_lowir_nodes;
@@ -94,9 +99,16 @@ void TemplateValidationState::save_core(Parser& parser,
 	root = parser.root_;
 	generated_nodes = parser.generated_nodes_;
 	template_type_substitutions = parser.template_type_substitutions_;
+	template_value_substitutions = parser.template_value_substitutions_;
 	active_class_instantiations = parser.active_class_instantiations_;
 	local_type_counter = parser.local_type_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
+	override_function_parameter_names =
+		parser.override_function_parameter_names_;
+	function_parameter_name_override =
+		parser.function_parameter_name_override_;
+	template_argument_expression_depth =
+		parser.template_argument_expression_depth_;
 	extra_lowir_nodes = parser.extra_lowir_nodes_;
 	validation_found_dependent_base =
 		parser.class_templates_with_dependent_base_.count(declaration) != 0;
@@ -118,6 +130,8 @@ void TemplateValidationState::save_semantic_tables(Parser& parser)
 	default_member_initializers = parser.default_member_initializers_;
 	default_arguments = parser.default_arguments_;
 	function_parameter_names = parser.function_parameter_names_;
+	override_function_parameter_name_bindings =
+		parser.override_function_parameter_name_bindings_;
 	deleted_functions = parser.deleted_functions_;
 	enum_owner_scopes = parser.enum_owner_scopes_;
 	class_friend_functions = parser.class_friend_functions_;
@@ -173,7 +187,14 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.extra_lowir_nodes_ = extra_lowir_nodes;
 	parser.local_type_counter_ = local_type_counter;
 	parser.force_new_function_binding_ = force_new_function_binding;
+	parser.override_function_parameter_names_ =
+		override_function_parameter_names;
+	parser.function_parameter_name_override_ =
+		function_parameter_name_override;
+	parser.template_argument_expression_depth_ =
+		template_argument_expression_depth;
 	parser.template_type_substitutions_ = template_type_substitutions;
+	parser.template_value_substitutions_ = template_value_substitutions;
 	parser.active_class_instantiations_ = active_class_instantiations;
 }
 
@@ -193,6 +214,8 @@ void TemplateValidationState::restore_semantic_tables(Parser& parser)
 	parser.default_member_initializers_ = default_member_initializers;
 	parser.default_arguments_ = default_arguments;
 	parser.function_parameter_names_ = function_parameter_names;
+	parser.override_function_parameter_name_bindings_ =
+		override_function_parameter_name_bindings;
 	parser.deleted_functions_ = deleted_functions;
 	parser.enum_owner_scopes_ = enum_owner_scopes;
 	parser.class_friend_functions_ = class_friend_functions;
@@ -235,16 +258,53 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	TemplateValidationState saved(*this, declaration);
 
 	map<string, TypePtr> subst;
-	vector<TypePtr> args;
+	map<string, TemplateArgument> value_subst;
+	vector<TemplateArgument> args;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
 		string name = declaration->parameters[i].name;
 		if (name.empty())
 			name = "__template_param" + to_string(i);
-		TypePtr param = pa11::make_template_parameter_type(name);
-		args.push_back(param);
-		if (!declaration->parameters[i].name.empty())
-			subst[declaration->parameters[i].name] = param;
+		if (declaration->parameters[i].kind == TemplateParameterKind::Type)
+		{
+			TypePtr param = pa11::make_template_parameter_type(name);
+			if (declaration->parameters[i].is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(TemplateArgument::type_arg(param));
+				TemplateArgument arg = TemplateArgument::pack_arg(pack);
+				args.push_back(arg);
+				if (!declaration->parameters[i].name.empty())
+				{
+					subst[declaration->parameters[i].name] = param;
+					value_subst[declaration->parameters[i].name] =
+						arg;
+				}
+			}
+			else
+			{
+				args.push_back(TemplateArgument::type_arg(param));
+				if (!declaration->parameters[i].name.empty())
+					subst[declaration->parameters[i].name] = param;
+			}
+		}
+		else
+		{
+			TypePtr type = declaration->parameters[i].type.get() != NULL
+				? declaration->parameters[i].type
+				: pa11::make_fundamental(FT_INT);
+			TemplateArgument arg =
+				TemplateArgument::dependent_value_arg(type);
+			if (declaration->parameters[i].is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(arg);
+				arg = TemplateArgument::pack_arg(pack);
+			}
+			args.push_back(arg);
+			if (!declaration->parameters[i].name.empty())
+				value_subst[declaration->parameters[i].name] = arg;
+		}
 	}
 	ScopeKind owner_kind = declaration->owner != NULL
 		? declaration->owner->kind : ScopeKind::Namespace;
@@ -274,6 +334,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		                  validation_type);
 	injected->target_scope = class_scope;
 	template_type_substitutions_.push_back(subst);
+	template_value_substitutions_.push_back(value_subst);
 	active_class_instantiations_.push_back(
 		ActiveClassInstantiation(declaration,
 		                         template_specialization_name(declaration,
@@ -294,7 +355,10 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		saved.restore(*this, declaration);
 		if (string(err.what()) == "incomplete object type" ||
 		    string(err.what()) == "incomplete class type" ||
-		    string(err.what()) == "no matching constructor")
+		    string(err.what()) == "no matching constructor" ||
+		    string(err.what()) == "invalid initializer conversion" ||
+		    string(err.what()) == "decltype qualifier is not a scope" ||
+		    string(err.what()) == "qualified lookup root not found")
 			return;
 		throw;
 	}

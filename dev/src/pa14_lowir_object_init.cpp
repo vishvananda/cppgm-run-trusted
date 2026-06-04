@@ -3,6 +3,23 @@
 namespace pa14 {
 namespace internal {
 
+namespace {
+
+void demand_record_return_calls(ProgramLowerer& program, const Node& node)
+{
+	if (starts_with(node.line, "call-expression") &&
+	    node.direct_call != NULL &&
+	    pa11::strip_cv(node.type)->kind == TypeKind::Record)
+	{
+		program.demand_function_declaration(node.direct_call);
+		program.demand_inline_function(node.direct_call);
+	}
+	for (size_t i = 0; i < node.children.size(); ++i)
+		demand_record_return_calls(program, node.children[i]);
+}
+
+}  // namespace
+
 void FunctionLowerer::lower_aggregate_init(const function<Value()>& addr_for,
                                            TypePtr type,
                                            const Node& init)
@@ -200,115 +217,159 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 	}
 }
 
+bool FunctionLowerer::lower_braced_direct_constructor_init(
+	const function<Value()>& addr_for,
+	TypePtr type,
+	const Node& init)
+{
+	if (init.direct_call == NULL)
+		return false;
+	if (init.direct_call->is_generated_aggregate_constructor &&
+	    init.token_text != "force-constructor" &&
+	    !pa11::type_has_const(type) &&
+	    !type_has_reference_subobject(type) &&
+	    !record_has_user_assignment_operator(type))
+	{
+		lower_aggregate_init(addr_for, type, init);
+		return true;
+	}
+	if (inline_defaulted_copy_move_storage_constructor(init.direct_call,
+	                                                   type,
+	                                                   init))
+	{
+		const Node& source_node = init.children[0];
+		TypePtr source_object = object_type(source_node.type);
+		Value target = addr_for();
+		Value source;
+		if (source_node.category == ValueCategory::LValue ||
+		    source_node.category == ValueCategory::XValue)
+			source = ensure_pointer(emit_lvalue_addr(source_node));
+		else
+		{
+			string slot = fresh_aux_slot("tmpobj", scalar_lowir_type(source_object));
+			string addr = fresh_temp();
+			instr(addr + " = addr $" + slot);
+			source = Value("ptr", addr);
+			function<Value()> source_addr = [source]() {
+				return source;
+			};
+			lower_object_init(source_addr, source_object, source_node);
+		}
+		Value converted =
+			convert_value(source,
+			              pa11::make_pointer(source_object),
+			              pa11::make_pointer(type));
+		instr("copyobj " + to_string(pa11::type_size(type)) +
+		      "x" + to_string(pa11::type_align(type)) + " " +
+		      converted.text + ", " + target.text);
+		return true;
+	}
+	if (init.children.empty() &&
+	    (init.direct_call->is_generated_default_constructor ||
+	     init.direct_call->is_defaulted))
+	{
+		Value addr = addr_for();
+		if (init.direct_call->is_generated_default_constructor &&
+		    !no_op_generated_default_constructor(init.direct_call, type) &&
+		    zero_init_has_store(type))
+			lower_storage_zero(addr, pa11::type_size(type));
+		function<Value()> same_addr = [addr]() {
+			return addr;
+		};
+		vector<const Node*> args;
+		lower_constructor_call(same_addr, init.direct_call, args);
+		return true;
+	}
+	for (size_t i = 0; i < init.children.size(); ++i)
+		demand_record_return_calls(program_, init.children[i]);
+	vector<const Node*> args;
+	for (size_t i = 0; i < init.children.size(); ++i)
+		args.push_back(&init.children[i]);
+	lower_constructor_call(addr_for, init.direct_call, args);
+	return true;
+}
+
+bool FunctionLowerer::lower_braced_record_constructor_init(
+	const function<Value()>& addr_for,
+	TypePtr type,
+	const Node& init)
+{
+	if (pa11::strip_cv(type)->kind != TypeKind::Record)
+		return false;
+	Binding* ctor = find_constructor(type, init.children.size());
+	if (ctor != NULL && !init.children.empty())
+	{
+		if (ctor->is_generated_aggregate_constructor &&
+		    !pa11::type_has_const(type) &&
+		    !type_has_reference_subobject(type) &&
+		    !record_has_user_assignment_operator(type))
+		{
+			lower_aggregate_init(addr_for, type, init);
+			return true;
+		}
+		vector<const Node*> args;
+		for (size_t i = 0; i < init.children.size(); ++i)
+			args.push_back(&init.children[i]);
+		lower_constructor_call(addr_for, ctor, args);
+		return true;
+	}
+	if (ctor != NULL && init.children.empty() &&
+	    (ctor->is_generated_default_constructor || ctor->is_defaulted))
+	{
+		Value addr = addr_for();
+		if (ctor->is_generated_default_constructor &&
+		    !no_op_generated_default_constructor(ctor, type) &&
+		    zero_init_has_store(type))
+			lower_storage_zero(addr, pa11::type_size(type));
+		function<Value()> same_addr = [addr]() {
+			return addr;
+		};
+		vector<const Node*> args;
+		lower_constructor_call(same_addr, ctor, args);
+		return true;
+	}
+	if (ctor != NULL && init.children.empty())
+	{
+		vector<const Node*> args;
+		lower_constructor_call(addr_for, ctor, args);
+		return true;
+	}
+	return false;
+}
+
+bool FunctionLowerer::lower_braced_object_init(const function<Value()>& addr_for,
+                                               TypePtr type,
+                                               const Node& init)
+{
+	if (lower_braced_direct_constructor_init(addr_for, type, init))
+		return true;
+	if (lower_braced_record_constructor_init(addr_for, type, init))
+		return true;
+	if (is_brace_elision_aggregate(type))
+	{
+		lower_aggregate_init(addr_for, type, init);
+		return true;
+	}
+	if (pa11::strip_cv(type)->kind == TypeKind::Record)
+		throw runtime_error("no matching constructor for " +
+		                    pa11::describe_type(type) + " from " +
+		                    init.line);
+	if (init.children.empty())
+	{
+		lower_zero_init(addr_for, type);
+		return true;
+	}
+	lower_object_init(addr_for, type, init.children[0]);
+	return true;
+}
+
 void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
                                         TypePtr type,
                                         const Node& init)
 {
 	if (starts_with(init.line, "braced-init-list"))
 	{
-		if (init.direct_call != NULL)
-		{
-			if (init.direct_call->is_generated_aggregate_constructor &&
-			    init.token_text != "force-constructor" &&
-			    !pa11::type_has_const(type) &&
-			    !type_has_reference_subobject(type) &&
-			    !record_has_user_assignment_operator(type))
-			{
-				lower_aggregate_init(addr_for, type, init);
-				return;
-			}
-			if (inline_defaulted_copy_move_storage_constructor(init.direct_call,
-			                                                   type,
-			                                                   init))
-			{
-				const Node& source_node = init.children[0];
-				TypePtr source_object = object_type(source_node.type);
-				Value target = addr_for();
-				Value source;
-				if (source_node.category == ValueCategory::LValue ||
-				    source_node.category == ValueCategory::XValue)
-					source = ensure_pointer(emit_lvalue_addr(source_node));
-				else
-				{
-					string slot =
-						fresh_aux_slot("tmpobj",
-						               scalar_lowir_type(source_object));
-					string addr = fresh_temp();
-					instr(addr + " = addr $" + slot);
-					source = Value("ptr", addr);
-					function<Value()> source_addr = [source]() {
-						return source;
-					};
-					lower_object_init(source_addr, source_object, source_node);
-				}
-				Value converted =
-					convert_value(source,
-					              pa11::make_pointer(source_object),
-					              pa11::make_pointer(type));
-				instr("copyobj " + to_string(pa11::type_size(type)) +
-				      "x" + to_string(pa11::type_align(type)) + " " +
-				      converted.text + ", " + target.text);
-				return;
-			}
-			vector<const Node*> args;
-			for (size_t i = 0; i < init.children.size(); ++i)
-				args.push_back(&init.children[i]);
-			lower_constructor_call(addr_for, init.direct_call, args);
-			return;
-		}
-		if (pa11::strip_cv(type)->kind == TypeKind::Record)
-		{
-			Binding* ctor = find_constructor(type, init.children.size());
-			if (ctor != NULL && !init.children.empty())
-			{
-				if (ctor->is_generated_aggregate_constructor &&
-				    !pa11::type_has_const(type) &&
-				    !type_has_reference_subobject(type) &&
-				    !record_has_user_assignment_operator(type))
-				{
-					lower_aggregate_init(addr_for, type, init);
-					return;
-				}
-				vector<const Node*> args;
-				for (size_t i = 0; i < init.children.size(); ++i)
-					args.push_back(&init.children[i]);
-				lower_constructor_call(addr_for, ctor, args);
-				return;
-			}
-			if (ctor != NULL && init.children.empty() &&
-			    (ctor->is_generated_default_constructor || ctor->is_defaulted))
-			{
-				Value addr = addr_for();
-				lower_storage_zero(addr, pa11::type_size(type));
-				function<Value()> same_addr = [addr]() {
-					return addr;
-				};
-				vector<const Node*> args;
-				lower_constructor_call(same_addr, ctor, args);
-				return;
-			}
-			if (ctor != NULL && init.children.empty())
-			{
-				vector<const Node*> args;
-				lower_constructor_call(addr_for, ctor, args);
-				return;
-			}
-		}
-		if (is_brace_elision_aggregate(type))
-		{
-			lower_aggregate_init(addr_for, type, init);
-			return;
-		}
-		if (pa11::strip_cv(type)->kind == TypeKind::Record)
-			throw runtime_error("no matching constructor for " +
-			                    pa11::describe_type(type) + " from " +
-			                    init.line);
-		if (init.children.empty())
-		{
-			lower_zero_init(addr_for, type);
-			return;
-		}
-		lower_object_init(addr_for, type, init.children[0]);
+		lower_braced_object_init(addr_for, type, init);
 		return;
 	}
 	if (is_reference(type))

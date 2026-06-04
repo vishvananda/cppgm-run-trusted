@@ -122,6 +122,7 @@ bool no_op_generated_default_constructor(Binding* ctor, TypePtr type);
 bool has_inline_constructor(TypePtr type);
 bool is_brace_elision_aggregate(TypePtr type);
 bool is_string_literal_node(const Node& node);
+bool zero_init_has_store(TypePtr type);
 bool type_has_reference_subobject(TypePtr type);
 bool record_has_user_assignment_operator(TypePtr type);
 string zero_integer_type(uint64_t size);
@@ -174,9 +175,11 @@ struct ProgramLowerer
 	size_t active_inline_dependency_insert_count;
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
-	int generated_assignment_emit_depth;
+		int generated_assignment_emit_depth;
 
-	ProgramLowerer();
+		typedef vector<const Binding*>::iterator PendingInlineIterator;
+
+		ProgramLowerer();
 	string symbol_for(const Binding* binding);
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
 	string destructor_symbol_for(const Binding* binding, bool base_entry);
@@ -195,9 +198,29 @@ struct ProgramLowerer
 	                                         TypePtr record,
 	                                         bool move,
 	                                         const string& name);
-	void demand_move_assignment_copy_dependency(const Binding* binding);
-	void insert_pending_inline_definition(const Binding* binding);
-	void emit_pending_synthetic_assignment_functions();
+		void demand_move_assignment_copy_dependency(const Binding* binding);
+		void insert_pending_inline_definition(const Binding* binding);
+		void place_lvalue_assignment_before_rvalue_assignment(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_user_assignment_before_owner_members(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_record_return_before_matching_constructor(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_constructor_inline_definition(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_destructor_inline_definition(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_const_conversion_before_mutable_conversion(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_specialized_conversion_before_base_conversion(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_ranked_owner_member(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_before_late_operator_or_generated_assignment(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_active_destructor_dependency(
+			const Binding* binding, PendingInlineIterator& pos);
+		void emit_pending_synthetic_assignment_functions();
 	void demand_inline_function(const Binding* binding,
 	                            bool complete_entry = true);
 	void emit_pending_inline_definitions();
@@ -296,10 +319,21 @@ private:
 	                              TypePtr type,
 	                              const vector<Node>& clauses,
 	                              size_t& index);
-	void lower_object_init(const function<Value()>& addr_for,
-	                       TypePtr type,
-	                       const Node& init);
-	void lower_base_zero_init(const function<Value()>& addr_for,
+		void lower_object_init(const function<Value()>& addr_for,
+		                       TypePtr type,
+		                       const Node& init);
+		bool lower_braced_object_init(const function<Value()>& addr_for,
+		                              TypePtr type,
+		                              const Node& init);
+		bool lower_braced_direct_constructor_init(
+			const function<Value()>& addr_for,
+			TypePtr type,
+			const Node& init);
+		bool lower_braced_record_constructor_init(
+			const function<Value()>& addr_for,
+			TypePtr type,
+			const Node& init);
+		void lower_base_zero_init(const function<Value()>& addr_for,
 	                          TypePtr source,
 	                          TypePtr base);
 	void lower_zero_init(const function<Value()>& addr_for, TypePtr type);

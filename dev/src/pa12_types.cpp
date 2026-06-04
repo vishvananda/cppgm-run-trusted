@@ -18,6 +18,37 @@ TypePtr adjust_parameter_type(TypePtr type)
 	return type;
 }
 
+bool type_contains_template_parameter_name(TypePtr type, string& name)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		name = type->name;
+		return true;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+		return type_contains_template_parameter_name(type->base, name);
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		if (type_contains_template_parameter_name(type->base, name))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (type_contains_template_parameter_name(type->parameters[i],
+			                                          name))
+				return true;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+		return type_contains_template_parameter_name(type->member_class,
+		                                             name) ||
+		       type_contains_template_parameter_name(type->base, name);
+	return false;
+}
+
 void skip_angle_tokens(const vector<Token>& tokens, size_t& pos)
 {
 	if (pos >= tokens.size() ||
@@ -220,10 +251,22 @@ TypePtr Parser::parse_class_specifier()
 		}
 		else
 		{
-			Expr align_expr = parse_expression();
-			if (!align_expr.has_constant_value)
-				throw runtime_error("invalid alignas");
-			align_value = align_expr.constant_value;
+			size_t align_save = pos_;
+			try
+			{
+				TypePtr align_type = parse_type_id();
+				if (!at(OP_RPAREN))
+					throw runtime_error("alignas type parse left tokens");
+				align_value = pa11::type_align(align_type);
+			}
+			catch (const exception&)
+			{
+				pos_ = align_save;
+				Expr align_expr = parse_expression();
+				if (!align_expr.has_constant_value)
+					throw runtime_error("invalid alignas");
+				align_value = align_expr.constant_value;
+			}
 		}
 		expect(OP_RPAREN);
 		forced_align = max<uint64_t>(forced_align, align_value);
@@ -262,6 +305,11 @@ TypePtr Parser::parse_class_specifier()
 		qualified_owner = parse_nested_name_specifier(NULL);
 	if (at_identifier())
 		name = consume_identifier();
+	if (at(OP_LT))
+	{
+		vector<TemplateArgument> ignored_template_id;
+		parse_template_argument_list(ignored_template_id);
+	}
 	if (!at(OP_LBRACE) && !at(OP_COLON))
 	{
 		if (name.empty())
@@ -313,8 +361,12 @@ TypePtr Parser::parse_class_specifier()
 			++pos_;
 		if (!try_parse_type_name(direct_base))
 			throw runtime_error("invalid base class");
-		TypePtr base_bare = pa11::strip_cv(direct_base);
-		if (base_bare->kind != pa11::TypeKind::Record &&
+		if (consume(OP_DOTS))
+			direct_base.reset();
+		TypePtr base_bare = direct_base.get() != NULL
+			? pa11::strip_cv(direct_base) : TypePtr();
+		if (base_bare.get() != NULL &&
+		    base_bare->kind != pa11::TypeKind::Record &&
 		    base_bare->kind != pa11::TypeKind::TemplateParameter)
 			throw runtime_error("invalid base class");
 	}
@@ -440,6 +492,11 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		{
 			Node ignored;
 			parse_using_family(ignored);
+			continue;
+		}
+		if (at(KW_STATIC_ASSERT))
+		{
+			parse_static_assert_declaration();
 			continue;
 		}
 		if (parse_friend_declaration())
@@ -580,7 +637,7 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			dependent_root = true;
 		if (at(OP_LT))
 		{
-			vector<TypePtr> root_arguments;
+			vector<TemplateArgument> root_arguments;
 			try
 			{
 				parse_template_argument_list(root_arguments);
@@ -594,8 +651,31 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			{
 				dep_name += "<>";
 				for (size_t i = 0; i < root_arguments.size(); ++i)
-					if (type_is_template_dependent(root_arguments[i]))
-						dependent_root = true;
+				{
+					vector<TemplateArgument> pending;
+					pending.push_back(root_arguments[i]);
+					while (!pending.empty())
+					{
+						TemplateArgument arg = pending.back();
+						pending.pop_back();
+						if (arg.kind == TemplateArgumentKind::Type)
+						{
+							if (type_is_template_dependent(arg.type))
+								dependent_root = true;
+						}
+						else if (arg.kind == TemplateArgumentKind::Value)
+						{
+							if (arg.dependent ||
+							    type_is_template_dependent(arg.type))
+								dependent_root = true;
+						}
+						else
+						{
+							for (size_t p = 0; p < arg.pack.size(); ++p)
+								pending.push_back(arg.pack[p]);
+						}
+					}
+				}
 			}
 		}
 		if (dependent_root && at(OP_COLON2))
@@ -674,7 +754,7 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		TemplateDeclaration* templ = find_class_template(qualifier, name);
 		if (templ != NULL)
 		{
-			vector<TypePtr> arguments;
+			vector<TemplateArgument> arguments;
 			parse_template_argument_list(arguments);
 			out = instantiate_class_template(templ, arguments);
 			return true;
@@ -978,13 +1058,19 @@ void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
 		{
 			for (;;)
 			{
-				parameters.push_back(parse_parameter_declaration());
-				ParameterInfo& parameter = parameters.back();
-				if (!parameter.name.empty())
-					pa11::add_binding(parameter_scope,
-					                  BindingKind::Parameter,
-					                  parameter.name,
-					                  parameter.type);
+				ParameterInfo parsed = parse_parameter_declaration();
+				vector<ParameterInfo> expanded =
+					expand_parameter_pack(parsed);
+				for (size_t i = 0; i < expanded.size(); ++i)
+				{
+					parameters.push_back(expanded[i]);
+					ParameterInfo& parameter = parameters.back();
+					if (!parameter.name.empty())
+						pa11::add_binding(parameter_scope,
+						                  BindingKind::Parameter,
+						                  parameter.name,
+						                  parameter.type);
+				}
 				if (!consume(OP_COMMA))
 					break;
 				if (consume(OP_DOTS))
@@ -993,7 +1079,9 @@ void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
 					break;
 				}
 			}
-			if (!variadic && consume(OP_DOTS))
+			if (!variadic && !parameters.empty() &&
+			    !parameters.back().is_pack_expansion &&
+			    consume(OP_DOTS))
 				variadic = true;
 		}
 	}
@@ -1003,6 +1091,48 @@ void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
 		throw;
 	}
 	scopes_.pop_back();
+}
+
+vector<ParameterInfo> Parser::expand_parameter_pack(
+	const ParameterInfo& parameter) const
+{
+	vector<ParameterInfo> out;
+	if (!parameter.is_pack_expansion)
+	{
+		out.push_back(parameter);
+		return out;
+	}
+	TemplateArgument subst;
+	if (!find_template_value_substitution(parameter.pack_name, subst) ||
+	    subst.kind != TemplateArgumentKind::Pack)
+	{
+		out.push_back(parameter);
+		return out;
+	}
+	if (subst.pack.empty() && !parameter.pack_expression_name.empty())
+	{
+		ParameterInfo marker = parameter;
+		marker.name.clear();
+		marker.type.reset();
+		marker.is_pack_expansion = false;
+		out.push_back(marker);
+		return out;
+	}
+	for (size_t i = 0; i < subst.pack.size(); ++i)
+	{
+		if (subst.pack[i].kind != TemplateArgumentKind::Type)
+			throw runtime_error("type parameter pack required");
+		ParameterInfo expanded = parameter;
+		expanded.is_pack_expansion = false;
+		expanded.type =
+			substitute_template_type_parameter(parameter.type,
+			                                   parameter.pack_name,
+			                                   subst.pack[i].type);
+		if (!parameter.name.empty() && i > 0)
+			expanded.name = parameter.name + "__pack" + to_string(i + 1);
+		out.push_back(expanded);
+	}
+	return out;
 }
 
 ParameterInfo Parser::parse_parameter_declaration()
@@ -1019,6 +1149,17 @@ ParameterInfo Parser::parse_parameter_declaration()
 			info.type = adjust_parameter_type(apply_declarator(declarator, base));
 			if (declarator_has_name(declarator))
 				info.name = declarator_name(declarator).name;
+			string pack_name;
+			if (at(OP_DOTS) &&
+			    type_contains_template_parameter_name(info.type, pack_name))
+			{
+				expect(OP_DOTS);
+				info.is_pack_expansion = true;
+				info.pack_name = pack_name;
+				if (info.name.empty() && at_identifier())
+					info.name = consume_identifier();
+				info.pack_expression_name = info.name;
+			}
 			if (consume(OP_ASS))
 			{
 				info.has_default = true;
@@ -1036,6 +1177,17 @@ ParameterInfo Parser::parse_parameter_declaration()
 			apply_declarator(parse_abstract_declarator(), base));
 	else
 		info.type = adjust_parameter_type(base);
+	string pack_name;
+	if (at(OP_DOTS) &&
+	    type_contains_template_parameter_name(info.type, pack_name))
+	{
+		expect(OP_DOTS);
+		info.is_pack_expansion = true;
+		info.pack_name = pack_name;
+		if (info.name.empty() && at_identifier())
+			info.name = consume_identifier();
+		info.pack_expression_name = info.name;
+	}
 	if (consume(OP_ASS))
 	{
 		info.has_default = true;
@@ -1048,7 +1200,7 @@ bool Parser::starts_declaration()
 {
 	if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
 	    at(KW_STATIC) || at(KW_DECLTYPE) || at(KW_TYPENAME) ||
-	    starts_class_key() || at(KW_ENUM))
+	    starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT))
 		return true;
 	if (at_simple_cv() || at_simple_builtin())
 		return true;

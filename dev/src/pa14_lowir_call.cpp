@@ -2,11 +2,30 @@
 
 namespace pa14 {
 namespace internal {
+
+namespace {
+
+void demand_record_return_calls(ProgramLowerer& program, const Node& node)
+{
+	if (starts_with(node.line, "call-expression") &&
+	    node.direct_call != NULL &&
+	    pa11::strip_cv(node.type)->kind == TypeKind::Record)
+	{
+		program.demand_function_declaration(node.direct_call);
+		program.demand_inline_function(node.direct_call);
+	}
+	for (size_t i = 0; i < node.children.size(); ++i)
+		demand_record_return_calls(program, node.children[i]);
+}
+
+}  // namespace
+
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
                                                     TypePtr param,
                                                     vector<string>& args,
                                                     vector<pair<Value, TypePtr> >* temp_cleanups)
 {
+	demand_record_return_calls(program_, arg);
 	const Node* materialized = record_prvalue_child_for_xvalue(arg);
 	if (materialized != NULL &&
 	    pa11::strip_cv(param->base)->kind == TypeKind::Record)
@@ -175,6 +194,13 @@ void FunctionLowerer::lower_record_value_argument(const Node& arg,
 	function<Value()> addr_for = [target_addr]() {
 		return target_addr;
 	};
+	if (arg.direct_call != NULL &&
+	    arg.children.empty() &&
+	    (arg.direct_call->is_generated_default_constructor ||
+	     arg.direct_call->is_defaulted) &&
+	    no_op_generated_default_constructor(arg.direct_call, param) &&
+	    zero_init_has_store(param))
+		lower_storage_zero(target_addr, pa11::type_size(param));
 	lower_object_init(addr_for, param, arg);
 	args.push_back(by_address ? target_addr.text : "$" + slot);
 }
@@ -283,43 +309,26 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	if (direct != NULL)
 	{
 		callee_type = direct->type;
-		if (!delay_direct_demand && !virtual_call)
-			for (size_t i = arg_start; i < expr.children.size(); ++i)
+			if (!delay_direct_demand && !virtual_call &&
+			    direct->owner != NULL &&
+			    direct->owner->kind == ScopeKind::Class &&
+			    !direct->is_static_member &&
+			    direct->name == "operator()")
+				delay_direct_demand = true;
+			if (!delay_direct_demand && !virtual_call &&
+			    direct->owner != NULL &&
+			    direct->owner->kind == ScopeKind::Class &&
+			    !direct->is_static_member &&
+			    !expr.children.empty())
 			{
-				bool variadic_extra =
-					i - arg_start >= callee_type->parameters.size();
-				TypePtr param = !variadic_extra
-					? callee_type->parameters[i - arg_start]
-					: expr.children[i].type;
-				TypePtr arg_record =
-					pa11::strip_cv(object_type(expr.children[i].type));
-				TypePtr param_record =
-					is_reference(param)
-					? pa11::strip_cv(param->base)
-					: pa11::strip_cv(param);
-				const Node* address_child =
-					starts_with(expr.children[i].line, "unary-expression") &&
-					expr.children[i].has_op &&
-					expr.children[i].op == OP_AMP &&
-					!expr.children[i].children.empty()
-					? &expr.children[i].children[0] : NULL;
-				bool address_of_record_prvalue =
-					address_child != NULL &&
-					address_child->category == ValueCategory::PRValue &&
-					pa11::strip_cv(object_type(address_child->type))->kind ==
-						TypeKind::Record &&
-					binding_has_template_specialization_context(direct) &&
-					(is_class_constructor_binding(address_child->direct_call) ||
-					 starts_with(address_child->line, "braced-init-list"));
-				if ((arg_record->kind == TypeKind::Record &&
-				     (expr.children[i].category == ValueCategory::PRValue ||
-				      (param_record->kind == TypeKind::Record &&
-				       !pa11::same_type(arg_record, param_record)))) ||
-				    address_of_record_prvalue)
-				{
+				const Node& object_arg = expr.children[0];
+				TypePtr object = object_arg.type.get() != NULL
+					? pa11::strip_cv(object_type(object_arg.type))
+					: TypePtr();
+				if (object_arg.category != ValueCategory::LValue &&
+				    object.get() != NULL &&
+				    object->kind == TypeKind::Record)
 					delay_direct_demand = true;
-					break;
-				}
 			}
 		if (!delay_direct_demand && !virtual_call)
 		{
@@ -408,12 +417,13 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			param = pa11::make_fundamental(FT_DOUBLE);
 		lower_call_argument(expr.children[i], param, args, &temp_cleanups);
 	}
-	if (direct != NULL && delay_direct_demand)
-	{
-		if (!direct->is_defaulted &&
-		    !direct->is_inline_definition &&
-		    direct->owner != NULL &&
-		    direct->owner->kind == ScopeKind::Class)
+		if (direct != NULL && delay_direct_demand)
+		{
+			if (direct->name == "operator=" &&
+			    !direct->is_defaulted &&
+			    !direct->is_inline_definition &&
+			    direct->owner != NULL &&
+			    direct->owner->kind == ScopeKind::Class)
 		{
 			TypePtr record = pa11::record_type_for_scope(direct->owner);
 			if (record.get() != NULL)

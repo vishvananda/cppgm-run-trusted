@@ -413,12 +413,12 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 		if (template_it != function_template_placeholders_.end() &&
 		    template_it->second->placeholder == placeholder)
 		{
-			vector<TypePtr> explicit_args;
-			map<Binding*, vector<TypePtr> >::const_iterator eit =
+			vector<TemplateArgument> explicit_args;
+			map<Binding*, vector<TemplateArgument> >::const_iterator eit =
 				expr.explicit_template_arguments.find(candidate);
 			if (eit != expr.explicit_template_arguments.end())
 				explicit_args = eit->second;
-			vector<TypePtr> deduced;
+			vector<TemplateArgument> deduced;
 			if (!deduce_function_template_target_type(template_it->second,
 			                                          wanted,
 			                                          explicit_args,
@@ -553,8 +553,8 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 
 Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
                                         const vector<Expr>& args,
-                                        const map<Binding*, vector<TypePtr> >&
-                                                explicit_template_arguments,
+                                        const map<Binding*, vector<TemplateArgument> >&
+                                               explicit_template_arguments,
                                         vector<Expr>& converted)
 {
 	Binding* best = NULL;
@@ -646,7 +646,7 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 
 Binding* Parser::instantiate_template_call_candidate(
 	Binding* fn,
-	const map<Binding*, vector<TypePtr> >& explicit_template_arguments,
+	const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments,
 	const vector<Expr>& args)
 {
 	map<Binding*, TemplateDeclaration*>::iterator template_it =
@@ -655,12 +655,12 @@ Binding* Parser::instantiate_template_call_candidate(
 	if (template_it == function_template_placeholders_.end() ||
 	    template_it->second->placeholder != placeholder)
 		return fn;
-	vector<TypePtr> explicit_args;
-	map<Binding*, vector<TypePtr> >::const_iterator eit =
+	vector<TemplateArgument> explicit_args;
+	map<Binding*, vector<TemplateArgument> >::const_iterator eit =
 		explicit_template_arguments.find(fn);
 	if (eit != explicit_template_arguments.end())
 		explicit_args = eit->second;
-	vector<TypePtr> deduced;
+	vector<TemplateArgument> deduced;
 	if (!deduce_function_template_arguments(template_it->second,
 	                                        args,
 	                                        explicit_args,

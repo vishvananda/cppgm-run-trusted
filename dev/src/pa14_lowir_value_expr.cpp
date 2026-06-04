@@ -1008,14 +1008,9 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 		return emit_rvalue(expr.children[0]);
 	TypePtr cast_source = pa11::strip_cv(strip_for_value(expr.children[0].type));
 	TypePtr cast_target = pa11::strip_cv(strip_for_value(expr.type));
-	if (cast_source->kind == TypeKind::Fundamental &&
+	if (cast_source->kind == TypeKind::Enum &&
+	    cast_source->enum_underlying != FT_INT &&
 	    cast_target->kind == TypeKind::Fundamental &&
-	    cast_source->fundamental != FT_VOID &&
-	    cast_target->fundamental != FT_VOID &&
-	    cast_source->fundamental != FT_NULLPTR_T &&
-	    cast_target->fundamental != FT_NULLPTR_T &&
-	    cast_source->fundamental != cast_target->fundamental &&
-	    !starts_with(expr.children[0].line, "literal") &&
 	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
 	{
 		Value raw = emit_rvalue(expr.children[0]);
@@ -1024,9 +1019,10 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 		      raw.text);
 		return Value(scalar_lowir_type(expr.type), tmp);
 	}
-	if (cast_source->kind == TypeKind::Enum &&
-	    cast_source->enum_underlying != FT_INT &&
+	if (cast_source->kind == TypeKind::Fundamental &&
 	    cast_target->kind == TypeKind::Fundamental &&
+	    cast_source->fundamental == FT_LONG_INT &&
+	    cast_target->fundamental == FT_UNSIGNED_LONG_INT &&
 	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
 	{
 		Value raw = emit_rvalue(expr.children[0]);

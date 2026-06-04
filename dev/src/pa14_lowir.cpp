@@ -979,6 +979,12 @@ void FunctionLowerer::lower_discarded_expr(const Node& expr)
 		lower_object_init(addr_for, object, expr);
 		return;
 	}
+	if (expr.category == ValueCategory::LValue &&
+	    object->kind == TypeKind::Array)
+	{
+		ensure_pointer(emit_lvalue_addr(expr));
+		return;
+	}
 	emit_rvalue(expr);
 }
 

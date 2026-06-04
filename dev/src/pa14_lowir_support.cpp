@@ -70,6 +70,8 @@ bool is_unsigned_type(TypePtr type)
 	case FT_UNSIGNED_INT:
 	case FT_UNSIGNED_LONG_INT:
 	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_CHAR16_T:
+	case FT_CHAR32_T:
 	case FT_BOOL:
 		return true;
 	default:
@@ -143,6 +145,9 @@ int lowir_arithmetic_rank(TypePtr type)
 	case FT_BOOL:
 	case FT_CHAR: case FT_SIGNED_CHAR: case FT_UNSIGNED_CHAR: return 1;
 	case FT_SHORT_INT: case FT_UNSIGNED_SHORT_INT: return 2;
+	case FT_CHAR16_T: return 2;
+	case FT_WCHAR_T:
+	case FT_CHAR32_T:
 	case FT_INT: case FT_UNSIGNED_INT: return 3;
 	case FT_LONG_INT: case FT_UNSIGNED_LONG_INT:
 	case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return 4;
@@ -490,6 +495,8 @@ string sanitized_symbol_part(const string& part)
 	return text;
 }
 
+string template_record_symbol_part(const string& part);
+
 vector<string> qualified_parts(const Binding* binding)
 {
 	vector<string> parts;
@@ -508,11 +515,7 @@ vector<string> qualified_parts(const Binding* binding)
 					size_t scope_pos = part.rfind("::");
 					if (scope_pos != string::npos)
 						part = part.substr(scope_pos + 2);
-					for (size_t i = 0; i < part.size(); ++i)
-						if (part[i] == '<' || part[i] == '>' ||
-						    part[i] == ',' || part[i] == ' ' ||
-						    part[i] == '&' || part[i] == '*')
-							part[i] = '_';
+					part = template_record_symbol_part(part);
 				}
 			}
 			parts.push_back(part);
@@ -603,6 +606,105 @@ bool binding_has_template_specialization_context(const Binding* binding)
 	return false;
 }
 
+string trim_template_part(const string& text)
+{
+	size_t first = 0;
+	while (first < text.size() &&
+	       isspace(static_cast<unsigned char>(text[first])))
+		++first;
+	size_t last = text.size();
+	while (last > first &&
+	       isspace(static_cast<unsigned char>(text[last - 1])))
+		--last;
+	return text.substr(first, last - first);
+}
+
+vector<string> split_template_display_arguments(const string& text)
+{
+	vector<string> out;
+	size_t start = 0;
+	int depth = 0;
+	for (size_t i = 0; i < text.size(); ++i)
+	{
+		if (text[i] == '<')
+			++depth;
+		else if (text[i] == '>')
+			--depth;
+		else if (text[i] == ',' && depth == 0)
+		{
+			out.push_back(trim_template_part(text.substr(start, i - start)));
+			start = i + 1;
+		}
+	}
+	out.push_back(trim_template_part(text.substr(start)));
+	return out;
+}
+
+bool decimal_template_value(const string& text)
+{
+	if (text.empty())
+		return false;
+	size_t i = text[0] == '-' ? 1 : 0;
+	if (i == text.size())
+		return false;
+	for (; i < text.size(); ++i)
+		if (!isdigit(static_cast<unsigned char>(text[i])))
+			return false;
+	return true;
+}
+
+string template_display_symbol_text(string text)
+{
+	for (size_t i = 0; i < text.size(); ++i)
+		if (text[i] == '<' || text[i] == '>' || text[i] == ',' ||
+		    text[i] == ' ' || text[i] == '&' || text[i] == '*' ||
+		    text[i] == ':')
+			text[i] = '_';
+	return sanitized_symbol_part(text);
+}
+
+string template_value_symbol_text(const string& text)
+{
+	if (!text.empty() && text[0] == '-')
+		return "minus" + text.substr(1);
+	return text;
+}
+
+string template_argument_symbol_part(const string& arg)
+{
+	size_t space = arg.rfind(' ');
+	if (space != string::npos && space + 1 < arg.size())
+	{
+		string type = trim_template_part(arg.substr(0, space));
+		string value = trim_template_part(arg.substr(space + 1));
+		if (!type.empty() && decimal_template_value(value))
+			return "__" + template_display_symbol_text(type) + "_" +
+			       template_value_symbol_text(value);
+	}
+	if (decimal_template_value(arg))
+		return "_" + template_value_symbol_text(arg);
+	return template_display_symbol_text(arg);
+}
+
+string template_record_symbol_part(const string& part)
+{
+	size_t lt = part.find('<');
+	size_t gt = part.rfind('>');
+	if (lt == string::npos || gt == string::npos || gt < lt)
+		return template_display_symbol_text(part);
+	string out = template_display_symbol_text(part.substr(0, lt)) + "_";
+	vector<string> args =
+		split_template_display_arguments(part.substr(lt + 1, gt - lt - 1));
+	for (size_t i = 0; i < args.size(); ++i)
+	{
+		if (i != 0)
+			out += "_";
+		out += template_argument_symbol_part(args[i]);
+	}
+	out += "_";
+	return out;
+}
+
 string record_lowir_name(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -611,8 +713,23 @@ string record_lowir_name(TypePtr record)
 	{
 		if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
 		    !s->name.empty())
-			parts.push_back(s->name == "<unnamed>" ? "_GLOBAL__N_1" :
-			                s->name);
+		{
+			string part = s->name == "<unnamed>" ? "_GLOBAL__N_1" :
+			              s->name;
+			if (s->kind == ScopeKind::Class)
+			{
+				TypePtr scope_record = pa11::record_type_for_scope(s);
+				if (record_is_template_specialization(scope_record))
+				{
+					part = scope_record->name;
+					size_t scope_pos = part.rfind("::");
+					if (scope_pos != string::npos)
+						part = part.substr(scope_pos + 2);
+					part = template_record_symbol_part(part);
+				}
+			}
+			parts.push_back(part);
+		}
 	}
 	if (parts.empty())
 		parts.push_back(bare->name);

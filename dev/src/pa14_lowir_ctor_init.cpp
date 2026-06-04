@@ -3,6 +3,23 @@
 namespace pa14 {
 namespace internal {
 
+namespace {
+
+void demand_record_return_calls(ProgramLowerer& program, const Node& node)
+{
+	if (starts_with(node.line, "call-expression") &&
+	    node.direct_call != NULL &&
+	    pa11::strip_cv(node.type)->kind == TypeKind::Record)
+	{
+		program.demand_function_declaration(node.direct_call);
+		program.demand_inline_function(node.direct_call);
+	}
+	for (size_t i = 0; i < node.children.size(); ++i)
+		demand_record_return_calls(program, node.children[i]);
+}
+
+}  // namespace
+
 void FunctionLowerer::emit_temporary_cleanups(
 	const vector<pair<Value, TypePtr> >& temps)
 {
@@ -238,6 +255,8 @@ void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for,
 {
 	if (ctor == NULL)
 		throw runtime_error("missing constructor");
+	for (size_t i = 0; i < args.size(); ++i)
+		demand_record_return_calls(program_, *args[i]);
 	vector<string> lowered;
 	vector<pair<Value, TypePtr> > temp_cleanups;
 	vector<PendingConstructorConversion> pending_conversions;
@@ -329,21 +348,46 @@ bool FunctionLowerer::lower_string_array_init(const function<Value()>& addr_for,
 	if (bare->kind != TypeKind::Array || !is_string_literal_node(init))
 		return false;
 	TypePtr elem = pa11::strip_cv(bare->base);
-	if (elem->kind != TypeKind::Fundamental || pa11::type_size(elem) != 1)
+	if (elem->kind != TypeKind::Fundamental)
 		return false;
 	StringLiteralInfo info;
 	if (!AnalyzeStringLiteral(init.token_text, info) || !info.ud_suffix.empty())
 		return false;
-	uint64_t count = bare->unknown_bound ? info.bytes.size() : bare->bound;
+	uint64_t elem_size = pa11::type_size(elem);
+	if (elem_size == 0 || elem_size > 8 || elem->fundamental != info.type)
+		return false;
+	uint64_t count = bare->unknown_bound ? info.elements : bare->bound;
+	if (elem_size == 1)
+	{
+		for (size_t i = 0; i < count; ++i)
+		{
+			Value base = addr_for();
+			string decay = fresh_temp();
+			instr(decay + " = unary decay ptr " + base.text);
+			string addr = fresh_temp();
+			instr(addr + " = index " + scalar_lowir_type(bare->base) +
+			      " " + decay + ", " + to_string(i));
+			uint64_t value = i < info.bytes.size() ? info.bytes[i] : 0;
+			instr("store " + scalar_lowir_type(bare->base) + " " +
+			      to_string(value) + ", " + addr);
+		}
+		return true;
+	}
+	Value base = addr_for();
 	for (size_t i = 0; i < count; ++i)
 	{
-		Value base = addr_for();
-		string decay = fresh_temp();
-		instr(decay + " = unary decay ptr " + base.text);
-		string addr = fresh_temp();
-		instr(addr + " = index " + scalar_lowir_type(bare->base) +
-		      " [projection=array_element] " + decay + ", " + to_string(i));
-		uint64_t value = i < info.bytes.size() ? info.bytes[i] : 0;
+		string addr = base.text;
+		uint64_t byte_offset = i * elem_size;
+		if (byte_offset != 0)
+		{
+			addr = fresh_temp();
+			instr(addr + " = index i8 " + base.text + ", " +
+			      to_string(byte_offset));
+		}
+		uint64_t value = 0;
+		size_t offset = byte_offset;
+		for (size_t b = 0; b < elem_size && offset + b < info.bytes.size(); ++b)
+			value |= uint64_t(info.bytes[offset + b]) << (8 * b);
 		instr("store " + scalar_lowir_type(bare->base) + " " +
 		      to_string(value) + ", " + addr);
 	}
@@ -508,15 +552,15 @@ void FunctionLowerer::lower_member_init(const Node& node)
 	{
 		if (node.direct_call != NULL)
 		{
-			if (no_op_generated_default_constructor(node.direct_call,
-			                                        node.binding->type))
-				return;
-			Value addr = member_addr();
-			if (node.direct_call->is_generated_default_constructor)
-				lower_storage_zero(addr, pa11::type_size(node.binding->type));
-			function<Value()> same_addr = [addr]() {
-				return addr;
-			};
+				if (no_op_generated_default_constructor(node.direct_call,
+				                                        node.binding->type))
+					return;
+				Value addr = member_addr();
+				if (node.direct_call->is_generated_default_constructor)
+					lower_storage_zero(addr, pa11::type_size(node.binding->type));
+				function<Value()> same_addr = [addr]() {
+					return addr;
+				};
 			vector<const Node*> args;
 			for (size_t i = 0; i < node.children[0].children.size(); ++i)
 				args.push_back(&node.children[0].children[i]);
