@@ -373,7 +373,10 @@ Expr Parser::make_missing_id_expr(const QualifiedName& name)
 			}
 		}
 	}
-	throw runtime_error("name not found: " + name.spelling);
+	string near_token = pos_ < tokens_.size() ? tokens_[pos_].source :
+	                    string("<eof>");
+	throw runtime_error("name not found: " + name.spelling +
+	                    " near '" + near_token + "'");
 }
 
 Expr Parser::make_aliased_member_variable_id_expr(Binding* binding)
@@ -441,20 +444,63 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 	if (builtin.valid)
 		return builtin;
 	vector<Binding*> found = resolve_name_set(name, pa11::LOOKUP_VALUE);
-	synthesize_default_assignment_lookup(name, found);
-	if (found.empty())
-		return make_missing_id_expr(name);
-	Binding* nonfunction = NULL;
-	for (size_t i = 0; i < found.size(); ++i)
+	map<Binding*, vector<TypePtr> > explicit_template_arguments;
+	if (name.has_template_arguments)
 	{
-		if (found[i]->kind == BindingKind::Function)
-			continue;
-		if (nonfunction != NULL)
-			throw runtime_error("ambiguous name");
-		nonfunction = found[i];
+		vector<TemplateDeclaration*> templates = find_function_templates(name);
+		found.clear();
+		for (size_t i = 0; i < templates.size(); ++i)
+		{
+			if (templates[i]->placeholder == NULL)
+				continue;
+			found.push_back(templates[i]->placeholder);
+			explicit_template_arguments[templates[i]->placeholder] =
+				name.template_arguments;
+		}
+		if (found.empty())
+			throw runtime_error("function template not found");
 	}
+	synthesize_default_assignment_lookup(name, found);
+		if (found.empty())
+			return make_missing_id_expr(name);
+		Binding* nonfunction = NULL;
+		for (size_t i = 0; i < found.size(); ++i)
+		{
+			if (found[i]->kind == BindingKind::Function)
+				continue;
+			if (nonfunction != NULL)
+			{
+				bool found_local =
+					found[i]->owner != NULL &&
+					(found[i]->owner->kind == ScopeKind::Function ||
+					 found[i]->owner->kind == ScopeKind::Block);
+				bool previous_local =
+					nonfunction->owner != NULL &&
+					(nonfunction->owner->kind == ScopeKind::Function ||
+					 nonfunction->owner->kind == ScopeKind::Block);
+				if (found_local && !previous_local)
+				{
+					nonfunction = found[i];
+					continue;
+				}
+				if (!found_local && previous_local)
+					continue;
+				if (found[i]->kind == BindingKind::Parameter &&
+				    nonfunction->kind != BindingKind::Parameter)
+				{
+					nonfunction = found[i];
+					continue;
+				}
+				if (nonfunction->kind == BindingKind::Parameter &&
+				    found[i]->kind != BindingKind::Parameter)
+					continue;
+				throw runtime_error("ambiguous name: " + name.spelling);
+			}
+			nonfunction = found[i];
+		}
 	Expr out;
 	out.valid = true;
+	out.explicit_template_arguments = explicit_template_arguments;
 	for (size_t i = 0; i < found.size(); ++i)
 	{
 		if (found[i]->kind == BindingKind::Function)
@@ -513,6 +559,19 @@ Expr Parser::make_binary_expr(ETokenType op,
 	Expr builtin_converted;
 	bool have_builtin_converted =
 		make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted);
+	TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type));
+	TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
+	bool enum_operand =
+		left_object->kind == pa11::TypeKind::Enum ||
+		right_object->kind == pa11::TypeKind::Enum;
+	if (have_builtin_converted &&
+	    left_object->kind != pa11::TypeKind::Record &&
+	    right_object->kind != pa11::TypeKind::Record)
+		return builtin_converted;
+	if (left_object->kind != pa11::TypeKind::Record &&
+	    right_object->kind != pa11::TypeKind::Record &&
+	    !enum_operand)
+		candidates.clear();
 	bool candidate_accepts_operands = false;
 	for (size_t i = 0; i < candidates.size(); ++i)
 		if (binary_candidate_accepts_operands(candidates[i], lhs, rhs))
@@ -738,6 +797,12 @@ void Parser::collect_associated_hidden_friends(TypePtr type,
 {
 	TypePtr object = expression_object_type(type);
 	TypePtr bare = pa11::strip_cv(object);
+	if (bare->kind == pa11::TypeKind::Pointer ||
+	    bare->kind == pa11::TypeKind::Array)
+	{
+		collect_associated_hidden_friends(bare->base, name, seen, out);
+		return;
+	}
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
 	if (!seen.insert(bare->scope).second)
@@ -760,6 +825,14 @@ void Parser::collect_associated_hidden_friends(TypePtr type,
 	if (direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record)
 		collect_associated_hidden_friends(direct_base, name, seen, out);
+	map<const void*, vector<TypePtr> >::const_iterator args =
+		record_template_arguments_.find(bare.get());
+	if (args != record_template_arguments_.end())
+		for (size_t i = 0; i < args->second.size(); ++i)
+			collect_associated_hidden_friends(args->second[i],
+			                                  name,
+			                                  seen,
+			                                  out);
 }
 
 void Parser::collect_associated_namespace_functions(TypePtr type,
@@ -769,6 +842,33 @@ void Parser::collect_associated_namespace_functions(TypePtr type,
 {
 	TypePtr object = expression_object_type(type);
 	TypePtr bare = pa11::strip_cv(object);
+	if (bare->kind == pa11::TypeKind::Pointer ||
+	    bare->kind == pa11::TypeKind::Array)
+	{
+		collect_associated_namespace_functions(bare->base, name, seen, out);
+		return;
+	}
+	if (bare->kind == pa11::TypeKind::Enum)
+	{
+		map<const void*, Scope*>::const_iterator owner =
+			enum_owner_scopes_.find(bare.get());
+		if (owner == enum_owner_scopes_.end())
+			return;
+		for (Scope* scope = owner->second; scope != NULL; scope = scope->parent)
+		{
+			if (scope->kind != ScopeKind::Namespace)
+				continue;
+			if (!seen.insert(scope).second)
+				break;
+			vector<Binding*> found =
+				lookup_qualified_set(scope, name, pa11::LOOKUP_FUNCTION);
+			for (size_t i = 0; i < found.size(); ++i)
+				if (find(out.begin(), out.end(), found[i]) == out.end())
+					out.push_back(found[i]);
+			break;
+		}
+		return;
+	}
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
 	for (Scope* scope = bare->scope->parent; scope != NULL; scope = scope->parent)
@@ -789,6 +889,14 @@ void Parser::collect_associated_namespace_functions(TypePtr type,
 	if (direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record)
 		collect_associated_namespace_functions(direct_base, name, seen, out);
+	map<const void*, vector<TypePtr> >::const_iterator args =
+		record_template_arguments_.find(bare.get());
+	if (args != record_template_arguments_.end())
+		for (size_t i = 0; i < args->second.size(); ++i)
+			collect_associated_namespace_functions(args->second[i],
+			                                       name,
+			                                       seen,
+			                                       out);
 }
 
 vector<Binding*> Parser::binary_operator_candidates(ETokenType op,
@@ -1163,17 +1271,41 @@ Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 	return out;
 }
 
+Expr Parser::make_dependent_member_expr(const Expr& object,
+                                        const string& name,
+                                        const string& op)
+{
+	Expr out;
+	out.valid = true;
+	out.type = pa11::make_template_parameter_type("__dependent_member");
+	out.category = ValueCategory::LValue;
+	out.node = Node("member-expression lvalue " +
+	                pa11::describe_type(out.type) + " OP_DOT:" + name);
+	add_child(out.node, object.node);
+	out.node.has_op = true;
+	out.node.op = op == "->" ? OP_ARROW : OP_DOT;
+	out.node.token_text = name;
+	annotate_expr_node(out);
+	return out;
+}
+
 Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 {
 	TypePtr type = expression_object_type(object.type);
 	if (op == "->")
 		type = pointee_type_for_member(type);
 	TypePtr bare = pa11::strip_cv(type);
+	if ((bare->kind != pa11::TypeKind::Record || bare->scope == NULL) &&
+	    type_is_template_dependent(type))
+		return make_dependent_member_expr(object, name, op);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		throw runtime_error("member access on non-record");
 	vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
+	if (found.empty() && type_is_template_dependent(type))
+		return make_dependent_member_expr(object, name, op);
 	if (found.empty())
-		throw runtime_error("member not found");
+		throw runtime_error("member not found: " + name + " in " +
+		                    pa11::describe_type(bare));
 	if (!member_access_allowed(found[0], bare))
 	{
 		if (found[0]->is_private)
@@ -1280,7 +1412,8 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 	out.null_pointer_constant = inner.null_pointer_constant &&
 	                            !type_is_pointer(target);
 	if (target->kind == pa11::TypeKind::RValueReference &&
-	    inner.binding != NULL)
+	    inner.binding != NULL &&
+	    inner.node.line.compare(0, 13, "id-expression") == 0)
 	{
 		out.binding = inner.binding;
 		out.node = Node("id-expression xvalue " + pa11::describe_type(target) +

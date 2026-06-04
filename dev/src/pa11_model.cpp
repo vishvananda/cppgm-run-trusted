@@ -140,6 +140,7 @@ Type::Type(TypeKind k)
 	  scope(NULL),
 	  record_size(0),
 	  record_align(1),
+	  record_forced_align(0),
 	  direct_base_offset(0),
 	  layout_valid(false),
 	  is_polymorphic(false),
@@ -170,6 +171,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_mutable_member(false),
 	  is_hidden_friend(false),
 	  is_thread_local(false),
+	  is_object_root(false),
 	  is_virtual(false),
 	  is_override_specified(false),
 	  is_final_virtual(false),
@@ -558,7 +560,7 @@ void layout_record_type(TypePtr type)
 	bare->fields.clear();
 	bare->direct_base_offset = 0;
 	uint64_t offset = 0;
-	uint64_t align = 1;
+	uint64_t align = max<uint64_t>(1, bare->record_forced_align);
 	TypePtr direct_base = bare->base.get() != NULL ? strip_cv(bare->base) : TypePtr();
 	bool base_polymorphic =
 		direct_base.get() != NULL &&
@@ -579,6 +581,8 @@ void layout_record_type(TypePtr type)
 			bare->direct_base_offset = offset;
 			offset += type_size(direct_base);
 		}
+		else if (!record_uses_object_storage(direct_base))
+			offset = 0;
 		else
 			offset = type_size(direct_base);
 	}

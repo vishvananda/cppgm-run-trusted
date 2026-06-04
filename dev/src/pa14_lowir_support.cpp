@@ -496,8 +496,28 @@ vector<string> qualified_parts(const Binding* binding)
 	for (Scope* s = binding->owner; s != NULL; s = s->parent)
 	{
 		if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
-		    !s->name.empty() && s->name != "<unnamed>")
-			parts.push_back(s->name);
+		    !s->name.empty())
+		{
+			string part = s->name == "<unnamed>" ? "_GLOBAL__N_1" : s->name;
+			if (s->kind == ScopeKind::Class)
+			{
+				TypePtr record = pa11::record_type_for_scope(s);
+				if (record.get() != NULL &&
+				    record->name.find('<') != string::npos)
+				{
+					part = record->name;
+					size_t scope_pos = part.rfind("::");
+					if (scope_pos != string::npos)
+						part = part.substr(scope_pos + 2);
+					for (size_t i = 0; i < part.size(); ++i)
+						if (part[i] == '<' || part[i] == '>' ||
+						    part[i] == ',' || part[i] == ' ' ||
+						    part[i] == '&' || part[i] == '*')
+							part[i] = '_';
+				}
+			}
+			parts.push_back(part);
+		}
 	}
 	vector<string> out;
 	for (size_t i = parts.size(); i > 0; --i)
@@ -572,8 +592,9 @@ string record_lowir_name(TypePtr record)
 	for (Scope* s = bare->scope; s != NULL; s = s->parent)
 	{
 		if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
-		    !s->name.empty() && s->name != "<unnamed>")
-			parts.push_back(s->name);
+		    !s->name.empty())
+			parts.push_back(s->name == "<unnamed>" ? "_GLOBAL__N_1" :
+			                s->name);
 	}
 	if (parts.empty())
 		parts.push_back(bare->name);

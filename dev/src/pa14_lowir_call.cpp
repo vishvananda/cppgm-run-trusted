@@ -2,6 +2,27 @@
 
 namespace pa14 {
 namespace internal {
+namespace {
+
+bool template_specialization_context(const Binding* binding)
+{
+	if (binding == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+	{
+		if (scope->kind != ScopeKind::Class)
+			continue;
+		TypePtr record = pa11::record_type_for_scope(scope);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL &&
+		    record->kind == TypeKind::Record &&
+		    record->name.find('<') != string::npos)
+			return true;
+	}
+	return false;
+}
+
+}  // namespace
 
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
                                                     TypePtr param,
@@ -72,10 +93,10 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 		                             pa11::make_pointer(param->base)).text);
 		return;
 	}
-	string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
-	Value value = convert_value(emit_rvalue(arg), arg.type, param->base);
-	instr("store " + scalar_lowir_type(param->base) + " " +
-	      value.text + ", $" + slot);
+		string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
+		Value value = convert_value(emit_rvalue(arg), arg.type, param->base);
+		instr("store " + scalar_lowir_type(param->base) + " " +
+		      value.text + ", $" + slot);
 	string addr = fresh_temp();
 	instr(addr + " = addr $" + slot);
 	args.push_back(addr);
@@ -145,8 +166,7 @@ bool FunctionLowerer::call_setup_can_use_outer_eh(const Node& expr,
                                                   TypePtr callee_type,
                                                   size_t arg_start) const
 {
-	if (expr.direct_call == NULL ||
-	    is_class_constructor_binding(expr.direct_call) ||
+	if (is_class_constructor_binding(expr.direct_call) ||
 	    pa11::strip_cv(callee_type->base)->kind == TypeKind::Record ||
 	    call_temp_cleanup_defer_depth_ > 0)
 		return false;
@@ -192,12 +212,18 @@ void FunctionLowerer::lower_value_call_argument(const Node& arg,
 	{
 		lower_record_value_argument(arg, param, args);
 		return;
+		}
+		Value raw = emit_rvalue(arg);
+		Value converted = convert_binary_value(raw, arg.type, param);
+		TypePtr param_bare = pa11::strip_cv(param);
+		bool pointer_to_void =
+			param_bare->kind == TypeKind::Pointer &&
+			pa11::is_void_type(pa11::strip_cv(param_bare->base));
+		if (converted.type == "ptr" && converted.text == "0" &&
+		    (arg.token_text == "nullptr" || pointer_to_void))
+			converted.text = "nullptr";
+		args.push_back(converted.text);
 	}
-	Value raw = emit_rvalue(arg);
-	string src = scalar_lowir_type(strip_for_value(arg.type));
-	string dst = scalar_lowir_type(param);
-	args.push_back(convert_binary_value(raw, arg.type, param).text);
-}
 
 void FunctionLowerer::lower_call_argument(const Node& arg,
                                           TypePtr param,
@@ -280,6 +306,44 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	{
 		callee_type = direct->type;
 		if (!delay_direct_demand && !virtual_call)
+			for (size_t i = arg_start; i < expr.children.size(); ++i)
+			{
+				bool variadic_extra =
+					i - arg_start >= callee_type->parameters.size();
+				TypePtr param = !variadic_extra
+					? callee_type->parameters[i - arg_start]
+					: expr.children[i].type;
+				TypePtr arg_record =
+					pa11::strip_cv(object_type(expr.children[i].type));
+				TypePtr param_record =
+					is_reference(param)
+					? pa11::strip_cv(param->base)
+					: pa11::strip_cv(param);
+				const Node* address_child =
+					starts_with(expr.children[i].line, "unary-expression") &&
+					expr.children[i].has_op &&
+					expr.children[i].op == OP_AMP &&
+					!expr.children[i].children.empty()
+					? &expr.children[i].children[0] : NULL;
+				bool address_of_record_prvalue =
+					address_child != NULL &&
+					address_child->category == ValueCategory::PRValue &&
+					pa11::strip_cv(object_type(address_child->type))->kind ==
+						TypeKind::Record &&
+					template_specialization_context(direct) &&
+					(is_class_constructor_binding(address_child->direct_call) ||
+					 starts_with(address_child->line, "braced-init-list"));
+				if ((arg_record->kind == TypeKind::Record &&
+				     (expr.children[i].category == ValueCategory::PRValue ||
+				      (param_record->kind == TypeKind::Record &&
+				       !pa11::same_type(arg_record, param_record)))) ||
+				    address_of_record_prvalue)
+				{
+					delay_direct_demand = true;
+					break;
+				}
+			}
+		if (!delay_direct_demand && !virtual_call)
 		{
 			program_.demand_function_declaration(direct);
 			program_.demand_inline_function(direct);
@@ -337,6 +401,29 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	for (size_t i = arg_start; i < expr.children.size(); ++i)
 	{
 		bool variadic_extra = i - arg_start >= callee_type->parameters.size();
+		if (variadic_extra &&
+		    pa11::strip_cv(object_type(expr.children[i].type))->kind ==
+			    TypeKind::Record)
+		{
+			const Node& arg = expr.children[i];
+			if (arg.category == ValueCategory::LValue ||
+			    arg.category == ValueCategory::XValue)
+				args.push_back(ensure_pointer(emit_lvalue_addr(arg)).text);
+			else
+			{
+				TypePtr record = object_type(arg.type);
+				string slot = fresh_aux_slot("arg", slot_lowir_type(record));
+				string addr_name = fresh_temp();
+				instr(addr_name + " = addr $" + slot);
+				Value target_addr("ptr", addr_name);
+				function<Value()> addr_for = [target_addr]() {
+					return target_addr;
+				};
+				lower_object_init(addr_for, record, arg);
+				args.push_back(target_addr.text);
+			}
+			continue;
+		}
 		TypePtr param = !variadic_extra
 			? callee_type->parameters[i - arg_start] : expr.children[i].type;
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")

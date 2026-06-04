@@ -165,8 +165,11 @@ struct ProgramLowerer
 	vector<const Binding*> pending_inline_definitions;
 	vector<InitAction> init_actions;
 	vector<Node> global_init_variables;
+	vector<Node> thread_local_init_variables;
 	vector<Node> global_fini_variables;
 	vector<unique_ptr<Binding> > synthetic_bindings;
+	const Binding* active_inline_definition;
+	size_t active_inline_dependency_insert_count;
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
 	int generated_assignment_emit_depth;
@@ -260,6 +263,7 @@ private:
 	void lower_variable_decl(const Node& var);
 	bool lower_braced_variable_init(const Node& var, TypePtr type);
 	void lower_global_variable_init(const Node& var);
+	void lower_thread_local_variable_init(const Node& node);
 	void lower_global_variable_fini(const Node& var);
 	void lower_destructor_for_object(const function<Value()>& addr_for,
 	                                 TypePtr type);
@@ -399,7 +403,10 @@ private:
 	Value emit_cast(const Node& expr);
 	Value emit_conditional(const Node& expr);
 	Value emit_conditional_value(const Node& expr);
-	Value convert_value(Value value, TypePtr from, TypePtr to);
+	Value convert_value(Value value,
+	                    TypePtr from,
+	                    TypePtr to,
+	                    bool fold_literals = true);
 	Value convert_binary_value(Value value, TypePtr from, TypePtr to);
 	Value bool_value(Value value, TypePtr type);
 	Value ensure_pointer(Value storage);

@@ -1,5 +1,6 @@
 #include "pa12_internal.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 using namespace std;
@@ -266,6 +267,9 @@ void Parser::parse_using_family(Node& out)
 	if (at_identifier() && lookahead(OP_ASS, 1))
 	{
 		string name = consume_identifier();
+		TypePtr shadowed_template_parameter;
+		if (find_template_type_substitution(name, shadowed_template_parameter))
+			throw runtime_error("alias shadows template parameter");
 		expect(OP_ASS);
 		TypePtr type = parse_type_id();
 		expect(OP_SEMICOLON);
@@ -274,13 +278,53 @@ void Parser::parse_using_family(Node& out)
 		add_child(out, node);
 		return;
 	}
+	bool using_typename = consume(KW_TYPENAME);
 	string spelling;
 	Scope* qualifier = parse_nested_name_specifier(&spelling);
-	string name = consume_identifier();
+	string name = at(KW_OPERATOR)
+		? consume_operator_function_name()
+		: consume_identifier();
 	expect(OP_SEMICOLON);
-	vector<Binding*> targets = lookup_qualified_set(qualifier, name, pa11::LOOKUP_ANY);
+	vector<Binding*> targets =
+		lookup_qualified_set(qualifier,
+		                     name,
+		                     using_typename ? pa11::LOOKUP_TYPE :
+		                     pa11::LOOKUP_ANY);
+	if (targets.empty() &&
+	    current_scope()->kind == ScopeKind::Class &&
+	    qualifier->kind == ScopeKind::Class)
+	{
+		vector<Binding*> ctors =
+			lookup_qualified_set(qualifier,
+			                     qualifier->name,
+			                     pa11::LOOKUP_FUNCTION);
+		if (!ctors.empty())
+		{
+			targets = ctors;
+			name = qualifier->name;
+		}
+	}
 	if (targets.empty())
+	{
+		TemplateDeclaration* class_template = find_class_template(qualifier, name);
+		if (class_template != NULL)
+		{
+			class_templates_[current_scope()][name] = class_template;
+			return;
+		}
+		QualifiedName qname;
+		qname.qualifier = qualifier;
+		qname.name = name;
+		qname.qualified = true;
+		vector<TemplateDeclaration*> function_template =
+			find_function_templates(qname);
+		if (!function_template.empty())
+		{
+			function_templates_[current_scope()][name] = function_template;
+			return;
+		}
 		throw runtime_error("using declaration target not found");
+	}
 	if (current_scope()->kind == ScopeKind::Class &&
 	    qualifier->kind == ScopeKind::Class &&
 	    name == qualifier->name)
@@ -357,6 +401,7 @@ void Parser::parse_using_family(Node& out)
 				Node body("compound-statement");
 				Node base_action = make_base_init_action(base, &init);
 				base_action.direct_call = inherited;
+				base_action.token_text = "inherited-constructor";
 				add_child(body, base_action);
 				add_child(fn, body);
 				function_parameter_names_[ctor] = ctor_names;
@@ -365,7 +410,21 @@ void Parser::parse_using_family(Node& out)
 			return;
 		}
 	for (size_t i = 0; i < targets.size(); ++i)
-		pa11::add_using_declaration(current_scope(), name, targets[i]);
+	{
+		Binding* imported =
+			pa11::add_using_declaration(current_scope(), name, targets[i]);
+		map<Binding*, TemplateDeclaration*>::iterator templ =
+			function_template_placeholders_.find(targets[i]);
+		if (templ != function_template_placeholders_.end())
+		{
+			function_template_placeholders_[imported] = templ->second;
+			vector<TemplateDeclaration*>& overloads =
+				function_templates_[current_scope()][name];
+			if (find(overloads.begin(), overloads.end(), templ->second) ==
+			    overloads.end())
+				overloads.push_back(templ->second);
+		}
+	}
 }
 
 void Parser::parse_linkage_specification(Node& out)
@@ -392,14 +451,6 @@ void Parser::parse_linkage_specification(Node& out)
 	language_linkages_.push_back(language);
 	parse_simple_or_function_declaration(out, true);
 	language_linkages_.pop_back();
-}
-
-void Parser::parse_template_declaration()
-{
-	expect(KW_TEMPLATE);
-	skip_template_parameter_clause();
-	Node ignored;
-	parse_declaration_into(ignored);
 }
 
 void Parser::skip_template_parameter_clause()
@@ -490,7 +541,40 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
-	Declarator declarator = parse_declarator(false);
+	Scope* declarator_scope = NULL;
+	if (at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1)))
+	{
+		size_t qualifier_save = pos_;
+		try
+		{
+			Scope* qualifier = parse_nested_name_specifier(NULL);
+			if (qualifier != NULL && qualifier->kind == ScopeKind::Class)
+				declarator_scope = qualifier;
+		}
+		catch (const exception&)
+		{
+		}
+		pos_ = qualifier_save;
+	}
+	vector<Scope*> saved_declarator_scopes;
+	if (declarator_scope != NULL)
+	{
+		saved_declarator_scopes = scopes_;
+		scopes_.push_back(declarator_scope);
+	}
+	Declarator declarator;
+	try
+	{
+		declarator = parse_declarator(false);
+	}
+	catch (const exception&)
+	{
+		if (declarator_scope != NULL)
+			scopes_ = saved_declarator_scopes;
+		throw;
+	}
+	if (declarator_scope != NULL)
+		scopes_ = saved_declarator_scopes;
 	bool bit_field = false;
 	uint64_t bit_width = 0;
 	if (current_scope()->kind == ScopeKind::Class && consume(OP_COLON))
@@ -721,6 +805,8 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 					if (src_record->kind != pa11::TypeKind::Record ||
 					    !pa11::same_type(src_record, dst_record))
 						throw;
+					ensure_copy_move_constructor(dst_record,
+					                             args[0].category == ValueCategory::XValue);
 					init = args[0];
 				}
 			}
@@ -1036,10 +1122,12 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 {
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	int ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
-	bool is_static_member = target->kind == ScopeKind::Class && specs.static_decl;
+	bool is_static_member =
+		target->kind == ScopeKind::Class && !nonstatic_member_function;
 	Binding* function = NULL;
 	map<string, vector<Binding*> >::iterator found = target->members.find(name);
-	if (found != target->members.end())
+	if ((!force_new_function_binding_ || target->kind == ScopeKind::Class) &&
+	    found != target->members.end())
 	{
 		for (size_t i = 0; i < found->second.size(); ++i)
 		{
@@ -1060,7 +1148,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	function->is_static_member = is_static_member;
 	function->is_inline_definition =
 		function->is_inline_definition ||
-		(function_definition && current_scope()->kind == ScopeKind::Class);
+		(function_definition &&
+		 (current_scope()->kind == ScopeKind::Class || specs.inline_decl));
 	function->is_private =
 		target->kind == ScopeKind::Class &&
 		!class_private_access_.empty() &&
@@ -1085,6 +1174,10 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	{
 		vector<Expr> defaults;
 		vector<string> names;
+		map<Binding*, vector<Expr> >::const_iterator old_defaults =
+			default_arguments_.find(function);
+		map<Binding*, vector<string> >::const_iterator old_names =
+			function_parameter_names_.find(function);
 		if (nonstatic_member_function)
 		{
 			defaults.push_back(Expr());
@@ -1092,8 +1185,19 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		}
 		for (size_t i = 0; i < suffix->parameters.size(); ++i)
 		{
-			defaults.push_back(suffix->parameters[i].default_value);
-			names.push_back(suffix->parameters[i].name);
+			Expr default_value = suffix->parameters[i].default_value;
+			string parameter_name = suffix->parameters[i].name;
+			size_t slot = names.size();
+			if (!default_value.valid &&
+			    old_defaults != default_arguments_.end() &&
+			    slot < old_defaults->second.size())
+				default_value = old_defaults->second[slot];
+			if (parameter_name.empty() &&
+			    old_names != function_parameter_names_.end() &&
+			    slot < old_names->second.size())
+				parameter_name = old_names->second[slot];
+			defaults.push_back(default_value);
+			names.push_back(parameter_name);
 		}
 		default_arguments_[function] = defaults;
 		function_parameter_names_[function] = names;
@@ -1298,10 +1402,31 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	    type->kind == pa11::TypeKind::Array &&
 	    type->unknown_bound)
 		type = pa11::make_array(type->base, false, init->node.children.size());
+	bool existing_static_member_function = false;
+	if (target->kind == ScopeKind::Class &&
+	    type->kind == pa11::TypeKind::Function &&
+	    !specs.static_decl)
+	{
+		map<string, vector<Binding*> >::iterator found =
+			target->members.find(qname.name);
+		if (found != target->members.end())
+			for (size_t i = 0; i < found->second.size(); ++i)
+			{
+				Binding* candidate = found->second[i];
+				if (candidate->kind == BindingKind::Function &&
+				    candidate->is_static_member &&
+				    pa11::same_type(candidate->type, type))
+				{
+					existing_static_member_function = true;
+					break;
+				}
+			}
+	}
 	bool nonstatic_member_function =
 		target->kind == ScopeKind::Class &&
 		type->kind == pa11::TypeKind::Function &&
-		!specs.static_decl;
+		!specs.static_decl &&
+		!existing_static_member_function;
 	if (nonstatic_member_function)
 		type = make_member_function_type(target, type);
 	if (type->kind == pa11::TypeKind::Function || function_definition)

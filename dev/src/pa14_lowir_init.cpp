@@ -618,13 +618,28 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 			call_result_store_type_ = type;
 			call_result_store_consumed_ = false;
 		}
-		Value init = emit_rvalue(var.children[0]);
-		if (!call_result_store_consumed_)
-		{
-			init = convert_value(init, var.children[0].type, type);
-			instr("store " + scalar_lowir_type(type) + " " +
-			      init.text + ", $" + slot);
-		}
+			Value init = emit_rvalue(var.children[0]);
+			if (!call_result_store_consumed_)
+			{
+				TypePtr init_bare =
+					pa11::strip_cv(strip_for_value(var.children[0].type));
+				TypePtr target_bare = pa11::strip_cv(strip_for_value(type));
+				bool literal_value = !init.text.empty() &&
+				                     init.text[0] != '%' &&
+				                     init.text[0] != '$' &&
+				                     init.text[0] != '@';
+				bool materialize_widening_literal =
+					literal_value &&
+					pa11::is_integral_or_bool_type(init_bare) &&
+					pa11::is_integral_or_bool_type(target_bare) &&
+					pa11::type_size(target_bare) > pa11::type_size(init_bare);
+				init = convert_value(init,
+				                     var.children[0].type,
+				                     type,
+				                     !materialize_widening_literal);
+				instr("store " + scalar_lowir_type(type) + " " +
+				      init.text + ", $" + slot);
+			}
 		call_result_store_slot_.clear();
 		call_result_store_type_.reset();
 		call_result_store_consumed_ = false;
@@ -642,6 +657,15 @@ void FunctionLowerer::register_cleanup(Binding* binding, TypePtr type)
 	if (!type_needs_destructor(type))
 		return;
 	program_.ensure_eh_declarations();
+	TypePtr cleanup_type = bare;
+	while (cleanup_type->kind == TypeKind::Array)
+		cleanup_type = pa11::strip_cv(cleanup_type->base);
+	if (cleanup_type->kind == TypeKind::Record)
+	{
+		Binding* dtor = find_destructor(cleanup_type);
+		if (dtor != NULL && !dtor->is_noop_destructor)
+			program_.demand_inline_function(dtor);
+	}
 	cleanups_.back().push_back(Cleanup(binding, type));
 }
 
@@ -717,22 +741,90 @@ void FunctionLowerer::lower_global_variable_init(const Node& var)
 		return;
 	if (starts_with(var.children[0].line, "constructor-action"))
 	{
-		if (!var.children[0].children.empty() &&
-		    var.children[0].children[0].direct_call != NULL &&
-		    no_op_generated_default_constructor(
-			    var.children[0].children[0].direct_call,
-			    var.binding->type))
+			if (!var.children[0].children.empty() &&
+			    var.children[0].children[0].direct_call != NULL &&
+			    no_op_generated_default_constructor(
+				    var.children[0].children[0].direct_call,
+				    var.binding->type))
+				return;
+			if (!var.children[0].children.empty() &&
+			    var.children[0].children[0].direct_call != NULL &&
+			    var.children[0].children[0].direct_call->
+				    is_generated_aggregate_constructor)
+			{
+				function<Value()> addr_for = [this, &var]() {
+					program_.demand_global_declaration(var.binding);
+					string tmp = fresh_temp();
+					instr(tmp + " = addr @" + program_.symbol_for(var.binding));
+					return Value("ptr", tmp);
+				};
+				lower_aggregate_init(addr_for,
+				                     var.binding->type,
+				                     var.children[0].children[0]);
+				return;
+			}
+			if (!var.children[0].children.empty())
+				emit_rvalue(var.children[0].children[0]);
 			return;
-		if (!var.children[0].children.empty())
-			emit_rvalue(var.children[0].children[0]);
-		return;
 	}
 	if (var.children[0].direct_call != NULL &&
 	    no_op_generated_default_constructor(var.children[0].direct_call,
 	                                        var.binding->type))
 		return;
+	Binding* aggregate_ctor = NULL;
+	if (starts_with(var.children[0].line, "braced-init-list"))
+	{
+		aggregate_ctor = var.children[0].direct_call;
+		if (aggregate_ctor == NULL)
+			aggregate_ctor = find_constructor(var.binding->type,
+			                                  var.children[0].children.size());
+	}
+	if (aggregate_ctor != NULL &&
+	    aggregate_ctor->is_generated_aggregate_constructor)
+	{
+		function<Value()> addr_for = [this, &var]() {
+			program_.demand_global_declaration(var.binding);
+			string tmp = fresh_temp();
+			instr(tmp + " = addr @" + program_.symbol_for(var.binding));
+			return Value("ptr", tmp);
+		};
+		lower_aggregate_init(addr_for, var.binding->type, var.children[0]);
+		return;
+	}
 	if (default_init_no_op(var.binding->type))
 		return;
+	if (starts_with(var.children[0].line, "unary-expression") &&
+	    var.children[0].has_op &&
+	    var.children[0].op == OP_AMP &&
+	    !var.children[0].children.empty() &&
+	    var.children[0].children[0].binding != NULL &&
+	    var.children[0].children[0].binding->kind == BindingKind::Function)
+	{
+		Binding* fn = var.children[0].children[0].binding;
+		if (fn->is_inline_definition)
+			program_.demand_inline_function(fn);
+		string tmp = fresh_temp();
+		instr(tmp + " = addr @" + program_.symbol_for(fn));
+		program_.demand_global_declaration(var.binding);
+		instr("store ptr " + tmp + ", @" + program_.symbol_for(var.binding));
+		return;
+	}
+	if (starts_with(var.children[0].line, "id-expression") &&
+	    var.children[0].binding != NULL &&
+	    var.children[0].binding->kind == BindingKind::Function &&
+	    pa11::strip_cv(var.binding->type)->kind == TypeKind::Pointer &&
+	    pa11::strip_cv(var.binding->type)->base.get() != NULL &&
+	    pa11::strip_cv(var.binding->type)->base->kind == TypeKind::Function)
+	{
+		Binding* fn = var.children[0].binding;
+		if (fn->is_inline_definition)
+			program_.demand_inline_function(fn);
+		string tmp = fresh_temp();
+		instr(tmp + " = addr @" + program_.symbol_for(fn));
+		program_.demand_global_declaration(var.binding);
+		instr("store ptr " + tmp + ", @" + program_.symbol_for(var.binding));
+		return;
+	}
 	function<Value()> addr_for = [this, &var]() {
 		program_.demand_global_declaration(var.binding);
 		TypePtr bare = pa11::strip_cv(var.binding->type);
@@ -745,6 +837,25 @@ void FunctionLowerer::lower_global_variable_init(const Node& var)
 		return Value("ptr", "@" + program_.symbol_for(var.binding));
 	};
 	lower_object_init(addr_for, var.binding->type, var.children[0]);
+}
+
+void FunctionLowerer::lower_thread_local_variable_init(const Node& node)
+{
+	if (node.children.empty() || node.token_text.empty())
+		return;
+	string run_block = fresh_block("local_static_ctor_run");
+	string done_block = fresh_block("local_static_ctor_done");
+	string loaded = fresh_temp();
+	instr(loaded + " = load i64 @" + node.token_text);
+	string initialized = fresh_temp();
+	instr(initialized + " = cmp ne i64 " + loaded + ", 0");
+	terminate("branch " + initialized + ", ^" + done_block +
+	          ", ^" + run_block);
+	start_block(run_block);
+	lower_global_variable_init(node.children[0]);
+	instr("store i64 1, @" + node.token_text);
+	terminate("jump ^" + done_block);
+	start_block(done_block);
 }
 
 void FunctionLowerer::lower_global_variable_fini(const Node& var)

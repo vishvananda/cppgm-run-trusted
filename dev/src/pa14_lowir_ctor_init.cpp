@@ -278,10 +278,10 @@ void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for,
 					lowered,
 					temp_cleanups,
 					pending_conversions);
-			else
-			{
-				string slot = fresh_aux_slot("refarg",
-				                             scalar_lowir_type(param->base));
+				else
+				{
+					string slot = fresh_aux_slot("refarg",
+					                             scalar_lowir_type(param->base));
 				Value value = convert_value(emit_rvalue(arg),
 				                            arg.type,
 				                            param->base);
@@ -422,6 +422,13 @@ void FunctionLowerer::lower_base_init(const Node& node)
 					args.push_back(&init.children[i]);
 			else
 				args.push_back(&init);
+			TypePtr inherited_base =
+				node.type.get() != NULL ? pa11::strip_cv(node.type) : TypePtr();
+			if (node.token_text == "inherited-constructor" &&
+			    inherited_base.get() != NULL &&
+			    inherited_base->kind == TypeKind::Record &&
+			    inherited_base->name.find('<') != string::npos)
+				program_.demand_inline_function(ctor);
 			lower_constructor_call(base_addr, ctor, args, true);
 			return;
 		}
@@ -534,6 +541,13 @@ void FunctionLowerer::lower_member_init(const Node& node)
 	}
 	if (pa11::strip_cv(node.binding->type)->kind == TypeKind::Record)
 	{
+		if (!record_has_storage_copy(node.binding->type) &&
+		    node.children.size() == 1 &&
+		    starts_with(node.children[0].line, "member-expression"))
+		{
+			member_addr();
+			return;
+		}
 		lower_object_init(member_addr, node.binding->type, node.children[0]);
 		return;
 	}

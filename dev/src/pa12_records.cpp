@@ -6,6 +6,11 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool record_has_reference_field(TypePtr type);
+
+}  // namespace
 
 TypePtr Parser::make_member_function_type(Scope* class_scope, TypePtr type)
 {
@@ -110,8 +115,18 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 				{
 					map<string, vector<Binding*> >::const_iterator ctors =
 						field_bare->scope->members.find(field_bare->scope->name);
-					if (ctors != field_bare->scope->members.end() &&
-					    !ctors->second.empty())
+					bool has_user_ctor = false;
+					if (ctors != field_bare->scope->members.end())
+						for (size_t j = 0; j < ctors->second.size(); ++j)
+						{
+							Binding* ctor = ctors->second[j];
+							if (ctor->kind == BindingKind::Function &&
+							    !ctor->is_generated_default_constructor &&
+							    !ctor->is_generated_aggregate_constructor &&
+							    !ctor->is_generated_copy_move_constructor)
+								has_user_ctor = true;
+						}
+					if (has_user_ctor)
 						throw runtime_error("member has no default constructor");
 				}
 			}
@@ -124,7 +139,10 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 			bare->scope->members.find(bare->scope->name);
 		if (ctors != bare->scope->members.end())
 			for (size_t i = 0; i < ctors->second.size(); ++i)
-				if (ctors->second[i]->kind == BindingKind::Function)
+				if (ctors->second[i]->kind == BindingKind::Function &&
+				    !ctors->second[i]->is_generated_default_constructor &&
+				    !ctors->second[i]->is_generated_aggregate_constructor &&
+				    !ctors->second[i]->is_generated_copy_move_constructor)
 					has_declared_constructor = true;
 	}
 	bool empty_implicit_record =
@@ -366,7 +384,9 @@ bool type_needs_copy_move_helper(TypePtr type, bool move);
 
 bool constructor_binding_needs_helper(Binding* binding)
 {
-	return binding != NULL && binding->is_inline_definition;
+	return binding != NULL &&
+	       binding->is_inline_definition &&
+	       !binding->is_defaulted;
 }
 
 bool record_needs_copy_move_helper(TypePtr type, bool move)
@@ -560,9 +580,7 @@ bool Parser::copy_move_constructor_available(TypePtr type, bool move)
 	Binding* exact = find_copy_move_constructor_binding(bare, move);
 	if (exact != NULL)
 	{
-		if (exact->is_defaulted &&
-		    !exact->is_inline_definition &&
-		    record_needs_copy_move_helper(bare, move))
+		if (exact->is_defaulted)
 			ensure_copy_move_constructor(bare, move);
 		return deleted_functions_.find(exact) == deleted_functions_.end();
 	}
@@ -587,15 +605,16 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return NULL;
 	Binding* existing = find_copy_move_constructor_binding(bare, move);
+	pa11::layout_record_type(bare);
 	bool needs_helper = record_needs_copy_move_helper(bare, move);
+	bool defaulted_storage_copy = false;
 	if (existing != NULL &&
-	    (!existing->is_defaulted || !needs_helper))
+	    (!existing->is_defaulted || (!needs_helper && !defaulted_storage_copy)))
 		return existing;
 	if (existing == NULL && move && suppresses_implicit_move(bare))
 		return NULL;
-	if (!needs_helper)
+	if (!needs_helper && !defaulted_storage_copy)
 		return NULL;
-	pa11::layout_record_type(bare);
 	bool deleted = false;
 	vector<Node> init_actions;
 	TypePtr direct_base = bare->base.get() != NULL
@@ -713,6 +732,9 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	        pa11::describe_type(fn_type));
 	fn.binding = ctor;
 	fn.type = fn_type;
+		if (existing != NULL && existing->is_defaulted &&
+		    !record_has_reference_field(bare))
+			fn.token_text = "copy-move-helper";
 	Node this_node("parameter this " + pa11::describe_type(this_type));
 	this_node.binding = this_binding;
 	this_node.type = this_type;

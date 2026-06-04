@@ -37,7 +37,7 @@ Node::Node(const string& text)
 }
 
 QualifiedName::QualifiedName()
-	: qualifier(NULL), qualified(false)
+	: qualifier(NULL), qualified(false), has_template_arguments(false)
 {
 }
 
@@ -65,6 +65,7 @@ DeclSpecs::DeclSpecs()
 	  thread_local_decl(false),
 	  auto_decl(false),
 	  virtual_decl(false),
+	  inline_decl(false),
 	  cv(pa11::CV_NONE)
 {
 }
@@ -103,7 +104,36 @@ Declarator::Declarator() : has_name(false)
 }
 
 PendingFunctionBody::PendingFunctionBody()
-	: function(NULL), body_pos(0), constructor_body(false)
+	: function(NULL), body_pos(0), constructor_body(false), prebuilt_node(false)
+{
+}
+
+TemplateParameterInfo::TemplateParameterInfo()
+	: has_default(false), default_begin(0), default_end(0)
+{
+}
+
+TemplateDeclaration::TemplateDeclaration()
+	: kind(TemplateDeclarationKind::Unknown),
+	  owner(NULL),
+	  lexical_scope(NULL),
+	decl_begin(0),
+	decl_end(0),
+	has_definition(false),
+	constructor_template(false),
+	placeholder(NULL)
+{
+}
+
+ActiveClassInstantiation::ActiveClassInstantiation()
+	: declaration(NULL)
+{
+}
+
+ActiveClassInstantiation::ActiveClassInstantiation(TemplateDeclaration* d,
+                                                   const string& n,
+                                                   TypePtr t)
+	: declaration(d), specialization_name(n), type(t)
 {
 }
 
@@ -142,7 +172,8 @@ void dump_node(ostream& out, const Node& node, int depth)
 Parser::Parser(const string& srcfile, const Options& options)
 	: pos_(0),
 	  root_("translation-unit"),
-	  local_type_counter_(0)
+	  local_type_counter_(0),
+	  force_new_function_binding_(false)
 {
 	pa10::Options pa10_options;
 	pa10_options.preprocess = options.preprocess;
@@ -240,7 +271,10 @@ bool Parser::consume(ETokenType type)
 void Parser::expect(ETokenType type)
 {
 	if (!consume(type))
-		throw runtime_error("unexpected token");
+		throw runtime_error("unexpected token: got '" +
+		                    (pos_ < tokens_.size() ? tokens_[pos_].source :
+		                     string("<eof>")) +
+		                    "', expected " + to_string(type));
 }
 
 void Parser::expect_eof()
@@ -252,7 +286,13 @@ void Parser::expect_eof()
 string Parser::consume_identifier()
 {
 	if (!at_identifier())
-		throw runtime_error("expected identifier before '" + current().source + "'");
+	{
+		string prev = pos_ > 0 ? tokens_[pos_ - 1].source : string("<start>");
+		string next = pos_ + 1 < tokens_.size()
+			? tokens_[pos_ + 1].source : string("<eof>");
+		throw runtime_error("expected identifier before '" + current().source +
+		                    "' after '" + prev + "' next '" + next + "'");
+	}
 	return tokens_[pos_++].source;
 }
 
@@ -282,6 +322,35 @@ void Parser::parse_translation_unit()
 	while (!at_eof())
 		parse_declaration_into(root_);
 	expect_eof();
+	for (size_t i = 0; i < template_declarations_.size(); ++i)
+	{
+		TemplateDeclaration* declaration = template_declarations_[i].get();
+		if (declaration->kind != TemplateDeclarationKind::Class)
+			continue;
+		vector<TypePtr> specializations;
+		for (map<string, TypePtr>::const_iterator it =
+			     declaration->class_specializations.begin();
+		     it != declaration->class_specializations.end();
+		     ++it)
+			specializations.push_back(it->second);
+		for (size_t j = 0; j < specializations.size(); ++j)
+		{
+			TypePtr type = pa11::strip_cv(specializations[j]);
+			map<const void*, vector<TypePtr> >::const_iterator args =
+				record_template_arguments_.find(type.get());
+			if (args == record_template_arguments_.end())
+				continue;
+			bool dependent = false;
+			for (size_t k = 0; k < args->second.size(); ++k)
+				if (type_is_template_dependent(args->second[k]))
+					dependent = true;
+			if (dependent)
+				continue;
+			complete_template_record(type);
+			instantiate_member_function_templates(type);
+			instantiate_member_variable_templates(type);
+		}
+	}
 }
 
 void Parser::skip_balanced(ETokenType open, ETokenType close)

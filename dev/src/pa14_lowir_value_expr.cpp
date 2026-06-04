@@ -283,13 +283,11 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 			program_.demand_inline_function(ctor);
 			vector<string> lowered;
 			lowered.push_back(storage.text);
-			for (size_t i = arg_start; i < expr.children.size(); ++i)
-			{
-				TypePtr param = ctor->type->parameters[i - arg_start + 1];
-				lowered.push_back(convert_value(emit_rvalue(expr.children[i]),
-				                                expr.children[i].type,
-				                                param).text);
-			}
+				for (size_t i = arg_start; i < expr.children.size(); ++i)
+				{
+					TypePtr param = ctor->type->parameters[i - arg_start + 1];
+					lower_call_argument(expr.children[i], param, lowered);
+				}
 			ostringstream call;
 			call << "call void @" << program_.symbol_for(ctor) << "(";
 			for (size_t i = 0; i < lowered.size(); ++i)
@@ -468,7 +466,10 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 	throw runtime_error("unsupported rvalue expression: " + expr.line);
 }
 
-Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to)
+Value FunctionLowerer::convert_value(Value value,
+                                     TypePtr from,
+                                     TypePtr to,
+                                     bool fold_literals)
 {
 	string dst = scalar_lowir_type(to);
 	string src = scalar_lowir_type(strip_for_value(from));
@@ -510,7 +511,8 @@ Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to)
 		}
 		return Value(dst, value.text);
 	}
-	if (value.text != "" && value.text[0] != '%' &&
+	if (fold_literals &&
+	    value.text != "" && value.text[0] != '%' &&
 	    value.text[0] != '$' && value.text[0] != '@' &&
 	    !is_float_type(from) && !is_float_type(to) &&
 	    (value.text == "0" || (dst != "ptr" && src != "ptr")))
@@ -576,7 +578,7 @@ Value FunctionLowerer::bool_value(Value value, TypePtr type)
 	string src = scalar_lowir_type(strip_for_value(type));
 	string cmp_type = (!is_float_type(type) && src != "ptr") ? "i64" : src;
 	string tmp = fresh_temp();
-	string zero = is_float_type(type) ? "0.0" : (src == "ptr" ? "nullptr" : "0");
+	string zero = is_float_type(type) ? "0.0" : "0";
 	instr(tmp + " = cmp ne " + cmp_type + " " + value.text + ", " + zero);
 	return Value("u8", tmp);
 }
@@ -866,7 +868,20 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 Value FunctionLowerer::emit_unary(const Node& expr)
 {
 	if (expr.op == OP_AMP)
+	{
+		if (!expr.children.empty() &&
+		    expr.children[0].binding != NULL &&
+		    expr.children[0].binding->kind == BindingKind::Function)
+		{
+			if (expr.children[0].binding->is_inline_definition)
+				program_.demand_inline_function(expr.children[0].binding);
+			string addr = fresh_temp();
+			instr(addr + " = addr @" +
+			      program_.symbol_for(expr.children[0].binding));
+			return Value("ptr", addr);
+		}
 		return ensure_pointer(emit_lvalue_addr(expr.children[0]));
+	}
 	if (expr.op == OP_STAR)
 	{
 		Value addr = emit_lvalue_addr(expr);
@@ -926,8 +941,7 @@ Value FunctionLowerer::emit_unary(const Node& expr)
 		string tmp = fresh_temp();
 		string cmp_type = (!is_float_type(expr.children[0].type) &&
 		                   inner.type != "ptr") ? "i64" : inner.type;
-		string zero = is_float_type(expr.children[0].type) ? "0.0" :
-		              (inner.type == "ptr" ? "nullptr" : "0");
+			string zero = is_float_type(expr.children[0].type) ? "0.0" : "0";
 		instr(tmp + " = cmp eq " + cmp_type + " " + inner.text + ", " + zero);
 		return Value("u8", tmp);
 	}
@@ -993,9 +1007,26 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 	if (is_reference(expr.type))
 		return emit_rvalue(expr.children[0]);
 	TypePtr cast_source = pa11::strip_cv(strip_for_value(expr.children[0].type));
+	TypePtr cast_target = pa11::strip_cv(strip_for_value(expr.type));
+	if (cast_source->kind == TypeKind::Fundamental &&
+	    cast_target->kind == TypeKind::Fundamental &&
+	    cast_source->fundamental != FT_VOID &&
+	    cast_target->fundamental != FT_VOID &&
+	    cast_source->fundamental != FT_NULLPTR_T &&
+	    cast_target->fundamental != FT_NULLPTR_T &&
+	    cast_source->fundamental != cast_target->fundamental &&
+	    !starts_with(expr.children[0].line, "literal") &&
+	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
+	{
+		Value raw = emit_rvalue(expr.children[0]);
+		string tmp = fresh_temp();
+		instr(tmp + " = copy " + scalar_lowir_type(expr.type) + " " +
+		      raw.text);
+		return Value(scalar_lowir_type(expr.type), tmp);
+	}
 	if (cast_source->kind == TypeKind::Enum &&
 	    cast_source->enum_underlying != FT_INT &&
-	    pa11::strip_cv(strip_for_value(expr.type))->kind == TypeKind::Fundamental &&
+	    cast_target->kind == TypeKind::Fundamental &&
 	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
 	{
 		Value raw = emit_rvalue(expr.children[0]);

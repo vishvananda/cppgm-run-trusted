@@ -209,6 +209,7 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 		if (init.direct_call != NULL)
 		{
 			if (init.direct_call->is_generated_aggregate_constructor &&
+			    init.token_text != "force-constructor" &&
 			    !pa11::type_has_const(type) &&
 			    !type_has_reference_subobject(type) &&
 			    !record_has_user_assignment_operator(type))
@@ -286,6 +287,12 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 				lower_constructor_call(same_addr, ctor, args);
 				return;
 			}
+			if (ctor != NULL && init.children.empty())
+			{
+				vector<const Node*> args;
+				lower_constructor_call(addr_for, ctor, args);
+				return;
+			}
 		}
 		if (is_brace_elision_aggregate(type))
 		{
@@ -293,7 +300,9 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 			return;
 		}
 		if (pa11::strip_cv(type)->kind == TypeKind::Record)
-			throw runtime_error("no matching constructor");
+			throw runtime_error("no matching constructor for " +
+			                    pa11::describe_type(type) + " from " +
+			                    init.line);
 		if (init.children.empty())
 		{
 			lower_zero_init(addr_for, type);
@@ -464,7 +473,9 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 			{
 				Binding* ctor = find_constructor(type, 1);
 				if (ctor == NULL)
-					throw runtime_error("no matching constructor");
+					throw runtime_error("no matching constructor for " +
+					                    pa11::describe_type(type) +
+					                    " from " + init.line);
 				vector<const Node*> args;
 				args.push_back(&init.children[0]);
 				lower_constructor_call(addr_for, ctor, args);
@@ -493,19 +504,24 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 				return;
 			}
 			Value target = addr_for();
-			string source = (init.category == ValueCategory::LValue ||
-			                 init.category == ValueCategory::XValue)
-				? ensure_pointer(emit_lvalue_addr(init)).text
-				: emit_rvalue(init).text;
-			if (record_has_storage_copy(type))
-				instr("copyobj " + to_string(pa11::type_size(type)) +
-				      "x" + to_string(pa11::type_align(type)) + " " +
-				      source + ", " + target.text);
+				string source = (init.category == ValueCategory::LValue ||
+				                 init.category == ValueCategory::XValue)
+					? ensure_pointer(emit_lvalue_addr(init)).text
+					: emit_rvalue(init).text;
+				bool returned_prvalue =
+					init.category == ValueCategory::PRValue &&
+					starts_with(init.line, "call-expression");
+				if (record_has_storage_copy(type) || returned_prvalue)
+					instr("copyobj " + to_string(pa11::type_size(type)) +
+					      "x" + to_string(pa11::type_align(type)) + " " +
+					      source + ", " + target.text);
 			return;
 		}
 		Binding* ctor = find_constructor(type, 1);
 		if (ctor == NULL)
-			throw runtime_error("no matching constructor");
+			throw runtime_error("no matching constructor for " +
+			                    pa11::describe_type(type) + " from " +
+			                    init.line);
 		vector<const Node*> args;
 		args.push_back(&init);
 		lower_constructor_call(addr_for, ctor, args);

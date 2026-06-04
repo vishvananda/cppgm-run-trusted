@@ -100,6 +100,13 @@ Expr Parser::parse_conditional_expression()
 	Expr cond = parse_binary_expression(1);
 	if (!consume(OP_QMARK))
 		return cond;
+	if (pa11::strip_cv(expression_object_type(cond.type))->kind ==
+	    pa11::TypeKind::Record)
+	{
+		Conversion conv = convert_to(cond, pa11::make_fundamental(FT_BOOL));
+		if (conv.viable)
+			cond = conv.expr;
+	}
 	Expr yes = parse_expression();
 	expect(OP_COLON);
 	Expr no = parse_assignment_expression();
@@ -226,12 +233,15 @@ Expr Parser::parse_unary_expression()
 			init.category = ValueCategory::PRValue;
 			if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record)
 			{
-				Binding* ctor = ensure_default_constructor(target, true);
-				if (init.node.children.empty())
-					init.node.direct_call = ctor;
-				bool force_dtor =
-					pa11::strip_cv(target)->base.get() != NULL;
-				ensure_default_destructor(target, force_dtor);
+				if (!type_is_template_dependent(target))
+				{
+					Binding* ctor = ensure_default_constructor(target, true);
+					if (init.node.children.empty())
+						init.node.direct_call = ctor;
+					bool force_dtor =
+						pa11::strip_cv(target)->base.get() != NULL;
+					ensure_default_destructor(target, force_dtor);
+				}
 			}
 			annotate_expr_node(init);
 			return parse_postfix_suffixes(init);
@@ -312,7 +322,7 @@ Expr Parser::parse_postfix_expression()
 			}
 		}
 		if (!callee.valid)
-			throw runtime_error("name not found");
+			throw runtime_error("name not found: " + name.spelling);
 		return parse_postfix_suffixes(make_call_expr(callee, args));
 	}
 	return parse_postfix_suffixes(parse_primary_expression());
@@ -504,6 +514,7 @@ Expr Parser::parse_new_expression()
 	Binding* ctor = NULL;
 	if (!array_new && record->kind == pa11::TypeKind::Record && record->scope != NULL)
 	{
+		complete_template_record(record);
 		map<string, vector<Binding*> >::const_iterator found =
 			record->scope->members.find(record->scope->name);
 		if (found != record->scope->members.end())
@@ -519,8 +530,9 @@ Expr Parser::parse_new_expression()
 				}
 			}
 		}
-	if (ctor == NULL)
-			throw runtime_error("no matching constructor");
+		if (ctor == NULL && !type_is_template_dependent(record))
+			throw runtime_error("no matching constructor for new " +
+			                    pa11::describe_type(type));
 	}
 	Binding* opnew = NULL;
 	if (have_placement)
@@ -719,7 +731,18 @@ Expr Parser::parse_type_trait_expression(ETokenType keyword)
 	{
 		TypePtr type = parse_type_id();
 		expect(OP_RPAREN);
-		value = is_sizeof ? pa11::type_size(type) : pa11::type_align(type);
+		try
+		{
+			value = is_sizeof ? pa11::type_size(type) : pa11::type_align(type);
+		}
+		catch (const runtime_error& err)
+		{
+			if (!type_is_template_dependent(type) ||
+			    (string(err.what()) != "incomplete object type" &&
+			     string(err.what()) != "incomplete class type"))
+				throw;
+			value = 8;
+		}
 	}
 	catch (const exception&)
 	{
@@ -727,8 +750,19 @@ Expr Parser::parse_type_trait_expression(ETokenType keyword)
 		Expr expr = parse_expression();
 		expect(OP_RPAREN);
 		TypePtr object_type = expression_object_type(expr.type);
-		value = is_sizeof ? pa11::type_size(object_type) :
-			pa11::type_align(object_type);
+		try
+		{
+			value = is_sizeof ? pa11::type_size(object_type) :
+				pa11::type_align(object_type);
+		}
+		catch (const runtime_error& err)
+		{
+			if (!type_is_template_dependent(object_type) ||
+			    (string(err.what()) != "incomplete object type" &&
+			     string(err.what()) != "incomplete class type"))
+				throw;
+			value = 8;
+		}
 	}
 	return make_sizeof_expr(value);
 }
@@ -774,10 +808,13 @@ Expr Parser::parse_functional_cast(TypePtr target)
 		}
 		else
 		{
-			init.node.direct_call = ensure_default_constructor(target, true);
-			bool force_dtor =
-				pa11::strip_cv(target)->base.get() != NULL;
-			ensure_default_destructor(target, force_dtor);
+			if (!type_is_template_dependent(target))
+			{
+				init.node.direct_call = ensure_default_constructor(target, true);
+				bool force_dtor =
+					pa11::strip_cv(target)->base.get() != NULL;
+				ensure_default_destructor(target, force_dtor);
+			}
 		}
 		annotate_expr_node(init);
 		return init;

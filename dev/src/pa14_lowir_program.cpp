@@ -1,5 +1,6 @@
 #include "pa14_lowir_internal.h"
 
+#include <algorithm>
 #include <fstream>
 
 namespace pa14 {
@@ -131,7 +132,9 @@ void collect_direct_calls(const Node& node, set<const Binding*>& out)
 
 bool contains_call_expression(const Node& node)
 {
-	if (starts_with(node.line, "call-expression"))
+	if (starts_with(node.line, "call-expression") ||
+	    starts_with(node.line, "constructor-action") ||
+	    node.direct_call != NULL)
 		return true;
 	for (size_t i = 0; i < node.children.size(); ++i)
 		if (contains_call_expression(node.children[i]))
@@ -139,19 +142,44 @@ bool contains_call_expression(const Node& node)
 	return false;
 }
 
-bool early_hidden_friend_definition(const Node& node,
-                                    const set<const Binding*>& direct_calls)
-{
-	if (node.binding == NULL || !node.binding->is_hidden_friend)
-		return false;
-	return !contains_call_expression(node) ||
-	       direct_calls.find(node.binding) != direct_calls.end();
-}
-
 bool generated_copy_move_constructor_node(const Node& node)
 {
-	return node.binding != NULL &&
-	       node.binding->is_generated_copy_move_constructor;
+	if (node.binding == NULL ||
+	    (!node.binding->is_generated_copy_move_constructor &&
+	     node.token_text != "copy-move-helper"))
+		return false;
+	bool template_context = false;
+	for (Scope* scope = node.binding->owner; scope != NULL; scope = scope->parent)
+	{
+		if (scope->kind != ScopeKind::Class)
+			continue;
+		TypePtr record = pa11::record_type_for_scope(scope);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL &&
+		    record->kind == TypeKind::Record &&
+		    record->name.find('<') != string::npos)
+		{
+			template_context = true;
+			break;
+		}
+	}
+	if (!template_context)
+		return false;
+	if (node.binding->is_defaulted &&
+	    node.binding->owner != NULL &&
+	    node.binding->owner->kind == ScopeKind::Class)
+	{
+		TypePtr record = pa11::record_type_for_scope(node.binding->owner);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL)
+		{
+			pa11::layout_record_type(record);
+			for (size_t i = 0; i < record->fields.size(); ++i)
+				if (pa11::is_reference_type(record->fields[i]->type))
+					return false;
+		}
+	}
+	return true;
 }
 
 bool is_class_constructor(const Binding* binding)
@@ -160,6 +188,102 @@ bool is_class_constructor(const Binding* binding)
 	       binding->owner != NULL &&
 	       binding->owner->kind == ScopeKind::Class &&
 	       binding->name == binding->owner->name;
+}
+
+bool template_specialization_record(TypePtr record)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return record.get() != NULL &&
+	       record->kind == TypeKind::Record &&
+	       record->name.find('<') != string::npos;
+}
+
+bool template_specialization_context(const Binding* binding)
+{
+	if (binding == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Class &&
+		    template_specialization_record(pa11::record_type_for_scope(scope)))
+			return true;
+	return false;
+}
+
+bool type_mentions_template_specialization(TypePtr type)
+{
+	type = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (type.get() == NULL)
+		return false;
+	if (template_specialization_record(type))
+		return true;
+	if (type->kind == TypeKind::Pointer ||
+	    type->kind == TypeKind::LValueReference ||
+	    type->kind == TypeKind::RValueReference ||
+	    type->kind == TypeKind::Array ||
+	    type->kind == TypeKind::MemberPointer)
+		return type_mentions_template_specialization(type->base) ||
+		       type_mentions_template_specialization(type->member_class);
+	if (type->kind == TypeKind::Function)
+	{
+		if (type_mentions_template_specialization(type->base))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (type_mentions_template_specialization(type->parameters[i]))
+				return true;
+	}
+	return false;
+}
+
+bool binding_mentions_template_specialization(const Binding* binding)
+{
+	return binding != NULL &&
+	       type_mentions_template_specialization(binding->type);
+}
+
+bool early_hidden_friend_definition(const Node& node,
+                                    const set<const Binding*>& direct_calls)
+{
+	if (node.binding == NULL || !node.binding->is_hidden_friend)
+		return false;
+	if (direct_calls.find(node.binding) != direct_calls.end())
+		return true;
+	return !contains_call_expression(node) &&
+	       !binding_mentions_template_specialization(node.binding);
+}
+
+TypePtr first_this_record(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.empty())
+		return TypePtr();
+	TypePtr first = pa11::strip_cv(binding->type->parameters[0]);
+	if (first->kind != TypeKind::Pointer)
+		return TypePtr();
+	TypePtr record = pa11::strip_cv(first->base);
+	return record->kind == TypeKind::Record ? record : TypePtr();
+}
+
+bool function_touches_record(const Binding* binding, TypePtr record)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    record.get() == NULL)
+		return false;
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+	{
+		TypePtr param = pa11::strip_cv(binding->type->parameters[i]);
+		if (param->kind == TypeKind::Pointer ||
+		    param->kind == TypeKind::LValueReference ||
+		    param->kind == TypeKind::RValueReference)
+			param = pa11::strip_cv(param->base);
+		if (param->kind == TypeKind::Record &&
+		    pa11::same_type(param, record))
+			return true;
+	}
+	return false;
 }
 
 FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
@@ -206,7 +330,9 @@ const Binding* first_base_default_constructor(const Binding* binding)
 }  // namespace
 
 ProgramLowerer::ProgramLowerer()
-	: needs_empty_init_function(false),
+	: active_inline_definition(NULL),
+	  active_inline_dependency_insert_count(0),
+	  needs_empty_init_function(false),
 	  needs_eh_declarations(false),
 	  generated_assignment_emit_depth(0)
 {
@@ -223,10 +349,24 @@ string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
 		return "addr @" + string_symbol(init.token_text);
 	if (starts_with(init.line, "id-expression") && init.binding != NULL &&
 	    scalar_lowir_type(type) == "ptr")
+	{
+		if (init.binding->kind == BindingKind::Function &&
+		    init.binding->is_inline_definition)
+			demand_inline_function(init.binding);
 		return "addr @" + symbol_for(init.binding);
+	}
 	if (starts_with(init.line, "unary-expression") && init.has_op &&
 	    init.op == OP_PLUS && !init.children.empty())
 		return global_scalar_initializer(type, init.children[0]);
+	if (starts_with(init.line, "unary-expression") && init.has_op &&
+	    init.op == OP_AMP && !init.children.empty() &&
+	    init.children[0].binding != NULL &&
+	    init.children[0].binding->kind == BindingKind::Function)
+	{
+		if (init.children[0].binding->is_inline_definition)
+			demand_inline_function(init.children[0].binding);
+		return "addr @" + symbol_for(init.children[0].binding);
+	}
 	if (starts_with(init.line, "binary-expression") && init.has_op &&
 	    (init.op == OP_PLUS || init.op == OP_MINUS) &&
 	    init.children.size() == 2)
@@ -283,7 +423,9 @@ void ProgramLowerer::emit_global(const Node& node)
 	bool runtime_init =
 		!node.children.empty() &&
 		global_needs_runtime_init(type, node.children[0]);
-	if (runtime_init)
+	if (runtime_init && node.binding->is_thread_local)
+		thread_local_init_variables.push_back(node);
+	else if (runtime_init)
 		global_init_variables.push_back(node);
 	if (record_has_destructor(type))
 		global_fini_variables.push_back(node);
@@ -301,7 +443,8 @@ void ProgramLowerer::emit_global(const Node& node)
 		else if (bare->kind == TypeKind::Record)
 		{
 			out << "  zero " << pa11::type_size(type) << "\n";
-			needs_empty_init_function = true;
+			if (!node.binding->is_static_member)
+				needs_empty_init_function = true;
 		}
 		else
 		{
@@ -351,6 +494,8 @@ void ProgramLowerer::emit_global(const Node& node)
 						           symbol_for(init.children[0].binding)));
 			}
 		}
+		else if (node.children.empty() && node.binding->has_constant)
+			out << node.binding->constant_value;
 		else if (runtime_init || node.children.empty())
 			out << "zero";
 		else if (starts_with(node.children[0].line, "literal") &&
@@ -418,7 +563,27 @@ string typeinfo_name_symbol(TypePtr record)
 string typeinfo_name_spelling(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
-	return to_string(bare->name.size()) + bare->name;
+	vector<string> parts;
+	size_t start = 0;
+	for (;;)
+	{
+		size_t pos = bare->name.find("::", start);
+		string part = pos == string::npos
+			? bare->name.substr(start)
+			: bare->name.substr(start, pos - start);
+		if (!part.empty())
+			parts.push_back(part);
+		if (pos == string::npos)
+			break;
+		start = pos + 2;
+	}
+	if (parts.size() <= 1)
+		return to_string(bare->name.size()) + bare->name;
+	string out = "N";
+	for (size_t i = 0; i < parts.size(); ++i)
+		out += to_string(parts[i].size()) + parts[i];
+	out += "E";
+	return out;
 }
 
 void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
@@ -571,22 +736,34 @@ void ProgramLowerer::demand_vtable(TypePtr record)
 	for (size_t i = 0; i < bare->virtual_entries.size(); ++i)
 	{
 		Binding* fn = bare->virtual_entries[i].function;
-		if (fn == NULL)
-			continue;
-		if (fn->is_pure_virtual)
-		{
-			string ret = scalar_lowir_type(fn->type->base);
-			string sig = "__cxa_pure_virtual " + ret;
-			if (declared_pure_virtual_signatures.insert(sig).second &&
-			    declared_functions.insert("__cxa_pure_virtual").second)
-				declares.push_back(
-					"declare function @__cxa_pure_virtual(%arg0 : ptr) -> " +
-					ret +
-					" [effects=readnone, unwind=no, return=noreturn, "
-					"binding=strong]");
-			out << "  ptr addr @__cxa_pure_virtual\n";
-			continue;
-		}
+			if (fn == NULL)
+				continue;
+			if (fn->is_pure_virtual)
+			{
+				string ret = scalar_lowir_type(fn->type->base);
+				ostringstream sig;
+				sig << "__cxa_pure_virtual " << ret;
+				for (size_t j = 0; j < fn->type->parameters.size(); ++j)
+					sig << " " << lowir_parameter(fn->type->parameters[j]);
+				if (declared_pure_virtual_signatures.insert(sig.str()).second)
+				{
+					ostringstream decl;
+					decl << "declare function @__cxa_pure_virtual(";
+					for (size_t j = 0; j < fn->type->parameters.size(); ++j)
+					{
+						if (j != 0)
+							decl << ", ";
+						decl << "%arg" << j << " : " <<
+							lowir_parameter(fn->type->parameters[j]);
+					}
+					decl << ") -> " << ret
+					     << " [effects=readnone, unwind=no, return=noreturn, "
+					     << "binding=strong]";
+					declares.push_back(decl.str());
+				}
+				out << "  ptr addr @__cxa_pure_virtual\n";
+				continue;
+			}
 		if (bare->virtual_entries[i].deleting_entry)
 		{
 			emit_deleting_destructor_entry(fn);
@@ -872,131 +1049,24 @@ void ProgramLowerer::register_inline_definition(const Node& node)
 {
 	if (node.binding == NULL)
 		return;
-	symbol_for(node.binding);
-	if (inline_definition_ranks.find(node.binding) == inline_definition_ranks.end())
-		inline_definition_ranks[node.binding] = inline_definition_ranks.size();
-	inline_definitions[node.binding] = &node;
-}
-
-void ProgramLowerer::demand_function_declaration(const Binding* binding)
-{
-	if (binding == NULL)
-		return;
-	string name = symbol_for(binding);
-	if (defined_functions.find(name) != defined_functions.end() ||
-	    declared_functions.find(name) != declared_functions.end())
-		return;
-	map<const Binding*, string>::const_iterator found =
-		function_declarations_by_binding.find(binding);
-	if (found == function_declarations_by_binding.end())
+	bool copy_move_helper =
+		node.binding->is_generated_copy_move_constructor ||
+		node.token_text == "copy-move-helper";
+	if (node.binding->owner != NULL &&
+	    node.binding->owner->kind == ScopeKind::Class)
 	{
-		if (binding->name == "__builtin_strlen")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @__builtin_strlen(%arg0 : ptr "
-				"[capture=nocapture, access=read]) -> i64 "
-				"[effects=readonly, unwind=no, binding=strong, "
-				"object=cppgm_builtin_strlen]");
-		}
-		else if (binding->name == "__builtin_unreachable")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @__builtin_unreachable() -> void "
-				"[effects=readnone, unwind=no, return=noreturn, "
-				"binding=strong, object=cppgm_builtin_unreachable]");
-		}
-		else if (binding->name == "__builtin_memcpy")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @__builtin_memcpy(%arg0 : ptr "
-				"[capture=nocapture, access=write, alias=noalias], "
-				"%arg1 : ptr [capture=nocapture, access=read, alias=noalias], "
-				"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
-				"binding=strong, object=cppgm_builtin_memcpy]");
-		}
-		else if (binding->name == "__builtin_memmove")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @__builtin_memmove(%arg0 : ptr "
-				"[capture=nocapture, access=readwrite], "
-				"%arg1 : ptr [capture=nocapture, access=read], "
-				"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
-				"binding=strong, object=cppgm_builtin_memmove]");
-		}
-		else if (binding->owner != NULL &&
-		         binding->owner->parent == NULL &&
-		         binding->name == "operatornew")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @operator_new(%arg0 : i64) -> ptr "
-				"[binding=strong, object=cppgm_builtin_operator_new]");
-		}
-		else if (binding->owner != NULL &&
-		         binding->owner->parent == NULL &&
-		         binding->name == "operatordelete")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @operator_delete(%arg0 : ptr) -> void "
-				"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete]");
-		}
-		else if (binding->owner != NULL &&
-		         binding->owner->parent == NULL &&
-		         binding->name == "operatornew[]")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @operator_new__(%arg0 : i64) -> ptr "
-				"[binding=strong, object=cppgm_builtin_operator_new_array]");
-		}
-		else if (binding->owner != NULL &&
-		         binding->owner->parent == NULL &&
-		         binding->name == "operatordelete[]")
-		{
-			declared_functions.insert(name);
-			declares.push_back(
-				"declare function @operator_delete__(%arg0 : ptr) -> void "
-				"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete_array]");
-		}
-		else
-		{
-			bool indirect_result =
-				pa11::strip_cv(binding->type->base)->kind == TypeKind::Record &&
-				record_return_by_address(binding->type->base);
-			ostringstream out;
-			out << "declare function @" << name << "(";
-			if (indirect_result)
-				out << "%ret : ptr [pass=indirect_result]";
-			for (size_t i = 0; i < binding->type->parameters.size(); ++i)
-			{
-				if (i != 0 || indirect_result)
-					out << ", ";
-				out << "%arg" << i << " : "
-				    << lowir_parameter(binding->type->parameters[i]);
-			}
-			out << ") -> " << (indirect_result ? "void" :
-			                    scalar_lowir_type(binding->type->base));
-			vector<string> metadata;
-			if (binding->type->variadic)
-				metadata.push_back("arity=variadic");
-			if (binding->language_linkage == "c")
-				metadata.push_back("linkage=c");
-			if (binding->unwind_no)
-				metadata.push_back("unwind=no");
-			metadata.push_back("binding=strong");
-			out << metadata_suffix(metadata);
-			declared_functions.insert(name);
-			declares.push_back(out.str());
-		}
-		return;
+		TypePtr owner_record = pa11::record_type_for_scope(node.binding->owner);
+		bool class_template_specialization =
+			owner_record.get() != NULL &&
+			owner_record->name.find('<') != string::npos;
+		if (!class_template_specialization && !copy_move_helper)
+			symbol_for(node.binding);
 	}
-	declared_functions.insert(name);
-	declares.push_back(found->second);
+	if (!copy_move_helper &&
+	    inline_definition_ranks.find(node.binding) == inline_definition_ranks.end())
+		inline_definition_ranks[node.binding] = inline_definition_ranks.size();
+	if (inline_definitions.find(node.binding) == inline_definitions.end())
+		inline_definitions[node.binding] = &node;
 }
 
 void ProgramLowerer::demand_inline_function(const Binding* binding,
@@ -1085,9 +1155,41 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 				break;
 			}
 	if (binding->owner != NULL && binding->name == binding->owner->name)
+	{
 		for (vector<const Binding*>::iterator it =
 		     pending_inline_definitions.begin();
 		     it != pending_inline_definitions.end(); ++it)
+		{
+			bool pending_ctor =
+				(*it)->owner != NULL &&
+				(*it)->owner->kind == ScopeKind::Class &&
+				(*it)->name == (*it)->owner->name;
+			if (pending_ctor &&
+			    binding->type.get() != NULL &&
+			    (*it)->type.get() != NULL &&
+			    binding->type->kind == TypeKind::Function &&
+			    (*it)->type->kind == TypeKind::Function &&
+			    binding->type->parameters.size() <
+				    (*it)->type->parameters.size())
+			{
+				pos = it;
+				break;
+			}
+		}
+		if (pos == pending_inline_definitions.end())
+			for (vector<const Binding*>::iterator it =
+			     pending_inline_definitions.begin();
+			     it != pending_inline_definitions.end(); ++it)
+				if ((*it)->owner != NULL &&
+				    (*it)->owner->kind == ScopeKind::Namespace)
+				{
+					pos = it;
+					break;
+				}
+		for (vector<const Binding*>::iterator it =
+		     pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end() &&
+		     pos == pending_inline_definitions.end(); ++it)
 			if ((*it)->owner == binding->owner &&
 			    ((*it)->name == "operator=" ||
 			     (*it)->name.compare(0, 9, "operator ") == 0))
@@ -1095,6 +1197,53 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 				pos = it;
 				break;
 			}
+		if (active_inline_definition != NULL &&
+		    is_class_constructor(active_inline_definition) &&
+		    template_specialization_context(active_inline_definition))
+		{
+			TypePtr active_record = first_this_record(active_inline_definition);
+			for (vector<const Binding*>::iterator it =
+			     pending_inline_definitions.begin();
+			     it != pending_inline_definitions.end() &&
+			     pos == pending_inline_definitions.end(); ++it)
+			{
+				if (!is_class_constructor(*it))
+					continue;
+				TypePtr pending_record = first_this_record(*it);
+				if (active_record.get() != NULL &&
+				    pending_record.get() != NULL &&
+				    record_has_base(active_record, pending_record))
+					continue;
+				pos = it;
+				break;
+			}
+		}
+	}
+	if (!binding->name.empty() && binding->name[0] == '~' &&
+	    binding->owner != NULL)
+	{
+		TypePtr destroyed_record = first_this_record(binding);
+		for (vector<const Binding*>::iterator it =
+		     pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end(); ++it)
+		{
+			TypePtr pending_this = first_this_record(*it);
+			bool pending_destroyed_record_ctor =
+				template_specialization_context(binding) &&
+				is_class_constructor(*it) &&
+				pending_this.get() != NULL &&
+				destroyed_record.get() != NULL &&
+				pa11::same_type(pending_this, destroyed_record);
+			if (((*it)->owner == binding->owner &&
+			     (*it)->name != binding->owner->name) ||
+			    (!pending_destroyed_record_ctor &&
+			     function_touches_record(*it, destroyed_record)))
+			{
+				pos = it;
+				break;
+			}
+		}
+	}
 	bool binding_const_conversion =
 		binding->name.compare(0, 9, "operator ") == 0 &&
 		binding->type->kind == TypeKind::Function &&
@@ -1125,6 +1274,29 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 				break;
 			}
 		}
+	if (binding->name.compare(0, 9, "operator ") == 0 &&
+	    binding->owner != NULL &&
+	    template_specialization_context(binding))
+	{
+		TypePtr owner_record = class_record_for_member(binding);
+		for (vector<const Binding*>::iterator it =
+		     pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end() &&
+		     pos == pending_inline_definitions.end(); ++it)
+		{
+			if ((*it)->name.compare(0, 9, "operator ") != 0 ||
+			    (*it)->owner == NULL)
+				continue;
+			TypePtr pending_record = class_record_for_member(*it);
+			if (owner_record.get() != NULL &&
+			    pending_record.get() != NULL &&
+			    record_has_base(owner_record, pending_record))
+			{
+				pos = it;
+				break;
+			}
+		}
+	}
 	map<const Binding*, size_t>::const_iterator binding_rank =
 		inline_definition_ranks.find(binding);
 	bool operator_function = binding->name.compare(0, 8, "operator") == 0;
@@ -1154,12 +1326,23 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 		     it != pending_inline_definitions.end(); ++it)
 			if ((*it)->name == "operator[]" ||
 			    (generated_assignment_emit_depth == 0 &&
-			     (*it)->is_generated_copy_move_assignment) ||
-			    (!(*it)->name.empty() && (*it)->name[0] == '~'))
+			     (*it)->is_generated_copy_move_assignment))
 			{
 				pos = it;
 				break;
 			}
+	if (active_inline_definition != NULL &&
+	    active_inline_definition->name.size() > 0 &&
+	    active_inline_definition->name[0] == '~' &&
+	    binding != active_inline_definition &&
+	    template_specialization_context(active_inline_definition))
+	{
+		size_t index = active_inline_dependency_insert_count;
+		if (index > pending_inline_definitions.size())
+			index = pending_inline_definitions.size();
+		pos = pending_inline_definitions.begin() + index;
+		++active_inline_dependency_insert_count;
+	}
 	pending_inline_definitions.insert(pos, binding);
 }
 
@@ -1188,9 +1371,16 @@ void ProgramLowerer::emit_pending_inline_definitions()
 		    defined_functions.end() &&
 		    inline_definitions.find(base_ctor) != inline_definitions.end())
 		{
-			pending_inline_definitions.insert(pending_inline_definitions.begin(),
-			                                  binding);
 			demand_inline_function(base_ctor, base_ctor_complete);
+			vector<const Binding*>::iterator retry =
+				find(pending_inline_definitions.begin(),
+				     pending_inline_definitions.end(),
+				     base_ctor);
+			if (retry != pending_inline_definitions.end())
+				++retry;
+			else
+				retry = pending_inline_definitions.begin();
+			pending_inline_definitions.insert(retry, binding);
 			continue;
 		}
 		string name = symbol_for(binding);
@@ -1218,160 +1408,27 @@ void ProgramLowerer::emit_pending_inline_definitions()
 			defined_functions.insert(name);
 		if (need_base)
 			defined_functions.insert(name + "__base_entry");
+		const Binding* saved_active = active_inline_definition;
+		size_t saved_dependency_insert_count =
+			active_inline_dependency_insert_count;
+		active_inline_definition = binding;
+		active_inline_dependency_insert_count = 0;
 		FunctionLowerer lowerer(*this, *found->second);
 		if (binding->is_generated_copy_move_assignment)
 			++generated_assignment_emit_depth;
 		FunctionOut lowered = lowerer.lower();
 		if (binding->is_generated_copy_move_assignment)
 			--generated_assignment_emit_depth;
-		if (!binding->name.empty() && binding->name[0] == '~')
+		active_inline_definition = saved_active;
+		active_inline_dependency_insert_count = saved_dependency_insert_count;
+		if (!binding->name.empty() && binding->name[0] == '~' &&
+		    !template_specialization_context(binding))
 			emit_pending_inline_definitions();
 		if (need_base)
 			functions.push_back(make_constructor_base_entry(lowered, name));
 		if (need_complete)
 			functions.push_back(lowered);
 		emit_pending_synthetic_assignment_functions();
-	}
-}
-
-void ProgramLowerer::emit_global_lifecycle_functions()
-{
-	TypePtr void_type = pa11::make_fundamental(FT_VOID);
-	TypePtr fn_type = pa11::make_function(void_type, vector<TypePtr>(), false);
-	if (!global_init_variables.empty())
-	{
-		synthetic_bindings.push_back(unique_ptr<Binding>(
-			new Binding(BindingKind::Function, "__cppgm_init", NULL)));
-		Binding* binding = synthetic_bindings.back().get();
-		binding->type = fn_type;
-		Node fn("function-definition __cppgm_init " +
-		        pa11::describe_type(fn_type));
-		fn.binding = binding;
-		fn.type = fn_type;
-		Node body("compound-statement");
-		for (size_t i = 0; i < global_init_variables.size(); ++i)
-		{
-			Node action("global-init-variable");
-			pa12::internal::add_child(action, global_init_variables[i]);
-			pa12::internal::add_child(body, action);
-		}
-		pa12::internal::add_child(fn, body);
-		string name = symbol_for(binding);
-		defined_functions.insert(name);
-		FunctionLowerer lowerer(*this, fn);
-		functions.push_back(lowerer.lower());
-		emit_pending_inline_definitions();
-	}
-	if (!global_fini_variables.empty())
-	{
-		synthetic_bindings.push_back(unique_ptr<Binding>(
-			new Binding(BindingKind::Function, "__cppgm_fini", NULL)));
-		Binding* binding = synthetic_bindings.back().get();
-		binding->type = fn_type;
-		Node fn("function-definition __cppgm_fini " +
-		        pa11::describe_type(fn_type));
-		fn.binding = binding;
-		fn.type = fn_type;
-		Node body("compound-statement");
-		for (size_t n = 0; n < global_fini_variables.size(); ++n)
-		{
-			size_t i = global_fini_variables.size() - 1 - n;
-			Node action("global-fini-variable");
-			pa12::internal::add_child(action, global_fini_variables[i]);
-			pa12::internal::add_child(body, action);
-		}
-		pa12::internal::add_child(fn, body);
-		string name = symbol_for(binding);
-		defined_functions.insert(name);
-		FunctionLowerer lowerer(*this, fn);
-		functions.push_back(lowerer.lower());
-		emit_pending_inline_definitions();
-	}
-}
-
-void ProgramLowerer::collect_translation_unit(const Node& root)
-{
-	for (size_t i = 0; i < root.children.size(); ++i)
-		collect_node(root.children[i]);
-	emit_pending_inline_definitions();
-}
-
-void ProgramLowerer::write(const string& outfile) const
-{
-	ofstream out(outfile.c_str());
-	if (!out)
-		throw runtime_error("cannot open output file");
-	for (size_t i = 0; i < declares.size(); ++i)
-	{
-		size_t at = declares[i].find('@');
-		size_t lp = declares[i].find('(', at);
-		string name = (at == string::npos || lp == string::npos)
-			? "" : declares[i].substr(at + 1, lp - at - 1);
-		if (defined_functions.find(name) == defined_functions.end())
-			out << declares[i] << "\n\n";
-	}
-	for (size_t i = 0; i < string_defs.size(); ++i)
-	{
-		out << "global @" << string_defs[i].first << " [binding=internal] = {\n";
-		for (size_t j = 0; j < string_defs[i].second.size(); ++j)
-			out << "  i8 " << static_cast<unsigned>(string_defs[i].second[j]) << "\n";
-		out << "}\n\n";
-	}
-	for (size_t i = 0; i < global_declares.size(); ++i)
-	{
-		size_t at = global_declares[i].find('@');
-		size_t end = global_declares[i].find_first_of(" [", at);
-		string name = (at == string::npos || end == string::npos)
-			? "" : global_declares[i].substr(at + 1, end - at - 1);
-		if (defined_globals.find(name) == defined_globals.end())
-			out << global_declares[i] << "\n\n";
-	}
-	for (size_t i = 0; i < globals.size(); ++i)
-		out << globals[i] << "\n\n";
-	for (size_t i = 0; i < functions.size(); ++i)
-	{
-		out << functions[i].header << " {\n";
-		for (size_t j = 0; j < functions[i].slots.size(); ++j)
-			out << functions[i].slots[j] << "\n";
-		if (!functions[i].slots.empty())
-			out << "\n";
-		for (size_t j = 0; j < functions[i].blocks.size(); ++j)
-		{
-			if (j != 0)
-				out << "\n";
-			out << "  block ^" << functions[i].blocks[j].name << ":\n";
-			for (size_t k = 0; k < functions[i].blocks[j].instrs.size(); ++k)
-				out << functions[i].blocks[j].instrs[k] << "\n";
-		}
-		out << "}";
-		if (i + 1 != functions.size())
-			out << "\n\n";
-		else
-			out << "\n";
-	}
-	if ((needs_empty_init_function || !init_actions.empty()) &&
-	    defined_functions.find("__cppgm_init") == defined_functions.end())
-	{
-		if (!functions.empty())
-			out << "\n";
-		out << "function @__cppgm_init() -> void [role=init, binding=internal] {\n";
-		out << "  block ^entry:\n";
-		int temp = 0;
-		for (size_t i = 0; i < init_actions.size(); ++i)
-		{
-			++temp;
-			string tmp = "%t" + to_string(temp);
-			if (init_actions[i].kind == "load_ptr")
-				out << "    " << tmp << " = load ptr @"
-				    << init_actions[i].symbol << "\n";
-			else
-				out << "    " << tmp << " = addr @"
-				    << init_actions[i].symbol << "\n";
-			out << "    store ptr " << tmp << ", @"
-			    << init_actions[i].target << "\n";
-		}
-		out << "    return void\n";
-		out << "}\n";
 	}
 }
 
@@ -1398,6 +1455,14 @@ void emit_lowir(const vector<string>& srcfiles,
 			program.register_inline_definition(extra[j]);
 		for (size_t j = 0; j < extra.size(); ++j)
 		{
+			if (extra[j].binding == NULL ||
+			    !extra[j].binding->is_object_root)
+				continue;
+			program.demand_inline_function(extra[j].binding);
+			program.emit_pending_inline_definitions();
+		}
+		for (size_t j = 0; j < extra.size(); ++j)
+		{
 			if (!internal::early_hidden_friend_definition(extra[j], direct_calls))
 				continue;
 			program.demand_inline_function(extra[j].binding);
@@ -1408,6 +1473,7 @@ void emit_lowir(const vector<string>& srcfiles,
 		{
 			if (!internal::generated_copy_move_constructor_node(extra[j]))
 				continue;
+			program.demand_inline_function(extra[j].binding);
 			set<const pa11::Binding*> generated_calls;
 			internal::collect_direct_calls(extra[j], generated_calls);
 			for (set<const pa11::Binding*>::const_iterator it =

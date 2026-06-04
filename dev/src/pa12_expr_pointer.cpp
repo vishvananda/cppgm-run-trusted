@@ -50,6 +50,8 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 	Expr out;
 	out.valid = true;
 	out.category = ValueCategory::PRValue;
+	out.overloads = inner.overloads;
+	out.explicit_template_arguments = inner.explicit_template_arguments;
 	if (inner.binding != NULL &&
 	    inner.binding->owner != NULL &&
 	    inner.binding->owner->kind == ScopeKind::Class &&

@@ -192,9 +192,22 @@ TypePtr Parser::apply_ptr_ops(TypePtr type, const vector<PtrOp>& ops)
 		if (ops[i].kind == PtrKind::Pointer)
 			type = pa11::make_cv(pa11::make_pointer(type), ops[i].cv);
 		else if (ops[i].kind == PtrKind::LValueReference)
-			type = pa11::make_lvalue_reference(type);
+		{
+			if (type->kind == pa11::TypeKind::LValueReference ||
+			    type->kind == pa11::TypeKind::RValueReference)
+				type = pa11::make_lvalue_reference(type->base);
+			else
+				type = pa11::make_lvalue_reference(type);
+		}
 		else if (ops[i].kind == PtrKind::RValueReference)
-			type = pa11::make_rvalue_reference(type);
+		{
+			if (type->kind == pa11::TypeKind::LValueReference)
+				type = type;
+			else if (type->kind == pa11::TypeKind::RValueReference)
+				type = pa11::make_rvalue_reference(type->base);
+			else
+				type = pa11::make_rvalue_reference(type);
+		}
 		else
 			type = pa11::make_cv(pa11::make_member_pointer(ops[i].member_class, type),
 			                     ops[i].cv);
@@ -369,6 +382,7 @@ TypePtr Parser::add_enum(Scope* scope,
 		                     enum_scope);
 	Binding* binding = pa11::add_binding(scope, BindingKind::Type, name, type);
 	binding->target_scope = enum_scope;
+	enum_owner_scopes_[type.get()] = scope;
 	return type;
 }
 
@@ -417,7 +431,9 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 		TypePtr base = record.get() != NULL && record->base.get() != NULL
 			? pa11::strip_cv(record->base) : TypePtr();
 		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL)
+		    base->scope != NULL &&
+		    record_dependent_base_lookup_skips_.count(
+			    pa11::strip_cv(record).get()) == 0)
 		{
 			vector<Binding*> base_found;
 			set<Scope*> seen;
@@ -616,11 +632,14 @@ int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
 	if (pa11::same_type(src, dst))
 		return 0;
 	TypePtr src_bare = pa11::strip_cv(src);
+	TypePtr dst_bare = pa11::strip_cv(dst);
+	if (dst_bare->kind == pa11::TypeKind::Enum)
+		return 1000000;
 	if (src_bare->kind == pa11::TypeKind::Enum && src_bare->scoped_enum)
 		return 1000000;
 	if (pa11::is_integral_or_bool_type(src) &&
-	    pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental &&
-	    pa11::strip_cv(dst)->fundamental == FT_INT)
+	    dst_bare->kind == pa11::TypeKind::Fundamental &&
+	    dst_bare->fundamental == FT_INT)
 		return 1;
 	if (pa11::is_integral_or_bool_type(src) && pa11::is_integral_or_bool_type(dst))
 		return 2;

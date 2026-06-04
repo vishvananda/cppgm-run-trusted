@@ -1,5 +1,6 @@
 #include "pa12_internal.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 using namespace std;
@@ -15,6 +16,32 @@ TypePtr adjust_parameter_type(TypePtr type)
 	if (type->kind == pa11::TypeKind::Function)
 		return pa11::make_pointer(type);
 	return type;
+}
+
+void skip_angle_tokens(const vector<Token>& tokens, size_t& pos)
+{
+	if (pos >= tokens.size() ||
+	    tokens[pos].kind != posttoken::TokenKind::Simple ||
+	    tokens[pos].type != OP_LT)
+		return;
+	int depth = 0;
+	while (pos < tokens.size())
+	{
+		const Token& tok = tokens[pos];
+		if (tok.kind == posttoken::TokenKind::Simple &&
+		    tok.type == OP_LT)
+			++depth;
+		else if (tok.kind == posttoken::TokenKind::Simple &&
+		         tok.type == OP_GT)
+		{
+			--depth;
+			++pos;
+			if (depth == 0)
+				return;
+			continue;
+		}
+		++pos;
+	}
 }
 
 }  // namespace
@@ -56,6 +83,8 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 				specs.thread_local_decl = true;
 			if (at(KW_VIRTUAL))
 				specs.virtual_decl = true;
+			if (at(KW_INLINE))
+				specs.inline_decl = true;
 			++pos_;
 			saw_any = true;
 		}
@@ -141,17 +170,34 @@ TypePtr Parser::parse_decltype_specifier()
 		expect(OP_RPAREN);
 		return expr.type;
 	}
-	bool parenthesized = consume(OP_LPAREN);
-	QualifiedName name = parse_id_expression_name();
-	Binding* binding = resolve_single_name(name, pa11::LOOKUP_VALUE);
-	if (binding == NULL)
-		throw runtime_error("decltype target not found");
-	if (parenthesized)
-		expect(OP_RPAREN);
+	size_t save = pos_;
+	try
+	{
+		if (!at(OP_LPAREN))
+		{
+			QualifiedName name = parse_id_expression_name();
+			if (at(OP_RPAREN))
+			{
+				Binding* binding = resolve_single_name(name, pa11::LOOKUP_VALUE);
+				if (binding == NULL)
+					throw runtime_error("decltype target not found");
+				expect(OP_RPAREN);
+				return binding->type;
+			}
+		}
+	}
+	catch (const exception&)
+	{
+	}
+	pos_ = save;
+	Expr expr = parse_expression();
 	expect(OP_RPAREN);
-	if (parenthesized && binding->kind != BindingKind::Function)
-		return pa11::make_lvalue_reference(binding->type);
-	return binding->type;
+	TypePtr object = expression_object_type(expr.type);
+	if (expr.category == ValueCategory::LValue)
+		return pa11::make_lvalue_reference(object);
+	if (expr.category == ValueCategory::XValue)
+		return pa11::make_rvalue_reference(object);
+	return expr.type;
 }
 
 TypePtr Parser::parse_class_specifier()
@@ -159,7 +205,61 @@ TypePtr Parser::parse_class_specifier()
 	const size_t start_index = pos_;
 	ETokenType key = current().type;
 	++pos_;
+	uint64_t forced_align = 0;
+	while (consume(KW_ALIGNAS))
+	{
+		expect(OP_LPAREN);
+		uint64_t align_value = 0;
+		if (at_identifier() && current().source == "__alignof")
+		{
+			++pos_;
+			expect(OP_LPAREN);
+			TypePtr align_type = parse_type_id();
+			expect(OP_RPAREN);
+			align_value = pa11::type_align(align_type);
+		}
+		else
+		{
+			Expr align_expr = parse_expression();
+			if (!align_expr.has_constant_value)
+				throw runtime_error("invalid alignas");
+			align_value = align_expr.constant_value;
+		}
+		expect(OP_RPAREN);
+		forced_align = max<uint64_t>(forced_align, align_value);
+	}
 	string name;
+	Scope* qualified_owner = NULL;
+	bool template_id_qualifier = false;
+	if (at_identifier() && lookahead(OP_LT, 1))
+	{
+		size_t p = pos_ + 1;
+		int depth = 0;
+		while (p < tokens_.size())
+		{
+			if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+			    tokens_[p].type == OP_LT)
+				++depth;
+			else if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+			         tokens_[p].type == OP_GT)
+			{
+				--depth;
+				if (depth == 0)
+				{
+					template_id_qualifier =
+						p + 1 < tokens_.size() &&
+						tokens_[p + 1].kind == posttoken::TokenKind::Simple &&
+						tokens_[p + 1].type == OP_COLON2;
+					break;
+				}
+			}
+			++p;
+		}
+	}
+	if (at(OP_COLON2) ||
+	    (at_identifier() &&
+	     (lookahead(OP_COLON2, 1) || template_id_qualifier)))
+		qualified_owner = parse_nested_name_specifier(NULL);
 	if (at_identifier())
 		name = consume_identifier();
 	if (!at(OP_LBRACE) && !at(OP_COLON))
@@ -167,11 +267,18 @@ TypePtr Parser::parse_class_specifier()
 		if (name.empty())
 			throw runtime_error("anonymous class declaration is not a type");
 		vector<Binding*> found =
-			lookup_unqualified_set(current_scope(), name, pa11::LOOKUP_TYPE);
+			qualified_owner != NULL
+			? lookup_qualified_set(qualified_owner, name, pa11::LOOKUP_TYPE)
+			: lookup_unqualified_set(current_scope(), name, pa11::LOOKUP_TYPE);
 		if (!found.empty() &&
 		    found[0]->type->kind == pa11::TypeKind::Record)
 			return found[0]->type;
-		return add_record(current_scope(), name, class_tag(key), false, NULL);
+		return add_record(qualified_owner != NULL ? qualified_owner :
+		                  current_scope(),
+		                  name,
+		                  class_tag(key),
+		                  false,
+		                  NULL);
 	}
 
 	bool anonymous = name.empty();
@@ -204,16 +311,83 @@ TypePtr Parser::parse_class_specifier()
 	{
 		if (at(KW_PUBLIC) || at(KW_PRIVATE) || at(KW_PROTECTED))
 			++pos_;
-		if (!try_parse_type_name(direct_base) ||
-		    pa11::strip_cv(direct_base)->kind != pa11::TypeKind::Record)
+		if (!try_parse_type_name(direct_base))
+			throw runtime_error("invalid base class");
+		TypePtr base_bare = pa11::strip_cv(direct_base);
+		if (base_bare->kind != pa11::TypeKind::Record &&
+		    base_bare->kind != pa11::TypeKind::TemplateParameter)
 			throw runtime_error("invalid base class");
 	}
-	Scope* class_scope =
-		pa11::create_child_scope(current_scope(), ScopeKind::Class, name);
-	TypePtr type =
-		add_record(current_scope(), name, class_tag(key), true, class_scope);
-	type->scope = class_scope;
+	bool active_template_class =
+		!active_class_instantiations_.empty() &&
+		active_class_instantiations_.back().declaration != NULL &&
+		active_class_instantiations_.back().declaration->name == name;
+	Scope* class_scope = NULL;
+	TypePtr type;
+	if (active_template_class)
+	{
+		type = active_class_instantiations_.back().type;
+		class_scope = type->scope;
+		type->complete = true;
+		type->tag = class_tag(key);
+	}
+	else
+	{
+		Scope* owner = qualified_owner != NULL ? qualified_owner : current_scope();
+		bool named_local_record =
+			!anonymous &&
+			qualified_owner == NULL &&
+			owner->kind != ScopeKind::Namespace &&
+			owner->kind != ScopeKind::Class;
+		Binding* existing = qualified_owner != NULL
+			? pa11::lookup_qualified(qualified_owner,
+			                         name,
+			                         pa11::LOOKUP_TYPE)
+			: NULL;
+		TypePtr existing_record = existing != NULL
+			? pa11::strip_cv(existing->type) : TypePtr();
+		if (existing_record.get() != NULL &&
+		    existing_record->kind == pa11::TypeKind::Record &&
+		    !existing_record->complete)
+		{
+			type = existing_record;
+			class_scope = type->scope != NULL
+				? type->scope
+				: pa11::create_child_scope(owner, ScopeKind::Class, name);
+			type->scope = class_scope;
+			type->complete = true;
+			type->tag = class_tag(key);
+			existing->target_scope = class_scope;
+		}
+		else
+		{
+			class_scope =
+				pa11::create_child_scope(owner, ScopeKind::Class, name);
+			type = add_record(owner,
+			                  name,
+			                  class_tag(key),
+			                  true,
+			                  class_scope);
+			if (named_local_record)
+				type->name = make_local_type_name(name + "__local_type");
+			type->scope = class_scope;
+		}
+	}
 	type->base = direct_base;
+	if (active_template_class && direct_base.get() != NULL)
+	{
+		TemplateDeclaration* declaration =
+			active_class_instantiations_.back().declaration;
+		if (type_is_template_dependent(direct_base))
+			class_templates_with_dependent_base_.insert(declaration);
+		if (class_templates_with_dependent_base_.count(declaration) != 0)
+			record_dependent_base_lookup_skips_.insert(type.get());
+	}
+	if (forced_align > type->record_forced_align)
+	{
+		type->record_forced_align = forced_align;
+		type->layout_valid = false;
+	}
 	expect(OP_LBRACE);
 	scopes_.push_back(class_scope);
 	parse_class_body(class_scope, key == KW_CLASS);
@@ -230,6 +404,11 @@ TypePtr Parser::parse_class_specifier()
 
 void Parser::parse_class_body(Scope* class_scope, bool default_private)
 {
+	Scope* open_parent_class = NULL;
+	for (size_t i = 0; i + 1 < scopes_.size(); ++i)
+		if (scopes_[i] == class_scope->parent &&
+		    scopes_[i]->kind == ScopeKind::Class)
+			open_parent_class = scopes_[i];
 	class_private_access_.push_back(default_private);
 	class_protected_access_.push_back(false);
 	while (!at(OP_RBRACE))
@@ -295,8 +474,31 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 				    pa11::is_reference_type(class_type->fields[j]->type))
 					deleted_functions_.insert(function);
 		}
+		vector<Binding*> members = class_scope->binding_order;
+		for (size_t i = 0; i < members.size(); ++i)
+		{
+			Binding* function = members[i];
+			if (function->kind != BindingKind::Function ||
+			    !function->is_defaulted ||
+			    function->name != class_scope->name ||
+			    function->type->kind != pa11::TypeKind::Function ||
+			    function->type->parameters.size() != 2 ||
+			    !pa11::is_reference_type(function->type->parameters[1]))
+				continue;
+			ensure_copy_move_constructor(
+				class_type,
+				function->type->parameters[1]->kind ==
+					pa11::TypeKind::RValueReference);
+		}
 	}
-	parse_pending_member_bodies(class_scope);
+	if (open_parent_class != NULL)
+		deferred_nested_member_body_scopes_[open_parent_class].push_back(
+			class_scope);
+	else
+	{
+		parse_pending_member_bodies(class_scope);
+		parse_deferred_nested_member_bodies(class_scope);
+	}
 	class_protected_access_.pop_back();
 	class_private_access_.pop_back();
 }
@@ -364,7 +566,93 @@ bool Parser::try_parse_type_name(TypePtr& out)
 	size_t save = pos_;
 	string spelling;
 	Scope* qualifier = NULL;
-	if (at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1)))
+	bool typename_disambiguator = consume(KW_TYPENAME);
+	bool template_id_qualifier = false;
+	if (typename_disambiguator && at_identifier())
+	{
+		size_t dep_save = pos_;
+		string dep_name = consume_identifier();
+		bool dependent_root = false;
+		TypePtr subst;
+		if (find_template_type_substitution(dep_name, subst) &&
+		    pa11::strip_cv(subst)->kind ==
+		    pa11::TypeKind::TemplateParameter)
+			dependent_root = true;
+		if (at(OP_LT))
+		{
+			vector<TypePtr> root_arguments;
+			try
+			{
+				parse_template_argument_list(root_arguments);
+			}
+			catch (const exception&)
+			{
+				pos_ = dep_save;
+				root_arguments.clear();
+			}
+			if (pos_ != dep_save)
+			{
+				dep_name += "<>";
+				for (size_t i = 0; i < root_arguments.size(); ++i)
+					if (type_is_template_dependent(root_arguments[i]))
+						dependent_root = true;
+			}
+		}
+		if (dependent_root && at(OP_COLON2))
+		{
+			while (consume(OP_COLON2))
+			{
+				dep_name += "::";
+				consume(KW_TEMPLATE);
+				if (!at_identifier())
+				{
+					pos_ = dep_save;
+					break;
+				}
+				dep_name += consume_identifier();
+				if (at(OP_LT))
+				{
+					dep_name += "<>";
+					skip_angle_tokens(tokens_, pos_);
+				}
+			}
+			if (pos_ != dep_save)
+			{
+			out = pa11::make_template_parameter_type(dep_name);
+			return true;
+			}
+		}
+		pos_ = dep_save;
+	}
+	if (at_identifier() && lookahead(OP_LT, 1))
+	{
+		size_t p = pos_ + 1;
+		int depth = 0;
+		while (p < tokens_.size())
+		{
+			if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+			    tokens_[p].type == OP_LT)
+				++depth;
+			else if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+			         tokens_[p].type == OP_GT)
+			{
+				--depth;
+				if (depth == 0)
+				{
+					template_id_qualifier =
+						p + 1 < tokens_.size() &&
+						tokens_[p + 1].kind == posttoken::TokenKind::Simple &&
+						tokens_[p + 1].type == OP_COLON2;
+					break;
+				}
+			}
+			++p;
+		}
+	}
+	if (at(KW_DECLTYPE) ||
+	    at(OP_COLON2) ||
+	    (at_identifier() &&
+	     (lookahead(OP_COLON2, 1) || template_id_qualifier)))
 		qualifier = parse_nested_name_specifier(&spelling);
 	if (!at_identifier())
 	{
@@ -372,6 +660,26 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		return false;
 	}
 	string name = consume_identifier();
+	if (qualifier == NULL)
+	{
+		TypePtr subst;
+		if (find_template_type_substitution(name, subst))
+		{
+			out = subst;
+			return true;
+		}
+	}
+	if (at(OP_LT))
+	{
+		TemplateDeclaration* templ = find_class_template(qualifier, name);
+		if (templ != NULL)
+		{
+			vector<TypePtr> arguments;
+			parse_template_argument_list(arguments);
+			out = instantiate_class_template(templ, arguments);
+			return true;
+		}
+	}
 	vector<Binding*> found = qualifier != NULL
 		? lookup_qualified_set(qualifier, name, pa11::LOOKUP_TYPE)
 		: lookup_unqualified_set(current_scope(), name, pa11::LOOKUP_TYPE);
@@ -391,6 +699,10 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			throw runtime_error("protected type access");
 	}
 	out = binding->type;
+	complete_member_class_template_record(binding);
+	if (!type_is_template_dependent(out))
+		complete_template_record(out);
+	(void)typename_disambiguator;
 	return true;
 }
 
@@ -399,7 +711,25 @@ Declarator Parser::parse_declarator(bool abstract_allowed)
 	Declarator declarator;
 	parse_ptr_prefix(declarator.prefix);
 	parse_noptr_declarator_root(declarator, abstract_allowed);
-	parse_suffixes(declarator.suffixes);
+	if (declarator.has_name &&
+	    declarator.name.qualifier != NULL &&
+	    declarator.name.qualifier->kind == ScopeKind::Class)
+	{
+		vector<Scope*> saved_scopes = scopes_;
+		scopes_.push_back(declarator.name.qualifier);
+		try
+		{
+			parse_suffixes(declarator.suffixes);
+		}
+		catch (...)
+		{
+			scopes_ = saved_scopes;
+			throw;
+		}
+		scopes_ = saved_scopes;
+	}
+	else
+		parse_suffixes(declarator.suffixes);
 	return declarator;
 }
 
@@ -497,6 +827,10 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes)
 			}
 			catch (const exception&)
 			{
+				if (save + 1 < tokens_.size() &&
+				    tokens_[save + 1].kind == posttoken::TokenKind::Simple &&
+				    tokens_[save + 1].type == OP_RPAREN)
+					throw;
 				pos_ = save;
 				return;
 			}
@@ -527,9 +861,24 @@ Suffix Parser::parse_function_suffix()
 {
 	Suffix suffix(SuffixKind::Function);
 	expect(OP_LPAREN);
-	parse_parameter_clause(suffix.parameters, suffix.variadic);
-	expect(OP_RPAREN);
-	parse_function_suffix_tail(suffix);
+	vector<Scope*> saved_scopes = scopes_;
+	Scope* parameter_scope =
+		pa11::create_child_scope(current_scope(),
+		                         ScopeKind::Function,
+		                         "");
+	scopes_.push_back(parameter_scope);
+	try
+	{
+		parse_parameter_clause(suffix.parameters, suffix.variadic);
+		expect(OP_RPAREN);
+		parse_function_suffix_tail(suffix);
+	}
+	catch (const exception&)
+	{
+		scopes_ = saved_scopes;
+		throw;
+	}
+	scopes_ = saved_scopes;
 	return suffix;
 }
 
@@ -580,7 +929,32 @@ void Parser::parse_function_suffix_tail(Suffix& suffix)
 		}
 		if (consume(OP_ARROW))
 		{
-			suffix.trailing_return = parse_type_id();
+			vector<Scope*> saved_scopes = scopes_;
+			Scope* parameter_scope =
+				pa11::create_child_scope(current_scope(),
+				                         ScopeKind::Function,
+				                         "");
+			scopes_.push_back(parameter_scope);
+			for (size_t i = 0; i < suffix.parameters.size(); ++i)
+			{
+				const ParameterInfo& parameter = suffix.parameters[i];
+				if (parameter.name.empty())
+					continue;
+				pa11::add_binding(parameter_scope,
+				                  BindingKind::Parameter,
+				                  parameter.name,
+				                  parameter.type);
+			}
+			try
+			{
+				suffix.trailing_return = parse_type_id();
+			}
+			catch (const exception&)
+			{
+				scopes_ = saved_scopes;
+				throw;
+			}
+			scopes_ = saved_scopes;
 			continue;
 		}
 		break;
@@ -591,26 +965,44 @@ void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
                                     bool& variadic)
 {
 	variadic = false;
-	if (at(OP_RPAREN))
-		return;
-	if (consume(OP_DOTS))
+	Scope* parameter_scope =
+		pa11::create_child_scope(current_scope(), ScopeKind::Function, "");
+	scopes_.push_back(parameter_scope);
+	try
 	{
-		variadic = true;
-		return;
-	}
-	for (;;)
-	{
-		parameters.push_back(parse_parameter_declaration());
-		if (!consume(OP_COMMA))
-			break;
 		if (consume(OP_DOTS))
 		{
 			variadic = true;
-			return;
+		}
+		else if (!at(OP_RPAREN))
+		{
+			for (;;)
+			{
+				parameters.push_back(parse_parameter_declaration());
+				ParameterInfo& parameter = parameters.back();
+				if (!parameter.name.empty())
+					pa11::add_binding(parameter_scope,
+					                  BindingKind::Parameter,
+					                  parameter.name,
+					                  parameter.type);
+				if (!consume(OP_COMMA))
+					break;
+				if (consume(OP_DOTS))
+				{
+					variadic = true;
+					break;
+				}
+			}
+			if (!variadic && consume(OP_DOTS))
+				variadic = true;
 		}
 	}
-	if (consume(OP_DOTS))
-		variadic = true;
+	catch (...)
+	{
+		scopes_.pop_back();
+		throw;
+	}
+	scopes_.pop_back();
 }
 
 ParameterInfo Parser::parse_parameter_declaration()
@@ -655,7 +1047,8 @@ ParameterInfo Parser::parse_parameter_declaration()
 bool Parser::starts_declaration()
 {
 	if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
-	    at(KW_STATIC) || at(KW_DECLTYPE) || starts_class_key() || at(KW_ENUM))
+	    at(KW_STATIC) || at(KW_DECLTYPE) || at(KW_TYPENAME) ||
+	    starts_class_key() || at(KW_ENUM))
 		return true;
 	if (at_simple_cv() || at_simple_builtin())
 		return true;
@@ -663,7 +1056,7 @@ bool Parser::starts_declaration()
 	    pos_ + 1 < tokens_.size() &&
 	    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier)
 		return true;
-	if (!at_identifier() && !at(OP_COLON2))
+	if (!at_identifier() && !at(OP_COLON2) && !at(KW_TYPENAME))
 		return false;
 	TypePtr type;
 	size_t save = pos_;

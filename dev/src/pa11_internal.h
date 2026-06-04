@@ -73,6 +73,7 @@ struct Type
 	vector<Binding*> fields;
 	uint64_t record_size;
 	uint64_t record_align;
+	uint64_t record_forced_align;
 	uint64_t direct_base_offset;
 	bool layout_valid;
 	bool is_polymorphic;
@@ -119,6 +120,7 @@ struct Binding
 	bool is_mutable_member;
 	bool is_hidden_friend;
 	bool is_thread_local;
+	bool is_object_root;
 	bool is_virtual;
 	bool is_override_specified;
 	bool is_final_virtual;

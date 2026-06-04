@@ -4,6 +4,25 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool record_has_reference_field(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		TypePtr field = bare->fields[i]->type;
+		if (pa11::is_reference_type(field))
+			return true;
+		if (record_has_reference_field(field))
+			return true;
+	}
+	return bare->base.get() != NULL && record_has_reference_field(bare->base);
+}
+
+}  // namespace
 
 bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 {
@@ -167,14 +186,25 @@ void Parser::parse_constructor_body_from_parameters(
 	add_child(fn, this_node);
 	for (size_t i = 0; i < parameters.size(); ++i)
 	{
-		string pname = parameters[i].name.empty()
-			? "__param" + to_string(i + 1) : parameters[i].name;
-		Binding* param =
-			pa11::add_binding(function_scope,
-			                  BindingKind::Parameter,
-			                  pname,
-			                  parameters[i].type);
-		Node param_node("parameter " + pname + " " +
+		string pname = parameters[i].name;
+		string node_name = pname;
+		map<Binding*, vector<string> >::const_iterator saved_names =
+			function_parameter_names_.find(function);
+		if (node_name.empty() &&
+		    saved_names != function_parameter_names_.end() &&
+		    i + 1 < saved_names->second.size())
+			node_name = saved_names->second[i + 1];
+		if (node_name.empty())
+			node_name = "__param" + to_string(i + 1);
+		if (pname.empty() && node_name.compare(0, 7, "__param") != 0)
+			pname = node_name;
+		Binding* param = NULL;
+		if (!pname.empty())
+			param = pa11::add_binding(function_scope,
+			                          BindingKind::Parameter,
+			                          pname,
+			                          parameters[i].type);
+		Node param_node("parameter " + node_name + " " +
 		                pa11::describe_type(parameters[i].type));
 		param_node.binding = param;
 		param_node.type = parameters[i].type;
@@ -225,10 +255,25 @@ void Parser::parse_constructor_body_from_parameters(
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
 					{
-						init = make_constructor_init_expr(init_target,
-						                                  args,
-						                                  false);
-						have_init = true;
+						try
+						{
+							init = make_constructor_init_expr(init_target,
+							                                  args,
+							                                  false);
+							have_init = true;
+						}
+						catch (const runtime_error& err)
+						{
+							if (string(err.what()) != "no matching constructor" ||
+							    args.size() != 1 ||
+							    !pa11::same_type(
+								    pa11::strip_cv(init_target),
+								    pa11::strip_cv(
+									    expression_object_type(args[0].type))))
+								throw;
+							init = args[0];
+							have_init = true;
+						}
 					}
 					else if (args.size() == 1)
 					{
@@ -321,7 +366,7 @@ void Parser::parse_constructor_body_from_parameters(
 bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 {
 	if (current_scope()->kind == ScopeKind::Class ||
-	    !(at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1))))
+	    !(at(OP_COLON2) || at_identifier()))
 		return false;
 	size_t save = pos_;
 	QualifiedName name;
@@ -380,6 +425,23 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      fn_params,
 	                                      variadic);
+	Binding* existing_ctor = NULL;
+	map<string, vector<Binding*> >::iterator existing_it =
+		class_scope->members.find(class_scope->name);
+	if (existing_it != class_scope->members.end())
+		for (size_t i = 0; i < existing_it->second.size(); ++i)
+		{
+			Binding* candidate = existing_it->second[i];
+			if (candidate->kind == BindingKind::Function &&
+			    pa11::same_type(candidate->type, fn_type))
+			{
+				existing_ctor = candidate;
+				break;
+			}
+		}
+	if (existing_ctor != NULL &&
+	    existing_ctor->unwind_no != suffix.noexcept_decl)
+		throw runtime_error("exception specification mismatch");
 	Binding* ctor =
 		add_function_binding(class_scope, class_scope->name, fn_type, false);
 	ctor->unwind_no = suffix.noexcept_decl;
@@ -492,10 +554,25 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
 					{
-						init = make_constructor_init_expr(init_target,
-						                                  args,
-						                                  false);
-						have_init = true;
+						try
+						{
+							init = make_constructor_init_expr(init_target,
+							                                  args,
+							                                  false);
+							have_init = true;
+						}
+						catch (const runtime_error& err)
+						{
+							if (string(err.what()) != "no matching constructor" ||
+							    args.size() != 1 ||
+							    !pa11::same_type(
+								    pa11::strip_cv(init_target),
+								    pa11::strip_cv(
+									    expression_object_type(args[0].type))))
+								throw;
+							init = args[0];
+							have_init = true;
+						}
 					}
 					else if (args.size() == 1)
 					{
@@ -784,6 +861,34 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 		{
 			ctor->is_defaulted = true;
 			ctor->is_inline_definition = true;
+				if (parameters.size() == 1 &&
+				    pa11::is_reference_type(parameters[0].type) &&
+				    pa11::same_type(pa11::strip_cv(parameters[0].type->base),
+				                    pa11::strip_cv(class_type)) &&
+				    !record_has_reference_field(class_type))
+				{
+					Node fn("function-definition " + qualified_decl_name(ctor) +
+					        " " + pa11::describe_type(fn_type));
+					fn.binding = ctor;
+					fn.type = fn_type;
+					fn.token_text = "copy-move-helper";
+					Node this_node("parameter this " +
+					               pa11::describe_type(fn_params[0]));
+				this_node.type = fn_params[0];
+				add_child(fn, this_node);
+				string pname = parameters[0].name.empty()
+					? "__param1" : parameters[0].name;
+				Node param_node("parameter " + pname + " " +
+				                pa11::describe_type(parameters[0].type));
+				param_node.type = parameters[0].type;
+				add_child(fn, param_node);
+				add_child(fn, Node("compound-statement"));
+				PendingFunctionBody pending;
+				pending.function = ctor;
+				pending.node = fn;
+				pending.prebuilt_node = true;
+				pending_member_bodies_[class_scope].push_back(pending);
+			}
 			expect(OP_SEMICOLON);
 			return true;
 		}

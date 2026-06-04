@@ -48,9 +48,21 @@ void Parser::parse_function_body_from_parameters(
 		this_node.type = this_type;
 		add_child(fn, this_node);
 	}
+	map<Binding*, vector<string> >::const_iterator saved_names =
+		function_parameter_names_.find(function);
+	size_t saved_name_offset =
+		function->owner != NULL &&
+		function->owner->kind == ScopeKind::Class &&
+		!function->is_static_member ? 1 : 0;
 	for (size_t i = 0; i < parameters.size(); ++i)
 	{
 		string name = parameters[i].name;
+		string node_name = name;
+		size_t saved_name_index = saved_name_offset + i;
+		if (node_name.empty() &&
+		    saved_names != function_parameter_names_.end() &&
+		    saved_name_index < saved_names->second.size())
+			node_name = saved_names->second[saved_name_index];
 		if (!name.empty())
 		{
 			Binding* param =
@@ -66,7 +78,7 @@ void Parser::parse_function_body_from_parameters(
 		}
 		else
 		{
-			Node param_node("parameter  " +
+			Node param_node("parameter " + node_name + " " +
 			                pa11::describe_type(parameters[i].type));
 			param_node.type = parameters[i].type;
 			add_child(fn, param_node);
@@ -125,6 +137,11 @@ void Parser::parse_pending_member_bodies(Scope* class_scope)
 	size_t saved = pos_;
 	for (size_t i = 0; i < pending.size(); ++i)
 	{
+		if (pending[i].prebuilt_node)
+		{
+			extra_lowir_nodes_.push_back(pending[i].node);
+			continue;
+		}
 		pos_ = pending[i].body_pos;
 		Node wrapper;
 		add_child(wrapper, pending[i].node);
@@ -143,6 +160,21 @@ void Parser::parse_pending_member_bodies(Scope* class_scope)
 			extra_lowir_nodes_.push_back(wrapper.children.back());
 	}
 	pos_ = saved;
+}
+
+void Parser::parse_deferred_nested_member_bodies(Scope* class_scope)
+{
+	map<Scope*, vector<Scope*> >::iterator found =
+		deferred_nested_member_body_scopes_.find(class_scope);
+	if (found == deferred_nested_member_body_scopes_.end())
+		return;
+	vector<Scope*> nested = found->second;
+	deferred_nested_member_body_scopes_.erase(found);
+	for (size_t i = 0; i < nested.size(); ++i)
+	{
+		parse_pending_member_bodies(nested[i]);
+		parse_deferred_nested_member_bodies(nested[i]);
+	}
 }
 
 Node Parser::parse_compound_statement()
@@ -189,11 +221,32 @@ Node Parser::parse_block_item()
 			at(KW_EXTERN) ||
 			at(KW_STATIC) ||
 			at(KW_DECLTYPE) ||
+			at(KW_TYPENAME) ||
 			starts_class_key() ||
 			at(KW_ENUM) ||
 			(at_identifier() &&
 			 pos_ + 1 < tokens_.size() &&
 			 tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier);
+		if (!definitely_declaration && (at_identifier() || at(OP_COLON2)))
+		{
+			size_t type_save = pos_;
+			TypePtr type_probe;
+			if (try_parse_type_name(type_probe) &&
+			    (starts_declarator() || at_identifier()))
+			{
+				bool parenthesized_this_argument =
+					at(OP_LPAREN) &&
+					pos_ + 2 < tokens_.size() &&
+					tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple &&
+					(tokens_[pos_ + 1].type == OP_STAR ||
+					 tokens_[pos_ + 1].type == OP_AMP) &&
+					tokens_[pos_ + 2].kind == posttoken::TokenKind::Simple &&
+					tokens_[pos_ + 2].type == KW_THIS;
+				if (!parenthesized_this_argument)
+					definitely_declaration = true;
+			}
+			pos_ = type_save;
+		}
 		try
 		{
 			Node node;
@@ -350,18 +403,28 @@ Node Parser::parse_jump_statement()
 	Node node("return-statement");
 	if (!at(OP_SEMICOLON))
 	{
-		Expr expr = parse_expression();
+		Expr expr = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
 		TypePtr result = current_return_type();
 		if (result.get() != NULL && !pa11::is_void_type(result))
 		{
+			if (type_is_template_dependent(result) ||
+			    type_is_template_dependent(expr.type))
+			{
+				add_child(node, expr.node);
+				expect(OP_SEMICOLON);
+				return node;
+			}
 			TypePtr result_record = pa11::strip_cv(result);
-			TypePtr expr_record =
-				pa11::strip_cv(expression_object_type(expr.type));
+			TypePtr expr_record = expr.type.get() != NULL
+				? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr();
 			if (result_record->kind == pa11::TypeKind::Record &&
 			    expr.braced_init_list)
 			{
 				expr.type = result;
 				expr.node.type = result;
+				Binding* aggregate_ctor =
+					ensure_aggregate_constructor(result_record,
+					                             expr.node.children.size());
 				ensure_aggregate_constructors_for_init(result, expr.node);
 				vector<Expr> args;
 				for (size_t i = 0; i < expr.node.children.size(); ++i)
@@ -374,6 +437,33 @@ Node Parser::parse_jump_statement()
 					arg.binding = arg.node.binding;
 					args.push_back(arg);
 				}
+				if (aggregate_ctor != NULL)
+				{
+					Expr constructed;
+					constructed.valid = true;
+					constructed.type = result;
+					constructed.category = ValueCategory::PRValue;
+					constructed.braced_init_list = true;
+					constructed.copy_initialization = true;
+					constructed.node = Node("braced-init-list");
+					constructed.node.token_text = "force-constructor";
+					constructed.node.type = result;
+					constructed.node.category = constructed.category;
+					constructed.node.direct_call = aggregate_ctor;
+					for (size_t i = 0; i < args.size(); ++i)
+					{
+						Conversion conv =
+							convert_to(args[i],
+							           aggregate_ctor->type->parameters[i + 1]);
+						if (!conv.viable)
+							throw runtime_error("invalid return conversion");
+						add_child(constructed.node, conv.expr.node);
+					}
+					annotate_expr_node(constructed);
+					constructed.node.direct_call = aggregate_ctor;
+					expr = constructed;
+				}
+				else
 				try
 				{
 					expr = make_constructor_init_expr(result, args, true);
@@ -387,7 +477,8 @@ Node Parser::parse_jump_statement()
 				}
 			}
 			else if (result_record->kind == pa11::TypeKind::Record &&
-			         expr_record->kind != pa11::TypeKind::Record)
+			         (expr_record.get() == NULL ||
+			          expr_record->kind != pa11::TypeKind::Record))
 			{
 				vector<Expr> args;
 				args.push_back(expr);

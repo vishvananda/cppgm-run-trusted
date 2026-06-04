@@ -377,6 +377,8 @@ FunctionOut FunctionLowerer::lower()
 		metadata.push_back("binding=weak");
 	else
 		metadata.push_back("binding=strong");
+	if (binding->is_object_root)
+		metadata.push_back("object_root=yes");
 	header << metadata_suffix(metadata);
 	out_.header = header.str();
 	if (binding->is_generated_copy_move_assignment &&
@@ -709,6 +711,8 @@ void FunctionLowerer::lower_stmt(const Node& node)
 		if (!node.children.empty())
 			lower_global_variable_init(node.children[0]);
 	}
+	else if (starts_with(node.line, "thread-local-init-variable"))
+		lower_thread_local_variable_init(node);
 	else if (starts_with(node.line, "global-fini-variable"))
 	{
 		if (!node.children.empty())
@@ -805,7 +809,25 @@ void FunctionLowerer::lower_return(const Node& node)
 	}
 	if (is_reference(ret))
 	{
-		Value addr = ensure_pointer(emit_lvalue_addr(node.children[0]));
+		Value addr;
+		if (node.children[0].category == ValueCategory::LValue ||
+		    node.children[0].category == ValueCategory::XValue)
+		{
+			addr = ensure_pointer(emit_lvalue_addr(node.children[0]));
+		}
+		else
+		{
+			string slot =
+				fresh_aux_slot("retref", scalar_lowir_type(ret->base));
+			Value value = convert_value(emit_rvalue(node.children[0]),
+			                            node.children[0].type,
+			                            ret->base);
+			instr("store " + scalar_lowir_type(ret->base) + " " +
+			      value.text + ", $" + slot);
+			string addr_name = fresh_temp();
+			instr(addr_name + " = addr $" + slot);
+			addr = Value("ptr", addr_name);
+		}
 		addr = convert_value(addr,
 		                     pa11::make_pointer(object_type(node.children[0].type)),
 		                     pa11::make_pointer(ret->base));
@@ -889,6 +911,33 @@ void FunctionLowerer::lower_discarded_expr(const Node& expr)
 		instr("eh_try ^" + dispatch);
 		++eh_try_depth_;
 		emit_call(expr);
+		--eh_try_depth_;
+		instr("eh_end");
+		if (define_dispatch)
+		{
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = dispatch;
+			start_block(dispatch);
+			emit_unwind_cleanups();
+			terminate("resume");
+			start_block(end);
+		}
+		return;
+	}
+	if ((starts_with(expr.line, "binary-expression") ||
+	     starts_with(expr.line, "assignment-expression")) &&
+	    expr.has_op && expr.op == OP_ASS &&
+	    !expr.children.empty() &&
+	    starts_with(expr.children[0].line, "member-expression") &&
+	    eh_try_depth_ == 0 && has_active_cleanups())
+	{
+		string dispatch = active_unwind_dispatch_.empty()
+			? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+		bool define_dispatch = active_unwind_dispatch_.empty();
+		instr("eh_try ^" + dispatch);
+		++eh_try_depth_;
+		emit_rvalue(expr);
 		--eh_try_depth_;
 		instr("eh_end");
 		if (define_dispatch)

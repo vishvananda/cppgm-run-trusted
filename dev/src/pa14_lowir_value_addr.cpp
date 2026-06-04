@@ -20,8 +20,19 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 {
 	if (expr.binding == NULL)
 		return emit_literal(expr);
+	if (expr.binding->has_constant &&
+	    (expr.binding->kind == BindingKind::Enumerator ||
+	     expr.binding->is_static_member) &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Record &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Array)
+		return Value(scalar_lowir_type(expr.binding->type),
+		             to_string(expr.binding->constant_value));
 	if (expr.binding->kind == BindingKind::Function)
 	{
+		if (expr.binding->is_inline_definition)
+			program_.demand_inline_function(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
 		string decay = fresh_temp();
@@ -29,6 +40,18 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		return Value("ptr", decay);
 	}
 	TypePtr object = object_type(expr.type);
+	if ((expr.binding->is_static_member ||
+	     (expr.binding->owner != NULL &&
+	      expr.binding->owner->kind == ScopeKind::Namespace)) &&
+	    pa11::strip_cv(object)->kind == TypeKind::Pointer &&
+	    pa11::strip_cv(object)->base.get() != NULL &&
+	    pa11::strip_cv(object)->base->kind == TypeKind::Function)
+	{
+		program_.demand_global_declaration(expr.binding);
+		string addr = fresh_temp();
+		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
+		return Value("ptr", addr);
+	}
 	if (object->kind == TypeKind::Array &&
 	    expr.binding->owner != NULL &&
 	    (expr.binding->owner->kind == ScopeKind::Namespace ||
@@ -87,6 +110,8 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	{
 		if (expr.binding->kind == BindingKind::Function)
 		{
+			if (expr.binding->is_inline_definition)
+				program_.demand_inline_function(expr.binding);
 			string tmp = fresh_temp();
 			instr(tmp + " = addr @" + program_.symbol_for(expr.binding));
 			return Value("ptr", tmp);
@@ -95,13 +120,17 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		    expr.binding->owner->kind == ScopeKind::Class &&
 		    !expr.binding->is_static_member)
 		{
+			Binding* member =
+				expr.binding->aliased_binding != NULL &&
+				expr.binding->target_scope != NULL
+				? expr.binding->aliased_binding : expr.binding;
 			string this_ptr = fresh_temp();
 			instr(this_ptr + " = load ptr $this");
 			Value base("ptr", this_ptr);
 			TypePtr object_record = fn_.binding != NULL &&
 			                        fn_.binding->owner != NULL
 				? pa11::record_type_for_scope(fn_.binding->owner) : TypePtr();
-			TypePtr owner_record = pa11::record_type_for_scope(expr.binding->owner);
+			TypePtr owner_record = pa11::record_type_for_scope(member->owner);
 			if (object_record.get() != NULL &&
 			    owner_record.get() != NULL &&
 			    !pa11::same_type(pa11::strip_cv(object_record),
@@ -116,8 +145,8 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 			}
 			string tmp = fresh_temp();
 			instr(tmp + " = index i8 [projection=field] " + base.text +
-			      ", " + to_string(expr.binding->member_offset));
-			if (is_reference(expr.binding->type))
+			      ", " + to_string(member->member_offset));
+			if (is_reference(member->type))
 			{
 				string ref = fresh_temp();
 				instr(ref + " = load ptr " + tmp);
@@ -243,10 +272,14 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 
 Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 {
-	if (expr.binding->is_static_member)
+	Binding* member =
+		expr.binding->aliased_binding != NULL &&
+		expr.binding->target_scope != NULL
+		? expr.binding->aliased_binding : expr.binding;
+	if (member->is_static_member)
 	{
-		program_.demand_global_declaration(expr.binding);
-		return Value("ptr", "@" + program_.symbol_for(expr.binding));
+		program_.demand_global_declaration(member);
+		return Value("ptr", "@" + program_.symbol_for(member));
 	}
 	if (expr.children.empty())
 		throw runtime_error("member expression missing object");
@@ -278,7 +311,7 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	if (object_record.get() != NULL &&
 	    object_record->kind == TypeKind::Pointer)
 		object_record = pa11::strip_cv(object_record->base);
-	TypePtr owner_record = pa11::record_type_for_scope(expr.binding->owner);
+	TypePtr owner_record = pa11::record_type_for_scope(member->owner);
 	if (object_record.get() != NULL &&
 	    object_record->kind == TypeKind::Record &&
 	    owner_record.get() != NULL &&
@@ -293,8 +326,8 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	}
 	string tmp = fresh_temp();
 	instr(tmp + " = index i8 [projection=field] " + base.text +
-	      ", " + to_string(expr.binding->member_offset));
-	if (is_reference(expr.binding->type))
+	      ", " + to_string(member->member_offset));
+	if (is_reference(member->type))
 	{
 		string ref = fresh_temp();
 		instr(ref + " = load ptr " + tmp);
