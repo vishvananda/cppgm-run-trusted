@@ -533,7 +533,8 @@ void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
 			block.instrs.push_back(
 				"    " + base_addr +
 				" = index i8 [projection=base_subobject] " +
-				reload + ", 0");
+				reload + ", " +
+				to_string(base_subobject_offset(record, base)));
 			block.instrs.push_back("    call void @" + base_callee +
 			                       "(" + base_addr + ")");
 		}

@@ -88,15 +88,12 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 		}
 		if (bare->base.get() != NULL)
 		{
-			function<Value()> base_addr = [this, addr_for]() {
+			function<Value()> base_addr = [this, addr_for, bare]() {
 				Value base = addr_for();
-				string addr = fresh_temp();
-				instr(addr + " = index i8 [projection=base_subobject] " +
-				      base.text + ", 0");
-				return Value("ptr", addr);
+				return emit_base_subobject_addr(base, bare, bare->base);
 			};
 			if (index >= clauses.size())
-				lower_base_zero_init(addr_for, bare->base);
+				lower_base_zero_init(addr_for, bare, bare->base);
 			else
 			{
 				const Node& child = clauses[index];
@@ -344,9 +341,10 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 					                  src_record,
 					                  init.children[0]);
 				}
-				string base = fresh_temp();
-				instr(base + " = index i8 [projection=base_subobject] " +
-				      source.text + ", 0");
+				string base =
+					emit_base_subobject_addr(source,
+					                         src_record,
+					                         dst_record).text;
 				if (record_has_storage_copy(type))
 					instr("copyobj " + to_string(pa11::type_size(type)) +
 					      "x" + to_string(pa11::type_align(type)) + " " +
@@ -560,12 +558,23 @@ void FunctionLowerer::lower_storage_zero(Value addr, uint64_t size)
 }
 
 void FunctionLowerer::lower_base_zero_init(const function<Value()>& addr_for,
+                                           TypePtr source,
                                            TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
+	function<Value()> base_addr = [this, addr_for, source, type]() {
+		Value object = addr_for();
+		uint64_t offset = base_subobject_offset(source, type);
+		if (offset == 0)
+			return object;
+		string addr = fresh_temp();
+		instr(addr + " = index i8 [projection=base_subobject] " +
+		      object.text + ", " + to_string(offset));
+		return Value("ptr", addr);
+	};
 	if (bare->kind != TypeKind::Record)
 	{
-		lower_zero_init(addr_for, type);
+		lower_zero_init(base_addr, type);
 		return;
 	}
 	Binding* ctor = find_constructor(type, 0);
@@ -574,19 +583,19 @@ void FunctionLowerer::lower_base_zero_init(const function<Value()>& addr_for,
 		if (no_op_generated_default_constructor(ctor, type))
 			return;
 		vector<const Node*> args;
-		lower_constructor_call(addr_for, ctor, args);
+		lower_constructor_call(base_addr, ctor, args);
 		return;
 	}
 	if (has_inline_constructor(type))
 		throw runtime_error("no default constructor");
 	pa11::layout_record_type(bare);
 	if (bare->base.get() != NULL)
-		lower_base_zero_init(addr_for, bare->base);
+		lower_base_zero_init(base_addr, bare, bare->base);
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 	{
 		Binding* field = bare->fields[i];
-		function<Value()> field_addr = [this, addr_for, field]() {
-			Value base = addr_for();
+		function<Value()> field_addr = [this, base_addr, field]() {
+			Value base = base_addr();
 			if (field->member_offset == 0)
 				return base;
 			string addr = fresh_temp();
@@ -616,7 +625,7 @@ void FunctionLowerer::lower_zero_init(const function<Value()>& addr_for, TypePtr
 			throw runtime_error("no default constructor");
 		pa11::layout_record_type(bare);
 		if (bare->base.get() != NULL)
-			lower_base_zero_init(addr_for, bare->base);
+			lower_base_zero_init(addr_for, bare, bare->base);
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
 			Binding* field = bare->fields[i];

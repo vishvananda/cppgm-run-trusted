@@ -354,13 +354,13 @@ void FunctionLowerer::lower_base_init(const Node& node)
 {
 	if (node.type.get() == NULL)
 		return;
-	function<Value()> base_addr = [this]() {
+	TypePtr source = class_record_for_member(fn_.binding);
+	function<Value()> base_addr = [this, source, &node]() {
 		string this_ptr = fresh_temp();
 		instr(this_ptr + " = load ptr $this");
-		string addr = fresh_temp();
-		instr(addr + " = index i8 [projection=base_subobject] " +
-		      this_ptr + ", 0");
-		return Value("ptr", addr);
+		return emit_base_subobject_addr(Value("ptr", this_ptr),
+		                                source,
+		                                node.type);
 	};
 	if (node.children.empty())
 	{

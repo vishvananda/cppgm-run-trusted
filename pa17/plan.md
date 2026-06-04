@@ -47,3 +47,51 @@ inspection or source-shape probes.
    `perl scripts/cppgm_file_audit.pl --stage pa17 --paths dev/src`.
 4. Commit cohesive progress only after the relevant checks are green, and leave
    `git status --short` empty.
+
+## Architecture Review
+
+The implemented PA17 path matches the planned ownership split. `pa11::Binding`
+owns virtual flags, override links, slot indices, and slot widths; `pa11::Type`
+owns record polymorphism state, vptr introduction state, ordered vtable
+entries, and the direct-base layout offset used when a PA17 vptr is introduced
+ahead of a storage-bearing non-polymorphic base. Class completion in
+`pa12_decls.cpp` builds vtable entries from direct-base metadata and class
+binding order, with overrides replacing inherited entries in place and virtual
+destructors occupying complete/deleting slot pairs.
+
+The PA12 layer parses `virtual`, `override`, `final`, and pure specifiers into
+semantic binding fields. It records explicit qualification as
+`suppress_virtual_dispatch` on expression nodes, then call semantics records the
+selected binding and the `virtual_dispatch` decision. LowIR lowering consumes
+those semantic facts: direct calls remain direct, while virtual calls load the
+object vptr, index the selected slot, load the function pointer, and emit the
+existing indirect call form.
+
+The PA14 layer emits vtables and RTTI through `ProgramLowerer::demand_vtable`,
+deduplicated by record identity and driven by semantic polymorphism metadata.
+Constructors and destructors write vptrs in the existing lifetime-lowering
+flow, not through a separate runtime, interpreter, trampoline, or copied
+payload. Base-subobject projection is now layout-owned: `pa11::Type` stores the
+direct base offset, and `pa14` computes derived-to-base offsets from the
+single-inheritance chain instead of hardcoding offset zero in each lowering
+site.
+
+## Final Architecture Review
+
+After audit cleanup, PA17 remains a monotonic extension of PA16. Non-polymorphic
+classes do not get eager vtables or vptr stores. Polymorphic classes with
+polymorphic direct bases keep the inherited vptr at offset zero. Polymorphic
+classes that introduce the first vptr while inheriting storage from a
+non-polymorphic direct base keep the vptr at offset zero and place the base
+subobject after the vptr with alignment padding, so base construction, base
+member access, derived-to-base pointer/reference conversion, copy/assignment,
+and destruction all agree on one semantic layout fact.
+
+No PA17 behavior is implemented in harnesses, wrappers, unchecked paths, or by
+calling reference binaries or host compilers. The remaining string dispatch on
+`Node::line` is the established PA10/PA14 AST representation boundary; PA17
+virtual semantics themselves are represented by binding fields, vtable slot
+metadata, and explicit `virtual_dispatch`/`suppress_virtual_dispatch` flags.
+The audited hot paths are bounded by class hierarchy depth, class member count,
+or demand-emitted record identity sets; no repeated full-suite walks, timeout
+workarounds, fallback success paths, or test-shape acceptance gates were found.

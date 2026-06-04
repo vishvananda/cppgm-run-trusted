@@ -825,12 +825,9 @@ void FunctionLowerer::lower_destructor_for_object(
 	}
 	if (bare->base.get() != NULL)
 	{
-		function<Value()> base_addr = [this, addr_for]() {
+		function<Value()> base_addr = [this, addr_for, bare]() {
 			Value base = addr_for();
-			string addr = fresh_temp();
-			instr(addr + " = index i8 [projection=base_subobject] " +
-			      base.text + ", 0");
-			return Value("ptr", addr);
+			return emit_base_subobject_addr(base, bare, bare->base);
 		};
 		lower_destructor_for_object(base_addr, bare->base);
 	}
@@ -889,13 +886,13 @@ void FunctionLowerer::lower_base_fini(const Node& node)
 {
 	if (node.type.get() == NULL)
 		return;
-	function<Value()> base_addr = [this]() {
+	TypePtr source = class_record_for_member(fn_.binding);
+	function<Value()> base_addr = [this, source, &node]() {
 		string this_ptr = fresh_temp();
 		instr(this_ptr + " = load ptr $this");
-		string addr = fresh_temp();
-		instr(addr + " = index i8 [projection=base_subobject] " +
-		      this_ptr + ", 0");
-		return Value("ptr", addr);
+		return emit_base_subobject_addr(Value("ptr", this_ptr),
+		                                source,
+		                                node.type);
 	};
 	Binding* dtor = find_destructor(node.type);
 	if (dtor != NULL && dtor->is_virtual)

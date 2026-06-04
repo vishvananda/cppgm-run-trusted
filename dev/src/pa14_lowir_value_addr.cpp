@@ -107,16 +107,11 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 			    !pa11::same_type(pa11::strip_cv(object_record),
 			                     pa11::strip_cv(owner_record)))
 			{
-				TypePtr direct_base = object_record->base.get() != NULL
-					? pa11::strip_cv(object_record->base) : TypePtr();
-				if (direct_base.get() != NULL &&
-				    pa11::same_type(direct_base,
-				                    pa11::strip_cv(owner_record)))
+				if (record_has_base_subobject(object_record, owner_record))
 				{
-					string base_tmp = fresh_temp();
-					instr(base_tmp + " = index i8 [projection=base_subobject] " +
-					      base.text + ", 0");
-					base = Value("ptr", base_tmp);
+					base = emit_base_subobject_addr(base,
+					                                object_record,
+					                                owner_record);
 				}
 			}
 			string tmp = fresh_temp();
@@ -174,10 +169,10 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		if (expr.children.empty())
 			throw runtime_error("base subobject missing object");
 		Value base = ensure_pointer(emit_lvalue_addr(expr.children[0]));
-		string tmp = fresh_temp();
-		instr(tmp + " = index i8 [projection=base_subobject] " +
-		      base.text + ", 0");
-		return Value("ptr", tmp);
+		return emit_base_subobject_addr(
+			base,
+			object_type(expr.children[0].type),
+			expr.type);
 	}
 	if (starts_with(expr.line, "unary-expression") && expr.has_op &&
 	    expr.op == OP_STAR)
@@ -220,9 +215,13 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		TypePtr source = pa11::strip_cv(object_type(expr.children[0].type));
 		if (target->kind == TypeKind::Record &&
 		    source->kind == TypeKind::Record &&
-		    !pa11::same_type(target, source) &&
-		    !record_has_base_subobject(source, target))
+		    !pa11::same_type(target, source))
 		{
+			if (record_has_base_subobject(source, target))
+			{
+				Value base = emit_lvalue_addr(expr.children[0]);
+				return emit_base_subobject_addr(base, source, target);
+			}
 			string slot = fresh_aux_slot("tmpobj", slot_lowir_type(target));
 			string addr_name = fresh_temp();
 			instr(addr_name + " = addr $" + slot);
@@ -285,15 +284,11 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	    owner_record.get() != NULL &&
 	    !pa11::same_type(object_record, owner_record))
 	{
-		TypePtr direct_base = object_record->base.get() != NULL
-			? pa11::strip_cv(object_record->base) : TypePtr();
-		if (direct_base.get() != NULL &&
-		    pa11::same_type(direct_base, owner_record))
+		if (record_has_base_subobject(object_record, owner_record))
 		{
-			string base_tmp = fresh_temp();
-			instr(base_tmp + " = index i8 [projection=base_subobject] " +
-			      base.text + ", 0");
-			base = Value("ptr", base_tmp);
+			base = emit_base_subobject_addr(base,
+			                                object_record,
+			                                owner_record);
 		}
 	}
 	string tmp = fresh_temp();

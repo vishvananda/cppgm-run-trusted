@@ -73,6 +73,7 @@ struct Type
 	vector<Binding*> fields;
 	uint64_t record_size;
 	uint64_t record_align;
+	uint64_t direct_base_offset;
 	bool layout_valid;
 	bool is_polymorphic;
 	bool introduces_vptr;

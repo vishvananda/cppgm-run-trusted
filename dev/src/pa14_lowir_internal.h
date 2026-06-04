@@ -108,6 +108,7 @@ string source_symbol_base(const Binding* binding);
 bool node_contains_call_expression(const Node& node);
 bool record_has_default_constructor_for_array(TypePtr type);
 bool record_has_base_subobject(TypePtr source, TypePtr target);
+uint64_t base_subobject_offset(TypePtr source, TypePtr target);
 Binding* find_constructor(TypePtr type, size_t arg_count);
 const Node* record_prvalue_child_for_xvalue(const Node& arg);
 bool defaulted_copy_move_constructor_needs_helper(Binding* binding, TypePtr type);
@@ -279,6 +280,7 @@ private:
 	                                Value value,
 	                                const function<Value()>& member_addr);
 	void lower_base_init(const Node& node);
+	Value emit_base_subobject_addr(Value object, TypePtr source, TypePtr target);
 	void lower_aggregate_init(const function<Value()>& addr_for,
 	                          TypePtr type,
 	                          const Node& init);
@@ -291,7 +293,9 @@ private:
 	void lower_object_init(const function<Value()>& addr_for,
 	                       TypePtr type,
 	                       const Node& init);
-	void lower_base_zero_init(const function<Value()>& addr_for, TypePtr type);
+	void lower_base_zero_init(const function<Value()>& addr_for,
+	                          TypePtr source,
+	                          TypePtr base);
 	void lower_zero_init(const function<Value()>& addr_for, TypePtr type);
 	void lower_default_init(const function<Value()>& addr_for, TypePtr type);
 	void lower_storage_zero(Value addr, uint64_t size);

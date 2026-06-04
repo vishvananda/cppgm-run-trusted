@@ -95,6 +95,30 @@ bool record_has_base_subobject(TypePtr source, TypePtr target)
 	return false;
 }
 
+uint64_t base_subobject_offset(TypePtr source, TypePtr target)
+{
+	if (source.get() == NULL || target.get() == NULL)
+		return 0;
+	TypePtr cur = pa11::strip_cv(source);
+	TypePtr wanted = pa11::strip_cv(target);
+	uint64_t offset = 0;
+	if (cur->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return 0;
+	for (;;)
+	{
+		if (cur->base.get() == NULL)
+			return 0;
+		pa11::layout_record_type(cur);
+		TypePtr direct = pa11::strip_cv(cur->base);
+		offset += cur->direct_base_offset;
+		if (pa11::same_type(direct, wanted))
+			return offset;
+		cur = direct;
+		if (cur->kind != TypeKind::Record)
+			return 0;
+	}
+}
+
 Binding* find_record_copy_move_constructor(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -218,6 +242,16 @@ void FunctionLowerer::instr(const string& text)
 	if (current_ == NULL || current_->terminated)
 		return;
 	current_->instrs.push_back("    " + text);
+}
+
+Value FunctionLowerer::emit_base_subobject_addr(Value object,
+                                                TypePtr source,
+                                                TypePtr target)
+{
+	string addr = fresh_temp();
+	instr(addr + " = index i8 [projection=base_subobject] " +
+	      object.text + ", " + to_string(base_subobject_offset(source, target)));
+	return Value("ptr", addr);
 }
 
 void FunctionLowerer::terminate(const string& text)
@@ -528,14 +562,16 @@ bool FunctionLowerer::lower_defaulted_storage_special_member()
 			program_.demand_inline_function(base_assign);
 			string self = fresh_temp();
 			instr(self + " = load ptr $this");
-			string self_base = fresh_temp();
-			instr(self_base + " = index i8 [projection=base_subobject] " +
-			      self + ", 0");
+			string self_base =
+				emit_base_subobject_addr(Value("ptr", self),
+				                         record,
+				                         direct_base).text;
 			string other = fresh_temp();
 			instr(other + " = load ptr $" + other_name);
-			string other_base = fresh_temp();
-			instr(other_base + " = index i8 [projection=base_subobject] " +
-			      other + ", 0");
+			string other_base =
+				emit_base_subobject_addr(Value("ptr", other),
+				                         record,
+				                         direct_base).text;
 			string ignored = fresh_temp();
 			instr(ignored + " = call ptr @" + program_.symbol_for(base_assign) +
 			      "(" + self_base + ", " + other_base + ")");

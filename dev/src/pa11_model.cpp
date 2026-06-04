@@ -140,6 +140,7 @@ Type::Type(TypeKind k)
 	  scope(NULL),
 	  record_size(0),
 	  record_align(1),
+	  direct_base_offset(0),
 	  layout_valid(false),
 	  is_polymorphic(false),
 	  introduces_vptr(false)
@@ -527,6 +528,24 @@ uint64_t type_align(const TypePtr& type)
 	return type_size(bare);
 }
 
+namespace {
+
+bool record_uses_object_storage(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	if (bare->kind != TypeKind::Record)
+		return false;
+	if (bare->is_polymorphic)
+		return true;
+	if (!bare->fields.empty())
+		return true;
+	if (bare->base.get() != NULL)
+		return record_uses_object_storage(bare->base);
+	return false;
+}
+
+}  // namespace
+
 void layout_record_type(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -537,6 +556,7 @@ void layout_record_type(TypePtr type)
 	if (bare->layout_valid)
 		return;
 	bare->fields.clear();
+	bare->direct_base_offset = 0;
 	uint64_t offset = 0;
 	uint64_t align = 1;
 	TypePtr direct_base = bare->base.get() != NULL ? strip_cv(bare->base) : TypePtr();
@@ -544,13 +564,25 @@ void layout_record_type(TypePtr type)
 		direct_base.get() != NULL &&
 		direct_base->kind == TypeKind::Record &&
 		direct_base->is_polymorphic;
+	bool introduces_vptr = bare->is_polymorphic && !base_polymorphic;
 	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
 	{
 		layout_record_type(direct_base);
-		offset = type_size(direct_base);
-		align = max<uint64_t>(align, type_align(direct_base));
+		uint64_t base_align = type_align(direct_base);
+		align = max<uint64_t>(align, base_align);
+		if (introduces_vptr && record_uses_object_storage(direct_base))
+		{
+			offset = 8;
+			uint64_t padding = offset % base_align;
+			if (padding != 0)
+				offset += base_align - padding;
+			bare->direct_base_offset = offset;
+			offset += type_size(direct_base);
+		}
+		else
+			offset = type_size(direct_base);
 	}
-	if (bare->is_polymorphic && !base_polymorphic)
+	if (introduces_vptr)
 	{
 		align = max<uint64_t>(align, 8);
 		if (offset < 8)

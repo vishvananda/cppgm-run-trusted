@@ -1,0 +1,137 @@
+declare global @__external_rtti_vtable____class_type_info [binding=strong]
+
+declare global @__external_rtti_vtable____si_class_type_info [binding=strong]
+
+global @__typeinfo_name__struct_Base [storage=readonly, binding=weak] = {
+  i8 52
+  i8 66
+  i8 97
+  i8 115
+  i8 101
+  i8 0
+}
+
+global @__rtti_struct_Base [storage=readonly, binding=weak] = {
+  ptr addr @__external_rtti_vtable____class_type_info + 16
+  ptr addr @__typeinfo_name__struct_Base
+}
+
+global @__typeinfo_name__struct_Derived [storage=readonly, binding=weak] = {
+  i8 55
+  i8 68
+  i8 101
+  i8 114
+  i8 105
+  i8 118
+  i8 101
+  i8 100
+  i8 0
+}
+
+global @__rtti_struct_Derived [storage=readonly, binding=weak] = {
+  ptr addr @__external_rtti_vtable____si_class_type_info + 16
+  ptr addr @__typeinfo_name__struct_Derived
+  ptr addr @__rtti_struct_Base
+}
+
+global @Derived__vtable [storage=readonly, binding=weak] = {
+  i64 0
+  ptr addr @__rtti_struct_Derived
+  ptr addr @Derived__dispatch
+}
+
+function @via_ptr(%d : ptr) -> i32 [binding=strong] {
+  slot $d : ptr
+  slot $b : ptr
+
+  block ^entry:
+    store ptr %d, $d
+    %t1 = load ptr $d
+    %t2 = index i8 [projection=base_subobject] %t1, 8
+    store ptr %t2, $b
+    %t3 = load ptr $b
+    %t4 = call i32 @Base__get(%t3)
+    return i32 %t4
+}
+
+function @via_ref(%d : ptr [pass=reference]) -> i32 [binding=strong] {
+  slot $d : ptr
+  slot $b : ptr
+
+  block ^entry:
+    store ptr %d, $d
+    %t1 = load ptr $d
+    %t2 = index i8 [projection=base_subobject] %t1, 8
+    store ptr %t2, $b
+    %t3 = load ptr $b
+    %t4 = call i32 @Base__get(%t3)
+    return i32 %t4
+}
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $d : obj<16x8>
+
+  block ^entry:
+    %t1 = addr $d
+    call void @Derived__Derived(%t1)
+    %t2 = addr $d
+    %t3 = load ptr %t2
+    %t4 = load ptr %t3
+    %t5 = call i32 %t4(%t2) as (%arg0 : ptr) -> i32
+    %t6 = addr $d
+    %t7 = call i32 @via_ptr(%t6)
+    %t8 = binary add i32 %t5, %t7
+    %t9 = addr $d
+    %t10 = call i32 @via_ref(%t9)
+    %t11 = binary add i32 %t8, %t10
+    %t12 = binary sub i32 %t11, 9
+    return i32 %t12
+}
+
+function @Base__get(%this : ptr) -> i32 [binding=weak] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load i32 %t2
+    return i32 %t3
+}
+
+function @Derived__Derived(%this : ptr) -> void [binding=weak] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=base_subobject] %t1, 8
+    call void @Base__Base__base_entry(%t2)
+    %t3 = load ptr $this
+    %t4 = addr @Derived__vtable
+    %t5 = index i8 %t4, 16
+    store ptr %t5, %t3
+    return void
+}
+
+function @Base__Base__base_entry(%this : ptr) -> void [binding=weak] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 3, %t2
+    return void
+}
+
+function @Derived__dispatch(%this : ptr) -> i32 [binding=weak] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=base_subobject] %t1, 8
+    %t3 = call i32 @Base__get(%t2)
+    return i32 %t3
+}

@@ -501,14 +501,11 @@ Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to)
 			TypePtr to_pointee = pa11::strip_cv(to_bare->base);
 			if (from_pointee->kind == TypeKind::Record &&
 			    to_pointee->kind == TypeKind::Record &&
-			    from_pointee->base.get() != NULL &&
-			    pa11::same_type(pa11::strip_cv(from_pointee->base),
-			                    to_pointee))
+			    record_has_base_subobject(from_pointee, to_pointee))
 			{
-				string tmp = fresh_temp();
-				instr(tmp + " = index i8 [projection=base_subobject] " +
-				      value.text + ", 0");
-				return Value("ptr", tmp);
+				return emit_base_subobject_addr(value,
+				                                from_pointee,
+				                                to_pointee);
 			}
 		}
 		return Value(dst, value.text);
