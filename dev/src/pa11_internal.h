@@ -40,8 +40,18 @@ enum class TypeKind
 
 struct Scope;
 struct Binding;
+struct VirtualTableEntry;
 struct Type;
 typedef shared_ptr<Type> TypePtr;
+
+struct VirtualTableEntry
+{
+	Binding* function;
+	bool deleting_entry;
+
+	VirtualTableEntry();
+	VirtualTableEntry(Binding* f, bool d);
+};
 
 struct Type
 {
@@ -64,6 +74,9 @@ struct Type
 	uint64_t record_size;
 	uint64_t record_align;
 	bool layout_valid;
+	bool is_polymorphic;
+	bool introduces_vptr;
+	vector<VirtualTableEntry> virtual_entries;
 
 	explicit Type(TypeKind k);
 };
@@ -105,6 +118,13 @@ struct Binding
 	bool is_mutable_member;
 	bool is_hidden_friend;
 	bool is_thread_local;
+	bool is_virtual;
+	bool is_override_specified;
+	bool is_final_virtual;
+	bool is_pure_virtual;
+	Binding* overrides_virtual;
+	int virtual_slot_index;
+	int virtual_slot_width;
 	bool unwind_no;
 	int ref_qualifier;
 	bool is_noop_destructor;

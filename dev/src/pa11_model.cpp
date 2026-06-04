@@ -140,7 +140,9 @@ Type::Type(TypeKind k)
 	  scope(NULL),
 	  record_size(0),
 	  record_align(1),
-	  layout_valid(false)
+	  layout_valid(false),
+	  is_polymorphic(false),
+	  introduces_vptr(false)
 {
 }
 
@@ -167,6 +169,13 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_mutable_member(false),
 	  is_hidden_friend(false),
 	  is_thread_local(false),
+	  is_virtual(false),
+	  is_override_specified(false),
+	  is_final_virtual(false),
+	  is_pure_virtual(false),
+	  overrides_virtual(NULL),
+	  virtual_slot_index(-1),
+	  virtual_slot_width(0),
 	  unwind_no(false),
 	  ref_qualifier(0),
 	  is_noop_destructor(false),
@@ -187,6 +196,16 @@ Scope::Scope(ScopeKind k, const string& n, Scope* p)
 }
 
 TranslationUnit::TranslationUnit() : anonymous_counter(0)
+{
+}
+
+VirtualTableEntry::VirtualTableEntry()
+	: function(NULL), deleting_entry(false)
+{
+}
+
+VirtualTableEntry::VirtualTableEntry(Binding* f, bool d)
+	: function(f), deleting_entry(d)
 {
 }
 
@@ -521,11 +540,21 @@ void layout_record_type(TypePtr type)
 	uint64_t offset = 0;
 	uint64_t align = 1;
 	TypePtr direct_base = bare->base.get() != NULL ? strip_cv(bare->base) : TypePtr();
+	bool base_polymorphic =
+		direct_base.get() != NULL &&
+		direct_base->kind == TypeKind::Record &&
+		direct_base->is_polymorphic;
 	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
 	{
 		layout_record_type(direct_base);
 		offset = type_size(direct_base);
 		align = max<uint64_t>(align, type_align(direct_base));
+	}
+	if (bare->is_polymorphic && !base_polymorphic)
+	{
+		align = max<uint64_t>(align, 8);
+		if (offset < 8)
+			offset = 8;
 	}
 	if (bare->scope != NULL)
 	{

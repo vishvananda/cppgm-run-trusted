@@ -126,6 +126,12 @@ bool record_has_user_assignment_operator(TypePtr type);
 string zero_integer_type(uint64_t size);
 bool same_record_initializer(const Node& init, TypePtr type);
 bool record_has_base(TypePtr source, TypePtr target);
+bool is_class_constructor_binding(const Binding* binding);
+bool is_class_destructor_binding(const Binding* binding);
+TypePtr class_record_for_member(const Binding* binding);
+string record_lowir_name(TypePtr record);
+string vtable_symbol_for_record(TypePtr record);
+string rtti_symbol_for_record(TypePtr record);
 
 struct ProgramLowerer
 {
@@ -148,6 +154,11 @@ struct ProgramLowerer
 	map<const Binding*, string> function_declarations_by_binding;
 	set<const Binding*> demanded_inline_complete_entries;
 	set<const Binding*> demanded_constructor_base_entries;
+	set<const Binding*> demanded_destructor_base_entries;
+	set<const void*> emitted_vtables;
+	set<const void*> emitted_rtti;
+	set<string> declared_pure_virtual_signatures;
+	set<const Binding*> emitted_deleting_destructors;
 	map<const void*, Binding*> implicit_copy_assignments;
 	map<const void*, Binding*> implicit_move_assignments;
 	vector<const Binding*> pending_inline_definitions;
@@ -162,7 +173,11 @@ struct ProgramLowerer
 	ProgramLowerer();
 	string symbol_for(const Binding* binding);
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
+	string destructor_symbol_for(const Binding* binding, bool base_entry);
 	string string_symbol(const string& token_text);
+	void demand_vtable(TypePtr record);
+	void emit_rtti(TypePtr record);
+	void emit_deleting_destructor_entry(const Binding* dtor);
 	void register_inline_definition(const Node& node);
 	void register_function_declaration(const Node& node);
 	void demand_function_declaration(const Binding* binding);
@@ -311,6 +326,9 @@ private:
 	void register_cleanup(Binding* binding, TypePtr type);
 	void emit_scope_cleanups(vector<Cleanup>& scope);
 	void emit_all_cleanups();
+	void lower_vptr_store(TypePtr record);
+	void maybe_lower_constructor_vptr(size_t index, size_t total);
+	void maybe_lower_destructor_epilogue(bool& emitted);
 	bool has_active_cleanups() const;
 	void emit_unwind_cleanups();
 	void add_pending_temp_cleanup(Value addr, TypePtr type);
@@ -365,6 +383,11 @@ private:
 	                                             TypePtr param,
 	                                             vector<string>& args,
 	                                             vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
+	bool call_argument_may_create_temp_cleanup(const Node& arg,
+	                                           TypePtr param) const;
+	bool call_setup_can_use_outer_eh(const Node& expr,
+	                                 TypePtr callee_type,
+	                                 size_t arg_start) const;
 	void lower_record_value_argument(const Node& arg,
 	                                 TypePtr param,
 	                                 vector<string>& args);

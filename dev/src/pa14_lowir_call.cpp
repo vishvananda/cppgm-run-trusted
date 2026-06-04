@@ -111,6 +111,59 @@ bool FunctionLowerer::lower_temporary_record_pointer_argument(const Node& arg,
 	return true;
 }
 
+bool FunctionLowerer::call_argument_may_create_temp_cleanup(const Node& arg,
+                                                            TypePtr param) const
+{
+	if (node_contains_call_expression(arg))
+		return true;
+	TypePtr bare_param = pa11::strip_cv(param);
+	if (is_reference(param))
+	{
+		const Node* materialized = record_prvalue_child_for_xvalue(arg);
+		if (materialized != NULL &&
+		    pa11::strip_cv(param->base)->kind == TypeKind::Record &&
+		    type_needs_cleanup(object_type(materialized->type)))
+			return true;
+		if (arg.category == ValueCategory::PRValue &&
+		    pa11::strip_cv(param->base)->kind == TypeKind::Record &&
+		    pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record &&
+		    type_needs_cleanup(object_type(arg.type)))
+			return true;
+	}
+	if (bare_param->kind == TypeKind::Pointer &&
+	    starts_with(arg.line, "unary-expression") &&
+	    arg.has_op && arg.op == OP_AMP && !arg.children.empty() &&
+	    arg.children[0].category != ValueCategory::LValue &&
+	    pa11::strip_cv(object_type(arg.children[0].type))->kind ==
+	    TypeKind::Record &&
+	    type_needs_cleanup(object_type(arg.children[0].type)))
+		return true;
+	return false;
+}
+
+bool FunctionLowerer::call_setup_can_use_outer_eh(const Node& expr,
+                                                  TypePtr callee_type,
+                                                  size_t arg_start) const
+{
+	if (expr.direct_call == NULL ||
+	    is_class_constructor_binding(expr.direct_call) ||
+	    pa11::strip_cv(callee_type->base)->kind == TypeKind::Record ||
+	    call_temp_cleanup_defer_depth_ > 0)
+		return false;
+	for (size_t i = arg_start; i < expr.children.size(); ++i)
+	{
+		bool variadic_extra = i - arg_start >= callee_type->parameters.size();
+		TypePtr param = !variadic_extra
+			? callee_type->parameters[i - arg_start]
+			: expr.children[i].type;
+		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
+			param = pa11::make_fundamental(FT_DOUBLE);
+		if (call_argument_may_create_temp_cleanup(expr.children[i], param))
+			return false;
+	}
+	return true;
+}
+
 void FunctionLowerer::lower_record_value_argument(const Node& arg,
                                                   TypePtr param,
                                                   vector<string>& args)
@@ -219,11 +272,14 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	size_t arg_start = direct != NULL ? 1 : 1;
 	string callee;
 	TypePtr callee_type;
+	bool virtual_call =
+		direct != NULL && expr.virtual_dispatch &&
+		direct->virtual_slot_index >= 0;
 	bool delay_direct_demand = direct != NULL && direct->name == "operator=";
 	if (direct != NULL)
 	{
 		callee_type = direct->type;
-		if (!delay_direct_demand)
+		if (!delay_direct_demand && !virtual_call)
 		{
 			program_.demand_function_declaration(direct);
 			program_.demand_inline_function(direct);
@@ -265,6 +321,19 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	}
 	vector<string> args;
 	vector<pair<Value, TypePtr> > temp_cleanups;
+	bool protected_setup =
+		eh_try_depth_ == 0 && has_active_cleanups() &&
+		call_setup_can_use_outer_eh(expr, callee_type, arg_start);
+	string protected_dispatch;
+	bool protected_define_dispatch = false;
+	if (protected_setup)
+	{
+		protected_dispatch = active_unwind_dispatch_.empty()
+			? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+		protected_define_dispatch = active_unwind_dispatch_.empty();
+		instr("eh_try ^" + protected_dispatch);
+		++eh_try_depth_;
+	}
 	for (size_t i = arg_start; i < expr.children.size(); ++i)
 	{
 		bool variadic_extra = i - arg_start >= callee_type->parameters.size();
@@ -294,6 +363,23 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	}
 	else if (direct == NULL)
 		callee = emit_rvalue(expr.children[0]).text;
+	if (virtual_call)
+	{
+		if (args.empty())
+			throw runtime_error("virtual call missing object argument");
+		string vptr = fresh_temp();
+		instr(vptr + " = load ptr " + args[0]);
+		string slot_addr = vptr;
+		if (direct->virtual_slot_index > 0)
+		{
+			slot_addr = fresh_temp();
+			instr(slot_addr + " = index i8 " + vptr + ", " +
+			      to_string(direct->virtual_slot_index * 8));
+		}
+		string fnptr = fresh_temp();
+		instr(fnptr + " = load ptr " + slot_addr);
+		callee = fnptr;
+	}
 	if (pa11::strip_cv(callee_type->base)->kind == TypeKind::Record &&
 	    record_return_by_address(callee_type->base))
 	{
@@ -312,7 +398,7 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			indirect_call << indirect_args[i];
 		}
 		indirect_call << ")";
-		if (direct == NULL)
+		if (direct == NULL || virtual_call)
 		{
 			indirect_call << " as (%ret : ptr [pass=indirect_result]";
 			for (size_t i = 0; i < callee_type->parameters.size(); ++i)
@@ -365,7 +451,7 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		call << args[i];
 	}
 	call << ")";
-	if (direct == NULL)
+	if (direct == NULL || virtual_call)
 	{
 		call << " as (";
 		for (size_t i = 0; i < callee_type->parameters.size(); ++i)
@@ -376,6 +462,43 @@ Value FunctionLowerer::emit_call(const Node& expr)
 				lowir_parameter(callee_type->parameters[i]);
 		}
 		call << ") -> " << ret;
+	}
+	if (protected_setup)
+	{
+		bool spill_result = ret != "void" &&
+		                    ret.compare(0, 4, "obj<") != 0;
+		string slot = preallocated_call_slot;
+		string loaded;
+		instr(call.str());
+		if (spill_result)
+		{
+			if (slot.empty())
+				slot = fresh_aux_slot("call", ret);
+			instr("store " + ret + " " + tmp + ", $" + slot);
+			loaded = fresh_temp();
+			instr(loaded + " = load " + ret + " $" + slot);
+		}
+		if (spill_result && !call_result_store_slot_.empty())
+		{
+			Value stored = convert_value(Value(ret, loaded),
+			                             callee_type->base,
+			                             call_result_store_type_);
+			instr("store " + scalar_lowir_type(call_result_store_type_) +
+			      " " + stored.text + ", $" + call_result_store_slot_);
+			call_result_store_consumed_ = true;
+		}
+		--eh_try_depth_;
+		instr("eh_end");
+		if (!protected_define_dispatch)
+			return spill_result ? Value(ret, loaded) : Value(ret, tmp);
+		string end = fresh_block("call_unwind_end");
+		terminate("jump ^" + end);
+		active_unwind_dispatch_ = protected_dispatch;
+		start_block(protected_dispatch);
+		emit_unwind_cleanups();
+		terminate("resume");
+		start_block(end);
+		return spill_result ? Value(ret, loaded) : Value(ret, tmp);
 	}
 	if (!temp_cleanups.empty() && call_temp_cleanup_defer_depth_ == 0)
 	{

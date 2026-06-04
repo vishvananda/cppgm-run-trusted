@@ -540,6 +540,64 @@ string source_symbol_base(const Binding* binding)
 	return out.str();
 }
 
+bool is_class_constructor_binding(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       binding->name == binding->owner->name;
+}
+
+bool is_class_destructor_binding(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       !binding->name.empty() &&
+	       binding->name[0] == '~';
+}
+
+TypePtr class_record_for_member(const Binding* binding)
+{
+	if (binding == NULL || binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class)
+		return TypePtr();
+	return pa11::record_type_for_scope(binding->owner);
+}
+
+string record_lowir_name(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	vector<string> parts;
+	for (Scope* s = bare->scope; s != NULL; s = s->parent)
+	{
+		if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
+		    !s->name.empty() && s->name != "<unnamed>")
+			parts.push_back(s->name);
+	}
+	if (parts.empty())
+		parts.push_back(bare->name);
+	ostringstream out;
+	for (size_t i = parts.size(); i > 0; --i)
+	{
+		if (i != parts.size())
+			out << "__";
+		out << sanitized_symbol_part(parts[i - 1]);
+	}
+	return out.str();
+}
+
+string vtable_symbol_for_record(TypePtr record)
+{
+	return record_lowir_name(record) + "__vtable";
+}
+
+string rtti_symbol_for_record(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	return "__rtti_" + bare->tag + "_" + record_lowir_name(bare);
+}
+
 string ProgramLowerer::symbol_for(const Binding* binding)
 {
 	map<const Binding*, string>::const_iterator found = symbols.find(binding);
@@ -587,6 +645,19 @@ string ProgramLowerer::constructor_symbol_for(const Binding* binding,
 	    binding->name == binding->owner->name)
 	{
 		demanded_constructor_base_entries.insert(binding);
+		name += "__base_entry";
+	}
+	return name;
+}
+
+string ProgramLowerer::destructor_symbol_for(const Binding* binding,
+                                             bool base_entry)
+{
+	string name = symbol_for(binding);
+	if (base_entry &&
+	    is_class_destructor_binding(binding))
+	{
+		demanded_destructor_base_entries.insert(binding);
 		name += "__base_entry";
 	}
 	return name;

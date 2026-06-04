@@ -54,6 +54,8 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 				specs.extern_decl = true;
 			if (at(KW_THREAD_LOCAL))
 				specs.thread_local_decl = true;
+			if (at(KW_VIRTUAL))
+				specs.virtual_decl = true;
 			++pos_;
 			saw_any = true;
 		}
@@ -281,6 +283,7 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 	TypePtr class_type = pa11::record_type_for_scope(class_scope);
 	if (class_type.get() != NULL)
 	{
+		complete_class_virtuals(class_type);
 		pa11::layout_record_type(class_type);
 		for (size_t i = 0; i < defaulted_move_assignments_.size(); ++i)
 		{
@@ -561,6 +564,18 @@ void Parser::parse_function_suffix_tail(Suffix& suffix)
 			suffix.noexcept_decl = true;
 			if (at(OP_LPAREN))
 				skip_balanced(OP_LPAREN, OP_RPAREN);
+			continue;
+		}
+		if (at_identifier() && current().source == "override")
+		{
+			++pos_;
+			suffix.override_decl = true;
+			continue;
+		}
+		if (at_identifier() && current().source == "final")
+		{
+			++pos_;
+			suffix.final_decl = true;
 			continue;
 		}
 		if (consume(OP_ARROW))

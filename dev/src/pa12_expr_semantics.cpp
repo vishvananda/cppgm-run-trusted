@@ -645,6 +645,10 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		out.node = Node("call-expression " + value_category_name(out.category) +
 		                " " + pa11::describe_type(out.type));
 		out.node.direct_call = direct;
+		out.node.virtual_dispatch =
+			callee.node.line.compare(0, 17, "member-expression") == 0 &&
+			direct->is_virtual &&
+			!callee.node.suppress_virtual_dispatch;
 		add_child(out.node, Node("callee " + qualified_decl_name(direct) +
 		                         " " + pa11::describe_type(direct->type)));
 	}

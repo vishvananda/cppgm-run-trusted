@@ -228,6 +228,70 @@ void FunctionLowerer::terminate(const string& text)
 	current_->terminated = true;
 }
 
+void FunctionLowerer::lower_vptr_store(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != TypeKind::Record || !bare->is_polymorphic)
+		return;
+	program_.demand_vtable(bare);
+	string self = fresh_temp();
+	instr(self + " = load ptr $this");
+	string vt = fresh_temp();
+	instr(vt + " = addr @" + vtable_symbol_for_record(bare));
+	string addr_point = fresh_temp();
+	instr(addr_point + " = index i8 " + vt + ", 16");
+	instr("store ptr " + addr_point + ", " + self);
+}
+
+void FunctionLowerer::maybe_lower_constructor_vptr(size_t index, size_t total)
+{
+	Binding* binding = fn_.binding;
+	if (!is_class_constructor_binding(binding))
+		return;
+	TypePtr record = class_record_for_member(binding);
+	if (record.get() == NULL ||
+	    !pa11::strip_cv(record)->is_polymorphic)
+		return;
+	const Node* current = index < total ? &fn_.children[index] : NULL;
+	if (current != NULL && starts_with(current->line, "base-init-action"))
+		return;
+	lower_vptr_store(record);
+}
+
+void FunctionLowerer::maybe_lower_destructor_epilogue(bool& emitted)
+{
+	Binding* binding = fn_.binding;
+	if (!is_class_destructor_binding(binding) || !binding->is_virtual)
+		return;
+	TypePtr record = class_record_for_member(binding);
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return;
+	pa11::layout_record_type(bare);
+	for (size_t n = 0; n < bare->fields.size(); ++n)
+	{
+		size_t i = bare->fields.size() - 1 - n;
+		Binding* field = bare->fields[i];
+		function<Value()> field_addr = [this, field]() {
+			string this_ptr = fresh_temp();
+			instr(this_ptr + " = load ptr $this");
+			string addr = fresh_temp();
+			instr(addr + " = index i8 [projection=field] " + this_ptr +
+			      ", " + to_string(field->member_offset));
+			return Value("ptr", addr);
+		};
+		lower_destructor_for_object(field_addr, field->type);
+		emitted = true;
+	}
+	if (bare->base.get() != NULL)
+	{
+		Node action("base-fini-action " + pa11::strip_cv(bare->base)->name);
+		action.type = bare->base;
+		lower_base_fini(action);
+		emitted = true;
+	}
+}
+
 FunctionOut FunctionLowerer::lower()
 {
 	Binding* binding = fn_.binding;
@@ -504,6 +568,16 @@ bool FunctionLowerer::lower_defaulted_storage_special_member()
 void FunctionLowerer::lower_compound(const Node& node)
 {
 	cleanups_.push_back(vector<Cleanup>());
+	bool top_function_body = cleanups_.size() == 2;
+	bool constructor_vptr_written = false;
+	bool destructor_has_fini_actions = false;
+	if (top_function_body && is_class_destructor_binding(fn_.binding) &&
+	    fn_.binding->is_virtual)
+	{
+		TypePtr record = class_record_for_member(fn_.binding);
+		if (record.get() != NULL)
+			lower_vptr_store(record);
+	}
 	Binding* final_return_binding = NULL;
 	bool earlier_return = false;
 	if (!node.children.empty())
@@ -518,6 +592,18 @@ void FunctionLowerer::lower_compound(const Node& node)
 	}
 	for (size_t i = 0; i < node.children.size(); ++i)
 	{
+		if (top_function_body && is_class_constructor_binding(fn_.binding) &&
+		    !constructor_vptr_written &&
+		    !starts_with(node.children[i].line, "base-init-action"))
+		{
+			TypePtr record = class_record_for_member(fn_.binding);
+			if (record.get() != NULL)
+				lower_vptr_store(record);
+			constructor_vptr_written = true;
+		}
+		if (starts_with(node.children[i].line, "base-fini-action") ||
+		    starts_with(node.children[i].line, "member-fini-action"))
+			destructor_has_fini_actions = true;
 		bool returns_declared_variable = false;
 		if (starts_with(node.children[i].line, "simple-declaration") &&
 		    i + 1 < node.children.size() &&
@@ -550,6 +636,15 @@ void FunctionLowerer::lower_compound(const Node& node)
 			return_slot_variables_.insert(node.children[i].children[0].binding);
 		lower_stmt(node.children[i]);
 	}
+	if (top_function_body && is_class_constructor_binding(fn_.binding) &&
+	    !constructor_vptr_written)
+	{
+		TypePtr record = class_record_for_member(fn_.binding);
+		if (record.get() != NULL)
+			lower_vptr_store(record);
+	}
+	if (top_function_body && !destructor_has_fini_actions)
+		maybe_lower_destructor_epilogue(destructor_has_fini_actions);
 	if (current_ != NULL && !current_->terminated)
 		emit_scope_cleanups(cleanups_.back());
 	cleanups_.pop_back();

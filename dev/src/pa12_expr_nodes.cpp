@@ -294,6 +294,7 @@ Expr Parser::make_implicit_member_id_expr(const QualifiedName& name,
 			member.node.has_op = true;
 			member.node.op = OP_ARROW;
 			member.node.token_text = binding->name;
+			member.node.suppress_virtual_dispatch = true;
 			annotate_expr_node(member);
 			return member;
 		}

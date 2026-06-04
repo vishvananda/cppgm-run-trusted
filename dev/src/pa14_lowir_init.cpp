@@ -263,6 +263,9 @@ bool no_op_generated_default_constructor(Binding* ctor, TypePtr type)
 {
 	if (ctor == NULL || !ctor->is_generated_default_constructor)
 		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record && bare->is_polymorphic)
+		return false;
 	return ctor->unwind_no || default_init_no_op(type);
 }
 
@@ -600,8 +603,13 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 		return;
 	}
 	if (is_reference(type))
-		instr("store ptr " + ensure_pointer(emit_lvalue_addr(var.children[0])).text +
-		      ", $" + slot);
+	{
+		Value source = ensure_pointer(emit_lvalue_addr(var.children[0]));
+		TypePtr from_ptr = pa11::make_pointer(object_type(var.children[0].type));
+		TypePtr to_ptr = pa11::make_pointer(type->base);
+		Value converted = convert_value(source, from_ptr, to_ptr);
+		instr("store ptr " + converted.text + ", $" + slot);
+	}
 	else
 	{
 		if (starts_with(var.children[0].line, "call-expression"))
@@ -889,6 +897,16 @@ void FunctionLowerer::lower_base_fini(const Node& node)
 		      this_ptr + ", 0");
 		return Value("ptr", addr);
 	};
+	Binding* dtor = find_destructor(node.type);
+	if (dtor != NULL && dtor->is_virtual)
+	{
+		program_.demand_function_declaration(dtor);
+		string callee = program_.destructor_symbol_for(dtor, true);
+		program_.demand_inline_function(dtor, false);
+		Value target = base_addr();
+		instr("call void @" + callee + "(" + target.text + ")");
+		return;
+	}
 	lower_destructor_for_object(base_addr, node.type);
 }
 

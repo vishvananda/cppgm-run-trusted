@@ -94,6 +94,7 @@ static void mark_empty_destructor(Binding* function, const Node& fn)
 	if (function == NULL ||
 	    function->name.empty() ||
 	    function->name[0] != '~' ||
+	    function->is_virtual ||
 	    !function_body_empty(fn))
 		return;
 	function->is_noop_destructor = true;

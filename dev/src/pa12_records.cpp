@@ -78,7 +78,8 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 		if (direct_base.get() != NULL &&
 		    direct_base->kind == pa11::TypeKind::Record &&
 		    base_ctor != NULL &&
-		    !(base_ctor->is_generated_default_constructor && base_ctor->unwind_no))
+		    (!(base_ctor->is_generated_default_constructor && base_ctor->unwind_no) ||
+		     direct_base->is_polymorphic))
 			init_actions.push_back(make_base_init_action(direct_base, NULL));
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
@@ -131,7 +132,7 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 		 (bare->fields.empty() && bare->base.get() == NULL)) &&
 		!has_declared_constructor;
 	if (init_actions.empty() && !force_trivial &&
-	    !empty_implicit_record)
+	    !empty_implicit_record && !bare->is_polymorphic)
 	{
 		return NULL;
 	}
@@ -938,9 +939,10 @@ Binding* find_destructor_binding(TypePtr type)
 bool destructor_needs_call(Binding* dtor)
 {
 	return dtor != NULL &&
+	       (dtor->is_virtual ||
 	       (!dtor->is_noop_destructor ||
 	        (!dtor->is_generated_default_destructor &&
-	         (dtor->is_private || dtor->is_protected_member)));
+	         (dtor->is_private || dtor->is_protected_member))));
 }
 
 }  // namespace
@@ -1001,6 +1003,13 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	dtor->is_inline_definition = true;
 	dtor->is_generated_default_destructor = true;
 	dtor->is_noop_destructor = fini_actions.empty() && !forced_nontrivial;
+	Binding* overridden_virtual_dtor = find_overridden_virtual(bare, dtor);
+	if (overridden_virtual_dtor != NULL)
+	{
+		dtor->is_virtual = true;
+		dtor->is_noop_destructor = false;
+		complete_class_virtuals(bare);
+	}
 	function_parameter_names_[dtor] = vector<string>(1, "this");
 	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
 	        pa11::describe_type(fn_type));
@@ -1143,6 +1152,7 @@ Node Parser::make_base_init_action(TypePtr base, const Node* init)
 		Binding* ctor = find_default_constructor(bare);
 		if (ctor != NULL)
 		{
+			action.direct_call = ctor;
 			map<Binding*, vector<Expr> >::const_iterator defaults =
 				default_arguments_.find(ctor);
 			if (defaults != default_arguments_.end())

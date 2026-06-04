@@ -393,6 +393,29 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 		instr(cond + " = cmp ne ptr " + pointer.text + ", 0");
 		terminate("branch " + cond + ", ^" + nonnull + ", ^" + end);
 		start_block(nonnull);
+		Binding* vdtor = find_destructor(object);
+		if (vdtor != NULL && vdtor->is_virtual &&
+		    vdtor->virtual_slot_index >= 0)
+		{
+			program_.demand_vtable(object);
+			string vptr = fresh_temp();
+			instr(vptr + " = load ptr " + pointer.text);
+			int deleting_slot = vdtor->virtual_slot_index + 1;
+			string slot_addr = vptr;
+			if (deleting_slot > 0)
+			{
+				slot_addr = fresh_temp();
+				instr(slot_addr + " = index i8 " + vptr + ", " +
+				      to_string(deleting_slot * 8));
+			}
+			string fnptr = fresh_temp();
+			instr(fnptr + " = load ptr " + slot_addr);
+			instr("call void " + fnptr + "(" + pointer.text +
+			      ") as (%arg0 : ptr) -> void");
+			terminate("jump ^" + end);
+			start_block(end);
+			return Value("void", "");
+		}
 		function<Value()> addr_for = [pointer]() {
 			return pointer;
 		};
@@ -1001,10 +1024,16 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 	                        "condaddr_else" : "cond_else");
 	string end = fresh_block(expr.category == ValueCategory::LValue ?
 	                         "condaddr_end" : "cond_end");
-	Value cond = emit_rvalue(expr.children[0]);
-	if (is_float_type(expr.children[0].type))
-		cond = bool_value(cond, expr.children[0].type);
-	terminate_with_pending_temp_cleanups(cond.text, yes, no);
+	if (eh_try_depth_ == 0 && has_active_cleanups() &&
+	    node_contains_call_expression(expr.children[0]))
+		branch_with_unwind_cleanups(expr.children[0], yes, no);
+	else
+	{
+		Value cond = emit_rvalue(expr.children[0]);
+		if (is_float_type(expr.children[0].type))
+			cond = bool_value(cond, expr.children[0].type);
+		terminate_with_pending_temp_cleanups(cond.text, yes, no);
+	}
 	start_block(yes);
 	Value yv;
 	if (expr.category == ValueCategory::LValue)
@@ -1072,10 +1101,16 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 	string yes = fresh_block("cond_then");
 	string no = fresh_block("cond_else");
 	string end = fresh_block("cond_end");
-	Value cond = emit_rvalue(expr.children[0]);
-	if (is_float_type(expr.children[0].type))
-		cond = bool_value(cond, expr.children[0].type);
-	terminate_with_pending_temp_cleanups(cond.text, yes, no);
+	if (eh_try_depth_ == 0 && has_active_cleanups() &&
+	    node_contains_call_expression(expr.children[0]))
+		branch_with_unwind_cleanups(expr.children[0], yes, no);
+	else
+	{
+		Value cond = emit_rvalue(expr.children[0]);
+		if (is_float_type(expr.children[0].type))
+			cond = bool_value(cond, expr.children[0].type);
+		terminate_with_pending_temp_cleanups(cond.text, yes, no);
+	}
 	start_block(yes);
 	if (starts_with(expr.children[1].line, "call-expression"))
 	{

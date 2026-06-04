@@ -121,7 +121,7 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 		function_returns_.pop_back();
 		scopes_.pop_back();
 	}
-	if (body.children.empty())
+	if (body.children.empty() && !dtor->is_virtual)
 	{
 		dtor->is_noop_destructor = true;
 		map<string, vector<Binding*> >::iterator found =
@@ -838,9 +838,15 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 
 bool Parser::parse_destructor_like_member()
 {
-	if (current_scope()->kind != ScopeKind::Class || !at(OP_COMPL))
+	if (current_scope()->kind != ScopeKind::Class)
 		return false;
 	size_t save = pos_;
+	bool virtual_decl = consume(KW_VIRTUAL);
+	if (!at(OP_COMPL))
+	{
+		pos_ = save;
+		return false;
+	}
 	++pos_;
 	if (!at_identifier() || current().source != current_scope()->name)
 	{
@@ -874,6 +880,10 @@ bool Parser::parse_destructor_like_member()
 	function_parameter_names_[dtor] = vector<string>(1, "this");
 	dtor->is_inline_definition = at(OP_LBRACE);
 	dtor->unwind_no = suffix.noexcept_decl;
+	dtor->is_virtual = dtor->is_virtual || virtual_decl;
+	dtor->is_override_specified =
+		dtor->is_override_specified || suffix.override_decl;
+	dtor->is_final_virtual = dtor->is_final_virtual || suffix.final_decl;
 	dtor->is_private = !class_private_access_.empty() &&
 	                   class_private_access_.back();
 	dtor->is_protected_member = !class_protected_access_.empty() &&
@@ -920,7 +930,7 @@ bool Parser::parse_destructor_like_member()
 	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
-	if (body.children.empty())
+	if (body.children.empty() && !dtor->is_virtual)
 	{
 		dtor->is_noop_destructor = true;
 		map<string, vector<Binding*> >::iterator found =

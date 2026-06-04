@@ -407,6 +407,199 @@ void ProgramLowerer::ensure_eh_declarations()
 			"declare function @__cppgm_eh_personality() -> void [role=eh_personality]");
 }
 
+namespace {
+
+string typeinfo_name_symbol(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	return "__typeinfo_name__" + bare->tag + "_" + record_lowir_name(bare);
+}
+
+string typeinfo_name_spelling(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	return to_string(bare->name.size()) + bare->name;
+}
+
+void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
+{
+	ostringstream out;
+	out << "global @" << typeinfo_name_symbol(record)
+	    << " [storage=readonly, binding=weak] = {\n";
+	string name = typeinfo_name_spelling(record);
+	for (size_t i = 0; i < name.size(); ++i)
+		out << "  i8 " << static_cast<unsigned>(
+			static_cast<unsigned char>(name[i])) << "\n";
+	out << "  i8 0\n";
+	out << "}";
+	globals.push_back(out.str());
+}
+
+}  // namespace
+
+void ProgramLowerer::emit_rtti(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != TypeKind::Record)
+		return;
+	if (emitted_rtti.find(bare.get()) != emitted_rtti.end())
+		return;
+	emitted_rtti.insert(bare.get());
+	if (declared_globals.insert("__external_rtti_vtable____class_type_info").second)
+		global_declares.push_back(
+			"declare global @__external_rtti_vtable____class_type_info "
+			"[binding=strong]");
+	TypePtr direct_base =
+		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
+	{
+		emit_rtti(direct_base);
+		if (declared_globals.insert(
+			    "__external_rtti_vtable____si_class_type_info").second)
+			global_declares.push_back(
+				"declare global @__external_rtti_vtable____si_class_type_info "
+				"[binding=strong]");
+	}
+	append_typeinfo_name_global(globals, bare);
+	ostringstream out;
+	out << "global @" << rtti_symbol_for_record(bare)
+	    << " [storage=readonly, binding=weak] = {\n";
+	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
+	{
+		out << "  ptr addr @__external_rtti_vtable____si_class_type_info + 16\n";
+		out << "  ptr addr @" << typeinfo_name_symbol(bare) << "\n";
+		out << "  ptr addr @" << rtti_symbol_for_record(direct_base) << "\n";
+	}
+	else
+	{
+		out << "  ptr addr @__external_rtti_vtable____class_type_info + 16\n";
+		out << "  ptr addr @" << typeinfo_name_symbol(bare) << "\n";
+	}
+	out << "}";
+	globals.push_back(out.str());
+}
+
+void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
+{
+	if (dtor == NULL || emitted_deleting_destructors.find(dtor) !=
+	    emitted_deleting_destructors.end())
+		return;
+	emitted_deleting_destructors.insert(dtor);
+	TypePtr record = class_record_for_member(dtor);
+	if (record.get() == NULL)
+		return;
+	ensure_eh_declarations();
+	demand_function_declaration(dtor);
+	demand_inline_function(dtor);
+	if (declared_functions.find("operator_delete") == declared_functions.end() &&
+	    defined_functions.find("operator_delete") == defined_functions.end())
+	{
+		declared_functions.insert("operator_delete");
+		declares.push_back(
+			"declare function @operator_delete(%arg0 : ptr) -> void "
+			"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete]");
+	}
+	string name = symbol_for(dtor) + "__deleting_entry";
+	if (defined_functions.find(name) != defined_functions.end())
+		return;
+	defined_functions.insert(name);
+	FunctionOut out;
+	out.header = "function @" + name + "(%this : ptr) -> void [binding=weak]";
+	out.slots.push_back("  slot $this : ptr");
+	Block block("entry");
+	int temp = 1;
+	block.instrs.push_back("    store ptr %this, $this");
+	string self = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + self + " = load ptr $this");
+	string vt = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + vt + " = addr @" +
+	                       vtable_symbol_for_record(record));
+	string addr_point = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + addr_point + " = index i8 " + vt + ", 16");
+	block.instrs.push_back("    store ptr " + addr_point + ", " + self);
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->base.get() != NULL)
+	{
+		TypePtr base = pa11::strip_cv(bare->base);
+		Binding* base_dtor = find_destructor(base);
+		if (base_dtor != NULL && base_dtor->is_virtual)
+		{
+			demand_function_declaration(base_dtor);
+			string base_callee = destructor_symbol_for(base_dtor, true);
+			demand_inline_function(base_dtor, false);
+			string reload = "%t" + to_string(temp++);
+			block.instrs.push_back("    " + reload + " = load ptr $this");
+			string base_addr = "%t" + to_string(temp++);
+			block.instrs.push_back(
+				"    " + base_addr +
+				" = index i8 [projection=base_subobject] " +
+				reload + ", 0");
+			block.instrs.push_back("    call void @" + base_callee +
+			                       "(" + base_addr + ")");
+		}
+	}
+	string del_arg = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + del_arg + " = load ptr $this");
+	block.instrs.push_back("    call void @operator_delete(" + del_arg + ")");
+	block.instrs.push_back("    return void");
+	block.terminated = true;
+	out.blocks.push_back(block);
+	functions.push_back(out);
+}
+
+void ProgramLowerer::demand_vtable(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != TypeKind::Record || !bare->is_polymorphic)
+		return;
+	if (emitted_vtables.find(bare.get()) != emitted_vtables.end())
+		return;
+	TypePtr direct_base =
+		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	if (direct_base.get() != NULL &&
+	    direct_base->kind == TypeKind::Record &&
+	    direct_base->is_polymorphic)
+		demand_vtable(direct_base);
+	emitted_vtables.insert(bare.get());
+	emit_rtti(bare);
+	ostringstream out;
+	out << "global @" << vtable_symbol_for_record(bare)
+	    << " [storage=readonly, binding=weak] = {\n";
+	out << "  i64 0\n";
+	out << "  ptr addr @" << rtti_symbol_for_record(bare) << "\n";
+	for (size_t i = 0; i < bare->virtual_entries.size(); ++i)
+	{
+		Binding* fn = bare->virtual_entries[i].function;
+		if (fn == NULL)
+			continue;
+		if (fn->is_pure_virtual)
+		{
+			string ret = scalar_lowir_type(fn->type->base);
+			string sig = "__cxa_pure_virtual " + ret;
+			if (declared_pure_virtual_signatures.insert(sig).second &&
+			    declared_functions.insert("__cxa_pure_virtual").second)
+				declares.push_back(
+					"declare function @__cxa_pure_virtual(%arg0 : ptr) -> " +
+					ret +
+					" [effects=readnone, unwind=no, return=noreturn, "
+					"binding=strong]");
+			out << "  ptr addr @__cxa_pure_virtual\n";
+			continue;
+		}
+		if (bare->virtual_entries[i].deleting_entry)
+		{
+			emit_deleting_destructor_entry(fn);
+			out << "  ptr addr @" << symbol_for(fn) << "__deleting_entry\n";
+			continue;
+		}
+		demand_function_declaration(fn);
+		demand_inline_function(fn);
+		out << "  ptr addr @" << symbol_for(fn) << "\n";
+	}
+	out << "}";
+	globals.push_back(out.str());
+}
+
 Binding* ProgramLowerer::demand_implicit_copy_assignment(TypePtr type, bool move)
 {
 	TypePtr record = pa11::strip_cv(type);
@@ -593,6 +786,12 @@ void ProgramLowerer::collect_node(const Node& node)
 	}
 	if (starts_with(node.line, "function-definition "))
 	{
+		if (node.binding != NULL && node.binding->is_virtual)
+		{
+			TypePtr record = class_record_for_member(node.binding);
+			if (record.get() != NULL)
+				demand_vtable(record);
+		}
 		if (node.binding != NULL && node.binding->is_inline_definition)
 		{
 			register_inline_definition(node);
@@ -805,9 +1004,10 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 	if (binding == NULL || !binding->is_inline_definition)
 		return;
 	bool class_ctor = is_class_constructor(binding);
+	bool class_dtor = is_class_destructor_binding(binding);
 	if (complete_entry)
 		demanded_inline_complete_entries.insert(binding);
-	else if (!class_ctor)
+	else if (!class_ctor && !class_dtor)
 		return;
 	demand_move_assignment_copy_dependency(binding);
 	string name = symbol_for(binding);
@@ -973,26 +1173,39 @@ void ProgramLowerer::emit_pending_inline_definitions()
 		if (found == inline_definitions.end())
 			continue;
 		const Binding* base_ctor = first_base_default_constructor(binding);
+		string base_ctor_name;
+		bool base_ctor_complete = false;
+		if (base_ctor != NULL)
+		{
+			base_ctor_complete = !base_ctor->is_generated_default_constructor;
+			base_ctor_name = base_ctor_complete
+				? symbol_for(base_ctor)
+				: constructor_symbol_for(base_ctor, true);
+		}
 		if (base_ctor != NULL &&
-		    defined_functions.find(symbol_for(base_ctor)) ==
+		    defined_functions.find(base_ctor_name) ==
 		    defined_functions.end() &&
 		    inline_definitions.find(base_ctor) != inline_definitions.end())
 		{
 			pending_inline_definitions.insert(pending_inline_definitions.begin(),
 			                                  binding);
-			demand_inline_function(base_ctor);
+			demand_inline_function(base_ctor, base_ctor_complete);
 			continue;
 		}
 		string name = symbol_for(binding);
 		bool class_ctor = is_class_constructor(binding);
+		bool class_dtor = is_class_destructor_binding(binding);
 		bool need_complete =
 			!class_ctor ||
 			demanded_inline_complete_entries.find(binding) !=
 			demanded_inline_complete_entries.end();
 		bool need_base =
-			class_ctor &&
-			demanded_constructor_base_entries.find(binding) !=
-			demanded_constructor_base_entries.end();
+			(class_ctor &&
+			 demanded_constructor_base_entries.find(binding) !=
+			 demanded_constructor_base_entries.end()) ||
+			(class_dtor &&
+			 demanded_destructor_base_entries.find(binding) !=
+			 demanded_destructor_base_entries.end());
 		if (defined_functions.find(name) != defined_functions.end())
 			need_complete = false;
 		if (defined_functions.find(name + "__base_entry") !=

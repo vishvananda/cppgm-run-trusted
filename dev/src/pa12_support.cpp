@@ -16,7 +16,9 @@ Node::Node()
 	  has_op(false),
 	  op(KW_ALIGNAS),
 	  has_constant_value(false),
-	  constant_value(0)
+	  constant_value(0),
+	  suppress_virtual_dispatch(false),
+	  virtual_dispatch(false)
 {
 }
 
@@ -28,7 +30,9 @@ Node::Node(const string& text)
 	  has_op(false),
 	  op(KW_ALIGNAS),
 	  has_constant_value(false),
-	  constant_value(0)
+	  constant_value(0),
+	  suppress_virtual_dispatch(false),
+	  virtual_dispatch(false)
 {
 }
 
@@ -60,6 +64,7 @@ DeclSpecs::DeclSpecs()
 	  extern_decl(false),
 	  thread_local_decl(false),
 	  auto_decl(false),
+	  virtual_decl(false),
 	  cv(pa11::CV_NONE)
 {
 }
@@ -87,6 +92,8 @@ Suffix::Suffix(SuffixKind k)
 	  function_cv(pa11::CV_NONE),
 	  ref_qualifier(0),
 	  noexcept_decl(false),
+	  override_decl(false),
+	  final_decl(false),
 	  trailing_return()
 {
 }

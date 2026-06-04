@@ -56,6 +56,8 @@ struct Node
 	string token_text;
 	bool has_constant_value;
 	uint64_t constant_value;
+	bool suppress_virtual_dispatch;
+	bool virtual_dispatch;
 
 	Node();
 	explicit Node(const string& text);
@@ -100,6 +102,7 @@ struct DeclSpecs
 	bool extern_decl;
 	bool thread_local_decl;
 	bool auto_decl;
+	bool virtual_decl;
 	unsigned cv;
 	vector<ETokenType> builtin;
 	TypePtr named_type;
@@ -137,6 +140,8 @@ struct Suffix
 	unsigned function_cv;
 	int ref_qualifier;
 	bool noexcept_decl;
+	bool override_decl;
+	bool final_decl;
 	TypePtr trailing_return;
 
 	explicit Suffix(SuffixKind k);
@@ -345,6 +350,8 @@ private:
 		                                 bool function_definition,
 		                                 bool nonstatic_member_function,
 		                                 Node& out);
+			void complete_class_virtuals(TypePtr type);
+			Binding* find_overridden_virtual(TypePtr record, Binding* function) const;
 			void apply_variable_initializer(const DeclSpecs& specs,
 			                                Scope* target,
 			                                Binding* variable,

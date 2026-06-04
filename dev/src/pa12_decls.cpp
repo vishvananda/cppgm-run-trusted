@@ -50,6 +50,125 @@ bool record_has_nonpublic_field(TypePtr record)
 	return false;
 }
 
+bool is_destructor_binding(Binding* binding)
+{
+	return binding != NULL && !binding->name.empty() && binding->name[0] == '~';
+}
+
+unsigned pointed_record_cv(TypePtr ptr)
+{
+	TypePtr bare = pa11::strip_cv(ptr);
+	if (bare->kind != pa11::TypeKind::Pointer)
+		return pa11::CV_NONE;
+	TypePtr pointee = bare->base;
+	return pointee->kind == pa11::TypeKind::Cv ? pointee->cv : pa11::CV_NONE;
+}
+
+bool same_parameter_tail(const vector<TypePtr>& left,
+                         const vector<TypePtr>& right)
+{
+	if (left.size() != right.size())
+		return false;
+	if (left.empty())
+		return true;
+	if (pointed_record_cv(left[0]) != pointed_record_cv(right[0]))
+		return false;
+	for (size_t i = 1; i < left.size(); ++i)
+		if (!pa11::same_type(left[i], right[i]))
+			return false;
+	return true;
+}
+
+bool record_derives_from(TypePtr source, TypePtr target)
+{
+	TypePtr wanted = pa11::strip_cv(target);
+	for (TypePtr cur = pa11::strip_cv(source);
+	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
+	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+		if (pa11::same_type(cur, wanted))
+			return true;
+	return false;
+}
+
+bool covariant_return(TypePtr derived_return, TypePtr base_return)
+{
+	TypePtr d = pa11::strip_cv(derived_return);
+	TypePtr b = pa11::strip_cv(base_return);
+	if (d->kind == pa11::TypeKind::Pointer &&
+	    b->kind == pa11::TypeKind::Pointer)
+	{
+		TypePtr dr = pa11::strip_cv(d->base);
+		TypePtr br = pa11::strip_cv(b->base);
+		return dr->kind == pa11::TypeKind::Record &&
+		       br->kind == pa11::TypeKind::Record &&
+		       record_derives_from(dr, br);
+	}
+	if (d->kind == pa11::TypeKind::LValueReference &&
+	    b->kind == pa11::TypeKind::LValueReference)
+	{
+		TypePtr dr = pa11::strip_cv(d->base);
+		TypePtr br = pa11::strip_cv(b->base);
+		return dr->kind == pa11::TypeKind::Record &&
+		       br->kind == pa11::TypeKind::Record &&
+		       record_derives_from(dr, br);
+	}
+	return false;
+}
+
+bool virtual_signature_matches(Binding* base, Binding* derived)
+{
+	if (base == NULL || derived == NULL ||
+	    base->type.get() == NULL || derived->type.get() == NULL ||
+	    base->type->kind != pa11::TypeKind::Function ||
+	    derived->type->kind != pa11::TypeKind::Function)
+		return false;
+	if (is_destructor_binding(base) || is_destructor_binding(derived))
+		return is_destructor_binding(base) && is_destructor_binding(derived);
+	if (base->name != derived->name ||
+	    base->type->variadic != derived->type->variadic ||
+	    !same_parameter_tail(base->type->parameters, derived->type->parameters))
+		return false;
+	if (pa11::same_type(base->type->base, derived->type->base))
+		return true;
+	return covariant_return(derived->type->base, base->type->base);
+}
+
+bool class_has_polymorphic_base(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	return base.get() != NULL &&
+	       base->kind == pa11::TypeKind::Record &&
+	       base->is_polymorphic;
+}
+
+bool has_declared_destructor(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	return bare->scope->members.find("~" + bare->scope->name) !=
+	       bare->scope->members.end();
+}
+
+bool inherits_virtual_destructor(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	for (TypePtr cur = base;
+	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
+	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	{
+		for (size_t i = 0; i < cur->virtual_entries.size(); ++i)
+		{
+			Binding* fn = cur->virtual_entries[i].function;
+			if (fn != NULL && is_destructor_binding(fn))
+				return true;
+		}
+	}
+	return false;
+}
+
 }  // namespace
 
 void Parser::parse_declaration_into(Node& out)
@@ -523,6 +642,37 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
+	if (at(OP_ASS) &&
+	    current_scope()->kind == ScopeKind::Class &&
+	    declarator_function_suffix(declarator) != NULL)
+	{
+		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
+		          "simple-declaration");
+		Binding* function =
+			declare_one(specs, base, declarator, NULL, false, node);
+		expect(OP_ASS);
+		Expr pure_value = parse_expression();
+		if (!pure_value.has_constant_value || pure_value.constant_value != 0)
+			throw runtime_error("unsupported function pure-specifier");
+		if (function != NULL)
+		{
+			function->is_pure_virtual = true;
+			function->is_virtual = true;
+		}
+		expect(OP_SEMICOLON);
+		if (emit_node && !node.children.empty())
+		{
+			if (node.line.empty())
+			{
+				for (size_t i = 0; i < node.children.size(); ++i)
+					add_child(out, node.children[i]);
+			}
+			else
+				add_child(out, node);
+		}
+		return;
+	}
+
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
@@ -795,6 +945,86 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 	}
 }
 
+Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) const
+{
+	TypePtr bare = pa11::strip_cv(record);
+	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	for (TypePtr cur = base;
+	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
+	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	{
+		for (size_t i = 0; i < cur->virtual_entries.size(); ++i)
+		{
+			Binding* candidate = cur->virtual_entries[i].function;
+			if (candidate != NULL &&
+			    !cur->virtual_entries[i].deleting_entry &&
+			    virtual_signature_matches(candidate, function))
+				return candidate;
+		}
+	}
+	return NULL;
+}
+
+void Parser::complete_class_virtuals(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return;
+	TypePtr direct_base =
+		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	if (inherits_virtual_destructor(bare) && !has_declared_destructor(bare))
+		ensure_default_destructor(bare);
+	bare->virtual_entries.clear();
+	if (direct_base.get() != NULL &&
+	    direct_base->kind == pa11::TypeKind::Record &&
+	    direct_base->is_polymorphic)
+	{
+		bare->virtual_entries = direct_base->virtual_entries;
+		bare->is_polymorphic = true;
+	}
+	bare->introduces_vptr =
+		bare->is_polymorphic && !class_has_polymorphic_base(bare);
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member->kind != BindingKind::Function ||
+		    member->is_static_member ||
+		    member->name == bare->scope->name)
+			continue;
+		Binding* overridden = find_overridden_virtual(bare, member);
+		if (overridden != NULL)
+		{
+			if (overridden->is_final_virtual)
+				throw runtime_error("cannot override final virtual member");
+			member->is_virtual = true;
+			member->overrides_virtual = overridden;
+			member->virtual_slot_index = overridden->virtual_slot_index;
+			member->virtual_slot_width = overridden->virtual_slot_width;
+			for (size_t j = 0; j < bare->virtual_entries.size(); ++j)
+			{
+				if (bare->virtual_entries[j].function == overridden)
+					bare->virtual_entries[j].function = member;
+			}
+			bare->is_polymorphic = true;
+			continue;
+		}
+		if (member->is_override_specified)
+			throw runtime_error("override requires virtual base member");
+		if (!member->is_virtual)
+			continue;
+		member->virtual_slot_index =
+			static_cast<int>(bare->virtual_entries.size());
+		member->virtual_slot_width = is_destructor_binding(member) ? 2 : 1;
+		bare->virtual_entries.push_back(pa11::VirtualTableEntry(member, false));
+		if (is_destructor_binding(member))
+			bare->virtual_entries.push_back(pa11::VirtualTableEntry(member, true));
+		bare->is_polymorphic = true;
+	}
+	bare->introduces_vptr =
+		bare->is_polymorphic && !class_has_polymorphic_base(bare);
+	bare->layout_valid = false;
+}
+
 Binding* Parser::declare_function_entity(const DeclSpecs& specs,
                                          Scope* target,
                                          const string& name,
@@ -841,6 +1071,16 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		class_protected_access_.back();
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
 	function->ref_qualifier = ref_qualifier;
+	if (target->kind == ScopeKind::Class && !is_static_member)
+	{
+		function->is_virtual = function->is_virtual || specs.virtual_decl;
+		function->is_override_specified =
+			function->is_override_specified ||
+			(suffix != NULL && suffix->override_decl);
+		function->is_final_virtual =
+			function->is_final_virtual ||
+			(suffix != NULL && suffix->final_decl);
+	}
 	if (suffix != NULL)
 	{
 		vector<Expr> defaults;
