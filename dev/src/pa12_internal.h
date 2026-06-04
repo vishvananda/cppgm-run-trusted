@@ -312,6 +312,16 @@ struct ConstexprValue
 	static ConstexprValue pointer(Binding* binding, long long index);
 };
 
+bool constexpr_zero_value_for_type(TypePtr type, ConstexprValue& out);
+bool constexpr_integral_compare(ETokenType op,
+                                TypePtr left_type,
+                                const ConstexprValue& lhs,
+                                const ConstexprValue& rhs,
+                                ConstexprValue& out);
+bool constexpr_string_literal_element(const Node& node,
+                                      const ConstexprValue& index,
+                                      ConstexprValue& out);
+
 struct TemplateValidationState;
 
 class Parser

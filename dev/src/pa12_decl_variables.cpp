@@ -75,7 +75,7 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 				add_child(var, found->second);
 		}
 	}
-	else if (variable->is_constexpr && init != NULL && !var.children.empty())
+	else if (variable->is_constexpr && !var.children.empty())
 		static_member_initializers_[variable] = var.children[0];
 	add_child(out, var);
 	return variable;

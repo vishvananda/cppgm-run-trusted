@@ -16,16 +16,69 @@ enum class EvalFlow
 	Normal,
 	Return,
 	Break,
-	Continue
+	Continue,
+	Invalid
 };
 
 struct EvalState
 {
 	map<Binding*, ConstexprValue> locals;
+
+	EvalState() {}
+};
+
+struct EvalBudget
+{
 	int steps;
 	int depth;
 
-	EvalState() : steps(0), depth(0) {}
+	EvalBudget() : steps(0), depth(0) {}
+};
+
+EvalBudget* active_budget = NULL;
+
+const int kMaxEvalSteps = 200000;
+const int kMaxEvalDepth = 512;
+
+struct EvalBudgetScope
+{
+	EvalBudget budget;
+	EvalBudget* previous;
+
+	EvalBudgetScope() : previous(active_budget)
+	{
+		if (active_budget == NULL)
+			active_budget = &budget;
+	}
+
+	~EvalBudgetScope()
+	{
+		active_budget = previous;
+	}
+};
+
+struct EvalCallScope
+{
+	bool entered;
+	bool ok_;
+
+	EvalCallScope() : entered(false), ok_(true)
+	{
+		if (active_budget != NULL)
+		{
+			entered = true;
+			++active_budget->depth;
+			ok_ = active_budget->depth <= kMaxEvalDepth;
+		}
+	}
+
+	~EvalCallScope()
+	{
+		if (entered && active_budget != NULL)
+			--active_budget->depth;
+	}
+
+	bool ok() const { return ok_; }
 };
 
 bool is_float_type(TypePtr type)
@@ -87,6 +140,14 @@ bool is_array_type(TypePtr type)
 	       pa11::strip_cv(type)->kind == pa11::TypeKind::Array;
 }
 
+bool consume_eval_step()
+{
+	if (active_budget == NULL)
+		return true;
+	++active_budget->steps;
+	return active_budget->steps <= kMaxEvalSteps;
+}
+
 bool eval_node(Parser& parser,
                const Node& node,
                EvalState& state,
@@ -146,8 +207,10 @@ bool eval_literal(const Node& node, ConstexprValue& out)
 		out = ConstexprValue::integer(0);
 		return true;
 	}
-	if (is_array_type(node.type) && !node.token_text.empty() &&
-	    node.token_text[0] == '"')
+	StringLiteralInfo string_info;
+	if (is_array_type(node.type) &&
+	    AnalyzeStringLiteral(node.token_text, string_info) &&
+	    string_info.ud_suffix.empty())
 	{
 		out = ConstexprValue::pointer(NULL, 1);
 		return true;
@@ -380,8 +443,12 @@ bool eval_braced_init_list(Parser& parser,
 		out = ConstexprValue::object(type);
 		for (size_t i = 0; i < node.children.size(); ++i)
 		{
+			Node child = node.children[i];
+			if (starts_with(child.line, "braced-init-list") &&
+			    child.type.get() == NULL)
+				child.type = type->base;
 			ConstexprValue elem;
-			if (!eval_node(parser, node.children[i], state, elem))
+			if (!eval_node(parser, child, state, elem))
 				return false;
 			out.elements.push_back(elem);
 		}
@@ -397,8 +464,12 @@ bool eval_braced_init_list(Parser& parser,
 		Binding* field = type->fields[i];
 		if (field == NULL || field->is_static_member)
 			continue;
+		Node child = node.children[index++];
+		if (starts_with(child.line, "braced-init-list") &&
+		    child.type.get() == NULL)
+			child.type = field->type;
 		ConstexprValue value;
-		if (!eval_node(parser, node.children[index++], state, value))
+		if (!eval_node(parser, child, state, value))
 			return false;
 		out.fields[field] = value;
 	}
@@ -458,23 +529,6 @@ bool eval_named_node(Parser& parser,
 	return false;
 }
 
-bool eval_record_address_fallback(const Node& node, ConstexprValue& out)
-{
-	if (node.children.size() != 1)
-		return false;
-	TypePtr record = node.children[0].type;
-	if (record.get() == NULL &&
-	    node.type.get() != NULL &&
-	    pa11::strip_cv(node.type)->kind == pa11::TypeKind::Pointer)
-		record = pa11::strip_cv(node.type)->base;
-	record = record.get() == NULL ? record : pa11::strip_cv(record);
-	if (record.get() == NULL ||
-	    record->kind != pa11::TypeKind::Record)
-		return false;
-	out = ConstexprValue::object(record);
-	return true;
-}
-
 bool eval_cast_node(Parser& parser,
                     const Node& node,
                     EvalState& state,
@@ -483,13 +537,21 @@ bool eval_cast_node(Parser& parser,
 	bool child_ok = !node.children.empty() &&
 	                eval_node(parser, node.children[0], state, out);
 	if (node.op == OP_AMP)
-	{
-		if (child_ok && out.is_object)
-			return true;
-		return eval_record_address_fallback(node, out);
-	}
+		return child_ok && out.is_object;
 	if (!child_ok)
 		return false;
+	TypePtr target = node.type.get() == NULL ? TypePtr() : pa11::strip_cv(node.type);
+	if (target.get() != NULL && target->kind == pa11::TypeKind::Pointer)
+	{
+		if (out.is_object || out.is_pointer)
+			return true;
+		if (!out.is_float && out.int_value == 0)
+		{
+			out = ConstexprValue::pointer(NULL, 0);
+			return true;
+		}
+		return false;
+	}
 	if (is_float_type(node.type))
 		out = ConstexprValue::floating(float_value(out));
 	else
@@ -505,8 +567,6 @@ bool eval_unary_node(Parser& parser,
 	if (node.children.empty() ||
 	    !eval_node(parser, node.children[0], state, out))
 	{
-		if (node.op == OP_AMP)
-			return eval_record_address_fallback(node, out);
 		return false;
 	}
 	switch (node.op)
@@ -541,6 +601,66 @@ bool eval_unary_node(Parser& parser,
 	default:
 		return false;
 	}
+}
+
+bool eval_constructor_action(Parser& parser,
+                             const Node& action,
+                             TypePtr object_type,
+                             EvalState& state,
+                             ConstexprValue& out)
+{
+	if (action.children.empty())
+		return false;
+	const Node& call = action.children[0];
+	if (!starts_with(call.line, "call-expression") ||
+	    call.direct_call == NULL)
+		return false;
+	vector<ConstexprValue> args;
+	for (size_t i = 2; i < call.children.size(); ++i)
+	{
+		ConstexprValue arg;
+		if (!eval_node(parser, call.children[i], state, arg))
+			return false;
+		args.push_back(arg);
+	}
+	return parser.try_evaluate_constexpr_constructor(call.direct_call,
+	                                                object_type,
+	                                                args,
+	                                                out);
+}
+
+TypePtr constructor_action_object_type(const Node& action)
+{
+	if (action.type.get() != NULL)
+		return action.type;
+	if (action.children.empty())
+		return TypePtr();
+	const Node& call = action.children[0];
+	if (call.children.size() < 2 ||
+	    call.children[1].children.empty())
+		return TypePtr();
+	return call.children[1].children[0].type;
+}
+
+bool eval_variable_initializer(Parser& parser,
+                               const Node& var,
+                               EvalState& state,
+                               ConstexprValue& out)
+{
+	if (var.binding == NULL)
+		return false;
+	if (var.children.empty())
+		return constexpr_zero_value_for_type(var.binding->type, out);
+	const Node& init = var.children[0];
+	if (starts_with(init.line, "constructor-action"))
+		return eval_constructor_action(parser,
+		                               init,
+		                               var.binding->type,
+		                               state,
+		                               out);
+	if (starts_with(init.line, "no-op-initializer"))
+		return constexpr_zero_value_for_type(var.binding->type, out);
+	return eval_node(parser, init, state, out);
 }
 
 bool eval_binary_node(Parser& parser,
@@ -584,9 +704,20 @@ bool eval_binary_node(Parser& parser,
 	}
 	ConstexprValue lhs;
 	ConstexprValue rhs;
-	return eval_node(parser, node.children[0], state, lhs) &&
-	       eval_node(parser, node.children[1], state, rhs) &&
-	       eval_binary_value(node.op, lhs, rhs, out);
+	if (!eval_node(parser, node.children[0], state, lhs) ||
+	    !eval_node(parser, node.children[1], state, rhs))
+		return false;
+	if (node.op == OP_EQ || node.op == OP_NE || node.op == OP_LT ||
+	    node.op == OP_GT || node.op == OP_LE || node.op == OP_GE)
+	{
+		if (constexpr_integral_compare(node.op,
+		                          node.children[0].type,
+		                          lhs,
+		                          rhs,
+		                          out))
+			return true;
+	}
+	return eval_binary_value(node.op, lhs, rhs, out);
 }
 
 bool assignment_base_op(ETokenType op, ETokenType& base)
@@ -653,6 +784,34 @@ bool eval_postfix_node(Parser& parser,
 	return true;
 }
 
+bool eval_subscript_node(Parser& parser,
+                         const Node& node,
+                         EvalState& state,
+                         ConstexprValue& out)
+{
+	if (node.children.size() != 2)
+		return false;
+	ConstexprValue index;
+	if (!eval_node(parser, node.children[1], state, index))
+		return false;
+	if (constexpr_string_literal_element(node.children[0], index, out))
+		return true;
+	ConstexprValue base;
+	if (!eval_node(parser, node.children[0], state, base))
+		return false;
+	long long offset = static_cast<long long>(integer_value(index));
+	if (base.is_pointer)
+	{
+		base.pointer_index += offset;
+		return eval_pointer_deref(parser, base, out);
+	}
+	if (!base.is_object || offset < 0 ||
+	    static_cast<size_t>(offset) >= base.elements.size())
+		return false;
+	out = base.elements[static_cast<size_t>(offset)];
+	return true;
+}
+
 bool eval_condition_declaration(Parser& parser,
                                 const Node& node,
                                 EvalState& state,
@@ -665,16 +824,19 @@ bool eval_condition_declaration(Parser& parser,
 		if (starts_with(child.line, "variable ") &&
 		    child.binding != NULL)
 		{
-			ConstexprValue value = ConstexprValue::integer(0);
-			if (!child.children.empty() &&
-			    !eval_node(parser, child.children[0], state, value))
+			ConstexprValue value;
+			if (!eval_variable_initializer(parser, child, state, value))
 				return false;
 			state.locals[child.binding] = value;
 			out = value;
 			have_value = true;
 		}
-		else if (eval_node(parser, child, state, out))
+		else
+		{
+			if (!eval_node(parser, child, state, out))
+				return false;
 			have_value = true;
+		}
 	}
 	return have_value;
 }
@@ -684,17 +846,24 @@ bool eval_node(Parser& parser,
                EvalState& state,
                ConstexprValue& out)
 {
-	if (++state.steps > 200000 || state.depth > 512)
+	if (!consume_eval_step())
 		return false;
-	if (starts_with(node.line, "literal "))
-		return eval_literal(node, out);
 	if (node.has_constant_value)
 	{
 		out = ConstexprValue::integer(node.constant_value);
 		return true;
 	}
+	if (starts_with(node.line, "literal "))
+		return eval_literal(node, out);
 	if (starts_with(node.line, "braced-init-list"))
 		return eval_braced_init_list(parser, node, state, out);
+	if (starts_with(node.line, "constructor-action"))
+	{
+		TypePtr object_type = constructor_action_object_type(node);
+		if (object_type.get() == NULL)
+			return false;
+		return eval_constructor_action(parser, node, object_type, state, out);
+	}
 	if (eval_member_field(parser, node, state, out))
 		return true;
 	if (starts_with(node.line, "id-expression") ||
@@ -724,6 +893,8 @@ bool eval_node(Parser& parser,
 		return eval_call(parser, node, state, out);
 	if (starts_with(node.line, "postfix-expression"))
 		return eval_postfix_node(parser, node, state, out);
+	if (starts_with(node.line, "subscript-expression"))
+		return eval_subscript_node(parser, node, state, out);
 	if (starts_with(node.line, "condition-declaration"))
 		return eval_condition_declaration(parser, node, state, out);
 	if (starts_with(node.line, "condition") && !node.children.empty())
@@ -767,6 +938,22 @@ EvalFlow eval_statement(Parser& parser,
 {
 	if (starts_with(node.line, "compound-statement"))
 		return eval_compound(parser, node, state, out);
+	if (starts_with(node.line, "for-init-statement"))
+	{
+		for (size_t i = 0; i < node.children.size(); ++i)
+		{
+			const Node& child = node.children[i];
+			if (starts_with(child.line, "simple-declaration"))
+			{
+				EvalFlow flow = eval_statement(parser, child, state, out);
+				if (flow != EvalFlow::Normal)
+					return flow;
+			}
+			else if (!eval_node(parser, child, state, out))
+				return EvalFlow::Invalid;
+		}
+		return EvalFlow::Normal;
+	}
 	if (starts_with(node.line, "simple-declaration"))
 	{
 		for (size_t i = 0; i < node.children.size(); ++i)
@@ -774,47 +961,115 @@ EvalFlow eval_statement(Parser& parser,
 			const Node& var = node.children[i];
 			if (!starts_with(var.line, "variable ") || var.binding == NULL)
 				continue;
-			ConstexprValue value = ConstexprValue::integer(0);
-			if (!var.children.empty() &&
-			    !eval_node(parser, var.children[0], state, value))
-				return EvalFlow::Normal;
+			ConstexprValue value;
+			if (!eval_variable_initializer(parser, var, state, value))
+				return EvalFlow::Invalid;
 			state.locals[var.binding] = value;
 		}
 		return EvalFlow::Normal;
 	}
+	if (starts_with(node.line, "storage-copy-action"))
+	{
+		if (node.children.empty())
+			return EvalFlow::Invalid;
+		ConstexprValue source;
+		if (!eval_node(parser, node.children[0], state, source) ||
+		    !source.is_object)
+			return EvalFlow::Invalid;
+		bool stored = false;
+		for (map<Binding*, ConstexprValue>::iterator it = state.locals.begin();
+		     it != state.locals.end();
+		     ++it)
+		{
+			if (it->first == NULL || it->first->name != "this" ||
+			    !it->second.is_object)
+				continue;
+			for (map<Binding*, ConstexprValue>::const_iterator fit =
+			     source.fields.begin();
+			     fit != source.fields.end();
+			     ++fit)
+				it->second.fields[fit->first] = fit->second;
+			stored = true;
+			break;
+		}
+		return stored ? EvalFlow::Normal : EvalFlow::Invalid;
+	}
+	if (starts_with(node.line, "base-init-action"))
+	{
+		ConstexprValue value;
+		if (!node.children.empty())
+		{
+			if (!eval_node(parser, node.children[0], state, value))
+				return EvalFlow::Invalid;
+		}
+		else if (node.direct_call != NULL)
+		{
+			vector<ConstexprValue> args;
+			if (!parser.try_evaluate_constexpr_constructor(node.direct_call,
+			                                               node.type,
+			                                               args,
+			                                               value))
+				return EvalFlow::Invalid;
+		}
+		else if (!constexpr_zero_value_for_type(node.type, value))
+			return EvalFlow::Invalid;
+		bool stored = false;
+		for (map<Binding*, ConstexprValue>::iterator it = state.locals.begin();
+		     it != state.locals.end();
+		     ++it)
+		{
+			if (it->first == NULL || it->first->name != "this" ||
+			    !it->second.is_object)
+				continue;
+			for (map<Binding*, ConstexprValue>::const_iterator fit =
+			     value.fields.begin();
+			     fit != value.fields.end();
+			     ++fit)
+				it->second.fields[fit->first] = fit->second;
+			stored = true;
+			break;
+		}
+		return stored ? EvalFlow::Normal : EvalFlow::Invalid;
+	}
+	if (starts_with(node.line, "delegating-init-action"))
+	{
+		if (node.children.empty())
+			return EvalFlow::Invalid;
+		ConstexprValue value;
+		if (!eval_node(parser, node.children[0], state, value) ||
+		    !value.is_object)
+			return EvalFlow::Invalid;
+		for (map<Binding*, ConstexprValue>::iterator it = state.locals.begin();
+		     it != state.locals.end();
+		     ++it)
+		{
+			if (it->first != NULL && it->first->name == "this")
+			{
+				it->second = value;
+				return EvalFlow::Normal;
+			}
+		}
+		return EvalFlow::Invalid;
+	}
 	if (starts_with(node.line, "member-init-action") && node.binding != NULL)
 	{
-		ConstexprValue value = ConstexprValue::integer(0);
+		ConstexprValue value;
 		if (!node.children.empty() &&
 		    !eval_node(parser, node.children[0], state, value))
+			return EvalFlow::Invalid;
+		else if (node.children.empty() && node.direct_call != NULL)
 		{
-			bool copied = false;
-			for (map<Binding*, ConstexprValue>::const_iterator it =
-			     state.locals.begin();
-			     it != state.locals.end() && !copied;
-			     ++it)
-			{
-				if (it->first == NULL ||
-				    it->first->name == "this" ||
-				    !it->second.is_object)
-					continue;
-				for (map<Binding*, ConstexprValue>::const_iterator fit =
-				     it->second.fields.begin();
-				     fit != it->second.fields.end();
-				     ++fit)
-				{
-					if (fit->first != NULL &&
-					    fit->first->name == node.binding->name)
-					{
-						value = fit->second;
-						copied = true;
-						break;
-					}
-				}
-			}
-			if (!copied)
-				return EvalFlow::Normal;
+			vector<ConstexprValue> args;
+			if (!parser.try_evaluate_constexpr_constructor(node.direct_call,
+			                                               node.binding->type,
+			                                               args,
+			                                               value))
+				return EvalFlow::Invalid;
 		}
+		else if (node.children.empty() &&
+		         !constexpr_zero_value_for_type(node.binding->type, value))
+			return EvalFlow::Invalid;
+		bool stored = false;
 		for (map<Binding*, ConstexprValue>::iterator it = state.locals.begin();
 		     it != state.locals.end();
 		     ++it)
@@ -823,14 +1078,16 @@ EvalFlow eval_statement(Parser& parser,
 			    !it->second.is_object)
 				continue;
 			it->second.fields[node.binding] = value;
+			stored = true;
 			break;
 		}
-		return EvalFlow::Normal;
+		return stored ? EvalFlow::Normal : EvalFlow::Invalid;
 	}
 	if (starts_with(node.line, "expression-statement"))
 	{
-		if (!node.children.empty())
-			eval_node(parser, node.children[0], state, out);
+		if (!node.children.empty() &&
+		    !eval_node(parser, node.children[0], state, out))
+			return EvalFlow::Invalid;
 		return EvalFlow::Normal;
 	}
 	if (starts_with(node.line, "return-statement"))
@@ -838,7 +1095,7 @@ EvalFlow eval_statement(Parser& parser,
 		if (node.children.empty())
 			out = ConstexprValue::integer(0);
 		else if (!eval_node(parser, node.children[0], state, out))
-			return EvalFlow::Normal;
+			return EvalFlow::Invalid;
 		return EvalFlow::Return;
 	}
 	if (starts_with(node.line, "if-statement"))
@@ -847,7 +1104,7 @@ EvalFlow eval_statement(Parser& parser,
 			return EvalFlow::Normal;
 		ConstexprValue cond;
 		if (!eval_node(parser, node.children[0], state, cond))
-			return EvalFlow::Normal;
+			return EvalFlow::Invalid;
 		if (truthy(cond))
 			return eval_branch_child(parser, node.children[1], state, out);
 		if (node.children.size() > 2)
@@ -861,11 +1118,14 @@ EvalFlow eval_statement(Parser& parser,
 		for (;;)
 		{
 			ConstexprValue cond;
-			if (!eval_node(parser, node.children[0], state, cond) ||
-			    !truthy(cond))
+			if (!eval_node(parser, node.children[0], state, cond))
+				return EvalFlow::Invalid;
+			if (!truthy(cond))
 				return EvalFlow::Normal;
 			EvalFlow flow = eval_statement(parser, node.children[1], state, out);
 			if (flow == EvalFlow::Return)
+				return flow;
+			if (flow == EvalFlow::Invalid)
 				return flow;
 			if (flow == EvalFlow::Break)
 				return EvalFlow::Normal;
@@ -880,11 +1140,14 @@ EvalFlow eval_statement(Parser& parser,
 			EvalFlow flow = eval_statement(parser, node.children[0], state, out);
 			if (flow == EvalFlow::Return)
 				return flow;
+			if (flow == EvalFlow::Invalid)
+				return flow;
 			if (flow == EvalFlow::Break)
 				return EvalFlow::Normal;
 			ConstexprValue cond;
-			if (!eval_node(parser, node.children[1], state, cond) ||
-			    !truthy(cond))
+			if (!eval_node(parser, node.children[1], state, cond))
+				return EvalFlow::Invalid;
+			if (!truthy(cond))
 				return EvalFlow::Normal;
 		}
 	}
@@ -895,7 +1158,10 @@ EvalFlow eval_statement(Parser& parser,
 		size_t index = 0;
 		if (starts_with(node.children[index].line, "for-init-statement"))
 		{
-			eval_compound(parser, node.children[index], state, out);
+			EvalFlow init_flow =
+				eval_statement(parser, node.children[index], state, out);
+			if (init_flow != EvalFlow::Normal)
+				return init_flow;
 			++index;
 		}
 		const Node* cond = NULL;
@@ -915,16 +1181,21 @@ EvalFlow eval_statement(Parser& parser,
 			if (cond != NULL)
 			{
 				ConstexprValue c;
-				if (!eval_node(parser, *cond, state, c) || !truthy(c))
+				if (!eval_node(parser, *cond, state, c))
+					return EvalFlow::Invalid;
+				if (!truthy(c))
 					return EvalFlow::Normal;
 			}
 			EvalFlow flow = eval_statement(parser, *body, state, out);
 			if (flow == EvalFlow::Return)
 				return flow;
+			if (flow == EvalFlow::Invalid)
+				return flow;
 			if (flow == EvalFlow::Break)
 				return EvalFlow::Normal;
-			if (iter != NULL && !iter->children.empty())
-				eval_node(parser, iter->children[0], state, out);
+			if (iter != NULL && !iter->children.empty() &&
+			    !eval_node(parser, iter->children[0], state, out))
+				return EvalFlow::Invalid;
 		}
 		return EvalFlow::Normal;
 	}
@@ -932,7 +1203,7 @@ EvalFlow eval_statement(Parser& parser,
 		return EvalFlow::Break;
 	if (starts_with(node.line, "continue-statement"))
 		return EvalFlow::Continue;
-	return EvalFlow::Normal;
+	return EvalFlow::Invalid;
 }
 
 }  // namespace
@@ -941,8 +1212,8 @@ bool Parser::try_evaluate_constexpr_call(Binding* function,
                                          const vector<Node>& args,
                                          ConstexprValue& out)
 {
+	EvalBudgetScope budget;
 	EvalState arg_state;
-	arg_state.depth = 1;
 	vector<ConstexprValue> values;
 	for (size_t i = 0; i < args.size(); ++i)
 	{
@@ -959,6 +1230,10 @@ bool Parser::try_evaluate_constexpr_call_values(
 	const vector<ConstexprValue>& args,
 	ConstexprValue& out)
 {
+	EvalBudgetScope budget;
+	EvalCallScope call_scope;
+	if (!call_scope.ok())
+		return false;
 	if (function == NULL)
 		return false;
 	Binding* body_binding = function;
@@ -983,7 +1258,6 @@ bool Parser::try_evaluate_constexpr_call_values(
 		return false;
 	const Node& fn = found->second;
 	EvalState state;
-	state.depth = 1;
 	size_t arg_index = 0;
 	size_t body_index = fn.children.size();
 	for (size_t i = 0; i < fn.children.size(); ++i)
@@ -1027,6 +1301,10 @@ bool Parser::try_evaluate_constexpr_constructor(
 	const vector<ConstexprValue>& args,
 	ConstexprValue& out)
 {
+	EvalBudgetScope budget;
+	EvalCallScope call_scope;
+	if (!call_scope.ok())
+		return false;
 	if (function == NULL)
 		return false;
 	Binding* body_binding = function;
@@ -1048,10 +1326,22 @@ bool Parser::try_evaluate_constexpr_constructor(
 		}
 	}
 	if (found == function_bodies_.end() || body_binding == NULL)
+	{
+		if (function->is_generated_default_constructor || function->is_defaulted)
+		{
+			if (args.size() == 1 && args[0].is_object)
+			{
+				out = args[0];
+				return true;
+			}
+			if (!constexpr_zero_value_for_type(object_type, out))
+				out = ConstexprValue::object(object_type);
+			return out.valid;
+		}
 		return false;
+	}
 	const Node& fn = found->second;
 	EvalState state;
-	state.depth = 1;
 	size_t arg_index = 0;
 	size_t body_index = fn.children.size();
 	Binding* this_binding = NULL;
@@ -1065,10 +1355,21 @@ bool Parser::try_evaluate_constexpr_constructor(
 		if (!starts_with(fn.children[i].line, "parameter "))
 			continue;
 		Binding* parameter = fn.children[i].binding;
-		if (parameter != NULL && parameter->name == "this")
+		bool this_parameter =
+			(parameter != NULL && parameter->name == "this") ||
+			starts_with(fn.children[i].line, "parameter this ");
+		if (this_parameter)
 		{
-			this_binding = parameter;
-			state.locals[parameter] = ConstexprValue::object(object_type);
+			if (parameter != NULL)
+			{
+				this_binding = parameter;
+				ConstexprValue this_value = ConstexprValue::object(object_type);
+				if ((function->is_generated_default_constructor ||
+				     function->is_defaulted) &&
+				    !constexpr_zero_value_for_type(object_type, this_value))
+					return false;
+				state.locals[parameter] = this_value;
+			}
 			continue;
 		}
 		if (arg_index >= args.size())
@@ -1082,14 +1383,15 @@ bool Parser::try_evaluate_constexpr_constructor(
 	if (this_binding == NULL &&
 	    (function->is_generated_default_constructor || function->is_defaulted))
 	{
-		out = ConstexprValue::object(object_type);
-		return true;
+		if (!constexpr_zero_value_for_type(object_type, out))
+			out = ConstexprValue::object(object_type);
+		return out.valid;
 	}
 	if (this_binding == NULL)
 		return false;
 	ConstexprValue ignored;
 	EvalFlow flow = eval_statement(*this, fn.children[body_index], state, ignored);
-	if (flow == EvalFlow::Return)
+	if (flow == EvalFlow::Return || flow == EvalFlow::Invalid)
 		return false;
 	map<Binding*, ConstexprValue>::const_iterator result =
 		state.locals.find(this_binding);
@@ -1102,6 +1404,7 @@ bool Parser::try_evaluate_constexpr_constructor(
 bool Parser::try_evaluate_constexpr_binding(Binding* binding,
                                             ConstexprValue& out)
 {
+	EvalBudgetScope budget;
 	if (binding == NULL)
 		return false;
 	if (binding->has_constant)
@@ -1135,7 +1438,6 @@ bool Parser::try_evaluate_constexpr_binding(Binding* binding,
 	if (found == static_member_initializers_.end())
 		return false;
 	EvalState state;
-	state.depth = 1;
 	if (!eval_node(*this, found->second, state, out))
 		return false;
 	return out.valid;
@@ -1143,8 +1445,8 @@ bool Parser::try_evaluate_constexpr_binding(Binding* binding,
 
 bool Parser::try_evaluate_constexpr_expr(const Node& node, ConstexprValue& out)
 {
+	EvalBudgetScope budget;
 	EvalState state;
-	state.depth = 1;
 	return eval_node(*this, node, state, out);
 }
 

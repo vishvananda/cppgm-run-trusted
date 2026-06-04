@@ -89,14 +89,14 @@ void Parser::parse_static_assert_declaration()
 			condition.constant_value = truth;
 		}
 	}
-	else if (condition.node.line.compare(0, 15, "call-expression") == 0)
-		condition.has_constant_value = false;
 	if (!condition.has_constant_value)
-		return;
+	{
+		if (dependent_context)
+			return;
+		throw runtime_error("static_assert condition is not constant");
+	}
 	if (condition.constant_value == 0)
 	{
-		if (condition.node.line.compare(0, 15, "call-expression") == 0)
-			return;
 		if (dependent_context)
 			return;
 		throw runtime_error("static_assert failed " + message);

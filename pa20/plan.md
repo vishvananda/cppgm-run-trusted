@@ -58,3 +58,45 @@ references under `pa20/` remain fixtures.
   functions along existing parser/lowerer ownership boundaries.
 - Re-run the file audit, rebuild `cppgm++`, and finish with
   `make test-report-through-pa20`.
+
+## Architecture Review
+
+PA20 is implemented in the existing semantic and LowIR pipeline. The semantic
+owner is the PA12 layer: `ConstexprValue` carries typed scalar, pointer,
+reference, array, and record-object facts; `pa12_constexpr.cpp` evaluates the
+supported C++11 constexpr expression and statement subset; and
+`pa12_decls_initializers.cpp`, `pa12_decl_variables.cpp`, and
+`pa12_static_assert.cpp` enforce declaration and assertion constantness at the
+point where the compiler still has semantic type and binding information.
+
+The evaluator now has a shared semantic budget for nested calls, explicit
+invalid-flow propagation, and constructor/default-initialization handling for
+typed objects. Constant results are not recovered downstream from emitted text:
+LowIR continues to consume stored semantic initializer facts and object
+metadata. The only new source boundary is `pa12_constexpr_values.cpp`, which
+contains pure constexpr value helpers and is listed in
+`dev/frontend_source_sets.mk`; it does not move implementation outside the
+checked `dev/src` ownership path.
+
+The audit found and removed the main architecture risks: fallback-success
+`static_assert` behavior, skipped executed constexpr failures, fabricated
+record-address objects, per-call budget resets, incomplete constructor/default
+object initialization, and prefixed string-literal recognition gaps. No
+interpreter/VM substitute, reference-binary shellout, embedded earlier-IR
+payload, test-specific gate, timeout workaround, or unchecked implementation
+fragment was found.
+
+## Final Architecture Review
+
+Final PA20 ownership is coherent: parser nodes preserve syntax, PA12 owns
+typed constant semantics and diagnostics, and PA14 only consumes semantic facts
+for LowIR generation. The implementation changes are scoped to the PA12
+constexpr/declaration/static-assert path plus one source-set entry for the
+helper split.
+
+The final validation gates are clean. `make test-report-through-pa20` passes
+1535/1535 tests, and
+`perl scripts/cppgm_file_audit.pl --stage pa20 --paths dev/src` exits 0. The
+file-audit size blocker introduced during the audit was resolved by the checked
+helper split rather than by weakening audit checks or moving code to an
+unchecked path.

@@ -186,6 +186,24 @@ void Parser::apply_scalar_variable_initializer(const DeclSpecs& specs,
 			variable->constant_value = value.int_value;
 		}
 	}
+	if (specs.constexpr_decl && !variable->has_constant)
+	{
+		ConstexprValue value;
+		TypePtr bare = pa11::strip_cv(type);
+		if (pa11::is_reference_type(type))
+		{
+			if (conv.expr.binding != NULL)
+				return;
+			if (try_evaluate_constexpr_expr(conv.expr.node, value) &&
+			    (value.is_object || value.is_pointer))
+				return;
+		}
+		if (bare->kind == pa11::TypeKind::Pointer &&
+		    try_evaluate_constexpr_expr(conv.expr.node, value) &&
+		    value.is_pointer)
+			return;
+		throw runtime_error("constexpr initializer is not constant");
+	}
 }
 
 void Parser::apply_variable_initializer(const DeclSpecs& specs,
