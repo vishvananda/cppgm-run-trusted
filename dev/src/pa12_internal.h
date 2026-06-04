@@ -199,13 +199,13 @@ private:
 	vector<Node> generated_nodes_;
 	vector<Node> extra_lowir_nodes_;
 	int local_type_counter_;
-	set<string> generated_default_ctors_;
-	set<string> generated_aggregate_ctors_;
-	set<string> generated_copy_ctors_;
-	set<string> generated_move_ctors_;
-	set<string> generated_copy_assignments_;
-	set<string> generated_move_assignments_;
-	set<string> generated_dtors_;
+	set<const void*> generated_default_ctors_;
+	set<pair<const void*, size_t> > generated_aggregate_ctors_;
+	set<const void*> generated_copy_ctors_;
+	set<const void*> generated_move_ctors_;
+	set<const void*> generated_copy_assignments_;
+	set<const void*> generated_move_assignments_;
+	set<const void*> generated_dtors_;
 	map<Binding*, Node> default_member_initializers_;
 	map<Binding*, vector<Expr> > default_arguments_;
 	map<Binding*, vector<string> > function_parameter_names_;
@@ -492,6 +492,7 @@ private:
 	Expr make_unary_expr(ETokenType op, const string& text, Expr inner);
 	Expr make_postfix_expr(ETokenType op, const string& text, Expr inner);
 	Expr make_subscript_expr(Expr lhs, Expr rhs);
+	Expr make_record_subscript_expr(TypePtr record, Expr lhs, Expr rhs);
 	Expr make_member_expr(Expr object, const string& name, const string& op);
 	Expr make_cast_expr(TypePtr target,
 	                    const string& op_text,

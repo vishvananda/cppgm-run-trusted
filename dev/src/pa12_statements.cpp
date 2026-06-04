@@ -127,31 +127,15 @@ void Parser::parse_pending_member_bodies(Scope* class_scope)
 		pos_ = pending[i].body_pos;
 		Node wrapper;
 		add_child(wrapper, pending[i].node);
-		try
-		{
-			if (pending[i].constructor_body)
-				parse_constructor_body_from_parameters(pending[i].function,
-				                                       pending[i].class_type,
-				                                       pending[i].parameters,
-				                                       wrapper);
-			else
-				parse_function_body_from_parameters(pending[i].function,
-				                                    pending[i].parameters,
-				                                    wrapper);
-		}
-		catch (const runtime_error&)
-		{
-			if (pending[i].function == NULL ||
-			    (pending[i].function->name.empty() ||
-			     (pending[i].function->name[0] != '~' &&
-			      pending[i].function->name != "operator=" &&
-			      (pending[i].function->owner == NULL ||
-			       pending[i].function->name !=
-				       pending[i].function->owner->name))))
-				throw;
-			if (!wrapper.children.empty())
-				add_child(wrapper.children.back(), Node("compound-statement"));
-		}
+		if (pending[i].constructor_body)
+			parse_constructor_body_from_parameters(pending[i].function,
+			                                       pending[i].class_type,
+			                                       pending[i].parameters,
+			                                       wrapper);
+		else
+			parse_function_body_from_parameters(pending[i].function,
+			                                    pending[i].parameters,
+			                                    wrapper);
 		if (!wrapper.children.empty())
 			mark_empty_destructor(pending[i].function, wrapper.children.back());
 		if (!wrapper.children.empty())

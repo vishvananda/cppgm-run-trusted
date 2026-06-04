@@ -72,3 +72,63 @@ constructor, copy, move, or conversion semantics from formatted node text.
 - Validation completed with scoped PA15/PA16 reports, the required
   `make test-report-through-pa16`, and
   `perl scripts/cppgm_file_audit.pl --stage pa16 --paths dev/src`.
+
+## Architecture Review
+
+The PA16 implementation keeps the PA boundary described above:
+
+- PA12 owns source-level semantic facts. Class records, constructor and
+  destructor actions, default arguments, deleted/defaulted functions,
+  ref-qualified functions, conversion operators, and selected overloads are
+  represented through `Binding*`, `TypePtr`, `Node::direct_call`, and typed
+  action nodes before LowIR lowering starts.
+- PA14 consumes those facts. It decides storage and call ABI shape through
+  `record_pass_by_address`, `record_return_by_address`, `lowir_parameter`,
+  constructor/destructor lowering, temporary slots, cleanup scopes, and
+  demand-driven helper emission in `ProgramLowerer`.
+- Source-set ownership is explicit in `dev/frontend_source_sets.mk`; the PA16
+  LowIR split files all remain under `dev/src` and are built only into
+  `cppgm++`.
+
+The audit found two architecture issues in the PA12 layer:
+
+- Generated special-member guards used unqualified record-name strings as the
+  recursion/deduplication key. That made semantic generation depend on display
+  spelling and could collide for distinct same-named classes in different
+  scopes. The guards now key by canonical record object identity, with
+  aggregate constructor arity included where needed.
+- Deferred inline constructor/destructor/assignment bodies could recover from a
+  parse failure by emitting an empty compound body for special members. That was
+  a fallback success path and could turn unsupported or malformed user code
+  into dummy LowIR. Deferred body parsing now propagates failures.
+
+The audit also cleaned up two implementation-structure risks:
+
+- The non-inline constructor-member parser path duplicated the constructor body
+  initialization parser. It now delegates to
+  `parse_constructor_body_from_parameters`, keeping constructor initializer
+  ownership in one PA12 helper.
+- `make_subscript_expr` mixed builtin subscript selection with record
+  `operator[]` and pointer-conversion probing in one deeply nested function.
+  Record fallback now lives in `make_record_subscript_expr`, leaving the
+  builtin array/pointer path direct and reducing file-audit complexity.
+
+## Final Architecture Review
+
+PA16 now has no known unresolved audit blockers. The implementation does not
+shell out to host compilers, reference tools, prior solutions, template
+binaries, interpreters, VMs, trampolines, or embedded payloads to produce
+LowIR. Unsupported semantic cases fail through the normal error path instead
+of succeeding with placeholder output.
+
+Typed ownership remains clear after cleanup:
+
+- PA12 chooses constructors, conversion operators, assignment operators, and
+  deleted/defaulted special members, then records those choices on semantic
+  nodes and bindings.
+- PA14 lowers from those bindings and typed nodes, including indirect
+  class-value parameters/returns, temporary materialization, copy/move helper
+  demand, constructor/destructor actions, and scope cleanup.
+- Remaining file-audit warnings are pre-existing header-weight or nsinit/nsdecl
+  duplication warnings outside the PA16 cleanup surface; the required audit
+  command exits successfully for PA16.

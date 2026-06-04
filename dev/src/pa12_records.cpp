@@ -136,10 +136,10 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 		return NULL;
 	}
 
-	string ctor_name = bare->name + "::" + bare->name;
-	if (generated_default_ctors_.find(ctor_name) != generated_default_ctors_.end())
+	const void* key = bare.get();
+	if (generated_default_ctors_.find(key) != generated_default_ctors_.end())
 		return find_default_constructor(bare);
-	generated_default_ctors_.insert(ctor_name);
+	generated_default_ctors_.insert(key);
 
 	TypePtr this_type = pa11::make_pointer(bare);
 	vector<TypePtr> params;
@@ -190,7 +190,7 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 	pa11::layout_record_type(bare);
 	if (arg_count > bare->fields.size())
 		return NULL;
-	string key = bare->name + "::aggregate:" + to_string(arg_count);
+	pair<const void*, size_t> key(bare.get(), arg_count);
 	if (generated_aggregate_ctors_.find(key) != generated_aggregate_ctors_.end())
 	{
 		existing = bare->scope->members.find(bare->scope->name);
@@ -610,8 +610,8 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      params,
 	                                      false);
-	set<string>& generated = move ? generated_move_ctors_ : generated_copy_ctors_;
-	string key = bare->name + (move ? "::move" : "::copy");
+	set<const void*>& generated = move ? generated_move_ctors_ : generated_copy_ctors_;
+	const void* key = bare.get();
 	if (generated.find(key) != generated.end())
 		return find_copy_move_constructor_binding(bare, move);
 	generated.insert(key);
@@ -762,9 +762,9 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 		return existing;
 	if (move && suppresses_implicit_move(bare))
 		return NULL;
-	set<string>& generated =
+	set<const void*>& generated =
 		move ? generated_move_assignments_ : generated_copy_assignments_;
-	string key = bare->name + (move ? "::move_assign" : "::copy_assign");
+	const void* key = bare.get();
 	if (generated.find(key) != generated.end())
 		return find_copy_move_assignment_binding(bare, move);
 	generated.insert(key);
@@ -987,7 +987,7 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	}
 	if (fini_actions.empty() && !force_trivial)
 		return NULL;
-	string key = bare->name + "::~";
+	const void* key = bare.get();
 	if (generated_dtors_.find(key) != generated_dtors_.end())
 		return find_destructor_binding(bare);
 	generated_dtors_.insert(key);

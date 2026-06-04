@@ -1055,6 +1055,73 @@ Expr Parser::make_postfix_expr(ETokenType op, const string& text, Expr inner)
 	return out;
 }
 
+Expr Parser::make_record_subscript_expr(TypePtr record, Expr lhs, Expr rhs)
+{
+	vector<Binding*> members =
+		lookup_qualified_set(record->scope,
+		                     "operator[]",
+		                     pa11::LOOKUP_FUNCTION);
+	if (!members.empty())
+	{
+		Expr callee = make_member_expr(lhs, "operator[]", ".");
+		vector<Expr> args;
+		args.push_back(rhs);
+		return make_call_expr(callee, args);
+	}
+
+	bool object_const =
+		pa11::type_has_const(expression_object_type(lhs.type));
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		for (map<string, vector<Binding*> >::const_iterator it =
+		     record->scope->members.begin();
+		     it != record->scope->members.end();
+		     ++it)
+		{
+			if (it->first.compare(0, 9, "operator ") != 0)
+				continue;
+			for (size_t i = 0; i < it->second.size(); ++i)
+			{
+				Binding* op = it->second[i];
+				if (op->kind != BindingKind::Function ||
+				    op->type->kind != pa11::TypeKind::Function ||
+				    op->type->parameters.size() != 1)
+					continue;
+				TypePtr pointer = pa11::strip_cv(op->type->base);
+				if (pointer->kind != pa11::TypeKind::Pointer)
+					continue;
+				if (!object_const && pass == 0 &&
+				    pa11::type_has_const(pointer->base))
+					continue;
+				try
+				{
+					Expr callee;
+					callee.valid = true;
+					callee.binding = op;
+					callee.type = op->type;
+					callee.category = ValueCategory::LValue;
+					callee.overloads.push_back(op);
+					callee.node = Node("member-expression lvalue " +
+					                   pa11::describe_type(callee.type) +
+					                   " OP_DOT:" + op->name);
+					add_child(callee.node, lhs.node);
+					callee.node.binding = op;
+					callee.node.has_op = true;
+					callee.node.op = OP_DOT;
+					callee.node.token_text = op->name;
+					annotate_expr_node(callee);
+					Expr ptr = make_call_expr(callee, vector<Expr>());
+					return make_subscript_expr(ptr, rhs);
+				}
+				catch (const runtime_error&)
+				{
+				}
+			}
+		}
+	}
+	throw runtime_error("invalid subscript operands");
+}
+
 Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 {
 	TypePtr base = pa11::strip_cv(expression_object_type(lhs.type));
@@ -1069,75 +1136,10 @@ Expr Parser::make_subscript_expr(Expr lhs, Expr rhs)
 			base = rbase->base;
 		else if (rbase->kind == pa11::TypeKind::Pointer)
 			base = rbase->base;
+		else if (base->kind == pa11::TypeKind::Record && base->scope != NULL)
+			return make_record_subscript_expr(base, lhs, rhs);
 		else
-		{
-			if (base->kind == pa11::TypeKind::Record && base->scope != NULL)
-			{
-				vector<Binding*> members =
-					lookup_qualified_set(base->scope,
-					                     "operator[]",
-					                     pa11::LOOKUP_FUNCTION);
-				if (!members.empty())
-				{
-					Expr callee = make_member_expr(lhs, "operator[]", ".");
-					vector<Expr> args;
-					args.push_back(rhs);
-					return make_call_expr(callee, args);
-				}
-				bool object_const =
-					pa11::type_has_const(expression_object_type(lhs.type));
-				for (int pass = 0; pass < 2; ++pass)
-				{
-					for (map<string, vector<Binding*> >::const_iterator it =
-					     base->scope->members.begin();
-					     it != base->scope->members.end();
-					     ++it)
-					{
-						if (it->first.compare(0, 9, "operator ") != 0)
-							continue;
-						for (size_t i = 0; i < it->second.size(); ++i)
-						{
-							Binding* op = it->second[i];
-							if (op->kind != BindingKind::Function ||
-							    op->type->kind != pa11::TypeKind::Function ||
-							    op->type->parameters.size() != 1)
-								continue;
-							TypePtr pointer = pa11::strip_cv(op->type->base);
-							if (pointer->kind != pa11::TypeKind::Pointer)
-								continue;
-							if (!object_const && pass == 0 &&
-							    pa11::type_has_const(pointer->base))
-								continue;
-							try
-							{
-								Expr callee;
-								callee.valid = true;
-								callee.binding = op;
-								callee.type = op->type;
-								callee.category = ValueCategory::LValue;
-								callee.overloads.push_back(op);
-								callee.node = Node("member-expression lvalue " +
-								                   pa11::describe_type(callee.type) +
-								                   " OP_DOT:" + op->name);
-								add_child(callee.node, lhs.node);
-								callee.node.binding = op;
-								callee.node.has_op = true;
-								callee.node.op = OP_DOT;
-								callee.node.token_text = op->name;
-								annotate_expr_node(callee);
-								Expr ptr =
-									make_call_expr(callee, vector<Expr>());
-								return make_subscript_expr(ptr, rhs);
-							}
-							catch (const runtime_error&)
-							{
-							}
-						}
-					}
-				}
-			}
 			throw runtime_error("invalid subscript operands");
-		}
 	}
 	Expr out;
 	out.type = base;
