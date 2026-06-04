@@ -135,6 +135,7 @@ struct Suffix
 	vector<ParameterInfo> parameters;
 	bool variadic;
 	unsigned function_cv;
+	int ref_qualifier;
 	bool noexcept_decl;
 	TypePtr trailing_return;
 
@@ -158,6 +159,8 @@ struct PendingFunctionBody
 	Node node;
 	vector<ParameterInfo> parameters;
 	size_t body_pos;
+	bool constructor_body;
+	TypePtr class_type;
 
 	PendingFunctionBody();
 };
@@ -198,6 +201,10 @@ private:
 	int local_type_counter_;
 	set<string> generated_default_ctors_;
 	set<string> generated_aggregate_ctors_;
+	set<string> generated_copy_ctors_;
+	set<string> generated_move_ctors_;
+	set<string> generated_copy_assignments_;
+	set<string> generated_move_assignments_;
 	set<string> generated_dtors_;
 	map<Binding*, Node> default_member_initializers_;
 	map<Binding*, vector<Expr> > default_arguments_;
@@ -206,6 +213,7 @@ private:
 	map<Scope*, vector<Binding*> > class_friend_functions_;
 	map<Scope*, vector<TypePtr> > class_friend_classes_;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies_;
+	vector<Binding*> defaulted_move_assignments_;
 
 	Scope* current_scope() const;
 	Scope* global_scope() const;
@@ -223,6 +231,8 @@ private:
 	string consume_identifier();
 	string consume_literal();
 	string consume_operator_function_name();
+	TypePtr parse_conversion_type_id();
+	string conversion_operator_name(TypePtr type) const;
 	const Token& current() const;
 	const Token& at_token(size_t index) const;
 
@@ -233,7 +243,9 @@ private:
 		void parse_template_declaration();
 		void parse_simple_or_function_declaration(Node& out, bool emit_node);
 		bool parse_qualified_constructor_definition(Node& out, bool emit_node);
+		bool parse_qualified_conversion_definition(Node& out, bool emit_node);
 		bool parse_constructor_like_member(bool explicit_ctor = false);
+		bool parse_conversion_function_member(bool explicit_conv = false);
 		bool parse_destructor_like_member();
 		bool parse_friend_declaration();
 		void parse_class_body(Scope* class_scope, bool default_private);
@@ -282,6 +294,11 @@ private:
 	void parse_function_body_from_parameters(Binding* function,
 	                                         const vector<ParameterInfo>& parameters,
 	                                         Node& function_node);
+	void parse_constructor_body_from_parameters(
+		Binding* function,
+		TypePtr class_type,
+		const vector<ParameterInfo>& parameters,
+		Node& function_node);
 	void parse_pending_member_bodies(Scope* class_scope);
 	Node parse_compound_statement();
 	Node parse_block_item();
@@ -294,7 +311,7 @@ private:
 	Node parse_jump_statement();
 	Node parse_labeled_statement();
 	Node parse_expression_statement();
-	Node parse_condition();
+	Node parse_condition(TypePtr target);
 
 	Expr parse_expression();
 	Expr parse_assignment_expression();
@@ -305,6 +322,7 @@ private:
 	Expr parse_postfix_suffixes(Expr expr);
 	Expr parse_primary_expression();
 	Expr parse_new_expression();
+	Expr parse_delete_expression();
 	Expr parse_literal_expression();
 	Expr parse_cast_expression();
 	Expr parse_type_trait_expression(ETokenType keyword);
@@ -327,13 +345,30 @@ private:
 		                                 bool function_definition,
 		                                 bool nonstatic_member_function,
 		                                 Node& out);
-		void apply_variable_initializer(const DeclSpecs& specs,
-		                                Scope* target,
-		                                Binding* variable,
-		                                TypePtr type,
-		                                const Expr* init,
+			void apply_variable_initializer(const DeclSpecs& specs,
+			                                Scope* target,
+			                                Binding* variable,
+			                                TypePtr type,
+			                                const Expr* init,
 		                                Node& var);
-		void validate_record_copy_initialization(TypePtr type, const Expr& init);
+			void apply_braced_variable_initializer(Scope* target,
+			                                      Binding* variable,
+			                                      TypePtr type,
+			                                      const Expr& init,
+			                                      Node& var);
+			void apply_record_variable_initializer(Scope* target,
+			                                      Binding* variable,
+			                                      TypePtr type,
+			                                      const Expr& init,
+			                                      Node& var);
+			void apply_scalar_variable_initializer(const DeclSpecs& specs,
+			                                      Scope* target,
+			                                      Binding* variable,
+			                                      TypePtr type,
+			                                      const Expr& init,
+			                                      Node& var);
+			void validate_record_copy_initialization(TypePtr type, const Expr& init);
+		bool parse_qualified_destructor_definition(Node& out, bool emit_node);
 		Binding* add_alias(Scope* scope, const string& name, TypePtr type);
 		Binding* add_function_binding(Scope* scope,
 		                              const string& name,
@@ -361,6 +396,10 @@ private:
 	Binding* ensure_default_constructor(TypePtr type, bool force_trivial = false);
 	Binding* ensure_aggregate_constructor(TypePtr type, size_t arg_count);
 	void ensure_aggregate_constructors_for_init(TypePtr type, const Node& init);
+	Binding* ensure_copy_move_constructor(TypePtr type, bool move);
+	bool copy_move_constructor_available(TypePtr type, bool move);
+	Binding* ensure_copy_move_assignment(TypePtr type, bool move);
+	bool copy_move_assignment_available(TypePtr type, bool move);
 	Binding* ensure_default_destructor(TypePtr type, bool force_trivial = false);
 	Binding* find_default_constructor(TypePtr type) const;
 		TypePtr make_member_function_type(Scope* class_scope, TypePtr type);
@@ -395,14 +434,37 @@ private:
 	Binding* resolve_call_candidate(const vector<Binding*>& overloads,
 	                                const vector<Expr>& args,
 	                                vector<Expr>& converted);
+	Binding* resolve_constructor_candidate(TypePtr type,
+	                                       const vector<Expr>& args,
+	                                       bool copy_initialization,
+	                                       vector<Expr>& converted);
+	Expr make_constructor_init_expr(TypePtr type,
+	                                const vector<Expr>& args,
+	                                bool copy_initialization);
 	Expr make_call_expr(Expr callee, vector<Expr> args);
 	Expr make_id_expr(const QualifiedName& name);
-	Expr make_builtin_id_expr(const QualifiedName& name);
-	Expr make_implicit_member_id_expr(const QualifiedName& name,
-	                                  const vector<Binding*>& found,
-	                                  Binding* binding,
-	                                  Binding* this_binding);
+		Expr make_builtin_id_expr(const QualifiedName& name);
+		void synthesize_default_assignment_lookup(const QualifiedName& name,
+		                                          vector<Binding*>& found);
+		Expr make_missing_id_expr(const QualifiedName& name);
+		Expr make_aliased_member_variable_id_expr(Binding* binding);
+		Expr make_enumerator_id_expr(Binding* binding);
+		void prefer_static_qualified_overloads(const QualifiedName& name,
+		                                       Expr& out,
+		                                       Binding*& binding);
+		Expr make_implicit_member_id_expr(const QualifiedName& name,
+		                                  const vector<Binding*>& found,
+		                                  Binding* binding,
+		                                  Binding* this_binding);
 	Expr make_binary_expr(ETokenType op, const string& text, Expr lhs, Expr rhs);
+	bool make_builtin_converted_binary_expr(ETokenType op,
+	                                        const string& text,
+	                                        const Expr& lhs,
+	                                        const Expr& rhs,
+	                                        Expr& out);
+	bool binary_candidate_accepts_operands(Binding* fn,
+	                                       const Expr& lhs,
+	                                       const Expr& rhs) const;
 	vector<Binding*> binary_operator_candidates(ETokenType op,
 	                                            const string& text,
 	                                            const Expr& lhs,
@@ -415,10 +477,18 @@ private:
 	                                            const string& name,
 	                                            set<Scope*>& seen,
 	                                            vector<Binding*>& out);
-	Expr make_assignment_expr(ETokenType op,
-	                          const string& text,
-	                          Expr lhs,
-	                          Expr rhs);
+		Expr make_assignment_expr(ETokenType op,
+		                          const string& text,
+		                          Expr lhs,
+		                          Expr rhs);
+		Expr make_overloaded_compound_assignment_expr(ETokenType op,
+		                                              const string& text,
+		                                              Expr lhs,
+		                                              Expr rhs,
+		                                              TypePtr lhs_bare);
+		Expr make_record_assignment_expr(Expr lhs,
+		                                 Expr rhs,
+		                                 TypePtr lhs_bare);
 	Expr make_unary_expr(ETokenType op, const string& text, Expr inner);
 	Expr make_postfix_expr(ETokenType op, const string& text, Expr inner);
 	Expr make_subscript_expr(Expr lhs, Expr rhs);
@@ -443,11 +513,18 @@ private:
 		bool member_access_allowed(Binding* member, TypePtr object_record) const;
 		bool is_pointer_arithmetic(const Expr& lhs, const Expr& rhs) const;
 	bool is_pointer_difference(const Expr& lhs, const Expr& rhs) const;
-	int scalar_conversion_rank(TypePtr source, TypePtr target) const;
-	bool ranks_better(const vector<int>& lhs, const vector<int>& rhs) const;
-	TypePtr pointer_arithmetic_type(ETokenType op,
-	                                const Expr& lhs,
-	                                const Expr& rhs) const;
+		int scalar_conversion_rank(TypePtr source, TypePtr target) const;
+		bool ranks_better(const vector<int>& lhs, const vector<int>& rhs) const;
+		void ensure_copy_move_constructor_for_single_arg(
+			TypePtr record,
+			const vector<Expr>& args);
+		void add_variadic_argument_ranks(Binding* fn,
+		                                 size_t arg_count,
+		                                 vector<int>& ranks) const;
+		void prepare_member_call(Expr& callee, vector<Expr>& args);
+		TypePtr pointer_arithmetic_type(ETokenType op,
+		                                const Expr& lhs,
+		                                const Expr& rhs) const;
 	TypePtr pointee_type_for_member(TypePtr type) const;
 	TypePtr expression_object_type(TypePtr type) const;
 	TypePtr lvalue_to_rvalue_type(TypePtr type) const;

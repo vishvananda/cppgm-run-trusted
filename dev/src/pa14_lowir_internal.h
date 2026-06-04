@@ -67,9 +67,14 @@ struct Cleanup
 {
 	Binding* binding;
 	TypePtr type;
+	string addr;
+	bool force_destructor_call;
 
-	Cleanup() : binding(NULL) {}
-	Cleanup(Binding* b, TypePtr t) : binding(b), type(t) {}
+	Cleanup() : binding(NULL), force_destructor_call(false) {}
+	Cleanup(Binding* b, TypePtr t, bool force = false)
+		: binding(b), type(t), force_destructor_call(force) {}
+	Cleanup(const string& a, TypePtr t, bool force = false)
+		: binding(NULL), type(t), addr(a), force_destructor_call(force) {}
 };
 
 struct PendingConstructorConversion
@@ -91,11 +96,36 @@ int lowir_arithmetic_rank(TypePtr type);
 TypePtr lowir_integral_promotion(TypePtr type);
 TypePtr lowir_common_type(TypePtr left, TypePtr right);
 string slot_lowir_type(TypePtr type);
+bool record_pass_by_address(TypePtr type);
+bool record_return_by_address(TypePtr type);
+bool record_has_nontrivial_value_transfer(TypePtr type);
+bool record_has_storage_copy(TypePtr type);
 string lowir_literal(TypePtr type, const Node& node);
 string lowir_parameter(TypePtr type);
 string metadata_suffix(const vector<string>& items);
 vector<string> qualified_parts(const Binding* binding);
 string source_symbol_base(const Binding* binding);
+bool node_contains_call_expression(const Node& node);
+bool record_has_default_constructor_for_array(TypePtr type);
+bool record_has_base_subobject(TypePtr source, TypePtr target);
+Binding* find_constructor(TypePtr type, size_t arg_count);
+const Node* record_prvalue_child_for_xvalue(const Node& arg);
+bool defaulted_copy_move_constructor_needs_helper(Binding* binding, TypePtr type);
+Binding* find_copy_move_constructor(TypePtr type, bool move);
+bool inline_defaulted_copy_move_storage_constructor(Binding* binding,
+                                                   TypePtr type,
+                                                   const Node& init);
+Binding* find_destructor(TypePtr type);
+bool type_needs_destructor(TypePtr type);
+bool no_op_generated_default_constructor(Binding* ctor, TypePtr type);
+bool has_inline_constructor(TypePtr type);
+bool is_brace_elision_aggregate(TypePtr type);
+bool is_string_literal_node(const Node& node);
+bool type_has_reference_subobject(TypePtr type);
+bool record_has_user_assignment_operator(TypePtr type);
+string zero_integer_type(uint64_t size);
+bool same_record_initializer(const Node& init, TypePtr type);
+bool record_has_base(TypePtr source, TypePtr target);
 
 struct ProgramLowerer
 {
@@ -103,6 +133,7 @@ struct ProgramLowerer
 	vector<string> global_declares;
 	vector<string> globals;
 	vector<FunctionOut> functions;
+	vector<FunctionOut> pending_synthetic_assignment_functions;
 	map<const Binding*, string> symbols;
 	map<string, int> used_symbols;
 	map<string, string> function_symbols;
@@ -113,7 +144,12 @@ struct ProgramLowerer
 	map<string, string> string_literals;
 	vector<pair<string, vector<unsigned char> > > string_defs;
 	map<const Binding*, const Node*> inline_definitions;
+	map<const Binding*, size_t> inline_definition_ranks;
 	map<const Binding*, string> function_declarations_by_binding;
+	set<const Binding*> demanded_inline_complete_entries;
+	set<const Binding*> demanded_constructor_base_entries;
+	map<const void*, Binding*> implicit_copy_assignments;
+	map<const void*, Binding*> implicit_move_assignments;
 	vector<const Binding*> pending_inline_definitions;
 	vector<InitAction> init_actions;
 	vector<Node> global_init_variables;
@@ -121,9 +157,11 @@ struct ProgramLowerer
 	vector<unique_ptr<Binding> > synthetic_bindings;
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
+	int generated_assignment_emit_depth;
 
 	ProgramLowerer();
 	string symbol_for(const Binding* binding);
+	string constructor_symbol_for(const Binding* binding, bool base_entry);
 	string string_symbol(const string& token_text);
 	void register_inline_definition(const Node& node);
 	void register_function_declaration(const Node& node);
@@ -131,7 +169,16 @@ struct ProgramLowerer
 	void demand_global_declaration(const Binding* binding);
 	void ensure_thread_local_wrapper(const string& global_name);
 	void ensure_eh_declarations();
-	void demand_inline_function(const Binding* binding);
+	Binding* demand_implicit_copy_assignment(TypePtr type, bool move);
+	void queue_synthetic_assignment_function(Binding* binding,
+	                                         TypePtr record,
+	                                         bool move,
+	                                         const string& name);
+	void demand_move_assignment_copy_dependency(const Binding* binding);
+	void insert_pending_inline_definition(const Binding* binding);
+	void emit_pending_synthetic_assignment_functions();
+	void demand_inline_function(const Binding* binding,
+	                            bool complete_entry = true);
 	void emit_pending_inline_definitions();
 	void emit_global_lifecycle_functions();
 	void collect_translation_unit(const Node& root);
@@ -160,13 +207,24 @@ private:
 	vector<string> break_targets_;
 	vector<string> continue_targets_;
 	vector<vector<Cleanup> > cleanups_;
+	set<const Binding*> by_address_parameters_;
+	set<const Binding*> return_slot_variables_;
 	set<uint64_t> initialized_bitfield_storage_;
+	vector<pair<Value, TypePtr> > pending_temp_cleanups_;
 	map<string, string> labels_;
 	map<const Node*, string> switch_labels_;
 	int temp_counter_;
 	int block_counter_;
 	int aux_slot_counter_;
 	int eh_try_depth_;
+	int call_temp_cleanup_defer_depth_;
+	string logical_call_result_slot_;
+	TypePtr logical_call_result_type_;
+	bool logical_call_result_consumed_;
+	string call_result_store_slot_;
+	TypePtr call_result_store_type_;
+	bool call_result_store_consumed_;
+	string active_unwind_dispatch_;
 
 	void add_slot(const string& name, const string& type);
 	string slot_for(const Binding* binding);
@@ -179,19 +237,29 @@ private:
 
 	void lower_params();
 	void lower_param_stores();
+	bool lower_defaulted_storage_special_member();
 	void lower_stmt(const Node& node);
 	void lower_compound(const Node& node);
 	void lower_decl_stmt(const Node& node);
 	void lower_variable_decl(const Node& var);
+	bool lower_braced_variable_init(const Node& var, TypePtr type);
 	void lower_global_variable_init(const Node& var);
 	void lower_global_variable_fini(const Node& var);
 	void lower_destructor_for_object(const function<Value()>& addr_for,
 	                                 TypePtr type);
+	bool type_needs_cleanup(TypePtr type) const;
 	void lower_scope_destructor_for_object(const function<Value()>& addr_for,
 	                                       TypePtr type);
 	void lower_member_fini(const Node& node);
 	void lower_base_fini(const Node& node);
 	void lower_member_init(const Node& node);
+	bool lower_direct_member_constructor_init(
+		const Node& node,
+		const function<Value()>& member_addr);
+	void lower_scalar_member_init(const Node& node,
+	                              const function<Value()>& member_addr);
+	void lower_delegating_init(const Node& node);
+	void lower_storage_copy_action(const Node& node);
 	void lower_bitfield_member_init(const Node& node,
 	                                Value value,
 	                                const function<Value()>& member_addr);
@@ -214,7 +282,8 @@ private:
 	void lower_storage_zero(Value addr, uint64_t size);
 	void lower_constructor_call(const function<Value()>& addr_for,
 	                            Binding* ctor,
-	                            const vector<const Node*>& args);
+	                            const vector<const Node*>& args,
+	                            bool base_entry = false);
 	void lower_record_reference_constructor_argument(
 		const Node& arg,
 		TypePtr param,
@@ -225,8 +294,12 @@ private:
 		Binding* ctor,
 		vector<string>& lowered,
 		const vector<pair<Value, TypePtr> >& temp_cleanups,
-		const vector<PendingConstructorConversion>& pending_conversions);
+		const vector<PendingConstructorConversion>& pending_conversions,
+		bool base_entry = false);
 	void emit_temporary_cleanups(const vector<pair<Value, TypePtr> >& temps);
+	void lower_temporary_init_with_unwind(const function<Value()>& addr_for,
+	                                      TypePtr type,
+	                                      const Node& init);
 	bool lower_string_array_init(const function<Value()>& addr_for,
 	                             TypePtr type,
 	                             const Node& init);
@@ -240,6 +313,13 @@ private:
 	void emit_all_cleanups();
 	bool has_active_cleanups() const;
 	void emit_unwind_cleanups();
+	void add_pending_temp_cleanup(Value addr, TypePtr type);
+	bool has_pending_temp_cleanups() const;
+	bool node_may_create_temp_cleanup(const Node& node) const;
+	void emit_pending_temp_cleanups();
+	void terminate_with_pending_temp_cleanups(const string& prefix,
+	                                         const string& yes,
+	                                         const string& no);
 	void lower_expr_stmt(const Node& node);
 	void lower_discarded_expr(const Node& expr);
 	void lower_switch(const Node& node);
@@ -267,16 +347,24 @@ private:
 	Value emit_unary(const Node& expr);
 	Value emit_postfix(const Node& expr);
 	Value emit_call(const Node& expr);
-	void lower_call_argument(const Node& arg, TypePtr param, vector<string>& args);
+	bool lower_indirect_record_call(const function<Value()>& addr_for,
+	                                const Node& expr);
+	void lower_call_argument(const Node& arg,
+	                         TypePtr param,
+	                         vector<string>& args,
+	                         vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
 	void lower_reference_call_argument(const Node& arg,
 	                                   TypePtr param,
-	                                   vector<string>& args);
+	                                   vector<string>& args,
+	                                   vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
 	void lower_value_call_argument(const Node& arg,
 	                               TypePtr param,
-	                               vector<string>& args);
+	                               vector<string>& args,
+	                               vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
 	bool lower_temporary_record_pointer_argument(const Node& arg,
 	                                             TypePtr param,
-	                                             vector<string>& args);
+	                                             vector<string>& args,
+	                                             vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
 	void lower_record_value_argument(const Node& arg,
 	                                 TypePtr param,
 	                                 vector<string>& args);

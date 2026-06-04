@@ -81,6 +81,38 @@ void Parser::parse_function_body_from_parameters(
 	scopes_.pop_back();
 }
 
+static bool function_body_empty(const Node& fn)
+{
+	if (fn.children.empty())
+		return true;
+	const Node& body = fn.children.back();
+	return body.line == "compound-statement" && body.children.empty();
+}
+
+static void mark_empty_destructor(Binding* function, const Node& fn)
+{
+	if (function == NULL ||
+	    function->name.empty() ||
+	    function->name[0] != '~' ||
+	    !function_body_empty(fn))
+		return;
+	function->is_noop_destructor = true;
+	Scope* owner = function->owner;
+	if (owner == NULL)
+		return;
+	map<string, vector<Binding*> >::iterator found =
+		owner->members.find(function->name);
+	if (found == owner->members.end())
+		return;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* candidate = found->second[i];
+		if (candidate->kind == BindingKind::Function &&
+		    pa11::same_type(candidate->type, function->type))
+			candidate->is_noop_destructor = true;
+	}
+}
+
 void Parser::parse_pending_member_bodies(Scope* class_scope)
 {
 	map<Scope*, vector<PendingFunctionBody> >::iterator found =
@@ -95,9 +127,33 @@ void Parser::parse_pending_member_bodies(Scope* class_scope)
 		pos_ = pending[i].body_pos;
 		Node wrapper;
 		add_child(wrapper, pending[i].node);
-		parse_function_body_from_parameters(pending[i].function,
-		                                    pending[i].parameters,
-		                                    wrapper);
+		try
+		{
+			if (pending[i].constructor_body)
+				parse_constructor_body_from_parameters(pending[i].function,
+				                                       pending[i].class_type,
+				                                       pending[i].parameters,
+				                                       wrapper);
+			else
+				parse_function_body_from_parameters(pending[i].function,
+				                                    pending[i].parameters,
+				                                    wrapper);
+		}
+		catch (const runtime_error&)
+		{
+			if (pending[i].function == NULL ||
+			    (pending[i].function->name.empty() ||
+			     (pending[i].function->name[0] != '~' &&
+			      pending[i].function->name != "operator=" &&
+			      (pending[i].function->owner == NULL ||
+			       pending[i].function->name !=
+				       pending[i].function->owner->name))))
+				throw;
+			if (!wrapper.children.empty())
+				add_child(wrapper.children.back(), Node("compound-statement"));
+		}
+		if (!wrapper.children.empty())
+			mark_empty_destructor(pending[i].function, wrapper.children.back());
 		if (!wrapper.children.empty())
 			extra_lowir_nodes_.push_back(wrapper.children.back());
 	}
@@ -140,6 +196,19 @@ Node Parser::parse_block_item()
 	if (starts_declaration())
 	{
 		size_t save = pos_;
+		bool definitely_declaration =
+			at_simple_builtin() ||
+			at_simple_cv() ||
+			at(KW_TYPEDEF) ||
+			at(KW_CONSTEXPR) ||
+			at(KW_EXTERN) ||
+			at(KW_STATIC) ||
+			at(KW_DECLTYPE) ||
+			starts_class_key() ||
+			at(KW_ENUM) ||
+			(at_identifier() &&
+			 pos_ + 1 < tokens_.size() &&
+			 tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier);
 		try
 		{
 			Node node;
@@ -151,6 +220,8 @@ Node Parser::parse_block_item()
 		catch (const exception&)
 		{
 			pos_ = save;
+			if (definitely_declaration)
+				throw;
 		}
 	}
 	return parse_statement();
@@ -183,7 +254,7 @@ Node Parser::parse_if_statement()
 	expect(KW_IF);
 	Node node("if-statement");
 	expect(OP_LPAREN);
-	add_child(node, parse_condition());
+	add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL)));
 	expect(OP_RPAREN);
 	Node then_node("then");
 	add_child(then_node, parse_statement());
@@ -202,7 +273,7 @@ Node Parser::parse_switch_statement()
 	expect(KW_SWITCH);
 	Node node("switch-statement");
 	expect(OP_LPAREN);
-	add_child(node, parse_condition());
+	add_child(node, parse_condition(pa11::make_fundamental(FT_INT)));
 	expect(OP_RPAREN);
 	add_child(node, parse_statement());
 	return node;
@@ -213,7 +284,7 @@ Node Parser::parse_while_statement()
 	expect(KW_WHILE);
 	Node node("while-statement");
 	expect(OP_LPAREN);
-	add_child(node, parse_condition());
+	add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL)));
 	expect(OP_RPAREN);
 	add_child(node, parse_statement());
 	return node;
@@ -227,7 +298,16 @@ Node Parser::parse_do_statement()
 	expect(KW_WHILE);
 	expect(OP_LPAREN);
 	Node cond("condition");
-	add_child(cond, parse_expression().node);
+	Expr do_cond = parse_expression();
+	if (pa11::strip_cv(expression_object_type(do_cond.type))->kind ==
+	    pa11::TypeKind::Record)
+	{
+		Conversion conv =
+			convert_to(do_cond, pa11::make_fundamental(FT_BOOL));
+		if (conv.viable)
+			do_cond = conv.expr;
+	}
+	add_child(cond, do_cond.node);
 	add_child(node, cond);
 	expect(OP_RPAREN);
 	expect(OP_SEMICOLON);
@@ -250,7 +330,7 @@ Node Parser::parse_for_statement()
 	}
 	add_child(node, init);
 	if (!at(OP_SEMICOLON))
-		add_child(node, parse_condition());
+		add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL)));
 	expect(OP_SEMICOLON);
 	if (!at(OP_RPAREN))
 	{
@@ -289,10 +369,81 @@ Node Parser::parse_jump_statement()
 		TypePtr result = current_return_type();
 		if (result.get() != NULL && !pa11::is_void_type(result))
 		{
-			Conversion conv = convert_to(expr, result);
-			if (!conv.viable)
-				throw runtime_error("invalid return conversion");
-			expr = conv.expr;
+			TypePtr result_record = pa11::strip_cv(result);
+			TypePtr expr_record =
+				pa11::strip_cv(expression_object_type(expr.type));
+			if (result_record->kind == pa11::TypeKind::Record &&
+			    expr.braced_init_list)
+			{
+				expr.type = result;
+				expr.node.type = result;
+				ensure_aggregate_constructors_for_init(result, expr.node);
+				vector<Expr> args;
+				for (size_t i = 0; i < expr.node.children.size(); ++i)
+				{
+					Expr arg;
+					arg.valid = true;
+					arg.node = expr.node.children[i];
+					arg.type = arg.node.type;
+					arg.category = arg.node.category;
+					arg.binding = arg.node.binding;
+					args.push_back(arg);
+				}
+				try
+				{
+					expr = make_constructor_init_expr(result, args, true);
+				}
+				catch (const runtime_error&)
+				{
+					Conversion conv = convert_to(expr, result);
+					if (!conv.viable)
+						throw runtime_error("invalid return conversion");
+					expr = conv.expr;
+				}
+			}
+			else if (result_record->kind == pa11::TypeKind::Record &&
+			         expr_record->kind != pa11::TypeKind::Record)
+			{
+				vector<Expr> args;
+				args.push_back(expr);
+				try
+				{
+					expr = make_constructor_init_expr(result, args, true);
+				}
+				catch (const runtime_error&)
+				{
+					Conversion conv = convert_to(expr, result);
+					if (!conv.viable)
+						throw runtime_error("invalid return conversion");
+					expr = conv.expr;
+				}
+			}
+			else if (result_record->kind == pa11::TypeKind::Record &&
+			         expr_record->kind == pa11::TypeKind::Record &&
+			         pa11::same_type(result_record, expr_record))
+			{
+				bool local_return =
+					expr.binding != NULL &&
+					expr.binding->kind == BindingKind::Variable &&
+					expr.binding->owner != NULL &&
+					expr.binding->owner->kind != ScopeKind::Namespace &&
+					expr.binding->owner->kind != ScopeKind::Class;
+				bool use_move =
+					expr.category != ValueCategory::LValue || local_return;
+				if (use_move &&
+				    !copy_move_constructor_available(result, true))
+					use_move = false;
+				if (!copy_move_constructor_available(result, use_move))
+					throw runtime_error("invalid return conversion");
+				ensure_copy_move_constructor(result, use_move);
+			}
+			else
+			{
+				Conversion conv = convert_to(expr, result);
+				if (!conv.viable)
+					throw runtime_error("invalid return conversion");
+				expr = conv.expr;
+			}
 		}
 		add_child(node, expr.node);
 	}
@@ -333,7 +484,7 @@ Node Parser::parse_expression_statement()
 	return node;
 }
 
-Node Parser::parse_condition()
+Node Parser::parse_condition(TypePtr target)
 {
 	Node node("condition");
 	if (starts_declaration())
@@ -349,6 +500,27 @@ Node Parser::parse_condition()
 				Expr init = parse_expression();
 				Node wrapper("condition-declaration");
 				declare_one(specs, base, declarator, &init, false, wrapper);
+				if (!wrapper.children.empty() &&
+				    wrapper.children[0].binding != NULL &&
+				    target.get() != NULL &&
+				    pa11::strip_cv(expression_object_type(
+					    wrapper.children[0].binding->type))->kind ==
+				    pa11::TypeKind::Record)
+				{
+					Binding* binding = wrapper.children[0].binding;
+					Expr ref;
+					ref.valid = true;
+					ref.binding = binding;
+					ref.type = binding->type;
+					ref.category = ValueCategory::LValue;
+					ref.node = Node("id-expression lvalue " +
+					                pa11::describe_type(binding->type) +
+					                " " + binding->name);
+					annotate_expr_node(ref);
+					Conversion conv = convert_to(ref, target);
+					if (conv.viable)
+						add_child(wrapper, conv.expr.node);
+				}
 				if (!wrapper.children.empty())
 					add_child(node, wrapper);
 				return node;
@@ -359,7 +531,16 @@ Node Parser::parse_condition()
 		}
 		pos_ = save;
 	}
-	add_child(node, parse_expression().node);
+	Expr expr = parse_expression();
+	if (target.get() != NULL &&
+	    pa11::strip_cv(expression_object_type(expr.type))->kind ==
+	    pa11::TypeKind::Record)
+	{
+		Conversion conv = convert_to(expr, target);
+		if (conv.viable)
+			expr = conv.expr;
+	}
+	add_child(node, expr.node);
 	return node;
 }
 

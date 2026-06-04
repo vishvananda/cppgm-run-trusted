@@ -1,5 +1,6 @@
 #include "pa12_internal.h"
 
+#include <algorithm>
 #include <cctype>
 #include <stdexcept>
 
@@ -86,7 +87,9 @@ Expr Parser::parse_assignment_expression()
 	{
 		string text = current().source;
 		++pos_;
-		Expr rhs = parse_assignment_expression();
+		Expr rhs = at(OP_LBRACE)
+			? parse_braced_init_list()
+			: parse_assignment_expression();
 		return make_assignment_expr(op, text, lhs, rhs);
 	}
 	return lhs;
@@ -207,6 +210,10 @@ Expr Parser::parse_unary_expression()
 		return parse_new_expression();
 	if (at(KW_NEW))
 		return parse_new_expression();
+	if (at(OP_COLON2) && lookahead(KW_DELETE, 1))
+		return parse_delete_expression();
+	if (at(KW_DELETE))
+		return parse_delete_expression();
 	TypePtr target;
 	if (expression_starts_type_name(target))
 	{
@@ -243,6 +250,71 @@ Expr Parser::parse_unary_expression()
 
 Expr Parser::parse_postfix_expression()
 {
+	if (at_identifier() && lookahead(OP_LPAREN, 1))
+	{
+		QualifiedName name = parse_id_expression_name();
+		expect(OP_LPAREN);
+		vector<Expr> args;
+		if (!at(OP_RPAREN))
+			args = parse_argument_list();
+		expect(OP_RPAREN);
+		Expr callee;
+		bool have_ordinary = false;
+		try
+		{
+			callee = make_id_expr(name);
+			have_ordinary = true;
+		}
+		catch (const runtime_error&)
+		{
+			if (name.qualified)
+				throw;
+		}
+		bool ordinary_member =
+			have_ordinary &&
+			callee.node.line.compare(0, 17, "member-expression") == 0;
+		if (!name.qualified && !ordinary_member)
+		{
+			vector<Binding*> candidates =
+				have_ordinary ? callee.overloads : vector<Binding*>();
+			set<Scope*> hidden_seen;
+			set<Scope*> namespace_seen;
+			for (size_t i = 0; i < args.size(); ++i)
+			{
+				collect_associated_hidden_friends(args[i].type,
+				                                  name.name,
+				                                  hidden_seen,
+				                                  candidates);
+				collect_associated_namespace_functions(args[i].type,
+				                                       name.name,
+				                                       namespace_seen,
+				                                       candidates);
+			}
+			for (size_t i = 0; i < candidates.size();)
+			{
+				if (find(candidates.begin(), candidates.begin() + i,
+				         candidates[i]) != candidates.begin() + i)
+					candidates.erase(candidates.begin() + i);
+				else
+					++i;
+			}
+			if (!candidates.empty())
+			{
+				callee.valid = true;
+				callee.binding = candidates[0];
+				callee.type = candidates[0]->type;
+				callee.category = ValueCategory::LValue;
+				callee.overloads = candidates;
+				callee.node = Node("id-expression lvalue " +
+				                   pa11::describe_type(callee.type) + " " +
+				                   candidates[0]->name);
+				annotate_expr_node(callee);
+			}
+		}
+		if (!callee.valid)
+			throw runtime_error("name not found");
+		return parse_postfix_suffixes(make_call_expr(callee, args));
+	}
 	return parse_postfix_suffixes(parse_primary_expression());
 }
 
@@ -298,7 +370,9 @@ Expr Parser::parse_postfix_suffixes(Expr expr)
 				expr = out;
 				continue;
 			}
-			string name = consume_identifier();
+			string name = at(KW_OPERATOR)
+				? consume_operator_function_name()
+				: consume_identifier();
 			expr = make_member_expr(expr, name, op);
 		}
 		else if (at(OP_INC) || at(OP_DEC))
@@ -403,17 +477,32 @@ Expr Parser::parse_new_expression()
 	}
 	TypePtr type;
 	if (!try_parse_type_name(type))
-		throw runtime_error("expected new type");
+	{
+		if (!at_simple_builtin() && !at_simple_cv())
+			throw runtime_error("expected new type");
+		DeclSpecs specs = parse_decl_specifier_seq(false);
+		type = type_from_decl_specs(specs);
+	}
+	bool array_new = false;
+	Expr bound;
+	if (consume(OP_LSQUARE))
+	{
+		array_new = true;
+		bound = parse_expression();
+		expect(OP_RSQUARE);
+	}
 	vector<Expr> args;
+	bool have_initializer_parens = false;
 	if (consume(OP_LPAREN))
 	{
+		have_initializer_parens = true;
 		if (!at(OP_RPAREN))
 			args = parse_argument_list();
 		expect(OP_RPAREN);
 	}
 	TypePtr record = pa11::strip_cv(type);
 	Binding* ctor = NULL;
-	if (record->kind == pa11::TypeKind::Record && record->scope != NULL)
+	if (!array_new && record->kind == pa11::TypeKind::Record && record->scope != NULL)
 	{
 		map<string, vector<Binding*> >::const_iterator found =
 			record->scope->members.find(record->scope->name);
@@ -433,17 +522,18 @@ Expr Parser::parse_new_expression()
 	if (ctor == NULL)
 			throw runtime_error("no matching constructor");
 	}
-	if (!have_placement)
-		throw runtime_error("unsupported new expression");
 	Binding* opnew = NULL;
-	vector<Binding*> news =
-		lookup_unqualified_set(current_scope(), "operatornew", pa11::LOOKUP_FUNCTION);
-	for (size_t i = 0; i < news.size(); ++i)
+	if (have_placement)
 	{
-		if (news[i]->type->parameters.size() == 2)
+		vector<Binding*> news =
+			lookup_unqualified_set(current_scope(), "operatornew", pa11::LOOKUP_FUNCTION);
+		for (size_t i = 0; i < news.size(); ++i)
 		{
-			opnew = news[i];
-			break;
+			if (news[i]->type->parameters.size() == 2)
+			{
+				opnew = news[i];
+				break;
+			}
 		}
 	}
 	Expr out;
@@ -451,12 +541,54 @@ Expr Parser::parse_new_expression()
 	out.binding = opnew;
 	out.type = pa11::make_pointer(type);
 	out.category = ValueCategory::PRValue;
-	out.node = Node("new-expression prvalue " + pa11::describe_type(out.type));
+	out.node = Node(string("new-expression prvalue ") +
+	                pa11::describe_type(out.type) +
+	                (array_new ? " array" : ""));
 	out.node.direct_call = ctor;
 	out.node.binding = opnew;
-	add_child(out.node, placement.node);
+	if (have_initializer_parens)
+		out.node.token_text = "paren-init";
+	if (have_placement)
+		add_child(out.node, placement.node);
+	if (array_new)
+		add_child(out.node, bound.node);
 	for (size_t i = 0; i < args.size(); ++i)
 		add_child(out.node, args[i].node);
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr Parser::parse_delete_expression()
+{
+	consume(OP_COLON2);
+	expect(KW_DELETE);
+	bool array_delete = false;
+	if (consume(OP_LSQUARE))
+	{
+		expect(OP_RSQUARE);
+		array_delete = true;
+	}
+	Expr operand = parse_unary_expression();
+	TypePtr ptr_type = pa11::strip_cv(expression_object_type(operand.type));
+	if (ptr_type->kind != pa11::TypeKind::Pointer)
+		throw runtime_error("delete operand is not pointer");
+	QualifiedName opname;
+	opname.name = array_delete ? "operatordelete[]" : "operatordelete";
+	opname.spelling = array_delete ? "::operatordelete[]" : "::operatordelete";
+	opname.qualified = true;
+	opname.qualifier = global_scope();
+	Expr op = make_builtin_id_expr(opname);
+	if (!op.valid || op.binding == NULL)
+		throw runtime_error("operator delete not found");
+	Expr out;
+	out.valid = true;
+	out.binding = op.binding;
+	out.type = pa11::make_fundamental(FT_VOID);
+	out.category = ValueCategory::PRValue;
+	out.node = Node(string("delete-expression prvalue void") +
+	                (array_delete ? " array" : ""));
+	out.node.binding = op.binding;
+	add_child(out.node, operand.node);
 	annotate_expr_node(out);
 	return out;
 }
@@ -683,7 +815,18 @@ Expr Parser::parse_braced_init_list()
 		if (at(OP_LBRACE))
 			add_child(init.node, parse_braced_init_list().node);
 		else
-			add_child(init.node, parse_assignment_expression().node);
+		{
+			Expr child = parse_assignment_expression();
+			if (child.category == ValueCategory::PRValue)
+			{
+				TypePtr object =
+					pa11::strip_cv(expression_object_type(child.type));
+				if (object->kind == pa11::TypeKind::Record &&
+				    object->base.get() != NULL)
+					ensure_default_destructor(object, true);
+			}
+			add_child(init.node, child.node);
+		}
 		if (!consume(OP_COMMA))
 			break;
 	}

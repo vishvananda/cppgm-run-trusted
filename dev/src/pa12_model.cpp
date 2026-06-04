@@ -15,6 +15,33 @@ bool seen_insert(set<Scope*>& seen, Scope* scope)
 	return scope != NULL && seen.insert(scope).second;
 }
 
+void append_unique(vector<Binding*>& out, Binding* binding)
+{
+	if (binding == NULL)
+		return;
+	if (find(out.begin(), out.end(), binding) == out.end())
+		out.push_back(binding);
+}
+
+void collect_direct_in_scope(Scope* scope,
+                             const string& name,
+                             int mask,
+                             vector<Binding*>& out)
+{
+	if (scope == NULL)
+		return;
+	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
+	if (it == scope->members.end())
+		return;
+	for (size_t i = 0; i < it->second.size(); ++i)
+	{
+		if (!pa11::binding_matches(it->second[i], mask) ||
+		    it->second[i]->is_hidden_friend)
+			continue;
+		append_unique(out, it->second[i]);
+	}
+}
+
 void collect_in_scope(Scope* scope,
                       const string& name,
                       int mask,
@@ -23,19 +50,7 @@ void collect_in_scope(Scope* scope,
 {
 	if (!seen_insert(seen, scope))
 		return;
-	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
-	if (it != scope->members.end())
-	{
-		for (size_t i = 0; i < it->second.size(); ++i)
-		{
-			if (pa11::binding_matches(it->second[i], mask))
-			{
-				if (it->second[i]->is_hidden_friend)
-					continue;
-				out.push_back(it->second[i]);
-			}
-		}
-	}
+	collect_direct_in_scope(scope, name, mask, out);
 	for (size_t i = 0; i < scope->using_directives.size(); ++i)
 		collect_in_scope(scope->using_directives[i], name, mask, seen, out);
 	if (!out.empty())
@@ -378,11 +393,38 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 {
 	for (Scope* scope = start; scope != NULL; scope = scope->parent)
 	{
-		vector<Binding*> out;
-		set<Scope*> seen;
-		collect_in_scope(scope, name, mask, seen, out);
-		if (!out.empty())
-			return out;
+		vector<Binding*> direct;
+		collect_direct_in_scope(scope, name, mask, direct);
+		if (!direct.empty())
+			return direct;
+		vector<Binding*> via_using;
+		for (size_t i = 0; i < scope->using_directives.size(); ++i)
+		{
+			vector<Binding*> one_directive;
+			set<Scope*> seen;
+			collect_in_scope(scope->using_directives[i],
+			                 name,
+			                 mask,
+			                 seen,
+			                 one_directive);
+			via_using.insert(via_using.end(),
+			                 one_directive.begin(),
+			                 one_directive.end());
+		}
+		if (!via_using.empty())
+			return via_using;
+		TypePtr record = pa11::record_type_for_scope(scope);
+		TypePtr base = record.get() != NULL && record->base.get() != NULL
+			? pa11::strip_cv(record->base) : TypePtr();
+		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL)
+		{
+			vector<Binding*> base_found;
+			set<Scope*> seen;
+			collect_in_scope(base->scope, name, mask, seen, base_found);
+			if (!base_found.empty())
+				return base_found;
+		}
 	}
 	return vector<Binding*>();
 }

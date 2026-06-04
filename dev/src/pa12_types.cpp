@@ -278,6 +278,21 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		}
 		(void)class_scope;
 	}
+	TypePtr class_type = pa11::record_type_for_scope(class_scope);
+	if (class_type.get() != NULL)
+	{
+		pa11::layout_record_type(class_type);
+		for (size_t i = 0; i < defaulted_move_assignments_.size(); ++i)
+		{
+			Binding* function = defaulted_move_assignments_[i];
+			if (function->owner != class_scope)
+				continue;
+			for (size_t j = 0; j < class_type->fields.size(); ++j)
+				if (pa11::type_has_const(class_type->fields[j]->type) ||
+				    pa11::is_reference_type(class_type->fields[j]->type))
+					deleted_functions_.insert(function);
+		}
+	}
 	parse_pending_member_bodies(class_scope);
 	class_protected_access_.pop_back();
 	class_private_access_.pop_back();
@@ -524,8 +539,16 @@ void Parser::parse_function_suffix_tail(Suffix& suffix)
 			suffix.function_cv |= consume_cv_flag();
 			continue;
 		}
-		if (consume(OP_AMP) || consume(OP_LAND))
+		if (consume(OP_AMP))
+		{
+			suffix.ref_qualifier = 1;
 			continue;
+		}
+		if (consume(OP_LAND))
+		{
+			suffix.ref_qualifier = 2;
+			continue;
+		}
 		if (consume(KW_NOEXCEPT))
 		{
 			suffix.noexcept_decl = true;

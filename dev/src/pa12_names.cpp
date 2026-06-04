@@ -7,6 +7,20 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+string Parser::conversion_operator_name(TypePtr type) const
+{
+	return "operator " + pa11::describe_type(type);
+}
+
+TypePtr Parser::parse_conversion_type_id()
+{
+	DeclSpecs specs = parse_decl_specifier_seq(true);
+	TypePtr type = type_from_decl_specs(specs);
+	vector<PtrOp> ops;
+	parse_ptr_prefix(ops);
+	return apply_ptr_ops(type, ops);
+}
+
 string Parser::consume_operator_function_name()
 {
 	expect(KW_OPERATOR);
@@ -27,6 +41,17 @@ string Parser::consume_operator_function_name()
 			return "operatordelete[]";
 		}
 		return "operatordelete";
+	}
+	{
+		size_t save = pos_;
+		try
+		{
+			return conversion_operator_name(parse_conversion_type_id());
+		}
+		catch (const exception&)
+		{
+			pos_ = save;
+		}
 	}
 	if (consume(OP_LPAREN))
 	{

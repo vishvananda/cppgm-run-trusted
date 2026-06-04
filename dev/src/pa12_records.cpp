@@ -72,9 +72,13 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	{
 		TypePtr direct_base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) :
 			TypePtr();
+		Binding* base_ctor = direct_base.get() != NULL &&
+		                      direct_base->kind == pa11::TypeKind::Record
+			? ensure_default_constructor(direct_base) : NULL;
 		if (direct_base.get() != NULL &&
 		    direct_base->kind == pa11::TypeKind::Record &&
-		    ensure_default_constructor(direct_base) != NULL)
+		    base_ctor != NULL &&
+		    !(base_ctor->is_generated_default_constructor && base_ctor->unwind_no))
 			init_actions.push_back(make_base_init_action(direct_base, NULL));
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
@@ -86,11 +90,21 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 			else
 			{
 				TypePtr field_bare = pa11::strip_cv(field->type);
-				if (ensure_default_constructor(field->type) != NULL ||
-				    (field_bare->kind == pa11::TypeKind::Array &&
-				     ensure_default_constructor(field_bare->base) != NULL))
+				Binding* field_ctor = ensure_default_constructor(field->type);
+				Binding* elem_ctor = field_bare->kind == pa11::TypeKind::Array
+					? ensure_default_constructor(field_bare->base) : NULL;
+				bool field_noop = field_ctor != NULL &&
+				                  field_ctor->is_generated_default_constructor &&
+				                  field_ctor->unwind_no;
+				bool elem_noop = elem_ctor != NULL &&
+				                 elem_ctor->is_generated_default_constructor &&
+				                 elem_ctor->unwind_no;
+				if ((field_ctor != NULL && !field_noop) ||
+				    (elem_ctor != NULL && !elem_noop))
 					init_actions.push_back(make_member_init_action(field, NULL));
-				else if (field_bare->kind == pa11::TypeKind::Record &&
+				else if (field_ctor == NULL &&
+				         elem_ctor == NULL &&
+				         field_bare->kind == pa11::TypeKind::Record &&
 				         field_bare->scope != NULL)
 				{
 					map<string, vector<Binding*> >::const_iterator ctors =
@@ -113,11 +127,11 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 					has_declared_constructor = true;
 	}
 	bool empty_implicit_record =
-		bare->fields.empty() && bare->base.get() == NULL &&
+		(bare->tag == "union" ||
+		 (bare->fields.empty() && bare->base.get() == NULL)) &&
 		!has_declared_constructor;
-	bool union_record = bare->tag == "union" && !has_declared_constructor;
 	if (init_actions.empty() && !force_trivial &&
-	    !empty_implicit_record && !union_record)
+	    !empty_implicit_record)
 	{
 		return NULL;
 	}
@@ -137,6 +151,7 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	                          bare->scope->name, fn_type);
 	ctor->is_inline_definition = true;
 	ctor->is_generated_default_constructor = true;
+	ctor->unwind_no = init_actions.empty();
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = ctor;
@@ -205,6 +220,7 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 	Binding* ctor = add_value(bare->scope, BindingKind::Function,
 	                          bare->scope->name, fn_type);
 	ctor->is_inline_definition = true;
+	ctor->is_generated_aggregate_constructor = true;
 	ctor->unwind_no = true;
 	function_parameter_names_[ctor] = names;
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
@@ -249,6 +265,660 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 
 namespace {
 
+Binding* find_copy_move_constructor_binding(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return NULL;
+	map<string, vector<Binding*> >::const_iterator found =
+		bare->scope->members.find(bare->scope->name);
+	if (found == bare->scope->members.end())
+		return NULL;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* binding = found->second[i];
+		if (binding->kind != BindingKind::Function ||
+		    binding->type->kind != pa11::TypeKind::Function ||
+		    binding->type->parameters.size() != 2 ||
+		    !pa11::is_reference_type(binding->type->parameters[1]))
+			continue;
+		TypePtr param = binding->type->parameters[1];
+		if (move && param->kind != pa11::TypeKind::RValueReference)
+			continue;
+		if (!move && param->kind != pa11::TypeKind::LValueReference)
+			continue;
+		if (pa11::same_type(pa11::strip_cv(param->base), bare))
+			return binding;
+	}
+	return NULL;
+}
+
+bool is_copy_move_assignment_for_record(Binding* binding, TypePtr record)
+{
+	if (binding->kind != BindingKind::Function ||
+	    binding->name != "operator=" ||
+	    binding->type->kind != pa11::TypeKind::Function ||
+	    binding->type->parameters.size() != 2 ||
+	    !pa11::is_reference_type(binding->type->parameters[1]))
+		return false;
+	TypePtr param = binding->type->parameters[1];
+	return pa11::same_type(pa11::strip_cv(param->base),
+	                       pa11::strip_cv(record));
+}
+
+Binding* find_copy_move_assignment_binding(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return NULL;
+	map<string, vector<Binding*> >::const_iterator found =
+		bare->scope->members.find("operator=");
+	if (found == bare->scope->members.end())
+		return NULL;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* binding = found->second[i];
+		if (!is_copy_move_assignment_for_record(binding, bare))
+			continue;
+		TypePtr param = binding->type->parameters[1];
+		if (move && param->kind == pa11::TypeKind::RValueReference)
+			return binding;
+		if (!move && param->kind == pa11::TypeKind::LValueReference)
+			return binding;
+	}
+	return NULL;
+}
+
+bool suppresses_implicit_move(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator ctors =
+		bare->scope->members.find(bare->scope->name);
+	if (ctors != bare->scope->members.end())
+		for (size_t i = 0; i < ctors->second.size(); ++i)
+			if (!ctors->second[i]->is_generated_copy_move_constructor &&
+			    (find_copy_move_constructor_binding(bare, false) == ctors->second[i] ||
+			     find_copy_move_constructor_binding(bare, true) == ctors->second[i]))
+				return true;
+	map<string, vector<Binding*> >::const_iterator dtors =
+		bare->scope->members.find("~" + bare->scope->name);
+	if (dtors != bare->scope->members.end())
+		for (size_t i = 0; i < dtors->second.size(); ++i)
+			if (dtors->second[i]->kind == BindingKind::Function)
+			{
+				if (!dtors->second[i]->is_generated_default_destructor)
+					return true;
+			}
+	map<string, vector<Binding*> >::const_iterator assigns =
+		bare->scope->members.find("operator=");
+	if (assigns != bare->scope->members.end())
+		for (size_t i = 0; i < assigns->second.size(); ++i)
+			if (!assigns->second[i]->is_generated_copy_move_assignment &&
+			    is_copy_move_assignment_for_record(assigns->second[i], bare))
+				return true;
+	return false;
+}
+
+bool type_needs_copy_move_helper(TypePtr type, bool move);
+
+bool constructor_binding_needs_helper(Binding* binding)
+{
+	return binding != NULL && binding->is_inline_definition;
+}
+
+bool record_needs_copy_move_helper(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	Binding* exact = find_copy_move_constructor_binding(bare, move);
+	if (constructor_binding_needs_helper(exact))
+		return true;
+	if (move &&
+	    constructor_binding_needs_helper(
+		    find_copy_move_constructor_binding(bare, false)))
+		return true;
+	pa11::layout_record_type(bare);
+	if (bare->base.get() != NULL &&
+	    type_needs_copy_move_helper(bare->base, move))
+		return true;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		if (bare->fields[i]->is_bit_field)
+			continue;
+		if (type_needs_copy_move_helper(bare->fields[i]->type, move))
+			return true;
+	}
+	return false;
+}
+
+bool type_needs_copy_move_helper(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array)
+		return type_needs_copy_move_helper(bare->base, move);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	return record_needs_copy_move_helper(bare, move);
+}
+
+bool type_needs_copy_move_assignment_helper(TypePtr type, bool move);
+
+bool assignment_binding_needs_helper(Binding* binding)
+{
+	return binding != NULL && binding->is_inline_definition;
+}
+
+bool record_needs_copy_move_assignment_helper(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	Binding* exact = find_copy_move_assignment_binding(bare, move);
+	if (assignment_binding_needs_helper(exact))
+		return true;
+	if (move &&
+	    assignment_binding_needs_helper(
+		    find_copy_move_assignment_binding(bare, false)))
+		return true;
+	pa11::layout_record_type(bare);
+	if (bare->base.get() != NULL &&
+	    type_needs_copy_move_assignment_helper(bare->base, move))
+		return true;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		if (bare->fields[i]->is_bit_field)
+			continue;
+		if (type_needs_copy_move_assignment_helper(bare->fields[i]->type, move))
+			return true;
+	}
+	return false;
+}
+
+bool type_needs_copy_move_assignment_helper(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array)
+		return type_needs_copy_move_assignment_helper(bare->base, move);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	return record_needs_copy_move_assignment_helper(bare, move);
+}
+
+Node make_parameter_lvalue(Binding* binding, TypePtr expr_type)
+{
+	Node node("id-expression lvalue " + pa11::describe_type(expr_type) +
+	          " " + binding->name);
+	node.binding = binding;
+	node.type = expr_type;
+	node.category = ValueCategory::LValue;
+	return node;
+}
+
+Node make_this_pointer_node(Binding* binding, TypePtr type)
+{
+	Node node("id-expression prvalue " + pa11::describe_type(type) +
+	          " this");
+	node.binding = binding;
+	node.type = type;
+	node.category = ValueCategory::PRValue;
+	return node;
+}
+
+Node make_deref_node(TypePtr type, const Node& inner)
+{
+	Node node("unary-expression lvalue " + pa11::describe_type(type) +
+	          " OP_STAR:*");
+	node.type = type;
+	node.category = ValueCategory::LValue;
+	node.has_op = true;
+	node.op = OP_STAR;
+	node.token_text = "*";
+	add_child(node, inner);
+	return node;
+}
+
+Expr expr_from_node(const Node& node)
+{
+	Expr expr;
+	expr.valid = true;
+	expr.node = node;
+	expr.type = node.type;
+	expr.category = node.category;
+	expr.binding = node.binding;
+	return expr;
+}
+
+Expr target_field_expr(Binding* field, const Node& object)
+{
+	Node member("member-expression lvalue " +
+	            pa11::describe_type(field->type) + " " + field->name);
+	member.binding = field;
+	member.type = field->type;
+	member.category = ValueCategory::LValue;
+	add_child(member, object);
+	return expr_from_node(member);
+}
+
+Expr target_base_expr(TypePtr base, const Node& object)
+{
+	TypePtr bare = pa11::strip_cv(base);
+	Node node("base-subobject-expression lvalue " +
+	          pa11::describe_type(bare));
+	node.type = bare;
+	node.category = ValueCategory::LValue;
+	add_child(node, object);
+	return expr_from_node(node);
+}
+
+Node make_move_cast(TypePtr type, const Node& inner)
+{
+	Node node("cast-expression xvalue " + pa11::describe_type(type));
+	node.type = type;
+	node.category = ValueCategory::XValue;
+	add_child(node, inner);
+	return node;
+}
+
+Node source_field_expr(Binding* field, const Node& object, bool move)
+{
+	Node member("member-expression lvalue " +
+	            pa11::describe_type(field->type) + " OP_DOT:" + field->name);
+	member.binding = field;
+	member.type = field->type;
+	member.category = ValueCategory::LValue;
+	member.has_op = true;
+	member.op = OP_DOT;
+	member.token_text = field->name;
+	add_child(member, object);
+	if (move)
+		return make_move_cast(field->type, member);
+	return member;
+}
+
+Node source_base_expr(TypePtr base, const Node& object, bool move)
+{
+	TypePtr bare = pa11::strip_cv(base);
+	Node node("base-subobject-expression lvalue " +
+	          pa11::describe_type(bare));
+	node.type = bare;
+	node.category = ValueCategory::LValue;
+	add_child(node, object);
+	if (move)
+		return make_move_cast(bare, node);
+	return node;
+}
+
+}  // namespace
+
+bool Parser::copy_move_constructor_available(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array)
+		return copy_move_constructor_available(bare->base, move);
+	if (bare->kind != pa11::TypeKind::Record)
+		return true;
+	Binding* exact = find_copy_move_constructor_binding(bare, move);
+	if (exact != NULL)
+	{
+		if (exact->is_defaulted &&
+		    !exact->is_inline_definition &&
+		    record_needs_copy_move_helper(bare, move))
+			ensure_copy_move_constructor(bare, move);
+		return deleted_functions_.find(exact) == deleted_functions_.end();
+	}
+	if (move)
+	{
+		Binding* copy = find_copy_move_constructor_binding(bare, false);
+		if (copy != NULL)
+			return deleted_functions_.find(copy) == deleted_functions_.end();
+		if (suppresses_implicit_move(bare))
+			return false;
+	}
+	if (!record_needs_copy_move_helper(bare, move))
+		return true;
+	Binding* generated = ensure_copy_move_constructor(bare, move);
+	return generated != NULL &&
+	       deleted_functions_.find(generated) == deleted_functions_.end();
+}
+
+Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return NULL;
+	Binding* existing = find_copy_move_constructor_binding(bare, move);
+	bool needs_helper = record_needs_copy_move_helper(bare, move);
+	if (existing != NULL &&
+	    (!existing->is_defaulted || !needs_helper))
+		return existing;
+	if (existing == NULL && move && suppresses_implicit_move(bare))
+		return NULL;
+	if (!needs_helper)
+		return NULL;
+	pa11::layout_record_type(bare);
+	bool deleted = false;
+	vector<Node> init_actions;
+	TypePtr direct_base = bare->base.get() != NULL
+		? pa11::strip_cv(bare->base) : TypePtr();
+	TypePtr source_record = move ? bare : pa11::make_cv(bare, pa11::CV_CONST);
+	TypePtr source_ref = move
+		? pa11::make_rvalue_reference(bare)
+		: pa11::make_lvalue_reference(source_record);
+	TypePtr this_type = pa11::make_pointer(bare);
+	vector<TypePtr> params;
+	params.push_back(this_type);
+	params.push_back(source_ref);
+	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
+	                                      params,
+	                                      false);
+	set<string>& generated = move ? generated_move_ctors_ : generated_copy_ctors_;
+	string key = bare->name + (move ? "::move" : "::copy");
+	if (generated.find(key) != generated.end())
+		return find_copy_move_constructor_binding(bare, move);
+	generated.insert(key);
+	Binding* ctor = existing != NULL
+		? existing
+		: add_value(bare->scope, BindingKind::Function,
+		            bare->scope->name, fn_type);
+	ctor->is_inline_definition = true;
+	if (existing == NULL)
+		ctor->is_generated_copy_move_constructor = true;
+	ctor->type = fn_type;
+	string other_name = "other";
+	if (existing != NULL)
+	{
+		map<Binding*, vector<string> >::const_iterator names =
+			function_parameter_names_.find(existing);
+		if (names != function_parameter_names_.end() &&
+		    names->second.size() > 1 &&
+		    !names->second[1].empty())
+			other_name = names->second[1];
+		else if (existing->is_defaulted)
+			other_name = "__param1";
+	}
+	function_parameter_names_[ctor] = vector<string>(2, "this");
+	function_parameter_names_[ctor][1] = other_name;
+	Scope* function_scope =
+		pa11::create_child_scope(bare->scope, ScopeKind::Function, ctor->name);
+	Binding* this_binding =
+		pa11::add_binding(function_scope,
+		                  BindingKind::Parameter,
+		                  "this",
+		                  this_type);
+	Binding* other_binding =
+		pa11::add_binding(function_scope,
+		                  BindingKind::Parameter,
+		                  other_name,
+		                  source_ref);
+	Node other = make_parameter_lvalue(other_binding, source_record);
+	uint64_t copied_prefix = 0;
+	if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record)
+	{
+		if (!copy_move_constructor_available(direct_base, move))
+			deleted = true;
+		Node source = source_base_expr(direct_base, other, move);
+		init_actions.push_back(
+			make_base_init_action(direct_base, &source));
+	}
+	else
+	{
+		for (size_t i = 0; i < bare->fields.size(); ++i)
+		{
+			Binding* field = bare->fields[i];
+			if (!type_needs_copy_move_helper(field->type, move))
+				continue;
+			copied_prefix = field->member_offset;
+			break;
+		}
+		if (copied_prefix != 0)
+		{
+			Node action("storage-copy-action");
+			action.type = bare;
+			action.has_constant_value = true;
+			action.constant_value = copied_prefix;
+			add_child(action, other);
+			init_actions.push_back(action);
+		}
+	}
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		Binding* field = bare->fields[i];
+		if (!copy_move_constructor_available(field->type, move))
+			deleted = true;
+		if (copied_prefix != 0 &&
+		    field->member_offset < copied_prefix &&
+		    !type_needs_copy_move_helper(field->type, move))
+			continue;
+		if (!type_needs_copy_move_helper(field->type, move))
+			continue;
+		Node source = source_field_expr(field, other, move);
+		init_actions.push_back(
+			make_member_init_action(field, &source));
+	}
+	if (init_actions.empty() &&
+	    existing != NULL &&
+	    existing->is_defaulted &&
+	    !bare->fields.empty())
+	{
+		Node action("storage-copy-action");
+		action.type = bare;
+		action.has_constant_value = true;
+		action.constant_value = pa11::type_size(bare);
+		add_child(action, other);
+		init_actions.push_back(action);
+	}
+	if (deleted)
+		deleted_functions_.insert(ctor);
+	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
+	        pa11::describe_type(fn_type));
+	fn.binding = ctor;
+	fn.type = fn_type;
+	Node this_node("parameter this " + pa11::describe_type(this_type));
+	this_node.binding = this_binding;
+	this_node.type = this_type;
+	add_child(fn, this_node);
+	Node other_node("parameter " + other_name + " " +
+	                pa11::describe_type(source_ref));
+	other_node.binding = other_binding;
+	other_node.type = source_ref;
+	add_child(fn, other_node);
+	Node body("compound-statement");
+	for (size_t i = 0; i < init_actions.size(); ++i)
+		add_child(body, init_actions[i]);
+	add_child(fn, body);
+	extra_lowir_nodes_.push_back(fn);
+	return ctor;
+}
+
+bool Parser::copy_move_assignment_available(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array)
+		return copy_move_assignment_available(bare->base, move);
+	if (bare->kind != pa11::TypeKind::Record)
+		return true;
+	Binding* exact = find_copy_move_assignment_binding(bare, move);
+	if (exact != NULL)
+		return deleted_functions_.find(exact) == deleted_functions_.end();
+	if (move)
+	{
+		Binding* copy = find_copy_move_assignment_binding(bare, false);
+		if (copy != NULL)
+			return deleted_functions_.find(copy) == deleted_functions_.end();
+		if (suppresses_implicit_move(bare))
+			return false;
+	}
+	Binding* generated = ensure_copy_move_assignment(bare, move);
+	return generated != NULL &&
+	       deleted_functions_.find(generated) == deleted_functions_.end();
+}
+
+Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return NULL;
+	Binding* existing = find_copy_move_assignment_binding(bare, move);
+	if (existing != NULL)
+		return existing;
+	if (move && suppresses_implicit_move(bare))
+		return NULL;
+	set<string>& generated =
+		move ? generated_move_assignments_ : generated_copy_assignments_;
+	string key = bare->name + (move ? "::move_assign" : "::copy_assign");
+	if (generated.find(key) != generated.end())
+		return find_copy_move_assignment_binding(bare, move);
+	generated.insert(key);
+
+	pa11::layout_record_type(bare);
+	TypePtr source_record = move ? bare : pa11::make_cv(bare, pa11::CV_CONST);
+	TypePtr source_ref = move
+		? pa11::make_rvalue_reference(bare)
+		: pa11::make_lvalue_reference(source_record);
+	TypePtr this_type = pa11::make_pointer(bare);
+	vector<TypePtr> params;
+	params.push_back(this_type);
+	params.push_back(source_ref);
+	TypePtr fn_type =
+		pa11::make_function(pa11::make_lvalue_reference(bare),
+		                    params,
+		                    false);
+	Binding* op =
+		add_value(bare->scope, BindingKind::Function, "operator=", fn_type);
+	op->is_generated_copy_move_assignment = true;
+	op->unwind_no = !record_needs_copy_move_assignment_helper(bare, move);
+	function_parameter_names_[op] = vector<string>(2, "this");
+	function_parameter_names_[op][1] = "other";
+	bool has_bitfield = false;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (bare->fields[i]->is_bit_field)
+			has_bitfield = true;
+	if (has_bitfield)
+		return op;
+	op->is_inline_definition = true;
+
+	Scope* function_scope =
+		pa11::create_child_scope(bare->scope, ScopeKind::Function, op->name);
+	Binding* this_binding =
+		pa11::add_binding(function_scope,
+		                  BindingKind::Parameter,
+		                  "this",
+		                  this_type);
+	Binding* other_binding =
+		pa11::add_binding(function_scope,
+		                  BindingKind::Parameter,
+		                  "other",
+		                  source_ref);
+	Node this_ptr = make_this_pointer_node(this_binding, this_type);
+	Node this_object = make_deref_node(bare, this_ptr);
+	Node other = make_parameter_lvalue(other_binding, source_record);
+	bool deleted = false;
+
+	Node fn("function-definition " + qualified_decl_name(op) + " " +
+	        pa11::describe_type(fn_type));
+	fn.binding = op;
+	fn.type = fn_type;
+	Node this_node("parameter this " + pa11::describe_type(this_type));
+	this_node.binding = this_binding;
+	this_node.type = this_type;
+	add_child(fn, this_node);
+	Node other_node("parameter other " + pa11::describe_type(source_ref));
+	other_node.binding = other_binding;
+	other_node.type = source_ref;
+	add_child(fn, other_node);
+	Node body("compound-statement");
+
+	TypePtr direct_base = bare->base.get() != NULL
+		? pa11::strip_cv(bare->base) : TypePtr();
+	bool base_needs_helper =
+		direct_base.get() != NULL &&
+		direct_base->kind == pa11::TypeKind::Record &&
+		type_needs_copy_move_assignment_helper(direct_base, move);
+	if (direct_base.get() != NULL &&
+	    direct_base->kind == pa11::TypeKind::Record)
+	{
+		if (!copy_move_assignment_available(direct_base, move))
+			deleted = true;
+		if (base_needs_helper)
+		{
+			Expr target = target_base_expr(direct_base, this_object);
+			Expr callee = make_member_expr(target, "operator=", ".");
+			vector<Expr> args;
+			args.push_back(expr_from_node(source_base_expr(direct_base,
+			                                               other,
+			                                               move)));
+			Expr call = make_call_expr(callee, args);
+			Node stmt("expression-statement");
+			add_child(stmt, call.node);
+			add_child(body, stmt);
+		}
+	}
+
+	uint64_t copied_prefix = pa11::type_size(bare);
+	if (base_needs_helper)
+		copied_prefix = 0;
+	else
+	{
+		for (size_t i = 0; i < bare->fields.size(); ++i)
+		{
+			Binding* field = bare->fields[i];
+			if (type_needs_copy_move_assignment_helper(field->type, move))
+			{
+				copied_prefix = field->member_offset;
+				break;
+			}
+		}
+	}
+	if (copied_prefix != 0)
+	{
+		Node action("storage-copy-action");
+		action.type = bare;
+		action.has_constant_value = true;
+		action.constant_value = copied_prefix;
+		add_child(action, other);
+		add_child(body, action);
+	}
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		Binding* field = bare->fields[i];
+		bool field_needs_helper =
+			type_needs_copy_move_assignment_helper(field->type, move);
+		Binding* field_assignment =
+			find_copy_move_assignment_binding(field->type, move);
+		if (field_assignment == NULL && move)
+			field_assignment =
+				find_copy_move_assignment_binding(field->type, false);
+		if (pa11::type_has_const(field->type) ||
+		    pa11::is_reference_type(field->type) ||
+		    ((field_needs_helper || field_assignment != NULL) &&
+		     !copy_move_assignment_available(field->type, move)))
+			deleted = true;
+		if (copied_prefix != 0 &&
+		    field->member_offset < copied_prefix &&
+		    !field_needs_helper)
+			continue;
+		if (!field_needs_helper)
+			continue;
+		Expr target = target_field_expr(field, this_object);
+		Expr callee = make_member_expr(target, "operator=", ".");
+		vector<Expr> args;
+		args.push_back(expr_from_node(source_field_expr(field, other, move)));
+		Expr call = make_call_expr(callee, args);
+		Node stmt("expression-statement");
+		add_child(stmt, call.node);
+		add_child(body, stmt);
+	}
+	if (deleted)
+		deleted_functions_.insert(op);
+	Node ret("return-statement");
+	add_child(ret, make_deref_node(bare, this_ptr));
+	add_child(body, ret);
+	add_child(fn, body);
+	extra_lowir_nodes_.push_back(fn);
+	return op;
+}
+
+namespace {
+
 Binding* find_destructor_binding(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -265,6 +935,14 @@ Binding* find_destructor_binding(TypePtr type)
 	return NULL;
 }
 
+bool destructor_needs_call(Binding* dtor)
+{
+	return dtor != NULL &&
+	       (!dtor->is_noop_destructor ||
+	        (!dtor->is_generated_default_destructor &&
+	         (dtor->is_private || dtor->is_protected_member)));
+}
+
 }  // namespace
 
 Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
@@ -279,20 +957,33 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 		return existing;
 	pa11::layout_record_type(bare);
 	vector<Node> fini_actions;
+	TypePtr direct_base = bare->base.get() != NULL
+		? pa11::strip_cv(bare->base) : TypePtr();
+	bool forced_nontrivial = false;
+	if (force_trivial &&
+	    direct_base.get() != NULL &&
+	    direct_base->kind == pa11::TypeKind::Record)
+	{
+		Binding* base_dtor = ensure_default_destructor(direct_base);
+		forced_nontrivial = destructor_needs_call(base_dtor);
+	}
 	if (!force_trivial || !bare->fields.empty())
 	{
 		for (size_t n = 0; n < bare->fields.size(); ++n)
 		{
 			size_t i = bare->fields.size() - 1 - n;
-			if (ensure_default_destructor(bare->fields[i]->type) != NULL)
+			Binding* field_dtor =
+				ensure_default_destructor(bare->fields[i]->type);
+			if (destructor_needs_call(field_dtor))
 				fini_actions.push_back(make_member_fini_action(bare->fields[i]));
 		}
-		TypePtr direct_base = bare->base.get() != NULL
-			? pa11::strip_cv(bare->base) : TypePtr();
 		if (direct_base.get() != NULL &&
-		    direct_base->kind == pa11::TypeKind::Record &&
-		    ensure_default_destructor(direct_base) != NULL)
-			fini_actions.push_back(make_base_fini_action(direct_base));
+		    direct_base->kind == pa11::TypeKind::Record)
+		{
+			Binding* base_dtor = ensure_default_destructor(direct_base);
+			if (destructor_needs_call(base_dtor))
+				fini_actions.push_back(make_base_fini_action(direct_base));
+		}
 	}
 	if (fini_actions.empty() && !force_trivial)
 		return NULL;
@@ -308,6 +999,8 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	Binding* dtor = add_value(bare->scope, BindingKind::Function,
 	                          "~" + bare->scope->name, fn_type);
 	dtor->is_inline_definition = true;
+	dtor->is_generated_default_destructor = true;
+	dtor->is_noop_destructor = fini_actions.empty() && !forced_nontrivial;
 	function_parameter_names_[dtor] = vector<string>(1, "this");
 	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
 	        pa11::describe_type(fn_type));
@@ -332,6 +1025,46 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	return dtor;
 }
 
+namespace {
+
+bool record_has_ordinary_member_function(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	for (map<string, vector<Binding*> >::const_iterator it =
+	     bare->scope->members.begin();
+	     it != bare->scope->members.end();
+	     ++it)
+	{
+		if (it->first == bare->scope->name ||
+		    it->first == "~" + bare->scope->name)
+			continue;
+		for (size_t i = 0; i < it->second.size(); ++i)
+			if (it->second[i]->kind == BindingKind::Function)
+				return true;
+	}
+	return false;
+}
+
+bool record_has_reference_field(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		TypePtr field = bare->fields[i]->type;
+		if (field->kind == pa11::TypeKind::LValueReference ||
+		    field->kind == pa11::TypeKind::RValueReference)
+			return true;
+	}
+	return false;
+}
+
+}  // namespace
+
 void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& init)
 {
 	if (init.line.compare(0, 16, "braced-init-list") != 0)
@@ -345,7 +1078,9 @@ void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& in
 	}
 	if (bare->kind != pa11::TypeKind::Record)
 		return;
-	if (pa11::type_has_const(type))
+	if (pa11::type_has_const(type) ||
+	    record_has_reference_field(bare) ||
+	    record_has_ordinary_member_function(bare))
 		ensure_aggregate_constructor(bare, init.children.size());
 	pa11::layout_record_type(bare);
 	for (size_t i = 0; i < init.children.size() && i < bare->fields.size(); ++i)
@@ -358,6 +1093,7 @@ Node Parser::make_member_init_action(Binding* field, const Node* init)
 	Node action("member-init-action " + field->name);
 	action.binding = field;
 	action.type = field->type;
+	TypePtr bare = pa11::strip_cv(field->type);
 	if (init != NULL)
 	{
 		Node child = *init;
@@ -368,8 +1104,7 @@ Node Parser::make_member_init_action(Binding* field, const Node* init)
 		}
 		add_child(action, child);
 	}
-	TypePtr bare = pa11::strip_cv(field->type);
-	if (bare->kind == pa11::TypeKind::Record)
+	if (bare->kind == pa11::TypeKind::Record && init == NULL)
 	{
 		action.direct_call = ensure_default_constructor(field->type);
 		if (init == NULL && action.direct_call != NULL)

@@ -203,6 +203,200 @@ string slot_lowir_type(TypePtr type)
 	return scalar_lowir_type(type);
 }
 
+namespace {
+
+bool is_copy_or_move_constructor(const Binding* binding, TypePtr record)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() < 2)
+		return false;
+	TypePtr param = binding->type->parameters[1];
+	if (!is_reference(param))
+		return false;
+	return pa11::same_type(pa11::strip_cv(param->base), pa11::strip_cv(record));
+}
+
+bool is_move_constructor(const Binding* binding, TypePtr record)
+{
+	if (!is_copy_or_move_constructor(binding, record))
+		return false;
+	return binding->type->parameters[1]->kind == TypeKind::RValueReference;
+}
+
+bool type_has_user_copy_move_or_destructor(TypePtr type);
+bool type_has_abi_indirect_special_member(TypePtr type);
+
+bool defaulted_member_affects_call_abi(const Binding* binding)
+{
+	if (binding->owner == NULL || binding->owner->kind != ScopeKind::Class)
+		return binding->is_inline_definition;
+	TypePtr record = pa11::record_type_for_scope(binding->owner);
+	if (record.get() == NULL)
+		return binding->is_inline_definition;
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->tag == "union")
+		return true;
+	pa11::layout_record_type(bare);
+	if (bare->base.get() != NULL &&
+	    type_has_abi_indirect_special_member(bare->base))
+		return true;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (type_has_abi_indirect_special_member(bare->fields[i]->type))
+			return true;
+	return false;
+}
+
+bool special_member_affects_call_abi(const Binding* binding)
+{
+	if (binding->is_generated_copy_move_constructor ||
+	    binding->is_generated_default_destructor)
+		return false;
+	if (!binding->is_defaulted)
+		return true;
+	return defaulted_member_affects_call_abi(binding);
+}
+
+bool record_has_user_copy_move_or_destructor(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != TypeKind::Record || bare->scope == NULL)
+		return false;
+	if (bare->tag == "union")
+		return true;
+	map<string, vector<Binding*> >::const_iterator ctors =
+		bare->scope->members.find(bare->scope->name);
+	if (ctors != bare->scope->members.end())
+	{
+		for (size_t i = 0; i < ctors->second.size(); ++i)
+		{
+			Binding* ctor = ctors->second[i];
+			if (is_copy_or_move_constructor(ctor, bare) &&
+			    special_member_affects_call_abi(ctor))
+				return true;
+		}
+	}
+	string dtor_name = "~" + bare->scope->name;
+	map<string, vector<Binding*> >::const_iterator dtors =
+		bare->scope->members.find(dtor_name);
+	if (dtors != bare->scope->members.end())
+	{
+		for (size_t i = 0; i < dtors->second.size(); ++i)
+			if (dtors->second[i]->kind == BindingKind::Function &&
+			    special_member_affects_call_abi(dtors->second[i]))
+				return true;
+	}
+	if (bare->base.get() != NULL &&
+	    type_has_user_copy_move_or_destructor(bare->base))
+		return true;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (type_has_user_copy_move_or_destructor(bare->fields[i]->type))
+			return true;
+	return false;
+}
+
+bool type_has_user_copy_move_or_destructor(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array)
+		return type_has_user_copy_move_or_destructor(bare->base);
+	if (bare->kind == TypeKind::Record)
+		return record_has_user_copy_move_or_destructor(bare);
+	return false;
+}
+
+bool record_has_abi_indirect_special_member(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != TypeKind::Record || bare->scope == NULL)
+		return false;
+	if (bare->tag == "union")
+		return true;
+	map<string, vector<Binding*> >::const_iterator ctors =
+		bare->scope->members.find(bare->scope->name);
+	if (ctors != bare->scope->members.end())
+	{
+		for (size_t i = 0; i < ctors->second.size(); ++i)
+		{
+			Binding* ctor = ctors->second[i];
+			if (is_move_constructor(ctor, bare) &&
+			    special_member_affects_call_abi(ctor))
+				return true;
+		}
+	}
+	string dtor_name = "~" + bare->scope->name;
+	map<string, vector<Binding*> >::const_iterator dtors =
+		bare->scope->members.find(dtor_name);
+	if (dtors != bare->scope->members.end())
+	{
+		for (size_t i = 0; i < dtors->second.size(); ++i)
+			if (dtors->second[i]->kind == BindingKind::Function &&
+			    special_member_affects_call_abi(dtors->second[i]))
+				return true;
+	}
+	if (bare->base.get() != NULL &&
+	    type_has_abi_indirect_special_member(bare->base))
+		return true;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (type_has_abi_indirect_special_member(bare->fields[i]->type))
+			return true;
+	return false;
+}
+
+bool type_has_abi_indirect_special_member(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array)
+		return type_has_abi_indirect_special_member(bare->base);
+	if (bare->kind == TypeKind::Record)
+		return record_has_abi_indirect_special_member(bare);
+	return false;
+}
+
+}  // namespace
+
+bool record_pass_by_address(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != TypeKind::Record)
+		return false;
+	if (pa11::type_size(bare) > 16)
+		return true;
+	return record_has_abi_indirect_special_member(bare);
+}
+
+bool record_return_by_address(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != TypeKind::Record)
+		return false;
+	if (pa11::type_size(bare) > 16)
+		return true;
+	return record_has_user_copy_move_or_destructor(bare);
+}
+
+bool record_has_nontrivial_value_transfer(TypePtr type)
+{
+	return record_has_user_copy_move_or_destructor(type);
+}
+
+bool record_has_storage_copy(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array)
+		return record_has_storage_copy(bare->base);
+	if (bare->kind != TypeKind::Record)
+		return true;
+	pa11::layout_record_type(bare);
+	if (bare->base.get() != NULL &&
+	    record_has_storage_copy(bare->base))
+		return true;
+	return !bare->fields.empty();
+}
+
 string lowir_literal(TypePtr type, const Node& node)
 {
 	if (node.token_text == "nullptr")
@@ -219,6 +413,9 @@ string lowir_parameter(TypePtr type)
 	string out = scalar_lowir_type(type);
 	if (is_reference(type))
 		out += " [pass=reference]";
+	else if (pa11::strip_cv(type)->kind == TypeKind::Record &&
+	         record_pass_by_address(type))
+		out = "ptr [pass=by_address]";
 	return out;
 }
 
@@ -305,12 +502,33 @@ vector<string> qualified_parts(const Binding* binding)
 	vector<string> out;
 	for (size_t i = parts.size(); i > 0; --i)
 		out.push_back(parts[i - 1]);
-	out.push_back(binding->name);
+	if (binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    !binding->name.empty() &&
+	    binding->name[0] == '~')
+		out.push_back("_" + binding->name.substr(1));
+	else if (binding->name == "operator=")
+		out.push_back("operator_");
+	else
+		out.push_back(binding->name);
 	return out;
 }
 
 string source_symbol_base(const Binding* binding)
 {
+	if (binding->owner != NULL &&
+	    binding->owner->parent == NULL &&
+	    binding->kind == BindingKind::Function)
+	{
+		if (binding->name == "operatornew")
+			return "operator_new";
+		if (binding->name == "operatordelete")
+			return "operator_delete";
+		if (binding->name == "operatornew[]")
+			return "operator_new__";
+		if (binding->name == "operatordelete[]")
+			return "operator_delete__";
+	}
 	vector<string> parts = qualified_parts(binding);
 	ostringstream out;
 	for (size_t i = 0; i < parts.size(); ++i)
@@ -332,6 +550,7 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 	{
 		string key = base + " " +
 		             string(binding->is_static_member ? "static " : "nonstatic ") +
+		             "refqual=" + to_string(binding->ref_qualifier) + " " +
 		             pa11::describe_type(binding->type);
 		map<string, string>::const_iterator fit = function_symbols.find(key);
 		if (fit != function_symbols.end())
@@ -350,8 +569,25 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 	{
 		string key = base + " " +
 		             string(binding->is_static_member ? "static " : "nonstatic ") +
+		             "refqual=" + to_string(binding->ref_qualifier) + " " +
 		             pa11::describe_type(binding->type);
 		function_symbols[key] = name;
+	}
+	return name;
+}
+
+string ProgramLowerer::constructor_symbol_for(const Binding* binding,
+                                              bool base_entry)
+{
+	string name = symbol_for(binding);
+	if (base_entry &&
+	    binding != NULL &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    binding->name == binding->owner->name)
+	{
+		demanded_constructor_base_entries.insert(binding);
+		name += "__base_entry";
 	}
 	return name;
 }

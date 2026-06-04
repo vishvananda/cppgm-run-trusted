@@ -6,6 +6,51 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool aggregate_blocking_constructor(Binding* binding)
+{
+	if (binding->kind != BindingKind::Function ||
+	    binding->type->kind != pa11::TypeKind::Function)
+		return false;
+	if (binding->is_generated_default_constructor ||
+	    binding->is_generated_aggregate_constructor ||
+	    binding->is_generated_copy_move_constructor)
+		return false;
+	if (binding->is_defaulted && binding->type->parameters.size() == 1)
+		return false;
+	return true;
+}
+
+bool record_has_aggregate_blocking_constructor(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator found =
+		bare->scope->members.find(bare->scope->name);
+	if (found == bare->scope->members.end())
+		return false;
+	for (size_t i = 0; i < found->second.size(); ++i)
+		if (aggregate_blocking_constructor(found->second[i]))
+			return true;
+	return false;
+}
+
+bool record_has_nonpublic_field(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (bare->fields[i]->is_private ||
+		    bare->fields[i]->is_protected_member)
+			return true;
+	return false;
+}
+
+}  // namespace
 
 void Parser::parse_declaration_into(Node& out)
 {
@@ -191,7 +236,9 @@ void Parser::parse_using_family(Node& out)
 					add_child(init, arg);
 				}
 				Node body("compound-statement");
-				add_child(body, make_base_init_action(base, &init));
+				Node base_action = make_base_init_action(base, &init);
+				base_action.direct_call = inherited;
+				add_child(body, base_action);
 				add_child(fn, body);
 				function_parameter_names_[ctor] = ctor_names;
 				extra_lowir_nodes_.push_back(fn);
@@ -253,14 +300,22 @@ void Parser::skip_template_parameter_clause()
 
 void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 {
+	if (parse_qualified_destructor_definition(out, emit_node))
+		return;
+	if (parse_qualified_conversion_definition(out, emit_node))
+		return;
 	if (parse_qualified_constructor_definition(out, emit_node))
 		return;
 	if (current_scope()->kind == ScopeKind::Class && consume(KW_EXPLICIT))
 	{
 		if (parse_constructor_like_member(true))
 			return;
-		throw runtime_error("explicit specifier without constructor");
+		if (parse_conversion_function_member(true))
+			return;
+		throw runtime_error("explicit specifier without constructor or conversion");
 	}
+	if (parse_conversion_function_member())
+		return;
 	if (parse_constructor_like_member())
 		return;
 	DeclSpecs specs = parse_decl_specifier_seq(false);
@@ -387,6 +442,87 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
+	if (at(OP_ASS) && lookahead(KW_DEFAULT, 1) &&
+	    declarator_function_suffix(declarator) != NULL)
+	{
+		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
+		          "simple-declaration");
+		const QualifiedName& qname = declarator_name(declarator);
+		bool defaulted_definition =
+			(current_scope()->kind != ScopeKind::Class &&
+			 qname.qualifier != NULL &&
+			 qname.qualifier->kind == ScopeKind::Class) ||
+			(current_scope()->kind == ScopeKind::Class &&
+			 qname.name == "operator=");
+		Binding* function =
+			declare_one(specs,
+			            base,
+			            declarator,
+			            NULL,
+			            defaulted_definition,
+			            node);
+		expect(OP_ASS);
+		expect(KW_DEFAULT);
+		if (function != NULL)
+			function->is_defaulted = true;
+		expect(OP_SEMICOLON);
+		if (defaulted_definition &&
+		    function != NULL &&
+		    !node.children.empty())
+		{
+			Node& fn = node.children.back();
+			map<Binding*, vector<string> >::const_iterator names =
+				function_parameter_names_.find(function);
+			for (size_t i = 0; i < function->type->parameters.size(); ++i)
+			{
+				string pname = i == 0 ? "this" : "__param" + to_string(i);
+				if (names != function_parameter_names_.end() &&
+				    i < names->second.size() &&
+				    !names->second[i].empty())
+					pname = names->second[i];
+				Node param("parameter " + pname + " " +
+				           pa11::describe_type(function->type->parameters[i]));
+				param.type = function->type->parameters[i];
+				add_child(fn, param);
+			}
+			add_child(fn, Node("compound-statement"));
+		}
+		if (function != NULL &&
+		    current_scope()->kind == ScopeKind::Class &&
+		    function->name == "operator=" &&
+		    function->type->kind == pa11::TypeKind::Function &&
+		    function->type->parameters.size() == 2 &&
+		    function->type->parameters[1]->kind ==
+		    pa11::TypeKind::RValueReference)
+		{
+			defaulted_move_assignments_.push_back(function);
+			TypePtr record = pa11::record_type_for_scope(current_scope());
+			if (record.get() != NULL)
+			{
+				pa11::layout_record_type(record);
+				for (size_t i = 0; i < record->fields.size(); ++i)
+					if (pa11::type_has_const(record->fields[i]->type) ||
+					    pa11::is_reference_type(record->fields[i]->type))
+						deleted_functions_.insert(function);
+			}
+		}
+		if (emit_node && !node.children.empty())
+		{
+			if (node.line.empty())
+			{
+				for (size_t i = 0; i < node.children.size(); ++i)
+					add_child(out, node.children[i]);
+			}
+			else
+				add_child(out, node);
+		}
+		else if (defaulted_definition &&
+		         current_scope()->kind == ScopeKind::Class &&
+		         !node.children.empty())
+			extra_lowir_nodes_.push_back(node.children.back());
+		return;
+	}
+
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
@@ -417,18 +553,32 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		if (!at(OP_RPAREN))
 		{
 			vector<Expr> args = parse_argument_list();
-			if (args.size() == 1)
+			TypePtr decl_type = apply_declarator(declarator, base);
+			if (pa11::strip_cv(decl_type)->kind == pa11::TypeKind::Record)
+			{
+				try
+				{
+					init = make_constructor_init_expr(decl_type, args, false);
+				}
+				catch (const runtime_error& err)
+				{
+					if (string(err.what()) != "no matching constructor" ||
+					    args.size() != 1)
+						throw;
+					TypePtr src_record =
+						pa11::strip_cv(expression_object_type(args[0].type));
+					TypePtr dst_record = pa11::strip_cv(decl_type);
+					if (src_record->kind != pa11::TypeKind::Record ||
+					    !pa11::same_type(src_record, dst_record))
+						throw;
+					init = args[0];
+				}
+			}
+			else if (args.size() == 1)
 				init = args[0];
 			else
 			{
-				TypePtr decl_type = apply_declarator(declarator, base);
-				if (pa11::strip_cv(decl_type)->kind != pa11::TypeKind::Record)
-					throw runtime_error("unsupported direct initializer");
-				init.valid = true;
-				init.braced_init_list = true;
-				init.node = Node("braced-init-list");
-				for (size_t i = 0; i < args.size(); ++i)
-					add_child(init.node, args[i].node);
+				throw runtime_error("unsupported direct initializer");
 			}
 			has_init = true;
 		}
@@ -518,6 +668,16 @@ bool Parser::parse_friend_declaration()
 	function->language_linkage = current_language_linkage();
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+	function->ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
+	if (pa11::strip_cv(type->base)->kind == pa11::TypeKind::Record &&
+	    pa11::strip_cv(type->base)->scope != NULL)
+		ensure_default_destructor(type->base);
+	for (size_t i = 0; i < type->parameters.size(); ++i)
+	{
+		TypePtr param = pa11::strip_cv(type->parameters[i]);
+		if (param->kind == pa11::TypeKind::Record && param->scope != NULL)
+			ensure_default_destructor(type->parameters[i]);
+	}
 	if (suffix != NULL)
 	{
 		vector<Expr> defaults;
@@ -550,404 +710,43 @@ bool Parser::parse_friend_declaration()
 	return true;
 }
 
-bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
-{
-	if (current_scope()->kind == ScopeKind::Class ||
-	    !(at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1))))
-		return false;
-	size_t save = pos_;
-	QualifiedName name;
-	try
-	{
-		name = parse_id_expression_name();
-	}
-	catch (const exception&)
-	{
-		pos_ = save;
-		return false;
-	}
-	if (name.qualifier == NULL ||
-	    name.qualifier->kind != ScopeKind::Class ||
-	    name.name != name.qualifier->name ||
-	    !at(OP_LPAREN))
-	{
-		pos_ = save;
-		return false;
-	}
-	Scope* class_scope = name.qualifier;
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL)
-	{
-		pos_ = save;
-		return false;
-	}
-
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	scopes_.push_back(class_scope);
-	parse_parameter_clause(parameters, variadic);
-	scopes_.pop_back();
-	expect(OP_RPAREN);
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-	if (!at(OP_LBRACE) && !at(OP_COLON))
-	{
-		pos_ = save;
-		return false;
-	}
-
-	vector<TypePtr> fn_params;
-	fn_params.push_back(pa11::make_pointer(class_type));
-	for (size_t i = 0; i < parameters.size(); ++i)
-		fn_params.push_back(parameters[i].type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      variadic);
-	Binding* ctor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          class_scope->name,
-	                          fn_type);
-	ctor->unwind_no = suffix.noexcept_decl;
-	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = ctor;
-	fn.type = fn_type;
-	Scope* function_scope =
-		pa11::create_child_scope(class_scope, ScopeKind::Function, ctor->name);
-	Binding* this_binding =
-		pa11::add_binding(function_scope,
-		                  BindingKind::Parameter,
-		                  "this",
-		                  fn_params[0]);
-	Node this_node("parameter this " + pa11::describe_type(fn_params[0]));
-	this_node.binding = this_binding;
-	this_node.type = fn_params[0];
-	add_child(fn, this_node);
-	for (size_t i = 0; i < parameters.size(); ++i)
-	{
-		string pname = parameters[i].name.empty()
-			? "__param" + to_string(i + 1) : parameters[i].name;
-		Binding* param =
-			pa11::add_binding(function_scope,
-			                  BindingKind::Parameter,
-			                  pname,
-			                  parameters[i].type);
-		Node param_node("parameter " + pname + " " +
-		                pa11::describe_type(parameters[i].type));
-		param_node.binding = param;
-		param_node.type = parameters[i].type;
-		add_child(fn, param_node);
-	}
-	if (consume(OP_COLON))
-		throw runtime_error("unsupported out-of-class constructor initializer");
-	scopes_.push_back(function_scope);
-	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
-	active_functions_.push_back(ctor);
-	Node body = parse_compound_statement();
-	active_functions_.pop_back();
-	function_returns_.pop_back();
-	scopes_.pop_back();
-	add_child(fn, body);
-	if (emit_node)
-		add_child(out, fn);
-	else
-		extra_lowir_nodes_.push_back(fn);
-	return true;
-}
-
-bool Parser::parse_constructor_like_member(bool explicit_ctor)
-{
-	if (current_scope()->kind != ScopeKind::Class || !at_identifier())
-		return false;
-	if (current().source != current_scope()->name)
-		return false;
-	if (!lookahead(OP_LPAREN, 1))
-		return false;
-	Scope* class_scope = current_scope();
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL)
-		throw runtime_error("constructor without class type");
-	consume_identifier();
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	parse_parameter_clause(parameters, variadic);
-	expect(OP_RPAREN);
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-
-	TypePtr this_type = pa11::make_pointer(class_type);
-	vector<TypePtr> fn_params;
-	fn_params.push_back(this_type);
-	for (size_t i = 0; i < parameters.size(); ++i)
-		fn_params.push_back(parameters[i].type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      variadic);
-	Binding* ctor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          class_scope->name,
-	                          fn_type);
-	vector<string> ctor_names(1, "this");
-	for (size_t i = 0; i < parameters.size(); ++i)
-		ctor_names.push_back(parameters[i].name);
-	function_parameter_names_[ctor] = ctor_names;
-	vector<Expr> ctor_defaults(fn_params.size());
-	bool have_ctor_defaults = false;
-	for (size_t i = 0; i < parameters.size(); ++i)
-	{
-		if (parameters[i].has_default)
-		{
-			ctor_defaults[i + 1] = parameters[i].default_value;
-			have_ctor_defaults = true;
-		}
-	}
-	if (have_ctor_defaults)
-		default_arguments_[ctor] = ctor_defaults;
-	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON);
-	ctor->is_explicit = explicit_ctor;
-	ctor->unwind_no = suffix.noexcept_decl;
-	ctor->is_private = !class_private_access_.empty() &&
-	                   class_private_access_.back();
-	ctor->is_protected_member = !class_protected_access_.empty() &&
-	                            class_protected_access_.back();
-	if (consume(OP_ASS))
-	{
-		if (consume(KW_DEFAULT) || consume(KW_DELETE))
-		{
-			expect(OP_SEMICOLON);
-			return true;
-		}
-		throw runtime_error("unsupported constructor definition");
-	}
-	if (consume(OP_SEMICOLON))
-		return true;
-
-	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = ctor;
-	fn.type = fn_type;
-	Scope* function_scope =
-		pa11::create_child_scope(class_scope, ScopeKind::Function, ctor->name);
-	Binding* this_binding =
-		pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
-	Node this_node("parameter this " + pa11::describe_type(this_type));
-	this_node.binding = this_binding;
-	this_node.type = this_type;
-	add_child(fn, this_node);
-	for (size_t i = 0; i < parameters.size(); ++i)
-	{
-		string pname = parameters[i].name.empty()
-			? "__param" + to_string(i + 1) : parameters[i].name;
-		Binding* param =
-			pa11::add_binding(function_scope,
-			                  BindingKind::Parameter,
-			                  pname,
-			                  parameters[i].type);
-		Node param_node("parameter " + pname + " " +
-		                pa11::describe_type(parameters[i].type));
-		param_node.binding = param;
-		param_node.type = parameters[i].type;
-		add_child(fn, param_node);
-	}
-
-	scopes_.push_back(function_scope);
-	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
-	active_functions_.push_back(ctor);
-	Node body("compound-statement");
-	map<Binding*, Node> explicit_member_initializers;
-	bool explicit_base = false;
-	Node explicit_base_action;
-	TypePtr direct_base = class_type->base.get() != NULL
-		? pa11::strip_cv(class_type->base) : TypePtr();
-	if (consume(OP_COLON))
-	{
-		for (;;)
-		{
-			string name = consume_identifier();
-			Binding* field = pa11::lookup_qualified(class_scope,
-			                                        name,
-			                                        pa11::LOOKUP_VARIABLE);
-			Expr init;
-			bool have_init = false;
-			if (at(OP_LBRACE))
-			{
-				init = parse_braced_init_list();
-				have_init = true;
-			}
-			else if (consume(OP_LPAREN))
-			{
-				if (!at(OP_RPAREN))
-				{
-					vector<Expr> args = parse_argument_list();
-					if (args.size() == 1)
-					{
-						init = args[0];
-						have_init = true;
-					}
-				}
-				else
-				{
-					init.valid = true;
-					init.category = ValueCategory::PRValue;
-					init.braced_init_list = true;
-					init.node = Node("braced-init-list");
-					have_init = true;
-				}
-				expect(OP_RPAREN);
-			}
-			if (direct_base.get() != NULL &&
-			    initializer_names_direct_base(class_scope, direct_base, name))
-			{
-				explicit_base_action =
-					make_base_init_action(direct_base,
-					                      have_init ? &init.node : NULL);
-				explicit_base = true;
-			}
-			else if (field != NULL && have_init)
-			{
-				explicit_member_initializers[field] =
-					make_member_init_action(field, &init.node);
-			}
-			else if (have_init)
-			{
-				Node action("member-init-action " + name);
-				action.token_text = name;
-				add_child(action, init.node);
-				add_child(body, action);
-			}
-			if (!consume(OP_COMMA))
-				break;
-		}
-	}
-	if (explicit_base)
-		add_child(body, explicit_base_action);
-	else if (direct_base.get() != NULL &&
-	         direct_base->kind == pa11::TypeKind::Record &&
-	         ensure_default_constructor(direct_base) != NULL)
-	{
-		Node base_action = make_base_init_action(direct_base, NULL);
-		add_child(body, base_action);
-	}
-	pa11::layout_record_type(class_type);
-	for (size_t i = 0; i < class_type->fields.size(); ++i)
-	{
-		Binding* field = class_type->fields[i];
-		map<Binding*, Node>::const_iterator explicit_init =
-			explicit_member_initializers.find(field);
-		if (explicit_init != explicit_member_initializers.end())
-		{
-			add_child(body, explicit_init->second);
-			continue;
-		}
-		map<Binding*, Node>::const_iterator init =
-			default_member_initializers_.find(field);
-		if (init != default_member_initializers_.end())
-			add_child(body, make_member_init_action(field, &init->second));
-		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record)
-			add_child(body, make_member_init_action(field, NULL));
-	}
-	Node parsed_body = parse_compound_statement();
-	for (size_t i = 0; i < parsed_body.children.size(); ++i)
-		add_child(body, parsed_body.children[i]);
-	active_functions_.pop_back();
-	function_returns_.pop_back();
-	scopes_.pop_back();
-	add_child(fn, body);
-	extra_lowir_nodes_.push_back(fn);
-	return true;
-}
-
-bool Parser::parse_destructor_like_member()
-{
-	if (current_scope()->kind != ScopeKind::Class || !at(OP_COMPL))
-		return false;
-	size_t save = pos_;
-	++pos_;
-	if (!at_identifier() || current().source != current_scope()->name)
-	{
-		pos_ = save;
-		return false;
-	}
-	Scope* class_scope = current_scope();
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL)
-		throw runtime_error("destructor without class type");
-	string dtor_name = "~" + consume_identifier();
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	parse_parameter_clause(parameters, variadic);
-	expect(OP_RPAREN);
-	if (!parameters.empty() || variadic)
-		throw runtime_error("destructor cannot have parameters");
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-
-	TypePtr this_type = pa11::make_pointer(class_type);
-	vector<TypePtr> fn_params(1, this_type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      false);
-	Binding* dtor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          dtor_name,
-	                          fn_type);
-	function_parameter_names_[dtor] = vector<string>(1, "this");
-	dtor->is_inline_definition = at(OP_LBRACE);
-	dtor->unwind_no = suffix.noexcept_decl;
-	dtor->is_private = !class_private_access_.empty() &&
-	                   class_private_access_.back();
-	dtor->is_protected_member = !class_protected_access_.empty() &&
-	                            class_protected_access_.back();
-	if (consume(OP_ASS))
-	{
-		if (consume(KW_DEFAULT) || consume(KW_DELETE))
-		{
-			expect(OP_SEMICOLON);
-			return true;
-		}
-		throw runtime_error("unsupported destructor definition");
-	}
-	if (consume(OP_SEMICOLON))
-		return true;
-
-	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = dtor;
-	fn.type = fn_type;
-	Scope* function_scope =
-		pa11::create_child_scope(class_scope, ScopeKind::Function, dtor->name);
-	Binding* this_binding =
-		pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
-	Node this_node("parameter this " + pa11::describe_type(this_type));
-	this_node.binding = this_binding;
-	this_node.type = this_type;
-	add_child(fn, this_node);
-
-	scopes_.push_back(function_scope);
-	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
-	active_functions_.push_back(dtor);
-	Node body = parse_compound_statement();
-	active_functions_.pop_back();
-	function_returns_.pop_back();
-	scopes_.pop_back();
-	add_child(fn, body);
-	extra_lowir_nodes_.push_back(fn);
-	return true;
-}
 
 void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 {
 	TypePtr record = pa11::strip_cv(type);
 	pa11::layout_record_type(record);
+	if (init.braced_init_list && record->scope != NULL)
+	{
+		map<string, vector<Binding*> >::const_iterator ctors =
+			record->scope->members.find(record->scope->name);
+		if (ctors != record->scope->members.end())
+		{
+			for (size_t i = 0; i < ctors->second.size(); ++i)
+			{
+				Binding* ctor = ctors->second[i];
+				if (ctor->kind == BindingKind::Function &&
+				    ctor->type->kind == pa11::TypeKind::Function &&
+				    !ctor->is_explicit &&
+				    ctor->type->parameters.size() ==
+					    init.node.children.size() + 1)
+					return;
+			}
+		}
+	}
 	if (init.braced_init_list)
 	{
-		for (size_t i = 0; i < record->fields.size(); ++i)
-			if (default_member_initializers_.find(record->fields[i]) !=
-			    default_member_initializers_.end())
-				throw runtime_error("default member initializer disqualifies aggregate");
+		bool aggregate_candidate =
+			!record_has_aggregate_blocking_constructor(record);
+		if (aggregate_candidate)
+		{
+			if (record_has_nonpublic_field(record))
+				throw runtime_error("non-public member disqualifies aggregate");
+			for (size_t i = 0; i < record->fields.size(); ++i)
+				if (default_member_initializers_.find(record->fields[i]) !=
+				    default_member_initializers_.end())
+					throw runtime_error(
+						"default member initializer disqualifies aggregate");
+		}
 	}
 	size_t arg_count = init.braced_init_list ? init.node.children.size() : 1;
 	if (record->scope == NULL)
@@ -957,10 +756,43 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 	if (found == record->scope->members.end())
 		return;
 	for (size_t i = 0; i < found->second.size(); ++i)
-		if (found->second[i]->kind == BindingKind::Function &&
-		    found->second[i]->is_explicit &&
-		    found->second[i]->type->parameters.size() == arg_count + 1)
-				throw runtime_error("explicit constructor in copy initialization");
+	{
+		Binding* ctor = found->second[i];
+		if (ctor->kind != BindingKind::Function ||
+		    !ctor->is_explicit ||
+		    ctor->type->parameters.size() != arg_count + 1)
+			continue;
+		bool viable = true;
+		for (size_t j = 0; j < arg_count; ++j)
+		{
+			Expr arg;
+			if (init.braced_init_list)
+			{
+				arg.valid = true;
+				arg.node = init.node.children[j];
+				arg.type = arg.node.type;
+				arg.category = arg.node.category;
+				arg.binding = arg.node.binding;
+			}
+			else
+				arg = init;
+			try
+			{
+				Conversion conv =
+					convert_to(arg, ctor->type->parameters[j + 1]);
+				if (!conv.viable)
+					viable = false;
+			}
+			catch (const runtime_error&)
+			{
+				viable = false;
+			}
+			if (!viable)
+				break;
+		}
+		if (viable)
+			throw runtime_error("explicit constructor in copy initialization");
+	}
 }
 
 Binding* Parser::declare_function_entity(const DeclSpecs& specs,
@@ -972,12 +804,33 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
                                          bool nonstatic_member_function,
                                          Node& out)
 {
-	Binding* function = add_value(target, BindingKind::Function, name, type);
+	const Suffix* suffix = declarator_function_suffix(declarator);
+	int ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
+	bool is_static_member = target->kind == ScopeKind::Class && specs.static_decl;
+	Binding* function = NULL;
+	map<string, vector<Binding*> >::iterator found = target->members.find(name);
+	if (found != target->members.end())
+	{
+		for (size_t i = 0; i < found->second.size(); ++i)
+		{
+			Binding* candidate = found->second[i];
+			if (candidate->kind == BindingKind::Function &&
+			    pa11::same_type(candidate->type, type) &&
+			    candidate->ref_qualifier == ref_qualifier &&
+			    candidate->is_static_member == is_static_member)
+			{
+				function = candidate;
+				break;
+			}
+		}
+	}
+	if (function == NULL)
+		function = add_value(target, BindingKind::Function, name, type);
 	function->language_linkage = current_language_linkage();
-	function->is_static_member =
-		target->kind == ScopeKind::Class && specs.static_decl;
+	function->is_static_member = is_static_member;
 	function->is_inline_definition =
-		function_definition && current_scope()->kind == ScopeKind::Class;
+		function->is_inline_definition ||
+		(function_definition && current_scope()->kind == ScopeKind::Class);
 	function->is_private =
 		target->kind == ScopeKind::Class &&
 		!class_private_access_.empty() &&
@@ -986,8 +839,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		target->kind == ScopeKind::Class &&
 		!class_protected_access_.empty() &&
 		class_protected_access_.back();
-	const Suffix* suffix = declarator_function_suffix(declarator);
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+	function->ref_qualifier = ref_qualifier;
 	if (suffix != NULL)
 	{
 		vector<Expr> defaults;
@@ -1015,6 +868,139 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	return function;
 }
 
+void Parser::apply_braced_variable_initializer(Scope* target,
+                                               Binding* variable,
+                                               TypePtr type,
+                                               const Expr& init,
+                                               Node& var)
+{
+	Node list = init.node;
+	if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record)
+	{
+		vector<Expr> args;
+		for (size_t i = 0; i < init.node.children.size(); ++i)
+		{
+			Expr arg;
+			arg.valid = true;
+			arg.node = init.node.children[i];
+			arg.type = arg.node.type;
+			arg.category = arg.node.category;
+			arg.binding = arg.node.binding;
+			args.push_back(arg);
+		}
+		try
+		{
+			Expr constructed =
+				make_constructor_init_expr(type, args, init.copy_initialization);
+			list = constructed.node;
+		}
+		catch (const runtime_error& err)
+		{
+			if (string(err.what()) != "no matching constructor")
+				throw;
+		}
+	}
+	ensure_aggregate_constructors_for_init(type, list);
+	list.line += " lvalue " + pa11::describe_type(type);
+	list.type = type;
+	if (target->kind == ScopeKind::Class && !variable->is_static_member)
+		default_member_initializers_[variable] = list;
+	add_child(var, list);
+}
+
+void Parser::apply_record_variable_initializer(Scope* target,
+                                               Binding* variable,
+                                               TypePtr type,
+                                               const Expr& init,
+                                               Node& var)
+{
+	Expr constructed;
+	TypePtr src_record = pa11::strip_cv(expression_object_type(init.type));
+	TypePtr dst_record = pa11::strip_cv(type);
+	if (src_record->kind == pa11::TypeKind::Record &&
+	    pa11::same_type(src_record, dst_record) &&
+	    init.category == ValueCategory::PRValue)
+	{
+		constructed = init;
+		if (target->kind == ScopeKind::Class && !variable->is_static_member)
+			default_member_initializers_[variable] = constructed.node;
+		add_child(var, constructed.node);
+		return;
+	}
+	try
+	{
+		vector<Expr> args;
+		args.push_back(init);
+		constructed = make_constructor_init_expr(type, args, init.copy_initialization);
+	}
+	catch (const runtime_error& err)
+	{
+		if (string(err.what()) != "no matching constructor")
+			throw;
+		if (src_record->kind != pa11::TypeKind::Record ||
+		    !pa11::same_type(src_record, dst_record))
+			throw;
+		bool declared_copy_or_move = false;
+		bool trivial_defaulted_match = false;
+		if (dst_record->scope != NULL)
+		{
+			map<string, vector<Binding*> >::const_iterator found =
+				dst_record->scope->members.find(dst_record->scope->name);
+			if (found != dst_record->scope->members.end())
+				for (size_t i = 0; i < found->second.size(); ++i)
+				{
+					Binding* ctor = found->second[i];
+					if (ctor->kind == BindingKind::Function &&
+					    ctor->type->kind == pa11::TypeKind::Function &&
+					    ctor->type->parameters.size() == 2 &&
+					    pa11::is_reference_type(ctor->type->parameters[1]) &&
+					    pa11::same_type(
+						    pa11::strip_cv(ctor->type->parameters[1]->base),
+						    dst_record))
+					{
+						TypePtr param = ctor->type->parameters[1];
+						if (ctor->is_defaulted &&
+						    !ctor->is_inline_definition &&
+						    ((init.category == ValueCategory::XValue &&
+						      param->kind == pa11::TypeKind::RValueReference) ||
+						     (init.category != ValueCategory::XValue &&
+						      param->kind == pa11::TypeKind::LValueReference)))
+							trivial_defaulted_match = true;
+						else
+							declared_copy_or_move = true;
+					}
+				}
+		}
+		if (declared_copy_or_move && !trivial_defaulted_match)
+			throw;
+		constructed = init;
+	}
+	if (target->kind == ScopeKind::Class && !variable->is_static_member)
+		default_member_initializers_[variable] = constructed.node;
+	add_child(var, constructed.node);
+}
+
+void Parser::apply_scalar_variable_initializer(const DeclSpecs& specs,
+                                               Scope* target,
+                                               Binding* variable,
+                                               TypePtr type,
+                                               const Expr& init,
+                                               Node& var)
+{
+	Conversion conv = convert_to(init, type);
+	if (!conv.viable)
+		throw runtime_error("invalid initializer conversion");
+	if (target->kind == ScopeKind::Class && !variable->is_static_member)
+		default_member_initializers_[variable] = conv.expr.node;
+	add_child(var, conv.expr.node);
+	if ((specs.constexpr_decl || pa11::type_has_const(type)) &&
+	    conv.expr.has_constant_value)
+	{
+		variable->has_constant = true;
+		variable->constant_value = conv.expr.constant_value;
+	}
+}
+
 void Parser::apply_variable_initializer(const DeclSpecs& specs,
                                         Scope* target,
                                         Binding* variable,
@@ -1030,34 +1016,15 @@ void Parser::apply_variable_initializer(const DeclSpecs& specs,
 	{
 		if (init->braced_init_list)
 		{
-			Node list = init->node;
-			ensure_aggregate_constructors_for_init(type, list);
-			list.line += " lvalue " + pa11::describe_type(type);
-			list.type = type;
-			if (target->kind == ScopeKind::Class && !variable->is_static_member)
-				default_member_initializers_[variable] = list;
-			add_child(var, list);
+			apply_braced_variable_initializer(target, variable, type, *init, var);
 			return;
 		}
 		if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record)
 		{
-			if (target->kind == ScopeKind::Class && !variable->is_static_member)
-				default_member_initializers_[variable] = init->node;
-			add_child(var, init->node);
+			apply_record_variable_initializer(target, variable, type, *init, var);
 			return;
 		}
-		Conversion conv = convert_to(*init, type);
-		if (!conv.viable)
-			throw runtime_error("invalid initializer conversion");
-		if (target->kind == ScopeKind::Class && !variable->is_static_member)
-			default_member_initializers_[variable] = conv.expr.node;
-		add_child(var, conv.expr.node);
-		if ((specs.constexpr_decl || pa11::type_has_const(type)) &&
-		    conv.expr.has_constant_value)
-		{
-			variable->has_constant = true;
-			variable->constant_value = conv.expr.constant_value;
-		}
+		apply_scalar_variable_initializer(specs, target, variable, type, *init, var);
 	}
 	else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record &&
 	         ensure_default_constructor(type) != NULL)

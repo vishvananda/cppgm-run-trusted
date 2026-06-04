@@ -14,8 +14,22 @@ Value FunctionLowerer::emit_logical_binary(const Node& expr)
 	else
 		branch_logical_operand(expr.children[0], sh, rhs);
 	start_block(rhs);
-	Value rv = bool_value(emit_rvalue(expr.children[1]), expr.children[1].type);
-	instr("store i64 " + rv.text + ", $" + slot);
+	if (starts_with(expr.children[1].line, "call-expression"))
+	{
+		logical_call_result_slot_ = slot;
+		logical_call_result_type_ = expr.children[1].type;
+		logical_call_result_consumed_ = false;
+	}
+	Value raw = emit_rvalue(expr.children[1]);
+	if (!logical_call_result_consumed_)
+	{
+		Value rv = bool_value(raw, expr.children[1].type);
+		instr("store i64 " + rv.text + ", $" + slot);
+		emit_pending_temp_cleanups();
+	}
+	logical_call_result_slot_.clear();
+	logical_call_result_type_.reset();
+	logical_call_result_consumed_ = false;
 	terminate("jump ^" + end);
 	start_block(sh);
 	instr("store i64 " + string(expr.op == OP_LAND ? "0" : "1") + ", $" +

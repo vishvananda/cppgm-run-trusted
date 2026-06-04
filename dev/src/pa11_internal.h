@@ -94,6 +94,11 @@ struct Binding
 	bool is_static_member;
 	bool is_inline_definition;
 	bool is_generated_default_constructor;
+	bool is_generated_aggregate_constructor;
+	bool is_generated_copy_move_constructor;
+	bool is_generated_copy_move_assignment;
+	bool is_generated_default_destructor;
+	bool is_defaulted;
 	bool is_explicit;
 	bool is_private;
 	bool is_protected_member;
@@ -101,6 +106,8 @@ struct Binding
 	bool is_hidden_friend;
 	bool is_thread_local;
 	bool unwind_no;
+	int ref_qualifier;
+	bool is_noop_destructor;
 	uint64_t member_offset;
 	bool is_bit_field;
 	uint64_t bit_width;

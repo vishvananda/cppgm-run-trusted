@@ -85,6 +85,7 @@ Suffix::Suffix(SuffixKind k)
 	  bound(0),
 	  variadic(false),
 	  function_cv(pa11::CV_NONE),
+	  ref_qualifier(0),
 	  noexcept_decl(false),
 	  trailing_return()
 {
@@ -94,7 +95,8 @@ Declarator::Declarator() : has_name(false)
 {
 }
 
-PendingFunctionBody::PendingFunctionBody() : function(NULL), body_pos(0)
+PendingFunctionBody::PendingFunctionBody()
+	: function(NULL), body_pos(0), constructor_body(false)
 {
 }
 

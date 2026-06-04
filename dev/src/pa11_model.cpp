@@ -156,6 +156,11 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_static_member(false),
 	  is_inline_definition(false),
 	  is_generated_default_constructor(false),
+	  is_generated_aggregate_constructor(false),
+	  is_generated_copy_move_constructor(false),
+	  is_generated_copy_move_assignment(false),
+	  is_generated_default_destructor(false),
+	  is_defaulted(false),
 	  is_explicit(false),
 	  is_private(false),
 	  is_protected_member(false),
@@ -163,6 +168,8 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_hidden_friend(false),
 	  is_thread_local(false),
 	  unwind_no(false),
+	  ref_qualifier(0),
+	  is_noop_destructor(false),
 	  member_offset(0),
 	  is_bit_field(false),
 	  bit_width(0),
@@ -536,6 +543,15 @@ void layout_record_type(TypePtr type)
 			uint64_t member_size = type_size(member->type);
 			if (member_align == 0)
 				member_align = 1;
+			if (bare->tag == "union")
+			{
+				member->member_offset = 0;
+				member->bit_offset = 0;
+				bare->fields.push_back(member);
+				offset = max<uint64_t>(offset, member_size);
+				align = max<uint64_t>(align, member_align);
+				continue;
+			}
 			if (member->is_bit_field)
 			{
 				uint64_t unit_bits = member_size * 8;
@@ -703,8 +719,19 @@ Binding* add_using_declaration(Scope* scope,
 	binding->is_static_member = target->is_static_member;
 	binding->is_generated_default_constructor =
 		target->is_generated_default_constructor;
+	binding->is_generated_aggregate_constructor =
+		target->is_generated_aggregate_constructor;
+	binding->is_generated_copy_move_constructor =
+		target->is_generated_copy_move_constructor;
+	binding->is_generated_copy_move_assignment =
+		target->is_generated_copy_move_assignment;
+	binding->is_generated_default_destructor =
+		target->is_generated_default_destructor;
+	binding->is_defaulted = target->is_defaulted;
 	binding->is_mutable_member = target->is_mutable_member;
 	binding->is_thread_local = target->is_thread_local;
+	binding->ref_qualifier = target->ref_qualifier;
+	binding->is_noop_destructor = target->is_noop_destructor;
 	return binding;
 }
 
