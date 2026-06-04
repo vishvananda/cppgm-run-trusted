@@ -130,6 +130,8 @@ bool record_has_base(TypePtr source, TypePtr target);
 bool is_class_constructor_binding(const Binding* binding);
 bool is_class_destructor_binding(const Binding* binding);
 TypePtr class_record_for_member(const Binding* binding);
+bool record_is_template_specialization(TypePtr record);
+bool binding_has_template_specialization_context(const Binding* binding);
 string record_lowir_name(TypePtr record);
 string vtable_symbol_for_record(TypePtr record);
 string rtti_symbol_for_record(TypePtr record);

@@ -136,6 +136,7 @@ Type::Type(TypeKind k)
 	  variadic(false),
 	  scoped_enum(false),
 	  complete(true),
+	  is_template_specialization(false),
 	  enum_underlying(FT_INT),
 	  scope(NULL),
 	  record_size(0),

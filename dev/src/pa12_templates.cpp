@@ -911,6 +911,7 @@ TypePtr Parser::instantiate_class_template(
 		                       declaration->tag,
 		                       false,
 		                       class_scope);
+	type->is_template_specialization = true;
 	Binding* binding =
 		pa11::add_binding(declaration->owner,
 		                  BindingKind::Type,
@@ -1007,97 +1008,6 @@ void Parser::complete_template_record(TypePtr type)
 	declaration->completing_specializations.erase(key);
 	instantiate_member_function_templates(type);
 	instantiate_member_variable_templates(type);
-}
-
-void Parser::validate_class_template_definition(TemplateDeclaration* declaration)
-{
-	if (declaration == NULL || !declaration->has_definition)
-		return;
-	size_t save_pos = pos_;
-	vector<Scope*> save_scopes = scopes_;
-	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
-	vector<ActiveClassInstantiation> save_active =
-		active_class_instantiations_;
-	vector<Node> save_extra = extra_lowir_nodes_;
-
-	map<string, TypePtr> subst;
-	vector<TypePtr> args;
-	for (size_t i = 0; i < declaration->parameters.size(); ++i)
-	{
-		string name = declaration->parameters[i].name;
-		if (name.empty())
-			name = "__template_param" + to_string(i);
-		TypePtr param = pa11::make_template_parameter_type(name);
-		args.push_back(param);
-		if (!declaration->parameters[i].name.empty())
-			subst[declaration->parameters[i].name] = param;
-	}
-	Scope* class_scope =
-		pa11::create_child_scope(declaration->owner,
-		                         ScopeKind::Class,
-		                         declaration->name);
-	TypePtr dummy =
-		pa11::make_record_type(declaration->name,
-		                       declaration->tag.empty() ? "struct" :
-		                       declaration->tag,
-		                       false,
-		                       class_scope);
-	Binding* dummy_binding =
-		pa11::add_binding(declaration->owner,
-		                  BindingKind::Type,
-		                  "__template_validation_" +
-		                  to_string(declaration->decl_begin),
-		                  dummy);
-	dummy_binding->target_scope = class_scope;
-	Binding* injected =
-		pa11::add_binding(class_scope,
-		                  BindingKind::Type,
-		                  declaration->name,
-		                  dummy);
-	injected->target_scope = class_scope;
-	template_type_substitutions_.push_back(subst);
-	active_class_instantiations_.push_back(
-		ActiveClassInstantiation(declaration,
-		                         template_specialization_name(declaration,
-		                                                      args),
-		                         dummy));
-	scopes_.clear();
-	scopes_.push_back(declaration->lexical_scope != NULL
-	                  ? declaration->lexical_scope
-	                  : declaration->owner);
-	pos_ = declaration->decl_begin;
-	try
-	{
-		TypePtr parsed = parse_class_specifier();
-		(void)parsed;
-	}
-	catch (const runtime_error& err)
-	{
-		extra_lowir_nodes_ = save_extra;
-		active_class_instantiations_ = save_active;
-		template_type_substitutions_ = save_subst;
-		scopes_ = save_scopes;
-		pos_ = save_pos;
-		if (string(err.what()) == "incomplete object type" ||
-		    string(err.what()) == "incomplete class type" ||
-		    string(err.what()) == "no matching constructor")
-			return;
-		throw;
-	}
-	catch (const exception&)
-	{
-		extra_lowir_nodes_ = save_extra;
-		active_class_instantiations_ = save_active;
-		template_type_substitutions_ = save_subst;
-		scopes_ = save_scopes;
-		pos_ = save_pos;
-		throw;
-	}
-	extra_lowir_nodes_ = save_extra;
-	active_class_instantiations_ = save_active;
-	template_type_substitutions_ = save_subst;
-	scopes_ = save_scopes;
-	pos_ = save_pos;
 }
 
 void Parser::complete_member_class_template_record(Binding* binding)

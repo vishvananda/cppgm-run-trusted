@@ -2,28 +2,6 @@
 
 namespace pa14 {
 namespace internal {
-namespace {
-
-bool template_specialization_context(const Binding* binding)
-{
-	if (binding == NULL)
-		return false;
-	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
-	{
-		if (scope->kind != ScopeKind::Class)
-			continue;
-		TypePtr record = pa11::record_type_for_scope(scope);
-		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-		if (record.get() != NULL &&
-		    record->kind == TypeKind::Record &&
-		    record->name.find('<') != string::npos)
-			return true;
-	}
-	return false;
-}
-
-}  // namespace
-
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
                                                     TypePtr param,
                                                     vector<string>& args,
@@ -330,7 +308,7 @@ Value FunctionLowerer::emit_call(const Node& expr)
 					address_child->category == ValueCategory::PRValue &&
 					pa11::strip_cv(object_type(address_child->type))->kind ==
 						TypeKind::Record &&
-					template_specialization_context(direct) &&
+					binding_has_template_specialization_context(direct) &&
 					(is_class_constructor_binding(address_child->direct_call) ||
 					 starts_with(address_child->line, "braced-init-list"));
 				if ((arg_record->kind == TypeKind::Record &&

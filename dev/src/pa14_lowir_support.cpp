@@ -502,8 +502,7 @@ vector<string> qualified_parts(const Binding* binding)
 			if (s->kind == ScopeKind::Class)
 			{
 				TypePtr record = pa11::record_type_for_scope(s);
-				if (record.get() != NULL &&
-				    record->name.find('<') != string::npos)
+				if (record_is_template_specialization(record))
 				{
 					part = record->name;
 					size_t scope_pos = part.rfind("::");
@@ -583,6 +582,25 @@ TypePtr class_record_for_member(const Binding* binding)
 	    binding->owner->kind != ScopeKind::Class)
 		return TypePtr();
 	return pa11::record_type_for_scope(binding->owner);
+}
+
+bool record_is_template_specialization(TypePtr record)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return record.get() != NULL &&
+	       record->kind == TypeKind::Record &&
+	       record->is_template_specialization;
+}
+
+bool binding_has_template_specialization_context(const Binding* binding)
+{
+	if (binding == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Class &&
+		    record_is_template_specialization(pa11::record_type_for_scope(scope)))
+			return true;
+	return false;
 }
 
 string record_lowir_name(TypePtr record)

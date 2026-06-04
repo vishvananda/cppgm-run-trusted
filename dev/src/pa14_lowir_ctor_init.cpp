@@ -426,8 +426,7 @@ void FunctionLowerer::lower_base_init(const Node& node)
 				node.type.get() != NULL ? pa11::strip_cv(node.type) : TypePtr();
 			if (node.token_text == "inherited-constructor" &&
 			    inherited_base.get() != NULL &&
-			    inherited_base->kind == TypeKind::Record &&
-			    inherited_base->name.find('<') != string::npos)
+			    record_is_template_specialization(inherited_base))
 				program_.demand_inline_function(ctor);
 			lower_constructor_call(base_addr, ctor, args, true);
 			return;

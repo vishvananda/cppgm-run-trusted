@@ -155,9 +155,7 @@ bool generated_copy_move_constructor_node(const Node& node)
 			continue;
 		TypePtr record = pa11::record_type_for_scope(scope);
 		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-		if (record.get() != NULL &&
-		    record->kind == TypeKind::Record &&
-		    record->name.find('<') != string::npos)
+		if (record_is_template_specialization(record))
 		{
 			template_context = true;
 			break;
@@ -190,31 +188,12 @@ bool is_class_constructor(const Binding* binding)
 	       binding->name == binding->owner->name;
 }
 
-bool template_specialization_record(TypePtr record)
-{
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	return record.get() != NULL &&
-	       record->kind == TypeKind::Record &&
-	       record->name.find('<') != string::npos;
-}
-
-bool template_specialization_context(const Binding* binding)
-{
-	if (binding == NULL)
-		return false;
-	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
-		if (scope->kind == ScopeKind::Class &&
-		    template_specialization_record(pa11::record_type_for_scope(scope)))
-			return true;
-	return false;
-}
-
 bool type_mentions_template_specialization(TypePtr type)
 {
 	type = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
 	if (type.get() == NULL)
 		return false;
-	if (template_specialization_record(type))
+	if (record_is_template_specialization(type))
 		return true;
 	if (type->kind == TypeKind::Pointer ||
 	    type->kind == TypeKind::LValueReference ||
@@ -1057,8 +1036,7 @@ void ProgramLowerer::register_inline_definition(const Node& node)
 	{
 		TypePtr owner_record = pa11::record_type_for_scope(node.binding->owner);
 		bool class_template_specialization =
-			owner_record.get() != NULL &&
-			owner_record->name.find('<') != string::npos;
+			record_is_template_specialization(owner_record);
 		if (!class_template_specialization && !copy_move_helper)
 			symbol_for(node.binding);
 	}
@@ -1199,7 +1177,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 			}
 		if (active_inline_definition != NULL &&
 		    is_class_constructor(active_inline_definition) &&
-		    template_specialization_context(active_inline_definition))
+		    binding_has_template_specialization_context(active_inline_definition))
 		{
 			TypePtr active_record = first_this_record(active_inline_definition);
 			for (vector<const Binding*>::iterator it =
@@ -1229,7 +1207,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 		{
 			TypePtr pending_this = first_this_record(*it);
 			bool pending_destroyed_record_ctor =
-				template_specialization_context(binding) &&
+				binding_has_template_specialization_context(binding) &&
 				is_class_constructor(*it) &&
 				pending_this.get() != NULL &&
 				destroyed_record.get() != NULL &&
@@ -1276,7 +1254,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 		}
 	if (binding->name.compare(0, 9, "operator ") == 0 &&
 	    binding->owner != NULL &&
-	    template_specialization_context(binding))
+	    binding_has_template_specialization_context(binding))
 	{
 		TypePtr owner_record = class_record_for_member(binding);
 		for (vector<const Binding*>::iterator it =
@@ -1335,7 +1313,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 	    active_inline_definition->name.size() > 0 &&
 	    active_inline_definition->name[0] == '~' &&
 	    binding != active_inline_definition &&
-	    template_specialization_context(active_inline_definition))
+	    binding_has_template_specialization_context(active_inline_definition))
 	{
 		size_t index = active_inline_dependency_insert_count;
 		if (index > pending_inline_definitions.size())
@@ -1422,7 +1400,7 @@ void ProgramLowerer::emit_pending_inline_definitions()
 		active_inline_definition = saved_active;
 		active_inline_dependency_insert_count = saved_dependency_insert_count;
 		if (!binding->name.empty() && binding->name[0] == '~' &&
-		    !template_specialization_context(binding))
+		    !binding_has_template_specialization_context(binding))
 			emit_pending_inline_definitions();
 		if (need_base)
 			functions.push_back(make_constructor_base_entry(lowered, name));

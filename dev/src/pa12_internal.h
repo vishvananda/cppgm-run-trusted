@@ -237,8 +237,12 @@ struct Conversion
 	Conversion(bool ok, int cost, const Expr& converted);
 };
 
+struct TemplateValidationState;
+
 class Parser
 {
+	friend struct TemplateValidationState;
+
 public:
 	Parser(const string& srcfile, const Options& options);
 

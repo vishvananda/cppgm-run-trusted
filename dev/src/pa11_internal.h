@@ -68,6 +68,7 @@ struct Type
 	string tag;
 	bool scoped_enum;
 	bool complete;
+	bool is_template_specialization;
 	EFundamentalType enum_underlying;
 	Scope* scope;
 	vector<Binding*> fields;
