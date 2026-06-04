@@ -15,6 +15,22 @@ void Parser::apply_braced_variable_initializer(Scope* target,
 {
 	Node list = init.node;
 	TypePtr record = pa11::strip_cv(type);
+	if (record->kind != pa11::TypeKind::Record &&
+	    record->kind != pa11::TypeKind::Array)
+	{
+		Conversion conv = convert_to(init, type);
+		if (!conv.viable)
+			throw runtime_error("invalid initializer conversion");
+		if (target->kind == ScopeKind::Class && !variable->is_static_member)
+			default_member_initializers_[variable] = conv.expr.node;
+		add_child(var, conv.expr.node);
+		if (pa11::type_has_const(type) && conv.expr.has_constant_value)
+		{
+			variable->has_constant = true;
+			variable->constant_value = conv.expr.constant_value;
+		}
+		return;
+	}
 	if (record->kind == pa11::TypeKind::Record &&
 	    record_has_aggregate_blocking_constructor(record))
 	{
@@ -158,6 +174,17 @@ void Parser::apply_scalar_variable_initializer(const DeclSpecs& specs,
 	{
 		variable->has_constant = true;
 		variable->constant_value = conv.expr.constant_value;
+	}
+	else if (specs.constexpr_decl || pa11::type_has_const(type))
+	{
+		ConstexprValue value;
+		if (try_evaluate_constexpr_expr(conv.expr.node, value) &&
+		    !value.is_object &&
+		    !value.is_pointer)
+		{
+			variable->has_constant = true;
+			variable->constant_value = value.int_value;
+		}
 	}
 }
 

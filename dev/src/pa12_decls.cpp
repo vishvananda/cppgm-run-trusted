@@ -141,6 +141,35 @@ bool inherits_virtual_destructor(TypePtr record)
 	return false;
 }
 
+bool array_redeclaration_compatible(TypePtr existing, TypePtr redeclared)
+{
+	TypePtr lhs = pa11::strip_cv(existing);
+	TypePtr rhs = pa11::strip_cv(redeclared);
+	if (lhs->kind == pa11::TypeKind::Array && rhs->kind == pa11::TypeKind::Array)
+	{
+		if (!lhs->unknown_bound && !rhs->unknown_bound &&
+		    lhs->bound != rhs->bound)
+			return false;
+		return array_redeclaration_compatible(lhs->base, rhs->base);
+	}
+	return pa11::same_type(lhs, rhs);
+}
+
+size_t local_static_decl_span_begin(const vector<Token>& tokens,
+                                    size_t begin,
+                                    size_t end)
+{
+	size_t pos = begin;
+	while (pos < end && tokens[pos].kind == posttoken::TokenKind::Simple &&
+	       (tokens[pos].type == KW_STATIC ||
+	        tokens[pos].type == KW_THREAD_LOCAL ||
+	        tokens[pos].type == KW_CONST ||
+	        tokens[pos].type == KW_VOLATILE ||
+	        tokens[pos].type == KW_CONSTEXPR))
+		++pos;
+	return pos;
+}
+
 }  // namespace
 
 void Parser::parse_declaration_into(Node& out)
@@ -179,68 +208,6 @@ void Parser::parse_declaration_into(Node& out)
 		return;
 	}
 	parse_simple_or_function_declaration(out, true);
-}
-
-void Parser::parse_static_assert_declaration()
-{
-	expect(KW_STATIC_ASSERT);
-	expect(OP_LPAREN);
-	bool dependent_context = false;
-	for (size_t i = 0; i < template_type_substitutions_.size(); ++i)
-		for (map<string, TypePtr>::const_iterator it =
-			     template_type_substitutions_[i].begin();
-		     it != template_type_substitutions_[i].end();
-		     ++it)
-			if (type_is_template_dependent(it->second))
-				dependent_context = true;
-	for (size_t i = 0; i < template_value_substitutions_.size(); ++i)
-		for (map<string, TemplateArgument>::const_iterator it =
-			     template_value_substitutions_[i].begin();
-		     it != template_value_substitutions_[i].end();
-		     ++it)
-			if (it->second.dependent ||
-			    type_is_template_dependent(it->second.type))
-				dependent_context = true;
-	size_t condition_begin = pos_;
-	Expr condition;
-	try
-	{
-		condition = parse_assignment_expression();
-	}
-	catch (const exception&)
-	{
-		if (!dependent_context)
-			throw;
-		pos_ = condition_begin;
-		int paren = 0;
-		while (!at_eof())
-		{
-			if (paren == 0 && at(OP_RPAREN))
-				break;
-			if (at(OP_LPAREN))
-				++paren;
-			else if (at(OP_RPAREN))
-				--paren;
-			++pos_;
-		}
-		expect(OP_RPAREN);
-		expect(OP_SEMICOLON);
-		return;
-	}
-	string message;
-	if (consume(OP_COMMA))
-	{
-		if (!at_literal())
-			throw runtime_error("expected static_assert message");
-		message = current().source;
-		++pos_;
-	}
-	expect(OP_RPAREN);
-	expect(OP_SEMICOLON);
-	if (!condition.has_constant_value)
-		return;
-	if (condition.constant_value == 0)
-		throw runtime_error("static_assert failed " + message);
 }
 
 void Parser::parse_namespace_or_alias(Node& out)
@@ -516,16 +483,29 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	if (current_scope()->kind == ScopeKind::Class && consume(KW_EXPLICIT))
 	{
-		if (parse_constructor_like_member(true))
+		bool constexpr_member = consume(KW_CONSTEXPR);
+		if (parse_constructor_like_member(true, constexpr_member))
 			return;
-		if (parse_conversion_function_member(true))
+		if (parse_conversion_function_member(true, constexpr_member))
 			return;
 		throw runtime_error("explicit specifier without constructor or conversion");
+	}
+	if (current_scope()->kind == ScopeKind::Class && at(KW_CONSTEXPR))
+	{
+		size_t constexpr_save = pos_;
+		consume(KW_CONSTEXPR);
+		bool explicit_member = consume(KW_EXPLICIT);
+		if (parse_constructor_like_member(explicit_member, true))
+			return;
+		if (parse_conversion_function_member(explicit_member, true))
+			return;
+		pos_ = constexpr_save;
 	}
 	if (parse_conversion_function_member())
 		return;
 	if (parse_constructor_like_member())
 		return;
+	size_t decl_start = pos_;
 	DeclSpecs specs = parse_decl_specifier_seq(false);
 	TypePtr base = type_from_decl_specs(specs);
 	if (consume(OP_SEMICOLON))
@@ -859,10 +839,17 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		expect(OP_RPAREN);
 	}
 
+	size_t decl_span_begin = local_static_decl_span_begin(tokens_,
+	                                                      decl_start,
+	                                                      pos_);
 	Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 	          "simple-declaration");
 	Binding* first =
 		declare_one(specs, base, declarator, has_init ? &init : NULL, false, node);
+	if (first != NULL && first->is_local_static)
+		first->local_static_discriminator =
+			"tokens" + to_string(decl_span_begin + 1) + "_" +
+			to_string(pos_);
 	if (bit_field)
 	{
 		first->is_bit_field = true;
@@ -870,6 +857,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	}
 	while (consume(OP_COMMA))
 	{
+		size_t next_begin = pos_;
 		Declarator next = parse_declarator(false);
 		Expr next_init;
 		bool next_has_init = false;
@@ -880,7 +868,12 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				parse_expression();
 			next_init.copy_initialization = true;
 		}
-		declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
+		Binding* next_binding =
+			declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
+		if (next_binding != NULL && next_binding->is_local_static)
+			next_binding->local_static_discriminator =
+				"tokens" + to_string(next_begin + 1) + "_" +
+				to_string(pos_);
 	}
 	expect(OP_SEMICOLON);
 	if (emit_node && !node.children.empty())
@@ -940,6 +933,7 @@ bool Parser::parse_friend_declaration()
 	Binding* function =
 		add_function_binding(target, qname.name, type, !qname.qualified);
 	function->language_linkage = current_language_linkage();
+	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
 	function->ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
@@ -975,9 +969,14 @@ bool Parser::parse_friend_declaration()
 		fn.binding = function;
 		fn.type = type;
 		add_child(node, fn);
-		parse_function_body(function, declarator, node);
-		if (!node.children.empty())
-			extra_lowir_nodes_.push_back(node.children.back());
+		PendingFunctionBody pending;
+		pending.function = function;
+		pending.node = node.children.back();
+		if (suffix != NULL)
+			pending.parameters = suffix->parameters;
+		pending.body_pos = pos_;
+		skip_balanced(OP_LBRACE, OP_RBRACE);
+		pending_member_bodies_[class_scope].push_back(pending);
 		return true;
 	}
 	expect(OP_SEMICOLON);
@@ -989,6 +988,8 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 {
 	TypePtr record = pa11::strip_cv(type);
 	pa11::layout_record_type(record);
+	if (init.braced_init_list && init.node.direct_call != NULL)
+		return;
 	if (init.braced_init_list && record->scope != NULL)
 	{
 		map<string, vector<Binding*> >::const_iterator ctors =
@@ -1183,11 +1184,14 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	if (function == NULL)
 		function = add_value(target, BindingKind::Function, name, type);
 	function->language_linkage = current_language_linkage();
+	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
 	function->is_static_member = is_static_member;
 	function->is_inline_definition =
 		function->is_inline_definition ||
 		(function_definition &&
-		 (current_scope()->kind == ScopeKind::Class || specs.inline_decl));
+		 (current_scope()->kind == ScopeKind::Class ||
+		  specs.inline_decl ||
+		  specs.constexpr_decl));
 	function->is_private =
 		target->kind == ScopeKind::Class &&
 		!class_private_access_.empty() &&
@@ -1353,43 +1357,23 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	{
 		Binding* existing =
 			pa11::find_owned_binding(target, qname.name, BindingKind::Variable);
-		if (existing != NULL && pa11::same_type(existing->type, type))
+		if (existing != NULL &&
+		    (pa11::same_type(existing->type, type) ||
+		     array_redeclaration_compatible(existing->type, type)))
+		{
 			variable = existing;
+			type = existing->type;
+		}
 	}
 	if (variable == NULL)
 		variable = add_value(target, BindingKind::Variable, qname.name, type);
-	variable->language_linkage = current_language_linkage();
-	variable->is_static_member =
-		variable->is_static_member ||
-		(target->kind == ScopeKind::Class &&
-		 (specs.static_decl || qname.qualifier != NULL));
-	variable->is_thread_local =
-		variable->is_thread_local || specs.thread_local_decl;
-	variable->is_mutable_member =
-		target->kind == ScopeKind::Class && specs.mutable_decl;
-	variable->is_private =
-		target->kind == ScopeKind::Class &&
-		!class_private_access_.empty() &&
-		class_private_access_.back();
-	variable->is_protected_member =
-		target->kind == ScopeKind::Class &&
-		!class_protected_access_.empty() &&
-		class_protected_access_.back();
-	if (target->kind == ScopeKind::Class)
-	{
-		TypePtr record = pa11::record_type_for_scope(target);
-		if (record.get() != NULL)
-			record->layout_valid = false;
-	}
-	ensure_default_destructor(type);
-	Node var("variable " + qname.name + " " + pa11::describe_type(type));
-	var.binding = variable;
-	var.type = type;
-	if (specs.extern_decl && target->kind == ScopeKind::Namespace && init == NULL)
-		return variable;
-	apply_variable_initializer(specs, target, variable, type, init, var);
-	add_child(out, var);
-	return variable;
+	return finish_variable_declaration(specs,
+	                                   target,
+	                                   variable,
+	                                   qname,
+	                                   type,
+	                                   init,
+	                                   out);
 }
 
 }  // namespace internal

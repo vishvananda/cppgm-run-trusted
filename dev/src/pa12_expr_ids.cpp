@@ -465,15 +465,6 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 		return make_constant_binding_expr(binding,
 		                                  expression_object_type(binding->type));
 	}
-	if (binding->owner != NULL &&
-	    binding->owner->kind == ScopeKind::Class &&
-	    binding->is_static_member &&
-	    binding->kind == BindingKind::Variable &&
-	    binding->has_constant)
-	{
-		return make_constant_binding_expr(binding,
-		                                  expression_object_type(binding->type));
-	}
 	out.binding = binding;
 	out.type = expression_object_type(binding->type);
 	if (binding->kind == BindingKind::Function)

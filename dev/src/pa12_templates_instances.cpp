@@ -921,12 +921,21 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 	{
 		map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
 			function_templates_.find(cur);
-		if (sit == function_templates_.end())
-			continue;
-		map<string, vector<TemplateDeclaration*> >::iterator it =
-			sit->second.find(name.name);
-		if (it != sit->second.end())
-			return it->second;
+		if (sit != function_templates_.end())
+		{
+			map<string, vector<TemplateDeclaration*> >::iterator it =
+				sit->second.find(name.name);
+			if (it != sit->second.end())
+				return it->second;
+		}
+		for (size_t i = 0; i < cur->using_directives.size(); ++i)
+		{
+			QualifiedName nested = name;
+			nested.qualifier = cur->using_directives[i];
+			out = find_function_templates(nested);
+			if (!out.empty())
+				return out;
+		}
 	}
 	return out;
 }

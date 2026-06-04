@@ -125,6 +125,44 @@ void collect_conversion_functions(TypePtr record,
 		collect_conversion_functions(bare->base, seen, out);
 }
 
+Expr make_builtin_constant_call(const vector<Expr>& args)
+{
+	if (args.size() != 1)
+		throw runtime_error("wrong argument count");
+	Expr out;
+	out.type = pa11::make_fundamental(FT_INT);
+	out.category = ValueCategory::PRValue;
+	out.valid = true;
+	const bool constant = args[0].constant_expression;
+	out.node = Node(string("literal prvalue int ") + (constant ? "1" : "0"));
+	out.constant_expression = true;
+	out.has_constant_value = true;
+	out.constant_value = constant ? 1 : 0;
+	out.null_pointer_constant = constant ? false : true;
+	out.node.token_text = constant ? "1" : "0";
+	annotate_expr_node(out);
+	return out;
+}
+
+void filter_static_class_member_overloads(Expr& callee)
+{
+	vector<Binding*> static_overloads;
+	bool has_class_member = false;
+	for (size_t i = 0; i < callee.overloads.size(); ++i)
+	{
+		Binding* candidate = callee.overloads[i];
+		if (candidate->owner != NULL &&
+		    candidate->owner->kind == ScopeKind::Class)
+		{
+			has_class_member = true;
+			if (candidate->is_static_member)
+				static_overloads.push_back(candidate);
+		}
+	}
+	if (has_class_member && !static_overloads.empty())
+		callee.overloads = static_overloads;
+}
+
 }  // namespace
 
 Conversion Parser::convert_to(const Expr& expr, TypePtr target)
@@ -834,46 +872,14 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		}
 	}
 	if (callee.builtin_constant_p)
-	{
-		if (args.size() != 1)
-			throw runtime_error("wrong argument count");
-		Expr out;
-		out.type = pa11::make_fundamental(FT_INT);
-		out.category = ValueCategory::PRValue;
-		out.valid = true;
-		const bool constant = args[0].constant_expression;
-		out.node = Node(string("literal prvalue int ") + (constant ? "1" : "0"));
-		out.constant_expression = true;
-		out.has_constant_value = true;
-		out.constant_value = constant ? 1 : 0;
-		out.null_pointer_constant = constant ? false : true;
-		out.node.token_text = constant ? "1" : "0";
-		annotate_expr_node(out);
-		return out;
-	}
+		return make_builtin_constant_call(args);
 	if (!callee.overloads.empty() &&
 	    callee.node.line.compare(0, 17, "member-expression") == 0 &&
 	    !callee.node.children.empty())
 		prepare_member_call(callee, args);
 	else if (!callee.overloads.empty() &&
 	         callee.node.line.compare(0, 13, "id-expression") == 0)
-	{
-		vector<Binding*> static_overloads;
-		bool has_class_member = false;
-		for (size_t i = 0; i < callee.overloads.size(); ++i)
-		{
-			Binding* candidate = callee.overloads[i];
-			if (candidate->owner != NULL &&
-			    candidate->owner->kind == ScopeKind::Class)
-			{
-				has_class_member = true;
-				if (candidate->is_static_member)
-					static_overloads.push_back(candidate);
-			}
-		}
-		if (has_class_member && !static_overloads.empty())
-			callee.overloads = static_overloads;
-	}
+		filter_static_class_member_overloads(callee);
 	vector<Expr> converted;
 	Binding* direct = NULL;
 	if (!callee.overloads.empty())
@@ -881,6 +887,12 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		                                args,
 		                                callee.explicit_template_arguments,
 		                                converted);
+	else if (callee.binding != NULL &&
+	         callee.binding->kind == BindingKind::Function)
+	{
+		direct = callee.binding;
+		converted = args;
+	}
 	Expr out;
 	if (direct != NULL)
 	{
@@ -891,13 +903,16 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		out.node = Node("call-expression " + value_category_name(out.category) +
 		                " " + pa11::describe_type(out.type));
 		out.node.direct_call = direct;
-		out.node.virtual_dispatch =
-			callee.node.line.compare(0, 17, "member-expression") == 0 &&
-			direct->is_virtual &&
-			!callee.node.suppress_virtual_dispatch;
-		add_child(out.node, Node("callee " + qualified_decl_name(direct) +
-		                         " " + pa11::describe_type(direct->type)));
-	}
+			out.node.virtual_dispatch =
+				callee.node.line.compare(0, 17, "member-expression") == 0 &&
+				direct->is_virtual &&
+				!callee.node.suppress_virtual_dispatch;
+			Node callee_node("callee " + qualified_decl_name(direct) +
+			                 " " + pa11::describe_type(direct->type));
+			callee_node.binding = direct;
+			callee_node.direct_call = direct;
+			add_child(out.node, callee_node);
+		}
 	else
 	{
 		TypePtr callee_type = expression_object_type(callee.type);
@@ -932,6 +947,17 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record)
 		ensure_default_destructor(out.type);
 	out.valid = true;
+	if (direct != NULL)
+	{
+		vector<Node> constexpr_args;
+		for (size_t i = 0; i < converted.size(); ++i)
+			constexpr_args.push_back(converted[i].node);
+		ConstexprValue constexpr_value;
+		if (try_evaluate_constexpr_call(direct,
+		                                constexpr_args,
+		                                constexpr_value))
+			apply_constexpr_value(out, constexpr_value);
+	}
 	annotate_expr_node(out);
 	return out;
 }

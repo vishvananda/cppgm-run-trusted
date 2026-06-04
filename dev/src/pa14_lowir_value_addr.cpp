@@ -21,8 +21,16 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	if (expr.binding == NULL)
 		return emit_literal(expr);
 	if (expr.binding->has_constant &&
-	    (expr.binding->kind == BindingKind::Enumerator ||
-	     expr.binding->is_static_member) &&
+	    expr.binding->kind == BindingKind::Enumerator &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Record &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Array)
+		return Value(scalar_lowir_type(expr.binding->type),
+		             to_string(expr.binding->constant_value));
+	if (expr.binding->has_constant &&
+	    expr.binding->is_static_member &&
+	    expr.line.find("decltype::") == string::npos &&
 	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
 		    TypeKind::Record &&
 	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
@@ -41,6 +49,7 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	}
 	TypePtr object = object_type(expr.type);
 	if ((expr.binding->is_static_member ||
+	     expr.binding->is_local_static ||
 	     (expr.binding->owner != NULL &&
 	      expr.binding->owner->kind == ScopeKind::Namespace)) &&
 	    pa11::strip_cv(object)->kind == TypeKind::Pointer &&
@@ -55,6 +64,7 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	if (object->kind == TypeKind::Array &&
 	    expr.binding->owner != NULL &&
 	    (expr.binding->owner->kind == ScopeKind::Namespace ||
+	     expr.binding->is_local_static ||
 	     expr.binding->is_static_member))
 	{
 		program_.demand_global_declaration(expr.binding);
@@ -164,6 +174,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		{
 			string tmp = fresh_temp();
 			if (expr.binding->is_static_member ||
+			    expr.binding->is_local_static ||
 			    (expr.binding->owner != NULL &&
 			     expr.binding->owner->kind == ScopeKind::Namespace))
 			{
@@ -175,6 +186,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 			return Value("ptr", tmp);
 		}
 		if (expr.binding->is_static_member ||
+		    expr.binding->is_local_static ||
 		    (expr.binding->owner != NULL &&
 		     expr.binding->owner->kind == ScopeKind::Namespace))
 		{
@@ -189,6 +201,11 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		if (return_slot_variables_.find(expr.binding) !=
 		    return_slot_variables_.end())
 			return Value("ptr", "%ret");
+		if (expr.binding->is_local_static)
+		{
+			program_.demand_global_declaration(expr.binding);
+			return Value("ptr", "@" + program_.symbol_for(expr.binding));
+		}
 		return Value("ptr", "$" + slot_for(expr.binding));
 	}
 	if (starts_with(expr.line, "member-expression") && expr.binding != NULL)
@@ -339,16 +356,28 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 Value FunctionLowerer::emit_subscript_addr(const Node& expr)
 {
 	Value base;
-	if (starts_with(expr.children[0].line, "conditional-expression") &&
-	    expr.children[0].category == ValueCategory::LValue &&
+	bool array_lvalue_base = false;
+	if (expr.children[0].category == ValueCategory::LValue &&
 	    pa11::strip_cv(object_type(expr.children[0].type))->kind == TypeKind::Array)
+	{
 		base = emit_lvalue_addr(expr.children[0]);
+		array_lvalue_base = true;
+	}
 	else
 		base = emit_rvalue(expr.children[0]);
 	base = ensure_pointer(base);
+	if (array_lvalue_base &&
+	    !starts_with(expr.children[0].line, "subscript-expression") &&
+	    !starts_with(expr.children[0].line, "literal") &&
+	    !starts_with(expr.children[0].line, "conditional-expression"))
+	{
+		string decay = fresh_temp();
+		instr(decay + " = unary decay ptr " + base.text);
+		base = Value("ptr", decay);
+	}
 	Value index = emit_rvalue(expr.children[1]);
 	TypePtr object = pa11::strip_cv(object_type(expr.type));
-	if (object->kind == TypeKind::Record)
+	if (object->kind == TypeKind::Record || object->kind == TypeKind::Array)
 	{
 		string scaled = fresh_temp();
 		instr(scaled + " = binary mul i64 " + index.text + ", " +

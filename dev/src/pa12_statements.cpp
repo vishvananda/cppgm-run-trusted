@@ -115,10 +115,17 @@ void Parser::parse_function_body_from_parameters(
 	active_functions_.push_back(function);
 	function_parameter_pack_substitutions_.push_back(parameter_packs);
 	add_child(fn, parse_compound_statement());
+	remember_function_body(function, fn);
 	function_parameter_pack_substitutions_.pop_back();
 	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
+}
+
+void Parser::remember_function_body(Binding* function, const Node& function_node)
+{
+	if (function != NULL)
+		function_bodies_[function] = function_node;
 }
 
 static bool function_body_empty(const Node& fn)
@@ -415,6 +422,130 @@ Node Parser::parse_for_statement()
 	return node;
 }
 
+Expr Parser::convert_aggregate_return_expression(Expr expr,
+                                                 TypePtr result,
+                                                 TypePtr result_record)
+{
+	expr.type = result;
+	expr.node.type = result;
+	Binding* aggregate_ctor =
+		ensure_aggregate_constructor(result_record, expr.node.children.size());
+	ensure_aggregate_constructors_for_init(result, expr.node);
+	vector<Expr> args;
+	for (size_t i = 0; i < expr.node.children.size(); ++i)
+	{
+		Expr arg;
+		arg.valid = true;
+		arg.node = expr.node.children[i];
+		arg.type = arg.node.type;
+		arg.category = arg.node.category;
+		arg.binding = arg.node.binding;
+		args.push_back(arg);
+	}
+	if (aggregate_ctor == NULL)
+	{
+		try
+		{
+			return make_constructor_init_expr(result, args, true);
+		}
+		catch (const runtime_error&)
+		{
+			Conversion conv = convert_to(expr, result);
+			if (!conv.viable)
+				throw runtime_error("invalid return conversion");
+			return conv.expr;
+		}
+	}
+	Expr constructed;
+	constructed.valid = true;
+	constructed.type = result;
+	constructed.category = ValueCategory::PRValue;
+	constructed.braced_init_list = true;
+	constructed.copy_initialization = true;
+	constructed.node = Node("braced-init-list");
+	constructed.node.token_text = "force-constructor";
+	constructed.node.type = result;
+	constructed.node.category = constructed.category;
+	constructed.node.direct_call = aggregate_ctor;
+	for (size_t i = 0; i < args.size(); ++i)
+	{
+		Conversion conv =
+			convert_to(args[i], aggregate_ctor->type->parameters[i + 1]);
+		if (!conv.viable)
+			throw runtime_error("invalid return conversion");
+		add_child(constructed.node, conv.expr.node);
+	}
+	annotate_expr_node(constructed);
+	constructed.node.direct_call = aggregate_ctor;
+	return constructed;
+}
+
+Expr Parser::convert_record_constructor_return_expression(Expr expr,
+                                                          TypePtr result)
+{
+	vector<Expr> args;
+	args.push_back(expr);
+	try
+	{
+		return make_constructor_init_expr(result, args, true);
+	}
+	catch (const runtime_error&)
+	{
+		Conversion conv = convert_to(expr, result);
+		if (!conv.viable)
+			throw runtime_error("invalid return conversion");
+		return conv.expr;
+	}
+}
+
+void Parser::validate_same_record_return_expression(const Expr& expr,
+                                                    TypePtr result)
+{
+	bool local_return =
+		expr.binding != NULL &&
+		expr.binding->kind == BindingKind::Variable &&
+		expr.binding->owner != NULL &&
+		expr.binding->owner->kind != ScopeKind::Namespace &&
+		expr.binding->owner->kind != ScopeKind::Class;
+	bool use_move = expr.category != ValueCategory::LValue || local_return;
+	if (use_move && !copy_move_constructor_available(result, true))
+		use_move = false;
+	if (!copy_move_constructor_available(result, use_move))
+		throw runtime_error("invalid return conversion");
+	ensure_copy_move_constructor(result, use_move);
+}
+
+Expr Parser::convert_return_expression(Expr expr, TypePtr result)
+{
+	if (result.get() == NULL || pa11::is_void_type(result))
+		return expr;
+	if (type_is_template_dependent(result) ||
+	    type_is_template_dependent(expr.type))
+		return expr;
+	TypePtr result_record = pa11::strip_cv(result);
+	TypePtr expr_record = expr.type.get() != NULL
+		? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr();
+	if (result_record->kind == pa11::TypeKind::Record)
+	{
+		if (expr.braced_init_list &&
+		    (expr_record.get() == NULL ||
+		     pa11::same_type(result_record, expr_record)))
+			return convert_aggregate_return_expression(expr,
+			                                           result,
+			                                           result_record);
+		if (expr_record.get() == NULL ||
+		    expr_record->kind != pa11::TypeKind::Record ||
+		    !pa11::same_type(result_record, expr_record))
+			return convert_record_constructor_return_expression(expr, result);
+		validate_same_record_return_expression(expr, result);
+		return expr;
+	}
+	Conversion conv = convert_to(expr, result);
+	if (!conv.viable)
+		throw runtime_error("invalid return conversion");
+	return conv.expr;
+}
+
 Node Parser::parse_jump_statement()
 {
 	if (consume(KW_BREAK))
@@ -438,123 +569,7 @@ Node Parser::parse_jump_statement()
 	if (!at(OP_SEMICOLON))
 	{
 		Expr expr = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
-		TypePtr result = current_return_type();
-		if (result.get() != NULL && !pa11::is_void_type(result))
-		{
-			if (type_is_template_dependent(result) ||
-			    type_is_template_dependent(expr.type))
-			{
-				add_child(node, expr.node);
-				expect(OP_SEMICOLON);
-				return node;
-			}
-			TypePtr result_record = pa11::strip_cv(result);
-			TypePtr expr_record = expr.type.get() != NULL
-				? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr();
-			if (result_record->kind == pa11::TypeKind::Record &&
-			    expr.braced_init_list)
-			{
-				expr.type = result;
-				expr.node.type = result;
-				Binding* aggregate_ctor =
-					ensure_aggregate_constructor(result_record,
-					                             expr.node.children.size());
-				ensure_aggregate_constructors_for_init(result, expr.node);
-				vector<Expr> args;
-				for (size_t i = 0; i < expr.node.children.size(); ++i)
-				{
-					Expr arg;
-					arg.valid = true;
-					arg.node = expr.node.children[i];
-					arg.type = arg.node.type;
-					arg.category = arg.node.category;
-					arg.binding = arg.node.binding;
-					args.push_back(arg);
-				}
-				if (aggregate_ctor != NULL)
-				{
-					Expr constructed;
-					constructed.valid = true;
-					constructed.type = result;
-					constructed.category = ValueCategory::PRValue;
-					constructed.braced_init_list = true;
-					constructed.copy_initialization = true;
-					constructed.node = Node("braced-init-list");
-					constructed.node.token_text = "force-constructor";
-					constructed.node.type = result;
-					constructed.node.category = constructed.category;
-					constructed.node.direct_call = aggregate_ctor;
-					for (size_t i = 0; i < args.size(); ++i)
-					{
-						Conversion conv =
-							convert_to(args[i],
-							           aggregate_ctor->type->parameters[i + 1]);
-						if (!conv.viable)
-							throw runtime_error("invalid return conversion");
-						add_child(constructed.node, conv.expr.node);
-					}
-					annotate_expr_node(constructed);
-					constructed.node.direct_call = aggregate_ctor;
-					expr = constructed;
-				}
-				else
-				try
-				{
-					expr = make_constructor_init_expr(result, args, true);
-				}
-				catch (const runtime_error&)
-				{
-					Conversion conv = convert_to(expr, result);
-					if (!conv.viable)
-						throw runtime_error("invalid return conversion");
-					expr = conv.expr;
-				}
-			}
-			else if (result_record->kind == pa11::TypeKind::Record &&
-			         (expr_record.get() == NULL ||
-			          expr_record->kind != pa11::TypeKind::Record))
-			{
-				vector<Expr> args;
-				args.push_back(expr);
-				try
-				{
-					expr = make_constructor_init_expr(result, args, true);
-				}
-				catch (const runtime_error&)
-				{
-					Conversion conv = convert_to(expr, result);
-					if (!conv.viable)
-						throw runtime_error("invalid return conversion");
-					expr = conv.expr;
-				}
-			}
-			else if (result_record->kind == pa11::TypeKind::Record &&
-			         expr_record->kind == pa11::TypeKind::Record &&
-			         pa11::same_type(result_record, expr_record))
-			{
-				bool local_return =
-					expr.binding != NULL &&
-					expr.binding->kind == BindingKind::Variable &&
-					expr.binding->owner != NULL &&
-					expr.binding->owner->kind != ScopeKind::Namespace &&
-					expr.binding->owner->kind != ScopeKind::Class;
-				bool use_move =
-					expr.category != ValueCategory::LValue || local_return;
-				if (use_move &&
-				    !copy_move_constructor_available(result, true))
-					use_move = false;
-				if (!copy_move_constructor_available(result, use_move))
-					throw runtime_error("invalid return conversion");
-				ensure_copy_move_constructor(result, use_move);
-			}
-			else
-			{
-				Conversion conv = convert_to(expr, result);
-				if (!conv.viable)
-					throw runtime_error("invalid return conversion");
-				expr = conv.expr;
-			}
-		}
+		expr = convert_return_expression(expr, current_return_type());
 		add_child(node, expr.node);
 	}
 	expect(OP_SEMICOLON);

@@ -930,6 +930,29 @@ Suffix Parser::parse_array_suffix()
 		return suffix;
 	}
 	Expr bound = parse_expression();
+	ConstexprValue value;
+	if (try_evaluate_constexpr_expr(bound.node, value) &&
+	    value.valid &&
+	    !value.is_float &&
+	    !value.is_object &&
+	    !value.is_pointer)
+	{
+		bound.has_constant_value = true;
+		bound.constant_value = value.int_value;
+	}
+	bool dependent_validation =
+		!active_class_instantiations_.empty() &&
+		(active_class_instantiations_.back().specialization_name.find(
+			 "dependent") != string::npos ||
+		 active_class_instantiations_.back().specialization_name.find(
+			 "typename ") != string::npos);
+	if ((!bound.has_constant_value || bound.constant_value == 0) &&
+	    dependent_validation)
+	{
+		suffix.unknown_bound = true;
+		expect(OP_RSQUARE);
+		return suffix;
+	}
 	if (!bound.has_constant_value || bound.constant_value == 0)
 		throw runtime_error("invalid array bound");
 	suffix.bound = bound.constant_value;

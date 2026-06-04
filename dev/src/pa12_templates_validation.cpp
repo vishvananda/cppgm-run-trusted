@@ -357,6 +357,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		    string(err.what()) == "incomplete class type" ||
 		    string(err.what()) == "no matching constructor" ||
 		    string(err.what()) == "invalid initializer conversion" ||
+		    string(err.what()) == "invalid array bound" ||
 		    string(err.what()) == "decltype qualifier is not a scope" ||
 		    string(err.what()) == "qualified lookup root not found")
 			return;

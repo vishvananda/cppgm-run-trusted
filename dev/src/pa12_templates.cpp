@@ -898,6 +898,37 @@ bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 				throw;
 			}
 			--template_argument_expression_depth_;
+			if (expr.valid && !expr.has_constant_value)
+			{
+				ConstexprValue value;
+				if (try_evaluate_constexpr_expr(expr.node, value) &&
+				    !value.is_object)
+				{
+					expr.has_constant_value = true;
+					expr.constant_value = value.int_value;
+					expr.node.has_constant_value = true;
+					expr.node.constant_value = value.int_value;
+				}
+			}
+			if (expr.valid && !expr.has_constant_value)
+			{
+				try
+					{
+						Conversion conv =
+							convert_to(expr, pa11::make_fundamental(FT_BOOL));
+						if (conv.viable && !conv.expr.has_constant_value)
+						{
+							ConstexprValue value;
+							if (try_evaluate_constexpr_expr(conv.expr.node, value))
+								apply_constexpr_value(conv.expr, value);
+						}
+						if (conv.viable && conv.expr.has_constant_value)
+							expr = conv.expr;
+					}
+					catch (const runtime_error&)
+				{
+				}
+			}
 			if (!expr.has_constant_value)
 				throw runtime_error("invalid non-type template argument");
 			TemplateArgument arg =
@@ -1090,6 +1121,37 @@ TemplateArgument Parser::parse_default_template_argument(
 				expr = Expr();
 			}
 			template_argument_expression_depth_ = save_expression_depth;
+			if (expr.valid && !expr.has_constant_value)
+			{
+				ConstexprValue value;
+				if (try_evaluate_constexpr_expr(expr.node, value) &&
+				    !value.is_object)
+				{
+					expr.has_constant_value = true;
+					expr.constant_value = value.int_value;
+					expr.node.has_constant_value = true;
+					expr.node.constant_value = value.int_value;
+				}
+			}
+			if (expr.valid && !expr.has_constant_value)
+			{
+				try
+					{
+						Conversion conv =
+							convert_to(expr, pa11::make_fundamental(FT_BOOL));
+						if (conv.viable && !conv.expr.has_constant_value)
+						{
+							ConstexprValue value;
+							if (try_evaluate_constexpr_expr(conv.expr.node, value))
+								apply_constexpr_value(conv.expr, value);
+						}
+						if (conv.viable && conv.expr.has_constant_value)
+							expr = conv.expr;
+					}
+					catch (const runtime_error&)
+				{
+				}
+			}
 			if (!expr.has_constant_value && !default_dependent)
 				throw runtime_error("invalid default template argument");
 			if (expr.has_constant_value)

@@ -132,7 +132,10 @@ struct Binding
 	string language_linkage;
 	bool has_constant;
 	uint64_t constant_value;
+	bool is_constexpr;
 	bool is_static_member;
+	bool is_local_static;
+	string local_static_discriminator;
 	bool is_inline_definition;
 	bool is_generated_default_constructor;
 	bool is_generated_aggregate_constructor;
@@ -147,6 +150,7 @@ struct Binding
 	bool is_hidden_friend;
 	bool is_thread_local;
 	bool is_object_root;
+	bool is_dependent_template_artifact;
 	bool is_virtual;
 	bool is_override_specified;
 	bool is_final_virtual;

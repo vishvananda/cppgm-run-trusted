@@ -8,46 +8,6 @@ namespace pa14 {
 namespace internal {
 namespace {
 
-bool record_has_constructor(TypePtr type)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind != TypeKind::Record || bare->scope == NULL)
-		return false;
-	map<string, vector<Binding*> >::const_iterator found =
-		bare->scope->members.find(bare->scope->name);
-	if (found == bare->scope->members.end())
-		return false;
-	for (size_t i = 0; i < found->second.size(); ++i)
-		if (found->second[i]->kind == BindingKind::Function &&
-		    found->second[i]->type->kind == TypeKind::Function)
-			return true;
-	return false;
-}
-
-bool record_has_destructor(TypePtr type)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind == TypeKind::Array)
-		return record_has_destructor(bare->base);
-	if (bare->kind != TypeKind::Record)
-		return false;
-	if (bare->scope != NULL)
-	{
-		string dtor_name = "~" + bare->scope->name;
-		map<string, vector<Binding*> >::const_iterator found =
-			bare->scope->members.find(dtor_name);
-		if (found != bare->scope->members.end())
-			return true;
-	}
-	pa11::layout_record_type(bare);
-	if (bare->base.get() != NULL && record_has_destructor(bare->base))
-		return true;
-	for (size_t i = 0; i < bare->fields.size(); ++i)
-		if (record_has_destructor(bare->fields[i]->type))
-			return true;
-	return false;
-}
-
 Binding* find_assignment_binding(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -77,50 +37,19 @@ Binding* find_assignment_binding(TypePtr type, bool move)
 	return NULL;
 }
 
-bool global_static_scalar_initializer(const Node& init)
+bool defer_static_constexpr_member_definition(const Node& node)
 {
-	if (starts_with(init.line, "literal"))
-		return true;
-	if (starts_with(init.line, "unary-expression") && init.has_op &&
-	    init.op == OP_PLUS && !init.children.empty())
-		return global_static_scalar_initializer(init.children[0]);
-	if (starts_with(init.line, "binary-expression") && init.has_op &&
-	    (init.op == OP_PLUS || init.op == OP_MINUS) &&
-	    init.children.size() == 2)
-	{
-		const Node& lhs = init.children[0];
-		const Node& rhs = init.children[1];
-		return (lhs.binding != NULL && rhs.has_constant_value) ||
-		       (rhs.binding != NULL && lhs.has_constant_value);
-	}
-	return init.has_constant_value;
-}
-
-bool global_needs_runtime_init(TypePtr type, const Node& init)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	if (starts_with(init.line, "constructor-action"))
-		return true;
-	if (starts_with(init.line, "braced-init-list"))
-	{
-		if (bare->kind == TypeKind::Record)
-			return record_has_constructor(type);
-		if (bare->kind == TypeKind::Array)
-		{
-			for (size_t i = 0; i < init.children.size(); ++i)
-				if (global_needs_runtime_init(bare->base, init.children[i]))
-					return true;
-		}
+	if (node.binding == NULL)
 		return false;
-	}
-	if (bare->kind == TypeKind::Record || bare->kind == TypeKind::Array)
-		return true;
-	if (pa11::strip_cv(type)->kind == TypeKind::Pointer &&
-	    starts_with(init.line, "id-expression") &&
-	    init.binding != NULL &&
-	    pa11::strip_cv(init.binding->type)->kind == TypeKind::Array)
+	bool qualified_member_definition =
+		node.binding->owner != NULL &&
+		node.binding->owner->kind == ScopeKind::Namespace &&
+		node.binding->name.find("::") != string::npos;
+	if (!node.binding->is_static_member && !qualified_member_definition)
 		return false;
-	return !global_static_scalar_initializer(init);
+	TypePtr object = strip_for_value(node.binding->type);
+	TypePtr bare = pa11::strip_cv(object);
+	return bare->kind == TypeKind::Array || bare->kind == TypeKind::Record;
 }
 
 void collect_direct_calls(const Node& node, set<const Binding*>& out)
@@ -320,6 +249,8 @@ bool early_hidden_friend_definition(const Node& node,
 		return false;
 	if (direct_calls.find(node.binding) != direct_calls.end())
 		return true;
+	if (node.binding->is_constexpr)
+		return false;
 	return !contains_call_expression(node) &&
 	       !binding_mentions_template_specialization(node.binding);
 }
@@ -482,119 +413,95 @@ string ProgramLowerer::global_data_item(TypePtr elem, const Node& init)
 	return scalar_lowir_type(elem) + " " + lowir_literal(elem, init);
 }
 
-void ProgramLowerer::emit_global(const Node& node)
+void ProgramLowerer::demand_initializer_calls(const Node& node)
 {
-	if (node.binding == NULL)
+	if (node.direct_call != NULL && node.direct_call->is_inline_definition)
+		demand_inline_function(node.direct_call);
+	for (size_t i = 0; i < node.children.size(); ++i)
+		demand_initializer_calls(node.children[i]);
+}
+
+void ProgramLowerer::demand_initializer_type_calls(TypePtr type, const Node& node)
+{
+	if (type.get() == NULL)
 		return;
-	string name = symbol_for(node.binding);
-	defined_globals.insert(name);
-	if (node.binding->is_thread_local)
-		ensure_thread_local_wrapper(name);
-	TypePtr type = node.binding->type;
-	ostringstream out;
 	TypePtr bare = pa11::strip_cv(type);
-	bool runtime_init =
-		!node.children.empty() &&
-		global_needs_runtime_init(type, node.children[0]);
-	if (runtime_init && node.binding->is_thread_local)
-		thread_local_init_variables.push_back(node);
-	else if (runtime_init)
-		global_init_variables.push_back(node);
-	if (record_has_destructor(type))
-		global_fini_variables.push_back(node);
-	if (bare->kind == TypeKind::Enum && node.binding->has_constant)
+	if (bare->kind == TypeKind::Array)
 	{
-		vector<string> metadata;
-		if (node.binding->is_thread_local)
-			metadata.push_back("storage=thread_local");
-		if (node.binding->language_linkage == "c")
-			metadata.push_back("linkage=c");
-		metadata.push_back("binding=strong");
-		out << "global @" << name << metadata_suffix(metadata) << " = {\n";
-		out << "  zero " << pa11::type_size(type) << "\n";
-		out << "}";
+		for (size_t i = 0; i < node.children.size(); ++i)
+			demand_initializer_type_calls(bare->base, node.children[i]);
+		return;
 	}
-	else if (bare->kind == TypeKind::Array || bare->kind == TypeKind::Record)
+	if (bare->kind == TypeKind::Record &&
+	    starts_with(node.line, "braced-init-list"))
 	{
-		vector<string> metadata;
-		if (node.binding->is_thread_local)
-			metadata.push_back("storage=thread_local");
-		if (node.binding->language_linkage == "c")
-			metadata.push_back("linkage=c");
-		metadata.push_back("binding=strong");
-		out << "global @" << name << metadata_suffix(metadata) << " = {\n";
-		if (runtime_init)
-			out << "  zero " << pa11::type_size(type) << "\n";
-		else if (bare->kind == TypeKind::Record)
+		Binding* ctor = find_constructor(bare, node.children.size());
+		if (ctor != NULL &&
+		    ctor->is_inline_definition &&
+		    !ctor->is_generated_aggregate_constructor)
+			demand_inline_function(ctor);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			demand_initializer_type_calls(TypePtr(), node.children[i]);
+	}
+}
+
+void ProgramLowerer::write_global_zero_items(ostringstream& out, TypePtr elem)
+{
+	TypePtr bare = pa11::strip_cv(elem);
+	if (bare->kind == TypeKind::Array && !bare->unknown_bound)
+	{
+		for (size_t i = 0; i < bare->bound; ++i)
+			write_global_zero_items(out, bare->base);
+		return;
+	}
+	out << "  zero " << pa11::type_size(elem) << "\n";
+}
+
+void ProgramLowerer::write_global_data_items(ostringstream& out,
+                                             TypePtr elem,
+                                             const Node& init)
+{
+	TypePtr bare = pa11::strip_cv(elem);
+	if (bare->kind == TypeKind::Array &&
+	    starts_with(init.line, "braced-init-list"))
+	{
+		size_t count = bare->unknown_bound ? init.children.size() : bare->bound;
+		for (size_t i = 0; i < count; ++i)
 		{
-			out << "  zero " << pa11::type_size(type) << "\n";
-			if (!node.binding->is_static_member)
-				needs_empty_init_function = true;
-		}
-		else
-		{
-			TypePtr elem = bare->base;
-			if (!node.children.empty() &&
-			    starts_with(node.children[0].line, "braced-init-list"))
-			{
-				for (size_t i = 0; i < node.children[0].children.size(); ++i)
-					out << "  " << global_data_item(elem, node.children[0].children[i])
-					    << "\n";
-				if (!bare->unknown_bound)
-					for (size_t i = node.children[0].children.size(); i < bare->bound; ++i)
-						out << "  zero " << pa11::type_size(elem) << "\n";
-			}
+			if (i < init.children.size())
+				write_global_data_items(out, bare->base, init.children[i]);
 			else
-				out << "  zero " << pa11::type_size(type) << "\n";
+				write_global_zero_items(out, bare->base);
 		}
-		out << "}";
+		return;
 	}
-	else
+	if (bare->kind == TypeKind::Record &&
+	    starts_with(init.line, "braced-init-list"))
 	{
-		vector<string> metadata;
-		if (node.binding->is_thread_local)
-			metadata.push_back("storage=thread_local");
-		if (node.binding->language_linkage == "c")
-			metadata.push_back("linkage=c");
-		metadata.push_back("binding=strong");
-		out << "global @" << name << " : " << scalar_lowir_type(type)
-		    << metadata_suffix(metadata) << " = ";
-		if (is_reference(type))
+		pa11::layout_record_type(bare);
+		size_t index = 0;
+		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
-			out << "zero";
-			if (!node.children.empty())
-			{
-				const Node& init = node.children[0];
-				if (starts_with(init.line, "id-expression") &&
-				    init.binding != NULL)
-					init_actions.push_back(
-						InitAction(name, "addr", symbol_for(init.binding)));
-				else if (starts_with(init.line, "unary-expression") &&
-				         init.has_op && init.op == OP_STAR &&
-				         !init.children.empty() &&
-				         init.children[0].binding != NULL)
-					init_actions.push_back(
-						InitAction(name,
-						           "load_ptr",
-						           symbol_for(init.children[0].binding)));
-			}
+			Binding* field = bare->fields[i];
+			if (field == NULL || field->is_static_member)
+				continue;
+			if (index < init.children.size())
+				write_global_data_items(out, field->type, init.children[index++]);
+			else
+				write_global_zero_items(out, field->type);
 		}
-		else if (node.children.empty() && node.binding->has_constant &&
-		         pa11::strip_cv(type)->kind != TypeKind::Enum)
-			out << node.binding->constant_value;
-		else if (node.binding->has_constant &&
-		         pa11::is_integral_or_bool_type(type) &&
-		         pa11::strip_cv(type)->kind != TypeKind::Enum)
-			out << node.binding->constant_value;
-		else if (runtime_init || node.children.empty())
-			out << "zero";
-		else if (starts_with(node.children[0].line, "literal") &&
-		         node.children[0].token_text == "nullptr")
-			out << "zero";
-		else
-			out << global_scalar_initializer(type, node.children[0]);
+		return;
 	}
-	globals.push_back(out.str());
+	out << "  " << global_data_item(elem, init) << "\n";
+}
+
+string ProgramLowerer::ensure_local_static_guard(const Binding* binding)
+{
+	string name = symbol_for(binding) + "__guard";
+	if (defined_globals.insert(name).second)
+		globals.push_back("global @" + name +
+		                  " : i64 [binding=internal] = zero");
+	return name;
 }
 
 void ProgramLowerer::demand_global_declaration(const Binding* binding)
@@ -604,11 +511,25 @@ void ProgramLowerer::demand_global_declaration(const Binding* binding)
 	string name = symbol_for(binding);
 	if (binding->is_thread_local)
 		ensure_thread_local_wrapper(name);
-	if (defined_globals.find(name) != defined_globals.end() ||
-	    declared_globals.find(name) != declared_globals.end())
+	if (defined_globals.find(name) != defined_globals.end())
+		return;
+	map<const Binding*, Node>::iterator deferred =
+		deferred_global_definitions.find(binding);
+	if (deferred != deferred_global_definitions.end())
+	{
+		Node node = deferred->second;
+		deferred_global_definitions.erase(deferred);
+		emit_global(node);
+		return;
+	}
+	if (declared_globals.find(name) != declared_globals.end())
 		return;
 	ostringstream out;
 	out << "declare global @" << name;
+	TypePtr object = strip_for_value(binding->type);
+	TypePtr bare = pa11::strip_cv(object);
+	if (bare->kind != TypeKind::Array && bare->kind != TypeKind::Record)
+		out << " : " << scalar_lowir_type(object);
 	vector<string> metadata;
 	if (binding->is_thread_local)
 		metadata.push_back("storage=thread_local");
@@ -811,13 +732,31 @@ void ProgramLowerer::collect_node(const Node& node)
 			collect_node(node.children[i]);
 		return;
 	}
-	if (starts_with(node.line, "variable "))
-	{
-		if (node.binding != NULL &&
-		    ((node.binding->owner != NULL &&
-		      node.binding->owner->kind == ScopeKind::Namespace) ||
-		     node.binding->is_static_member))
+		if (starts_with(node.line, "variable "))
+		{
+			if (node.binding != NULL &&
+			    node.binding->is_dependent_template_artifact)
+				return;
+			if (node.binding != NULL &&
+			    ((node.binding->owner != NULL &&
+			      node.binding->owner->kind == ScopeKind::Namespace) ||
+			     node.binding->is_static_member))
+			{
+				if (defer_static_constexpr_member_definition(node))
+				{
+					deferred_global_definitions[node.binding] = node;
+					return;
+				}
+				TypePtr object = strip_for_value(node.binding->type);
+				TypePtr bare = pa11::strip_cv(object);
+			if (node.binding->is_static_member &&
+			    node.binding->is_constexpr &&
+			    node.binding->has_constant &&
+			    bare->kind != TypeKind::Array &&
+			    bare->kind != TypeKind::Record)
+				return;
 			emit_global(node);
+		}
 		return;
 	}
 	if (starts_with(node.line, "function-declaration "))
@@ -1407,13 +1346,42 @@ void emit_lowir(const vector<string>& srcfiles,
 		parser->parse_translation_unit();
 		const vector<internal::Node>& extra = parser->extra_lowir_nodes();
 		set<const pa11::Binding*> direct_calls;
-		internal::collect_direct_calls(parser->root(), direct_calls);
-		for (size_t j = 0; j < extra.size(); ++j)
-			program.register_inline_definition(extra[j]);
-		for (size_t j = 0; j < extra.size(); ++j)
-		{
-			if (extra[j].binding == NULL ||
-			    !extra[j].binding->is_object_root)
+			internal::collect_direct_calls(parser->root(), direct_calls);
+			for (size_t j = 0; j < extra.size(); ++j)
+				program.register_inline_definition(extra[j]);
+			for (size_t j = 0; j < extra.size(); ++j)
+				if (internal::starts_with(extra[j].line, "variable "))
+				{
+					if (extra[j].binding != NULL)
+					{
+						pa11::TypePtr node_type =
+							extra[j].type.get() != NULL
+							? extra[j].type : extra[j].binding->type;
+						pa11::TypePtr object = internal::strip_for_value(
+							node_type);
+						pa11::TypePtr bare = pa11::strip_cv(object);
+						bool braced_storage =
+							!extra[j].children.empty() &&
+							internal::starts_with(extra[j].children[0].line,
+							                      "braced-init-list");
+						if (extra[j].binding->is_dependent_template_artifact &&
+						    (bare->kind == pa11::TypeKind::Array ||
+						     bare->kind == pa11::TypeKind::Record ||
+						     braced_storage))
+							continue;
+						if (bare->kind == pa11::TypeKind::Array ||
+						    bare->kind == pa11::TypeKind::Record ||
+						    braced_storage)
+							program.deferred_global_definitions[extra[j].binding] =
+								extra[j];
+						else
+							program.collect_node(extra[j]);
+					}
+				}
+			for (size_t j = 0; j < extra.size(); ++j)
+			{
+				if (extra[j].binding == NULL ||
+				    !extra[j].binding->is_object_root)
 				continue;
 			program.demand_inline_function(extra[j].binding);
 			program.emit_pending_inline_definitions();
@@ -1424,10 +1392,10 @@ void emit_lowir(const vector<string>& srcfiles,
 				continue;
 			program.demand_inline_function(extra[j].binding);
 			program.emit_pending_inline_definitions();
-		}
-		program.collect_translation_unit(parser->root());
-		for (size_t j = 0; j < extra.size(); ++j)
-		{
+			}
+			program.collect_translation_unit(parser->root());
+			for (size_t j = 0; j < extra.size(); ++j)
+			{
 			if (!internal::generated_copy_move_constructor_node(extra[j]))
 				continue;
 			program.demand_inline_function(extra[j].binding);

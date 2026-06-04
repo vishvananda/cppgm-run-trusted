@@ -184,6 +184,7 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	for (size_t i = 0; i < init_actions.size(); ++i)
 		add_child(body, init_actions[i]);
 	add_child(fn, body);
+	remember_function_body(ctor, fn);
 	generated_nodes_.push_back(fn);
 	extra_lowir_nodes_.push_back(fn);
 	return ctor;
@@ -278,11 +279,12 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 		arg.type = params[i + 1];
 		arg.category = ValueCategory::LValue;
 		add_child(body, make_member_init_action(bare->fields[i], &arg));
+		}
+		add_child(fn, body);
+		remember_function_body(ctor, fn);
+		extra_lowir_nodes_.push_back(fn);
+		return ctor;
 	}
-	add_child(fn, body);
-	extra_lowir_nodes_.push_back(fn);
-	return ctor;
-}
 
 namespace {
 

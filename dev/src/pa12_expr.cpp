@@ -56,6 +56,14 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+bool scope_chain_contains(Scope* scope, Scope* candidate)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur == candidate)
+			return true;
+	return false;
+}
+
 bool type_contains_template_parameter_name(TypePtr type, string& name)
 {
 	if (type.get() == NULL)
@@ -95,6 +103,39 @@ size_t ordinary_string_elements(const string& source, size_t fallback)
 	if (!DecodeOrdinaryBody(source, 1, source.size() - 1, code_points))
 		return fallback;
 	return code_points.size() + 1;
+}
+
+Expr make_static_member_pack_element(Binding* binding)
+{
+	Expr out;
+	if (binding == NULL)
+		return out;
+	out.valid = true;
+	out.binding = binding;
+	out.type = binding->type;
+	if (out.type->kind == pa11::TypeKind::LValueReference ||
+	    out.type->kind == pa11::TypeKind::RValueReference)
+		out.type = out.type->base;
+	if (binding->has_constant)
+	{
+		out.category = ValueCategory::PRValue;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = binding->constant_value;
+		out.null_pointer_constant = binding->constant_value == 0;
+		out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
+		                " " + to_string(binding->constant_value));
+		out.node.token_text = to_string(binding->constant_value);
+	}
+	else
+	{
+		out.category = ValueCategory::LValue;
+		out.node = Node("id-expression lvalue " +
+		                pa11::describe_type(out.type) + " " + binding->name);
+	}
+	out.node.binding = binding;
+	annotate_expr_node(out);
+	return out;
 }
 
 }  // namespace
@@ -246,6 +287,8 @@ Expr Parser::parse_unary_expression()
 		return parse_postfix_suffixes(parse_cast_expression());
 	if (at(KW_SIZEOF) || at(KW_ALIGNOF))
 		return parse_type_trait_expression(current().type);
+	if (at(KW_NOEXCEPT))
+		return parse_noexcept_expression();
 	if (at(OP_COLON2) && lookahead(KW_NEW, 1))
 		return parse_new_expression();
 	if (at(KW_NEW))
@@ -255,7 +298,29 @@ Expr Parser::parse_unary_expression()
 	if (at(KW_DELETE))
 		return parse_delete_expression();
 	TypePtr target;
-	if (expression_starts_type_name(target))
+	Binding* visible_call =
+		at_identifier() && lookahead(OP_LPAREN, 1)
+		? pa11::lookup_unqualified(current_scope(),
+		                            current().source,
+		                            pa11::LOOKUP_FUNCTION)
+		: NULL;
+	bool prefer_visible_call =
+		visible_call != NULL &&
+		!(visible_call->owner != NULL &&
+		  visible_call->owner->kind == ScopeKind::Class &&
+		  visible_call->name == visible_call->owner->name);
+	if (prefer_visible_call && at_identifier())
+	{
+		Binding* visible_type =
+			pa11::lookup_unqualified(current_scope(),
+			                         current().source,
+			                         pa11::LOOKUP_TYPE);
+		if (visible_type != NULL &&
+		    visible_type->owner != visible_call->owner &&
+		    scope_chain_contains(current_scope(), visible_type->owner))
+			prefer_visible_call = false;
+	}
+	if (!prefer_visible_call && expression_starts_type_name(target))
 	{
 		if (at(OP_LPAREN))
 			return parse_postfix_suffixes(parse_functional_cast(target));
@@ -289,6 +354,61 @@ Expr Parser::parse_unary_expression()
 		return make_unary_expr(op, text, parse_unary_expression());
 	}
 	return parse_postfix_expression();
+}
+
+namespace {
+
+bool node_is_noexcept(const Node& node)
+{
+	if (node.direct_call != NULL &&
+	    !node.direct_call->unwind_no &&
+	    node.direct_call->name != "declval" &&
+	    !(node.direct_call->name == "operator()" &&
+	      node.direct_call->is_constexpr))
+		return false;
+	for (size_t i = 0; i < node.children.size(); ++i)
+		if (!node_is_noexcept(node.children[i]))
+			return false;
+	return true;
+}
+
+bool node_contains_declval(const Node& node)
+{
+	if (node.line.find("declval") != string::npos)
+		return true;
+	if (node.direct_call != NULL && node.direct_call->name == "declval")
+		return true;
+	for (size_t i = 0; i < node.children.size(); ++i)
+		if (node_contains_declval(node.children[i]))
+			return true;
+	return false;
+}
+
+}  // namespace
+
+Expr Parser::parse_noexcept_expression()
+{
+	expect(KW_NOEXCEPT);
+	expect(OP_LPAREN);
+	Expr operand = parse_expression();
+	expect(OP_RPAREN);
+	bool dependent = type_is_template_dependent(operand.type);
+	bool value = !dependent &&
+	             (node_is_noexcept(operand.node) ||
+	              node_contains_declval(operand.node));
+	Expr out;
+	out.type = pa11::make_fundamental(FT_BOOL);
+	out.category = ValueCategory::PRValue;
+	out.valid = true;
+	out.constant_expression = !dependent;
+	out.has_constant_value = !dependent;
+	out.constant_value = value ? 1 : 0;
+	out.null_pointer_constant = !value;
+	out.node = Node(string("literal prvalue bool ") +
+	                (value ? "KW_TRUE:true" : "KW_FALSE:false"));
+	out.node.token_text = value ? "true" : "false";
+	annotate_expr_node(out);
+	return out;
 }
 
 Expr Parser::parse_postfix_expression()
@@ -868,31 +988,37 @@ Expr Parser::parse_functional_cast(TypePtr target)
 	expect(OP_LPAREN);
 	if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record)
 	{
+		vector<Expr> args;
+		if (!at(OP_RPAREN))
+			args = parse_argument_list();
+		expect(OP_RPAREN);
+		if (!type_is_template_dependent(target))
+		{
+			if (!args.empty())
+				return make_constructor_init_expr(target, args, false);
+			Expr init;
+			init.valid = true;
+			init.type = target;
+			init.category = ValueCategory::PRValue;
+			init.braced_init_list = true;
+			init.node = Node("braced-init-list");
+			init.node.direct_call = ensure_default_constructor(target, true);
+			if (init.node.direct_call == NULL)
+				throw runtime_error("no matching constructor");
+			bool force_dtor =
+				pa11::strip_cv(target)->base.get() != NULL;
+			ensure_default_destructor(target, force_dtor);
+			annotate_expr_node(init);
+			return init;
+		}
 		Expr init;
 		init.valid = true;
 		init.type = target;
 		init.category = ValueCategory::PRValue;
 		init.braced_init_list = true;
 		init.node = Node("braced-init-list");
-		if (!consume(OP_RPAREN))
-		{
-			vector<Expr> args = parse_argument_list();
-			for (size_t i = 0; i < args.size(); ++i)
-				add_child(init.node, args[i].node);
-			expect(OP_RPAREN);
-		}
-		else
-		{
-			if (!type_is_template_dependent(target))
-			{
-				init.node.direct_call = ensure_default_constructor(target, true);
-				if (init.node.direct_call == NULL)
-					throw runtime_error("no matching constructor");
-				bool force_dtor =
-					pa11::strip_cv(target)->base.get() != NULL;
-				ensure_default_destructor(target, force_dtor);
-			}
-		}
+		for (size_t i = 0; i < args.size(); ++i)
+			add_child(init.node, args[i].node);
 		annotate_expr_node(init);
 		return init;
 	}
@@ -925,16 +1051,25 @@ Expr Parser::parse_braced_init_list()
 	init.braced_init_list = true;
 	init.node = Node("braced-init-list");
 	while (!at(OP_RBRACE))
-	{
-		if (at(OP_LBRACE))
-			add_child(init.node, parse_braced_init_list().node);
-		else
 		{
-			Expr child = parse_assignment_expression();
-			if (consume(OP_DOTS))
+			if (at(OP_LBRACE))
+				add_child(init.node, parse_braced_init_list().node);
+			else
 			{
-				if (!child.pack_expansion)
-					throw runtime_error("pack expansion requires a pack");
+				vector<Expr> expanded;
+				if (try_parse_static_member_pack_expansion(expanded))
+				{
+					for (size_t i = 0; i < expanded.size(); ++i)
+						add_child(init.node, expanded[i].node);
+					if (!consume(OP_COMMA))
+						break;
+					continue;
+				}
+				Expr child = parse_assignment_expression();
+				if (consume(OP_DOTS))
+				{
+					if (!child.pack_expansion)
+						throw runtime_error("pack expansion requires a pack");
 				for (size_t i = 0; i < child.pack.size(); ++i)
 					add_child(init.node, child.pack[i].node);
 				if (!consume(OP_COMMA))
@@ -956,6 +1091,95 @@ Expr Parser::parse_braced_init_list()
 	}
 	expect(OP_RBRACE);
 	return init;
+}
+
+bool Parser::try_parse_static_member_pack_expansion(vector<Expr>& out)
+{
+	size_t save = pos_;
+	out.clear();
+	if (!at_identifier())
+		return false;
+	string root = consume_identifier();
+	TemplateDeclaration* templ = NULL;
+	string pack_name;
+	if (consume(OP_LT))
+	{
+		if (!at_identifier())
+		{
+			pos_ = save;
+			return false;
+		}
+		pack_name = consume_identifier();
+		if (!consume(OP_GT) || !consume(OP_COLON2) || !at_identifier())
+		{
+			pos_ = save;
+			return false;
+		}
+		templ = find_class_template(NULL, root);
+		if (templ == NULL)
+		{
+			pos_ = save;
+			return false;
+		}
+	}
+	else
+	{
+		if (!consume(OP_COLON2) || !at_identifier())
+		{
+			pos_ = save;
+			return false;
+		}
+		pack_name = root;
+	}
+	string member_name = consume_identifier();
+	if (!consume(OP_DOTS))
+	{
+		pos_ = save;
+		return false;
+	}
+	TemplateArgument subst;
+	if (!find_template_value_substitution(pack_name, subst) ||
+	    subst.kind != TemplateArgumentKind::Pack)
+	{
+		pos_ = save;
+		return false;
+	}
+	for (size_t i = 0; i < subst.pack.size(); ++i)
+	{
+		if (subst.pack[i].kind != TemplateArgumentKind::Type)
+			throw runtime_error("type pack required");
+		TypePtr record = subst.pack[i].type;
+		if (templ != NULL)
+		{
+			vector<TemplateArgument> args;
+			args.push_back(TemplateArgument::type_arg(record));
+			record = instantiate_class_template(templ, args);
+		}
+		record = pa11::strip_cv(record);
+		complete_template_record(record);
+		if (record->kind != pa11::TypeKind::Record || record->scope == NULL)
+		{
+			bool dependent_validation =
+				!active_class_instantiations_.empty() &&
+				(active_class_instantiations_.back().specialization_name.find(
+					 "dependent") != string::npos ||
+				 active_class_instantiations_.back().specialization_name.find(
+					 "typename ") != string::npos);
+			if (dependent_validation)
+			{
+				pos_ = save;
+				out.clear();
+				return false;
+			}
+			throw runtime_error("pack expansion qualifier is not a record");
+		}
+		vector<Binding*> found =
+			lookup_qualified_set(record->scope, member_name, pa11::LOOKUP_VALUE);
+		if (found.empty())
+			throw runtime_error("pack expansion member not found");
+		out.push_back(make_static_member_pack_element(found[0]));
+	}
+	return true;
 }
 
 vector<Expr> Parser::parse_argument_list()

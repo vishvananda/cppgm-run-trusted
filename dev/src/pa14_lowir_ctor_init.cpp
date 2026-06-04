@@ -328,9 +328,9 @@ void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for,
 				lowered.push_back(by_address ? target_addr.text : "$" + slot);
 			}
 			else
-				lowered.push_back(convert_value(emit_rvalue(arg),
-				                                arg.type,
-				                                param).text);
+				lowered.push_back(convert_binary_value(emit_rvalue(arg),
+				                                       arg.type,
+				                                       param).text);
 		}
 	}
 	emit_constructor_call_with_cleanups(ctor,

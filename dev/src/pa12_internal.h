@@ -291,6 +291,27 @@ struct Conversion
 	Conversion(bool ok, int cost, const Expr& converted);
 };
 
+struct ConstexprValue
+{
+	bool valid;
+	bool is_float;
+	bool is_object;
+	bool is_pointer;
+	uint64_t int_value;
+	long double float_value;
+	Binding* pointer_binding;
+	long long pointer_index;
+	TypePtr object_type;
+	map<Binding*, ConstexprValue> fields;
+	vector<ConstexprValue> elements;
+
+	ConstexprValue();
+	static ConstexprValue integer(uint64_t value);
+	static ConstexprValue floating(long double value);
+	static ConstexprValue object(TypePtr type);
+	static ConstexprValue pointer(Binding* binding, long long index);
+};
+
 struct TemplateValidationState;
 
 class Parser
@@ -330,6 +351,7 @@ private:
 	set<const void*> generated_move_assignments_;
 	set<const void*> generated_dtors_;
 	map<Binding*, Node> default_member_initializers_;
+	map<Binding*, Node> static_member_initializers_;
 	map<Binding*, vector<Expr> > default_arguments_;
 	map<Binding*, vector<string> > function_parameter_names_;
 	vector<string> function_parameter_name_override_;
@@ -360,6 +382,7 @@ private:
 	vector<map<string, TemplateArgument> > template_value_substitutions_;
 	vector<map<string, vector<Binding*> > > function_parameter_pack_substitutions_;
 	vector<ActiveClassInstantiation> active_class_instantiations_;
+	map<Binding*, Node> function_bodies_;
 
 	Scope* current_scope() const;
 	Scope* global_scope() const;
@@ -482,8 +505,10 @@ private:
 		void parse_simple_or_function_declaration(Node& out, bool emit_node);
 		bool parse_qualified_constructor_definition(Node& out, bool emit_node);
 		bool parse_qualified_conversion_definition(Node& out, bool emit_node);
-		bool parse_constructor_like_member(bool explicit_ctor = false);
-		bool parse_conversion_function_member(bool explicit_conv = false);
+		bool parse_constructor_like_member(bool explicit_ctor = false,
+		                                   bool constexpr_ctor = false);
+		bool parse_conversion_function_member(bool explicit_conv = false,
+		                                      bool constexpr_conv = false);
 		bool parse_destructor_like_member();
 		bool parse_friend_declaration();
 		void parse_class_body(Scope* class_scope, bool default_private);
@@ -539,6 +564,7 @@ private:
 		TypePtr class_type,
 		const vector<ParameterInfo>& parameters,
 		Node& function_node);
+	void remember_function_body(Binding* function, const Node& function_node);
 	void parse_pending_member_bodies(Scope* class_scope);
 	void parse_deferred_nested_member_bodies(Scope* class_scope);
 	Node parse_compound_statement();
@@ -547,18 +573,27 @@ private:
 	Node parse_if_statement();
 	Node parse_switch_statement();
 	Node parse_while_statement();
-	Node parse_do_statement();
-	Node parse_for_statement();
-	Node parse_jump_statement();
-	Node parse_labeled_statement();
-	Node parse_expression_statement();
-	Node parse_condition(TypePtr target);
+		Node parse_do_statement();
+		Node parse_for_statement();
+		Node parse_jump_statement();
+		Expr convert_return_expression(Expr expr, TypePtr result);
+		Expr convert_aggregate_return_expression(Expr expr,
+		                                         TypePtr result,
+		                                         TypePtr result_record);
+		Expr convert_record_constructor_return_expression(Expr expr,
+		                                                  TypePtr result);
+		void validate_same_record_return_expression(const Expr& expr,
+		                                            TypePtr result);
+		Node parse_labeled_statement();
+		Node parse_expression_statement();
+		Node parse_condition(TypePtr target);
 
 	Expr parse_expression();
 	Expr parse_assignment_expression();
 	Expr parse_conditional_expression();
 	Expr parse_binary_expression(int min_prec);
 	Expr parse_unary_expression();
+	Expr parse_noexcept_expression();
 	Expr parse_postfix_expression();
 	Expr parse_postfix_suffixes(Expr expr);
 	Expr parse_primary_expression();
@@ -567,10 +602,11 @@ private:
 	Expr parse_literal_expression();
 	Expr parse_cast_expression();
 	Expr parse_type_trait_expression(ETokenType keyword);
-	Expr parse_c_style_cast_or_parenthesized();
-	Expr parse_functional_cast(TypePtr target);
-	Expr parse_braced_init_list();
-	vector<Expr> parse_argument_list();
+		Expr parse_c_style_cast_or_parenthesized();
+		Expr parse_functional_cast(TypePtr target);
+		Expr parse_braced_init_list();
+		bool try_parse_static_member_pack_expansion(vector<Expr>& out);
+		vector<Expr> parse_argument_list();
 
 		Binding* declare_one(const DeclSpecs& specs,
 		                     TypePtr base,
@@ -578,15 +614,22 @@ private:
 		                     const Expr* init,
 		                     bool function_definition,
 		                     Node& out);
-		Binding* declare_function_entity(const DeclSpecs& specs,
-		                                 Scope* target,
-		                                 const string& name,
-		                                 TypePtr type,
+			Binding* declare_function_entity(const DeclSpecs& specs,
+			                                 Scope* target,
+			                                 const string& name,
+			                                 TypePtr type,
 		                                 const Declarator& declarator,
-		                                 bool function_definition,
-		                                 bool nonstatic_member_function,
-		                                 Node& out);
-			void complete_class_virtuals(TypePtr type);
+			                                 bool function_definition,
+			                                 bool nonstatic_member_function,
+			                                 Node& out);
+			Binding* finish_variable_declaration(const DeclSpecs& specs,
+			                                     Scope* target,
+			                                     Binding* variable,
+			                                     const QualifiedName& qname,
+			                                     TypePtr type,
+			                                     const Expr* init,
+			                                     Node& out);
+				void complete_class_virtuals(TypePtr type);
 			Binding* find_overridden_virtual(TypePtr record, Binding* function) const;
 			void apply_variable_initializer(const DeclSpecs& specs,
 			                                Scope* target,
@@ -700,6 +743,24 @@ private:
 	                                const vector<Expr>& args,
 	                                bool copy_initialization);
 	Expr make_call_expr(Expr callee, vector<Expr> args);
+	public:
+		bool try_evaluate_constexpr_call(Binding* function,
+		                                 const vector<Node>& args,
+		                                 ConstexprValue& out);
+		bool try_evaluate_constexpr_call_values(
+			Binding* function,
+			const vector<ConstexprValue>& args,
+			ConstexprValue& out);
+		bool try_evaluate_constexpr_constructor(
+			Binding* function,
+			TypePtr object_type,
+			const vector<ConstexprValue>& args,
+			ConstexprValue& out);
+		bool try_evaluate_constexpr_expr(const Node& node, ConstexprValue& out);
+		bool try_evaluate_constexpr_binding(Binding* binding,
+		                                    ConstexprValue& out);
+	private:
+	void apply_constexpr_value(Expr& expr, const ConstexprValue& value);
 		Expr make_dependent_call_expr(const Expr& callee,
 		                              const vector<Expr>& args);
 		Expr make_id_expr(const QualifiedName& name);

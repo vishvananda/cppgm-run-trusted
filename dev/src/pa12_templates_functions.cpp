@@ -139,12 +139,14 @@ Binding* Parser::instantiate_function_template(
 	{
 		TypePtr type =
 			substitute_template_type(declaration->generic_function_type);
-		Binding* binding =
-			add_function_binding(declaration->owner,
-			                     declaration->name,
-			                     type,
-			                     false);
-		declaration->function_specializations[key] = binding;
+			Binding* binding =
+				add_function_binding(declaration->owner,
+				                     declaration->name,
+				                     type,
+				                     false);
+			if (declaration->placeholder != NULL)
+				binding->unwind_no = declaration->placeholder->unwind_no;
+			declaration->function_specializations[key] = binding;
 		function_template_placeholders_[binding] = declaration;
 		declaration->completing_specializations.erase(key);
 		template_type_substitutions_ = save_subst;
@@ -198,14 +200,18 @@ Binding* Parser::instantiate_function_template(
 		declaration->completing_specializations.erase(key);
 		throw runtime_error("function template instantiation failed");
 	}
-	if (fn.line.compare(0, 19, "function-definition") != 0)
-	{
-		declaration->function_specializations[key] = fn.binding;
+		if (fn.line.compare(0, 19, "function-definition") != 0)
+		{
+			if (declaration->placeholder != NULL)
+				fn.binding->unwind_no = declaration->placeholder->unwind_no;
+			declaration->function_specializations[key] = fn.binding;
 		function_template_placeholders_[fn.binding] = declaration;
 		declaration->completing_specializations.erase(key);
 		return fn.binding;
 	}
-	fn.binding->is_inline_definition = true;
+		fn.binding->is_inline_definition = true;
+		if (declaration->placeholder != NULL)
+			fn.binding->unwind_no = declaration->placeholder->unwind_no;
 	extra_lowir_nodes_.push_back(fn);
 	declaration->function_specializations[key] = fn.binding;
 	function_template_placeholders_[fn.binding] = declaration;

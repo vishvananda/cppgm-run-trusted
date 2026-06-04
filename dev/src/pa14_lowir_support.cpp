@@ -532,6 +532,27 @@ vector<string> qualified_parts(const Binding* binding)
 
 string source_symbol_base(const Binding* binding)
 {
+	if (binding != NULL && binding->is_local_static)
+	{
+		vector<string> parts;
+		for (Scope* s = binding->owner; s != NULL; s = s->parent)
+		{
+			if ((s->kind == ScopeKind::Namespace ||
+			     s->kind == ScopeKind::Class ||
+			     s->kind == ScopeKind::Function) &&
+			    !s->name.empty())
+				parts.push_back(s->name);
+		}
+		ostringstream out;
+		out << "__local_static";
+		for (size_t i = parts.size(); i > 0; --i)
+			out << "__" << sanitized_symbol_part(parts[i - 1]);
+		out << "__" << sanitized_symbol_part(binding->name);
+		if (!binding->local_static_discriminator.empty())
+			out << "__" << sanitized_symbol_part(
+				binding->local_static_discriminator);
+		return out.str();
+	}
 	if (binding->owner != NULL &&
 	    binding->owner->parent == NULL &&
 	    binding->kind == BindingKind::Function)
@@ -639,6 +660,10 @@ string template_argument_symbol_part(
 			? pa11::strip_cv(arg.type) : TypePtr();
 		if (arg.dependent)
 			return "_dependent_value";
+		if (bare.get() != NULL &&
+		    bare->kind == TypeKind::Fundamental &&
+		    bare->fundamental == FT_BOOL)
+			return arg.value != 0 ? "true" : "false";
 		if (bare.get() != NULL && bare->kind == TypeKind::Enum)
 			return "__" + template_type_symbol_text(bare) + "_" +
 			       template_value_symbol_text(arg.value);
@@ -782,7 +807,7 @@ string ProgramLowerer::destructor_symbol_for(const Binding* binding,
 	return name;
 }
 
-vector<unsigned char> decode_simple_string(const string& text)
+vector<uint32_t> decode_simple_string(const string& text)
 {
 	size_t first = text.find('"');
 	size_t last = text.rfind('"');
@@ -791,11 +816,20 @@ vector<unsigned char> decode_simple_string(const string& text)
 	vector<uint32_t> code_points;
 	if (!DecodeOrdinaryBody(text, first + 1, last, code_points))
 		throw runtime_error("invalid string literal");
-	vector<unsigned char> bytes;
-	for (size_t i = 0; i < code_points.size(); ++i)
-		bytes.push_back(static_cast<unsigned char>(code_points[i] & 0xff));
-	bytes.push_back(0);
-	return bytes;
+	code_points.push_back(0);
+	return code_points;
+}
+
+string string_literal_lowir_type(const string& text)
+{
+	if (!text.empty() && text[0] == 'L')
+		return "i32";
+	if (!text.empty() && text[0] == 'U')
+		return "i32";
+	if (!text.empty() && text[0] == 'u' &&
+	    (text.size() < 2 || text[1] != '8'))
+		return "i16";
+	return "i8";
 }
 
 string ProgramLowerer::string_symbol(const string& token_text)
@@ -805,6 +839,7 @@ string ProgramLowerer::string_symbol(const string& token_text)
 		return found->second;
 	string name = "__strlit__" + to_string(string_literals.size() + 1);
 	string_literals[token_text] = name;
+	string_literal_types[name] = string_literal_lowir_type(token_text);
 	string_defs.push_back(make_pair(name, decode_simple_string(token_text)));
 	return name;
 }

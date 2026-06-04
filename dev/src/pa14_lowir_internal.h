@@ -152,9 +152,11 @@ struct ProgramLowerer
 	set<string> defined_globals;
 	set<string> declared_globals;
 	map<string, string> string_literals;
-	vector<pair<string, vector<unsigned char> > > string_defs;
-	map<const Binding*, const Node*> inline_definitions;
-	map<const Binding*, size_t> inline_definition_ranks;
+	map<string, string> string_literal_types;
+		vector<pair<string, vector<uint32_t> > > string_defs;
+		map<const Binding*, const Node*> inline_definitions;
+		map<const Binding*, Node> deferred_global_definitions;
+		map<const Binding*, size_t> inline_definition_ranks;
 	map<const Binding*, string> function_declarations_by_binding;
 	set<const Binding*> demanded_inline_complete_entries;
 	set<const Binding*> demanded_constructor_base_entries;
@@ -191,6 +193,7 @@ struct ProgramLowerer
 	void register_function_declaration(const Node& node);
 	void demand_function_declaration(const Binding* binding);
 	void demand_global_declaration(const Binding* binding);
+	string ensure_local_static_guard(const Binding* binding);
 	void ensure_thread_local_wrapper(const string& global_name);
 	void ensure_eh_declarations();
 	Binding* demand_implicit_copy_assignment(TypePtr type, bool move);
@@ -228,8 +231,12 @@ struct ProgramLowerer
 	void collect_translation_unit(const Node& root);
 	void collect_node(const Node& node);
 	void emit_global(const Node& node);
+	void demand_initializer_calls(const Node& node);
+	void demand_initializer_type_calls(TypePtr type, const Node& node);
 	string global_scalar_initializer(TypePtr type, const Node& init);
 	string global_data_item(TypePtr elem, const Node& init);
+	void write_global_data_items(ostringstream& out, TypePtr elem, const Node& init);
+	void write_global_zero_items(ostringstream& out, TypePtr elem);
 	void write(const string& outfile) const;
 };
 
@@ -285,11 +292,27 @@ private:
 	void lower_stmt(const Node& node);
 	void lower_compound(const Node& node);
 	void lower_decl_stmt(const Node& node);
-	void lower_variable_decl(const Node& var);
-	bool lower_braced_variable_init(const Node& var, TypePtr type);
-	void lower_global_variable_init(const Node& var);
-	void lower_thread_local_variable_init(const Node& node);
+		void lower_variable_decl(const Node& var);
+		bool lower_braced_variable_init(const Node& var, TypePtr type);
+		void lower_global_variable_init(const Node& var);
+		bool lower_constructor_action_global_init(const Node& var);
+		bool lower_generated_aggregate_global_init(const Node& var,
+		                                           const Node& init);
+		bool lower_function_pointer_global_init(const Node& var,
+		                                        const Node& init);
+		function<Value()> global_storage_addr_for(const Node& var);
+		function<Value()> global_variable_addr_for(const Node& var);
+		void lower_local_static_array_global_init(
+			const function<Value()>& addr_for,
+			TypePtr bare,
+			const Node& init);
+		bool lower_local_static_global_init(const Node& var,
+		                                    const function<Value()>& addr_for,
+		                                    TypePtr bare,
+		                                    const Node& init);
+		void lower_thread_local_variable_init(const Node& node);
 	void lower_global_variable_fini(const Node& var);
+	void lower_local_static_decl(const Node& var);
 	void lower_destructor_for_object(const function<Value()>& addr_for,
 	                                 TypePtr type);
 	bool type_needs_cleanup(TypePtr type) const;

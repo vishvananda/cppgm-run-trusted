@@ -195,6 +195,56 @@ Conversion::Conversion(bool ok, int cost, const Expr& converted)
 {
 }
 
+ConstexprValue::ConstexprValue()
+	: valid(false),
+	  is_float(false),
+	  is_object(false),
+	  is_pointer(false),
+	  int_value(0),
+	  float_value(0),
+	  pointer_binding(NULL),
+	  pointer_index(0)
+{
+}
+
+ConstexprValue ConstexprValue::integer(uint64_t value)
+{
+	ConstexprValue out;
+	out.valid = true;
+	out.int_value = value;
+	out.float_value = static_cast<long double>(value);
+	return out;
+}
+
+ConstexprValue ConstexprValue::floating(long double value)
+{
+	ConstexprValue out;
+	out.valid = true;
+	out.is_float = true;
+	out.float_value = value;
+	out.int_value = static_cast<uint64_t>(value);
+	return out;
+}
+
+ConstexprValue ConstexprValue::object(TypePtr type)
+{
+	ConstexprValue out;
+	out.valid = true;
+	out.is_object = true;
+	out.object_type = type;
+	return out;
+}
+
+ConstexprValue ConstexprValue::pointer(Binding* binding, long long index)
+{
+	ConstexprValue out;
+	out.valid = true;
+	out.is_pointer = true;
+	out.pointer_binding = binding;
+	out.pointer_index = index;
+	return out;
+}
+
 void add_child(Node& parent, const Node& child)
 {
 	parent.children.push_back(child);

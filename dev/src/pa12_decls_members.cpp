@@ -361,6 +361,7 @@ void Parser::parse_constructor_body_from_parameters(
 	function_returns_.pop_back();
 	scopes_.pop_back();
 	add_child(fn, body);
+	remember_function_body(function, fn);
 }
 
 bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
@@ -661,6 +662,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		scopes_.pop_back();
 	}
 	add_child(fn, body);
+	remember_function_body(ctor, fn);
 	if (emit_node)
 		add_child(out, fn);
 	else
@@ -740,7 +742,8 @@ bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node)
 	return true;
 }
 
-bool Parser::parse_conversion_function_member(bool explicit_conv)
+bool Parser::parse_conversion_function_member(bool explicit_conv,
+                                              bool constexpr_conv)
 {
 	if (current_scope()->kind != ScopeKind::Class || !at(KW_OPERATOR))
 		return false;
@@ -763,8 +766,9 @@ bool Parser::parse_conversion_function_member(bool explicit_conv)
 		                     conversion_operator_name(result),
 		                     fn_type,
 		                     false);
+	function->is_constexpr = function->is_constexpr || constexpr_conv;
 	function->is_explicit = explicit_conv;
-	function->is_inline_definition = at(OP_LBRACE);
+	function->is_inline_definition = at(OP_LBRACE) || constexpr_conv;
 	function->unwind_no = suffix.noexcept_decl;
 	function->ref_qualifier = suffix.ref_qualifier;
 	function->is_private = !class_private_access_.empty() &&
@@ -799,7 +803,8 @@ bool Parser::parse_conversion_function_member(bool explicit_conv)
 	return true;
 }
 
-bool Parser::parse_constructor_like_member(bool explicit_ctor)
+bool Parser::parse_constructor_like_member(bool explicit_ctor,
+                                           bool constexpr_ctor)
 {
 	if (current_scope()->kind != ScopeKind::Class || !at_identifier())
 		return false;
@@ -832,6 +837,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 	                          BindingKind::Function,
 	                          class_scope->name,
 	                          fn_type);
+	ctor->is_constexpr = ctor->is_constexpr || constexpr_ctor;
 	vector<string> ctor_names(1, "this");
 	for (size_t i = 0; i < parameters.size(); ++i)
 		ctor_names.push_back(parameters[i].name);
@@ -848,7 +854,8 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 	}
 	if (have_ctor_defaults)
 		default_arguments_[ctor] = ctor_defaults;
-	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON);
+	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) ||
+	                             constexpr_ctor;
 	ctor->is_explicit = explicit_ctor;
 	ctor->unwind_no = suffix.noexcept_decl;
 	ctor->is_private = !class_private_access_.empty() &&
@@ -861,6 +868,24 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor)
 		{
 			ctor->is_defaulted = true;
 			ctor->is_inline_definition = true;
+			ctor->unwind_no = true;
+			if (parameters.empty())
+			{
+				Node fn("function-definition " + qualified_decl_name(ctor) +
+				        " " + pa11::describe_type(fn_type));
+				fn.binding = ctor;
+				fn.type = fn_type;
+				Node this_node("parameter this " +
+				               pa11::describe_type(fn_params[0]));
+				this_node.type = fn_params[0];
+				add_child(fn, this_node);
+				add_child(fn, Node("compound-statement"));
+				PendingFunctionBody pending;
+				pending.function = ctor;
+				pending.node = fn;
+				pending.prebuilt_node = true;
+				pending_member_bodies_[class_scope].push_back(pending);
+			}
 				if (parameters.size() == 1 &&
 				    pa11::is_reference_type(parameters[0].type) &&
 				    pa11::same_type(pa11::strip_cv(parameters[0].type->base),

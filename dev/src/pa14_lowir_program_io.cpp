@@ -238,8 +238,12 @@ void ProgramLowerer::write(const string& outfile) const
 	for (size_t i = 0; i < string_defs.size(); ++i)
 	{
 		out << "global @" << string_defs[i].first << " [binding=internal] = {\n";
+		map<string, string>::const_iterator type =
+			string_literal_types.find(string_defs[i].first);
+		string item_type = type == string_literal_types.end()
+			? "i8" : type->second;
 		for (size_t j = 0; j < string_defs[i].second.size(); ++j)
-			out << "  i8 " << static_cast<unsigned>(string_defs[i].second[j]) << "\n";
+			out << "  " << item_type << " " << string_defs[i].second[j] << "\n";
 		out << "}\n\n";
 	}
 	for (size_t i = 0; i < global_declares.size(); ++i)
