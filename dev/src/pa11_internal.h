@@ -44,6 +44,29 @@ struct VirtualTableEntry;
 struct Type;
 typedef shared_ptr<Type> TypePtr;
 
+enum class TemplateInstanceArgumentKind
+{
+	Type,
+	Value,
+	Pack
+};
+
+struct TemplateInstanceArgument
+{
+	TemplateInstanceArgumentKind kind;
+	TypePtr type;
+	uint64_t value;
+	bool dependent;
+	vector<TemplateInstanceArgument> pack;
+
+	TemplateInstanceArgument();
+	static TemplateInstanceArgument type_arg(TypePtr type);
+	static TemplateInstanceArgument value_arg(TypePtr type, uint64_t value);
+	static TemplateInstanceArgument dependent_value_arg(TypePtr type);
+	static TemplateInstanceArgument pack_arg(
+		const vector<TemplateInstanceArgument>& values);
+};
+
 struct VirtualTableEntry
 {
 	Binding* function;
@@ -69,6 +92,8 @@ struct Type
 	bool scoped_enum;
 	bool complete;
 	bool is_template_specialization;
+	string template_primary_name;
+	vector<TemplateInstanceArgument> template_arguments;
 	EFundamentalType enum_underlying;
 	Scope* scope;
 	vector<Binding*> fields;

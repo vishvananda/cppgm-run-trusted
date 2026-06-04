@@ -10,136 +10,6 @@ namespace pa12 {
 namespace internal {
 namespace {
 
-bool type_contains_template_parameter(
-	TypePtr type,
-	const map<const void*, vector<TemplateArgument> >& record_template_arguments);
-
-bool template_argument_contains_template_parameter(
-	const TemplateArgument& arg,
-	const map<const void*, vector<TemplateArgument> >& record_template_arguments)
-{
-	if (arg.kind == TemplateArgumentKind::Type)
-		return type_contains_template_parameter(arg.type,
-		                                        record_template_arguments);
-	if (arg.kind == TemplateArgumentKind::Value)
-		return arg.dependent ||
-		       type_contains_template_parameter(arg.type,
-		                                        record_template_arguments);
-	for (size_t i = 0; i < arg.pack.size(); ++i)
-		if (template_argument_contains_template_parameter(
-			    arg.pack[i],
-			    record_template_arguments))
-			return true;
-	return false;
-}
-
-bool type_contains_template_parameter_name(TypePtr type, string& name)
-{
-	if (type.get() == NULL)
-		return false;
-	type = pa11::strip_cv(type);
-	if (type->kind == pa11::TypeKind::TemplateParameter)
-	{
-		name = type->name;
-		return true;
-	}
-	if (type->kind == pa11::TypeKind::Pointer ||
-	    type->kind == pa11::TypeKind::LValueReference ||
-	    type->kind == pa11::TypeKind::RValueReference ||
-	    type->kind == pa11::TypeKind::Array)
-		return type_contains_template_parameter_name(type->base, name);
-	if (type->kind == pa11::TypeKind::Function)
-	{
-		if (type_contains_template_parameter_name(type->base, name))
-			return true;
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-			if (type_contains_template_parameter_name(type->parameters[i],
-			                                          name))
-				return true;
-	}
-	if (type->kind == pa11::TypeKind::MemberPointer)
-		return type_contains_template_parameter_name(type->member_class,
-		                                             name) ||
-		       type_contains_template_parameter_name(type->base, name);
-	return false;
-}
-
-bool template_argument_kind_matches_parameter(
-	const TemplateArgument& argument,
-	const TemplateParameterInfo& parameter)
-{
-	if (parameter.kind == TemplateParameterKind::Type)
-		return argument.kind == TemplateArgumentKind::Type;
-	if (parameter.kind == TemplateParameterKind::NonType)
-		return argument.kind == TemplateArgumentKind::Value;
-	return false;
-}
-
-bool type_contains_template_parameter(
-	TypePtr type,
-	const map<const void*, vector<TemplateArgument> >& record_template_arguments)
-{
-	if (type.get() == NULL)
-		return false;
-	type = pa11::strip_cv(type);
-	if (type->kind == pa11::TypeKind::TemplateParameter)
-		return true;
-	if (type->kind == pa11::TypeKind::Pointer ||
-	    type->kind == pa11::TypeKind::LValueReference ||
-	    type->kind == pa11::TypeKind::RValueReference ||
-	    type->kind == pa11::TypeKind::Array)
-		return type_contains_template_parameter(type->base,
-		                                        record_template_arguments);
-	if (type->kind == pa11::TypeKind::Function)
-	{
-		if (type_contains_template_parameter(type->base,
-		                                     record_template_arguments))
-			return true;
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-			if (type_contains_template_parameter(
-				    type->parameters[i],
-				    record_template_arguments))
-				return true;
-	}
-	if (type->kind == pa11::TypeKind::MemberPointer)
-		return type_contains_template_parameter(
-			       type->member_class,
-			       record_template_arguments) ||
-		       type_contains_template_parameter(type->base,
-		                                        record_template_arguments);
-	if (type->kind == pa11::TypeKind::Record)
-	{
-		map<const void*, vector<TemplateArgument> >::const_iterator found =
-			record_template_arguments.find(type.get());
-		if (found != record_template_arguments.end())
-			for (size_t i = 0; i < found->second.size(); ++i)
-				if (template_argument_contains_template_parameter(
-					    found->second[i],
-					    record_template_arguments))
-					return true;
-	}
-	return false;
-}
-
-Binding* find_matching_function(Scope* scope,
-                                const string& name,
-                                TypePtr type)
-{
-	if (scope == NULL)
-		return NULL;
-	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
-	if (it == scope->members.end())
-		return NULL;
-	for (size_t i = 0; i < it->second.size(); ++i)
-	{
-		Binding* binding = it->second[i];
-		if (binding->kind == BindingKind::Function &&
-		    pa11::same_type(binding->type, type))
-			return binding;
-	}
-	return NULL;
-}
-
 string template_type_spelling(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -312,6 +182,34 @@ string template_argument_spelling(const vector<TemplateArgument>& arguments)
 	return out.str();
 }
 
+pa11::TemplateInstanceArgument template_instance_argument(
+	const TemplateArgument& argument)
+{
+	if (argument.kind == TemplateArgumentKind::Type)
+		return pa11::TemplateInstanceArgument::type_arg(argument.type);
+	if (argument.kind == TemplateArgumentKind::Value)
+	{
+		if (argument.dependent)
+			return pa11::TemplateInstanceArgument::dependent_value_arg(
+				argument.type);
+		return pa11::TemplateInstanceArgument::value_arg(argument.type,
+		                                                argument.value);
+	}
+	vector<pa11::TemplateInstanceArgument> pack;
+	for (size_t i = 0; i < argument.pack.size(); ++i)
+		pack.push_back(template_instance_argument(argument.pack[i]));
+	return pa11::TemplateInstanceArgument::pack_arg(pack);
+}
+
+vector<pa11::TemplateInstanceArgument> template_instance_arguments(
+	const vector<TemplateArgument>& arguments)
+{
+	vector<pa11::TemplateInstanceArgument> out;
+	for (size_t i = 0; i < arguments.size(); ++i)
+		out.push_back(template_instance_argument(arguments[i]));
+	return out;
+}
+
 bool same_template_argument_value(const TemplateArgument& left,
                                   const TemplateArgument& right)
 {
@@ -464,7 +362,7 @@ TypePtr Parser::instantiate_class_template(
 	}
 	bool dependent = false;
 	for (size_t i = 0; i < full_args.size(); ++i)
-		if (template_argument_contains_template_parameter(
+		if (template_argument_has_template_parameter(
 			    full_args[i],
 			    record_template_arguments_))
 			dependent = true;
@@ -493,6 +391,8 @@ TypePtr Parser::instantiate_class_template(
 		                       false,
 		                       class_scope);
 	type->is_template_specialization = true;
+	type->template_primary_name = declaration->name;
+	type->template_arguments = template_instance_arguments(full_args);
 	Binding* binding =
 		pa11::add_binding(declaration->owner,
 		                  BindingKind::Type,
@@ -528,7 +428,7 @@ void Parser::complete_template_record(TypePtr type)
 	vector<TemplateArgument> args = record_template_arguments_[bare.get()];
 	bool dependent = false;
 	for (size_t i = 0; i < args.size(); ++i)
-		if (template_argument_contains_template_parameter(
+		if (template_argument_has_template_parameter(
 			    args[i],
 			    record_template_arguments_))
 			dependent = true;
@@ -753,13 +653,7 @@ void Parser::instantiate_member_function_templates(TypePtr type)
 			string key = template_argument_key(args_it->second);
 			if (it->second[i]->completing_specializations.count(key) != 0)
 				continue;
-			try
-			{
-				instantiate_function_template(it->second[i], args_it->second);
-			}
-			catch (const runtime_error&)
-			{
-			}
+			instantiate_function_template(it->second[i], args_it->second);
 		}
 	}
 }
@@ -862,7 +756,8 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 
 bool Parser::type_is_template_dependent(TypePtr type) const
 {
-	return type_contains_template_parameter(type, record_template_arguments_);
+	return template_type_has_template_parameter(type,
+	                                           record_template_arguments_);
 }
 
 TypePtr Parser::substitute_template_type_parameter(TypePtr type,

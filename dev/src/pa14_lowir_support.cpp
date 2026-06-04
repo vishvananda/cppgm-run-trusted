@@ -495,7 +495,7 @@ string sanitized_symbol_part(const string& part)
 	return text;
 }
 
-string template_record_symbol_part(const string& part);
+string template_record_symbol_part(TypePtr record);
 
 vector<string> qualified_parts(const Binding* binding)
 {
@@ -510,16 +510,10 @@ vector<string> qualified_parts(const Binding* binding)
 			{
 				TypePtr record = pa11::record_type_for_scope(s);
 				if (record_is_template_specialization(record))
-				{
-					part = record->name;
-					size_t scope_pos = part.rfind("::");
-					if (scope_pos != string::npos)
-						part = part.substr(scope_pos + 2);
-					part = template_record_symbol_part(part);
+						part = template_record_symbol_part(record);
 				}
+				parts.push_back(part);
 			}
-			parts.push_back(part);
-		}
 	}
 	vector<string> out;
 	for (size_t i = parts.size(); i > 0; --i)
@@ -606,53 +600,6 @@ bool binding_has_template_specialization_context(const Binding* binding)
 	return false;
 }
 
-string trim_template_part(const string& text)
-{
-	size_t first = 0;
-	while (first < text.size() &&
-	       isspace(static_cast<unsigned char>(text[first])))
-		++first;
-	size_t last = text.size();
-	while (last > first &&
-	       isspace(static_cast<unsigned char>(text[last - 1])))
-		--last;
-	return text.substr(first, last - first);
-}
-
-vector<string> split_template_display_arguments(const string& text)
-{
-	vector<string> out;
-	size_t start = 0;
-	int depth = 0;
-	for (size_t i = 0; i < text.size(); ++i)
-	{
-		if (text[i] == '<')
-			++depth;
-		else if (text[i] == '>')
-			--depth;
-		else if (text[i] == ',' && depth == 0)
-		{
-			out.push_back(trim_template_part(text.substr(start, i - start)));
-			start = i + 1;
-		}
-	}
-	out.push_back(trim_template_part(text.substr(start)));
-	return out;
-}
-
-bool decimal_template_value(const string& text)
-{
-	if (text.empty())
-		return false;
-	size_t i = text[0] == '-' ? 1 : 0;
-	if (i == text.size())
-		return false;
-	for (; i < text.size(); ++i)
-		if (!isdigit(static_cast<unsigned char>(text[i])))
-			return false;
-	return true;
-}
-
 string template_display_symbol_text(string text)
 {
 	for (size_t i = 0; i < text.size(); ++i)
@@ -663,43 +610,65 @@ string template_display_symbol_text(string text)
 	return sanitized_symbol_part(text);
 }
 
-string template_value_symbol_text(const string& text)
+string template_value_symbol_text(uint64_t value)
 {
-	if (!text.empty() && text[0] == '-')
-		return "minus" + text.substr(1);
-	return text;
+	return to_string(value);
 }
 
-string template_argument_symbol_part(const string& arg)
+string template_type_symbol_text(TypePtr type)
 {
-	size_t space = arg.rfind(' ');
-	if (space != string::npos && space + 1 < arg.size())
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() != NULL &&
+	    bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+		return record_lowir_name(bare);
+	if (bare.get() != NULL &&
+	    (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum))
+		return template_display_symbol_text(bare->name);
+	return template_display_symbol_text(pa11::describe_type(type));
+}
+
+string template_argument_symbol_part(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return template_type_symbol_text(arg.type);
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
 	{
-		string type = trim_template_part(arg.substr(0, space));
-		string value = trim_template_part(arg.substr(space + 1));
-		if (!type.empty() && decimal_template_value(value))
-			return "__" + template_display_symbol_text(type) + "_" +
-			       template_value_symbol_text(value);
+		TypePtr bare = arg.type.get() != NULL
+			? pa11::strip_cv(arg.type) : TypePtr();
+		if (arg.dependent)
+			return "_dependent_value";
+		if (bare.get() != NULL && bare->kind == TypeKind::Enum)
+			return "__" + template_type_symbol_text(bare) + "_" +
+			       template_value_symbol_text(arg.value);
+		return "_" + template_value_symbol_text(arg.value);
 	}
-	if (decimal_template_value(arg))
-		return "_" + template_value_symbol_text(arg);
-	return template_display_symbol_text(arg);
-}
-
-string template_record_symbol_part(const string& part)
-{
-	size_t lt = part.find('<');
-	size_t gt = part.rfind('>');
-	if (lt == string::npos || gt == string::npos || gt < lt)
-		return template_display_symbol_text(part);
-	string out = template_display_symbol_text(part.substr(0, lt)) + "_";
-	vector<string> args =
-		split_template_display_arguments(part.substr(lt + 1, gt - lt - 1));
-	for (size_t i = 0; i < args.size(); ++i)
+	string out;
+	for (size_t i = 0; i < arg.pack.size(); ++i)
 	{
 		if (i != 0)
 			out += "_";
-		out += template_argument_symbol_part(args[i]);
+		out += template_argument_symbol_part(arg.pack[i]);
+	}
+	return out.empty() ? "_" : out;
+}
+
+string template_record_symbol_part(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	string primary = !bare->template_primary_name.empty()
+		? bare->template_primary_name
+		: (bare->scope != NULL ? bare->scope->name : bare->name);
+	string out = template_display_symbol_text(primary);
+	if (!record_is_template_specialization(bare))
+		return out;
+	out += "_";
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+	{
+		if (i != 0)
+			out += "_";
+		out += template_argument_symbol_part(bare->template_arguments[i]);
 	}
 	out += "_";
 	return out;
@@ -718,18 +687,12 @@ string record_lowir_name(TypePtr record)
 			              s->name;
 			if (s->kind == ScopeKind::Class)
 			{
-				TypePtr scope_record = pa11::record_type_for_scope(s);
-				if (record_is_template_specialization(scope_record))
-				{
-					part = scope_record->name;
-					size_t scope_pos = part.rfind("::");
-					if (scope_pos != string::npos)
-						part = part.substr(scope_pos + 2);
-					part = template_record_symbol_part(part);
+					TypePtr scope_record = pa11::record_type_for_scope(s);
+					if (record_is_template_specialization(scope_record))
+						part = template_record_symbol_part(scope_record);
 				}
+				parts.push_back(part);
 			}
-			parts.push_back(part);
-		}
 	}
 	if (parts.empty())
 		parts.push_back(bare->name);

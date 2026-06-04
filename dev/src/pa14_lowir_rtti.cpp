@@ -1,6 +1,5 @@
 #include "pa14_lowir_internal.h"
 
-#include <cctype>
 #include <sstream>
 
 namespace pa14 {
@@ -14,145 +13,136 @@ string typeinfo_name_symbol(TypePtr record)
 	return "__typeinfo_name__" + bare->tag + "_" + record_lowir_name(bare);
 }
 
-string trim_template_part(const string& text)
+string typeinfo_builtin_code(EFundamentalType type)
 {
-	size_t first = 0;
-	while (first < text.size() &&
-	       isspace(static_cast<unsigned char>(text[first])))
-		++first;
-	size_t last = text.size();
-	while (last > first &&
-	       isspace(static_cast<unsigned char>(text[last - 1])))
-		--last;
-	return text.substr(first, last - first);
+	if (type == FT_BOOL)
+		return "b";
+	if (type == FT_CHAR)
+		return "c";
+	if (type == FT_SIGNED_CHAR)
+		return "a";
+	if (type == FT_UNSIGNED_CHAR)
+		return "h";
+	if (type == FT_SHORT_INT)
+		return "s";
+	if (type == FT_UNSIGNED_SHORT_INT)
+		return "t";
+	if (type == FT_INT)
+		return "i";
+	if (type == FT_UNSIGNED_INT)
+		return "j";
+	if (type == FT_LONG_INT)
+		return "l";
+	if (type == FT_UNSIGNED_LONG_INT)
+		return "m";
+	if (type == FT_LONG_LONG_INT)
+		return "x";
+	if (type == FT_UNSIGNED_LONG_LONG_INT)
+		return "y";
+	if (type == FT_WCHAR_T)
+		return "w";
+	if (type == FT_CHAR16_T)
+		return "Ds";
+	if (type == FT_CHAR32_T)
+		return "Di";
+	return "";
 }
 
-vector<string> split_template_display_arguments(const string& text)
+string typeinfo_component_for_type(TypePtr type);
+
+string template_value_typeinfo_component(TypePtr type, uint64_t value)
 {
-	vector<string> out;
-	size_t start = 0;
-	int depth = 0;
-	for (size_t i = 0; i < text.size(); ++i)
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() != NULL && bare->kind == TypeKind::Enum)
 	{
-		if (text[i] == '<')
-			++depth;
-		else if (text[i] == '>')
-			--depth;
-		else if (text[i] == ',' && depth == 0)
-		{
-			out.push_back(trim_template_part(text.substr(start, i - start)));
-			start = i + 1;
-		}
+		string enum_name = bare->name;
+		return "L" + to_string(enum_name.size()) + enum_name +
+		       to_string(value) + "E";
 	}
-	out.push_back(trim_template_part(text.substr(start)));
+	string code = typeinfo_component_for_type(type);
+	if (code.empty())
+		code = "i";
+	return "L" + code + to_string(value) + "E";
+}
+
+string typeinfo_component_for_argument(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return typeinfo_component_for_type(arg.type);
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		if (arg.dependent)
+			return "Lii0E";
+		return template_value_typeinfo_component(arg.type, arg.value);
+	}
+	string out;
+	for (size_t i = 0; i < arg.pack.size(); ++i)
+		out += typeinfo_component_for_argument(arg.pack[i]);
 	return out;
 }
 
-bool decimal_template_value(const string& text)
+string template_typeinfo_component(TypePtr record)
 {
-	if (text.empty())
-		return false;
-	size_t i = text[0] == '-' ? 1 : 0;
-	if (i == text.size())
-		return false;
-	for (; i < text.size(); ++i)
-		if (!isdigit(static_cast<unsigned char>(text[i])))
-			return false;
-	return true;
-}
-
-string typeinfo_type_code(const string& type)
-{
-	if (type == "bool")
-		return "b";
-	if (type == "char")
-		return "c";
-	if (type == "signed char")
-		return "a";
-	if (type == "unsigned char")
-		return "h";
-	if (type == "short int" || type == "short")
-		return "s";
-	if (type == "unsigned short int" || type == "unsigned short")
-		return "t";
-	if (type == "int")
-		return "i";
-	if (type == "unsigned int" || type == "unsigned")
-		return "j";
-	if (type == "long int" || type == "long")
-		return "l";
-	if (type == "unsigned long int" || type == "unsigned long")
-		return "m";
-	if (type == "long long int" || type == "long long")
-		return "x";
-	if (type == "unsigned long long int" ||
-	    type == "unsigned long long")
-		return "y";
-	return to_string(type.size()) + type;
-}
-
-string template_typeinfo_component(const string& part)
-{
-	size_t lt = part.find('<');
-	size_t gt = part.rfind('>');
-	if (lt == string::npos || gt == string::npos || gt < lt)
-		return to_string(part.size()) + part;
-	string base = part.substr(0, lt);
-	vector<string> args =
-		split_template_display_arguments(part.substr(lt + 1, gt - lt - 1));
-	string out = to_string(base.size()) + base + "I";
-	string previous_type_code;
-	for (size_t i = 0; i < args.size(); ++i)
-	{
-		size_t space = args[i].rfind(' ');
-		if (space != string::npos && space + 1 < args[i].size())
-		{
-			string enum_type = trim_template_part(args[i].substr(0, space));
-			string value = trim_template_part(args[i].substr(space + 1));
-			if (!enum_type.empty() && decimal_template_value(value))
-			{
-				out += "L" + to_string(enum_type.size()) +
-				       enum_type + value + "E";
-				continue;
-			}
-		}
-		if (decimal_template_value(args[i]))
-		{
-			string code = previous_type_code.empty()
-				? "i" : previous_type_code;
-			out += "L" + code + args[i] + "E";
-			continue;
-		}
-		string code = typeinfo_type_code(args[i]);
-		out += code;
-		previous_type_code = code;
-	}
+	TypePtr bare = pa11::strip_cv(record);
+	string primary = !bare->template_primary_name.empty()
+		? bare->template_primary_name
+		: (bare->scope != NULL ? bare->scope->name : bare->name);
+	string out = to_string(primary.size()) + primary + "I";
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		out += typeinfo_component_for_argument(bare->template_arguments[i]);
 	out += "E";
 	return out;
+}
+
+string typeinfo_component_for_type(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	if (bare->kind == TypeKind::Fundamental)
+	{
+		string code = typeinfo_builtin_code(bare->fundamental);
+		if (!code.empty())
+			return code;
+	}
+	if (bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+		return template_typeinfo_component(bare);
+	if (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum)
+		return to_string(bare->name.size()) + bare->name;
+	string name = pa11::describe_type(bare);
+	return to_string(name.size()) + name;
 }
 
 string typeinfo_name_spelling(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
 	vector<string> parts;
-	size_t start = 0;
-	for (;;)
+	for (Scope* s = bare->scope; s != NULL; s = s->parent)
 	{
-		size_t pos = bare->name.find("::", start);
-		string part = pos == string::npos
-			? bare->name.substr(start)
-			: bare->name.substr(start, pos - start);
-		if (!part.empty())
-			parts.push_back(part);
-		if (pos == string::npos)
-			break;
-		start = pos + 2;
+		if (s->kind != ScopeKind::Namespace && s->kind != ScopeKind::Class)
+			continue;
+		if (s->name.empty())
+			continue;
+		if (s->kind == ScopeKind::Class)
+		{
+			TypePtr scope_record = pa11::record_type_for_scope(s);
+			if (scope_record.get() != NULL &&
+			    record_is_template_specialization(scope_record))
+			{
+				parts.push_back(template_typeinfo_component(scope_record));
+				continue;
+			}
+		}
+		string name = s->name == "<unnamed>" ? "_GLOBAL__N_1" : s->name;
+		parts.push_back(to_string(name.size()) + name);
 	}
 	if (parts.size() <= 1)
-		return template_typeinfo_component(bare->name);
+		return typeinfo_component_for_type(bare);
 	string out = "N";
-	for (size_t i = 0; i < parts.size(); ++i)
-		out += template_typeinfo_component(parts[i]);
+	for (size_t i = parts.size(); i > 0; --i)
+		out += parts[i - 1];
 	out += "E";
 	return out;
 }

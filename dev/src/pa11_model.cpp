@@ -213,6 +213,50 @@ VirtualTableEntry::VirtualTableEntry(Binding* f, bool d)
 {
 }
 
+TemplateInstanceArgument::TemplateInstanceArgument()
+	: kind(TemplateInstanceArgumentKind::Type),
+	  value(0),
+	  dependent(false)
+{
+}
+
+TemplateInstanceArgument TemplateInstanceArgument::type_arg(TypePtr type)
+{
+	TemplateInstanceArgument arg;
+	arg.kind = TemplateInstanceArgumentKind::Type;
+	arg.type = type;
+	return arg;
+}
+
+TemplateInstanceArgument TemplateInstanceArgument::value_arg(TypePtr type,
+                                                             uint64_t value)
+{
+	TemplateInstanceArgument arg;
+	arg.kind = TemplateInstanceArgumentKind::Value;
+	arg.type = type;
+	arg.value = value;
+	return arg;
+}
+
+TemplateInstanceArgument TemplateInstanceArgument::dependent_value_arg(
+	TypePtr type)
+{
+	TemplateInstanceArgument arg;
+	arg.kind = TemplateInstanceArgumentKind::Value;
+	arg.type = type;
+	arg.dependent = true;
+	return arg;
+}
+
+TemplateInstanceArgument TemplateInstanceArgument::pack_arg(
+	const vector<TemplateInstanceArgument>& values)
+{
+	TemplateInstanceArgument arg;
+	arg.kind = TemplateInstanceArgumentKind::Pack;
+	arg.pack = values;
+	return arg;
+}
+
 TypePtr make_fundamental(EFundamentalType fundamental)
 {
 	TypePtr type = new_type(TypeKind::Fundamental);

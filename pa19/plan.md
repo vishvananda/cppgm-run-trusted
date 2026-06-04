@@ -56,3 +56,44 @@ must keep parsing, semantic analysis, template instantiation, and LowIR lowering
   `perl scripts/cppgm_file_audit.pl --stage pa19 --paths dev/src`.
 - Commit cohesive progress once a stable checkpoint builds and preserves earlier
   assignment behavior.
+
+## Architecture Review
+
+The implemented PA19 path is a direct extension of the PA18 semantic and LowIR
+pipeline. PA12 owns template parsing, typed template arguments, non-type values,
+pack substitution, explicit specialization selection, and constant-dependent
+deferral. PA14 owns only LowIR naming and lowering after PA12 has produced
+ordinary semantic declarations.
+
+The audit found one ownership leak: PA14 was parsing template display strings
+from record names to recover specialization arguments for LowIR symbols and
+RTTI. That made PA14 depend on spelling conventions instead of the typed
+template state owned by PA12. The implementation now carries structured
+template-instance arguments on PA11 record types, populated by PA12 when class
+templates instantiate, and PA14 formats symbols/RTTI from that structured
+metadata.
+
+The template instantiation path now treats member function template
+materialization as required work for completed class-template specializations.
+Errors are not broadly swallowed. Dependency deferral remains represented by
+typed template arguments and the existing dependent-type checks rather than a
+catch-all fallback.
+
+## Final Architecture Review
+
+PA19 now leaves the compiler in the intended layered state:
+
+- PA12 keeps the semantic facts: typed template arguments, value arguments,
+  dependent value markers, pack contents, static assertions, and specialization
+  maps.
+- PA11 record types retain enough typed specialization metadata for later
+  lowering without making PA14 depend on PA12 parser internals.
+- PA14 lowers completed semantic records/functions to existing LowIR only; it
+  does not parse source/display strings to rediscover template facts and does
+  not introduce a PA19-specific output format.
+- Shared declaration/template helper ownership is in focused common source
+  files listed in `dev/frontend_source_sets.mk`, and the large PA12 template
+  routines are split at explicit-specialization, pack-completion, and
+  default-argument boundaries.
+- The required through-PA19 test report and file audit pass, with no unresolved
+  audit blocker or deferred architecture/performance problem found.

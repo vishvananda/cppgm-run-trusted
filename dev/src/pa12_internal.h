@@ -93,6 +93,14 @@ struct TemplateArgument
 	static TemplateArgument pack_arg(const vector<TemplateArgument>& values);
 };
 
+bool template_argument_has_template_parameter(
+	const TemplateArgument& arg,
+	const map<const void*, vector<TemplateArgument> >& record_template_arguments);
+bool template_type_has_template_parameter_name(TypePtr type, string& name);
+bool template_type_has_template_parameter(
+	TypePtr type,
+	const map<const void*, vector<TemplateArgument> >& record_template_arguments);
+
 struct QualifiedName
 {
 	Scope* qualifier;
@@ -126,6 +134,11 @@ struct Expr
 
 	Expr();
 };
+
+bool record_has_aggregate_blocking_constructor(TypePtr record);
+bool string_literal_initializes_array(TypePtr type,
+                                      const Expr& init,
+                                      uint64_t* elements);
 
 struct DeclSpecs
 {
@@ -378,13 +391,19 @@ private:
 		vector<TemplateParameterInfo> parse_template_parameter_clause();
 		TemplateParameterInfo parse_template_parameter_info();
 		void skip_template_parameter_default(TemplateParameterInfo& parameter);
-		TemplateDeclaration* register_template_declaration(
-			const vector<TemplateParameterInfo>& parameters,
-			size_t decl_begin,
-			size_t decl_end);
-		void register_class_template(TemplateDeclaration* declaration);
-		void register_function_template(TemplateDeclaration* declaration);
-		bool register_constructor_template(TemplateDeclaration* declaration);
+			TemplateDeclaration* register_template_declaration(
+				const vector<TemplateParameterInfo>& parameters,
+				size_t decl_begin,
+				size_t decl_end);
+			void register_class_template(TemplateDeclaration* declaration);
+			void register_function_template(TemplateDeclaration* declaration);
+			void register_explicit_function_template_specialization(
+				TemplateDeclaration* declaration,
+				const QualifiedName& qname,
+				size_t save_pos,
+				const vector<map<string, TypePtr> >& save_subst,
+				const vector<map<string, TemplateArgument> >& save_value_subst);
+			bool register_constructor_template(TemplateDeclaration* declaration);
 		bool register_static_member_variable_template(
 			TemplateDeclaration* declaration);
 		size_t skip_template_declaration_body(size_t begin) const;
@@ -395,12 +414,22 @@ private:
 		bool find_function_parameter_pack_substitution(
 			const string& name,
 			vector<Binding*>& out) const;
-		bool parse_template_argument_list(vector<TemplateArgument>& arguments);
-		vector<TemplateArgument> expand_template_argument_pack(
-			const TemplateArgument& argument) const;
-		vector<TemplateArgument> complete_template_arguments(
-			TemplateDeclaration* declaration,
-			const vector<TemplateArgument>& explicit_arguments);
+			bool parse_template_argument_list(vector<TemplateArgument>& arguments);
+			vector<TemplateArgument> expand_template_argument_pack(
+				const TemplateArgument& argument) const;
+			void append_completed_template_pack_argument(
+				TemplateDeclaration* declaration,
+				size_t parameter_index,
+				const vector<TemplateArgument>& explicit_expanded,
+				size_t& explicit_index,
+				vector<TemplateArgument>& out);
+			TemplateArgument parse_default_template_argument(
+				TemplateDeclaration* declaration,
+				size_t parameter_index,
+				const vector<TemplateArgument>& completed_args);
+			vector<TemplateArgument> complete_template_arguments(
+				TemplateDeclaration* declaration,
+				const vector<TemplateArgument>& explicit_arguments);
 		string template_argument_key(
 			const vector<TemplateArgument>& arguments) const;
 		string template_specialization_name(
