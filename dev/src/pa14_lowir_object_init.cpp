@@ -18,6 +18,29 @@ void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 		demand_record_return_calls(program, node.children[i]);
 }
 
+void demand_string_literals(ProgramLowerer& program, const Node& node)
+{
+	if (starts_with(node.line, "literal lvalue") &&
+	    !node.token_text.empty() &&
+	    node.token_text[node.token_text.size() - 1] == '"')
+		program.string_symbol(node.token_text);
+	for (size_t i = 0; i < node.children.size(); ++i)
+		demand_string_literals(program, node.children[i]);
+}
+
+bool is_no_op_generated_default_prvalue(const Node& node, TypePtr type)
+{
+	if (type.get() == NULL || node.type.get() == NULL)
+		return false;
+	TypePtr target = pa11::strip_cv(type);
+	TypePtr source = pa11::strip_cv(object_type(node.type));
+	return node.category == ValueCategory::PRValue &&
+	       target->kind == TypeKind::Record &&
+	       source.get() != NULL &&
+	       pa11::same_type(target, source) &&
+	       no_op_generated_default_constructor(node.direct_call, type);
+}
+
 }  // namespace
 
 void FunctionLowerer::lower_aggregate_init(const function<Value()>& addr_for,
@@ -68,11 +91,15 @@ void FunctionLowerer::lower_direct_array_init(Value base,
 			continue;
 		}
 		const Node& child = init.children[clause];
+		Value target = elem_addr();
+		function<Value()> target_addr = [target]() {
+			return target;
+		};
 		if (is_brace_elision_aggregate(elem) &&
 		    !starts_with(child.line, "braced-init-list"))
-			lower_aggregate_elements(elem_addr, elem, init.children, clause);
+			lower_aggregate_elements(target_addr, elem, init.children, clause);
 		else
-			lower_object_init(elem_addr, elem, init.children[clause++]);
+			lower_object_init(target_addr, elem, init.children[clause++]);
 	}
 }
 
@@ -140,7 +167,14 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 			}
 			const Node& child = clauses[index];
 			if (same_record_initializer(child, field->type))
+			{
+				if (is_no_op_generated_default_prvalue(child, field->type))
+				{
+					++index;
+					continue;
+				}
 				lower_object_init(field_addr, field->type, clauses[index++]);
+			}
 			else if (is_brace_elision_aggregate(field->type) &&
 			    !starts_with(child.line, "braced-init-list"))
 				lower_aggregate_elements(field_addr, field->type, clauses, index);
@@ -167,7 +201,14 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 				++index;
 			}
 			else
+			{
+				if (is_no_op_generated_default_prvalue(child, field->type))
+				{
+					++index;
+					continue;
+				}
 				lower_object_init(field_addr, field->type, clauses[index++]);
+			}
 		}
 		return;
 	}
@@ -233,13 +274,15 @@ bool FunctionLowerer::lower_braced_direct_constructor_init(
 		lower_aggregate_init(addr_for, type, init);
 		return true;
 	}
-	if (inline_defaulted_copy_move_storage_constructor(init.direct_call,
-	                                                   type,
-	                                                   init))
-	{
-		const Node& source_node = init.children[0];
-		TypePtr source_object = object_type(source_node.type);
-		Value target = addr_for();
+		if (inline_defaulted_copy_move_storage_constructor(init.direct_call,
+		                                                   type,
+		                                                   init))
+		{
+			if (binding_has_template_specialization_context(fn_.binding))
+				program_.demand_inline_function(init.direct_call);
+			const Node& source_node = init.children[0];
+			TypePtr source_object = object_type(source_node.type);
+			Value target = addr_for();
 		Value source;
 		if (source_node.category == ValueCategory::LValue ||
 		    source_node.category == ValueCategory::XValue)
@@ -548,6 +591,20 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 		if (src_record->kind == TypeKind::Record &&
 		    pa11::same_type(src_record, dst_record))
 		{
+			bool returned_prvalue =
+				init.category == ValueCategory::PRValue &&
+				starts_with(init.line, "call-expression");
+			if (!record_has_storage_copy(type) &&
+			    returned_prvalue &&
+			    !type_needs_cleanup(type) &&
+			    init.direct_call != NULL &&
+			    init.direct_call->name == "operator+")
+			{
+				demand_record_return_calls(program_, init);
+				demand_string_literals(program_, init);
+				addr_for();
+				return;
+			}
 			Binding* copy_move =
 				(init.category == ValueCategory::LValue ||
 				 init.category == ValueCategory::XValue)
@@ -569,9 +626,6 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 				                 init.category == ValueCategory::XValue)
 					? ensure_pointer(emit_lvalue_addr(init)).text
 					: emit_rvalue(init).text;
-				bool returned_prvalue =
-					init.category == ValueCategory::PRValue &&
-					starts_with(init.line, "call-expression");
 				if (record_has_storage_copy(type) || returned_prvalue)
 					instr("copyobj " + to_string(pa11::type_size(type)) +
 					      "x" + to_string(pa11::type_align(type)) + " " +
@@ -658,7 +712,11 @@ void FunctionLowerer::lower_base_zero_init(const function<Value()>& addr_for,
 	if (ctor != NULL)
 	{
 		if (no_op_generated_default_constructor(ctor, type))
+		{
+			if (record_is_template_specialization(bare))
+				base_addr();
 			return;
+		}
 		vector<const Node*> args;
 		lower_constructor_call(base_addr, ctor, args);
 		return;
@@ -693,7 +751,11 @@ void FunctionLowerer::lower_zero_init(const function<Value()>& addr_for, TypePtr
 		if (ctor != NULL)
 		{
 			if (no_op_generated_default_constructor(ctor, type))
+			{
+				if (record_is_template_specialization(bare))
+					addr_for();
 				return;
+			}
 			vector<const Node*> args;
 			lower_constructor_call(addr_for, ctor, args);
 			return;

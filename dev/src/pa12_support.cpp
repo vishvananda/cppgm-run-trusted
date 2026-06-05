@@ -176,10 +176,13 @@ TemplateDeclaration::TemplateDeclaration()
 	  lexical_scope(NULL),
 	decl_begin(0),
 	decl_end(0),
-	has_definition(false),
-	constructor_template(false),
-	class_specialization(false),
-	placeholder(NULL)
+		has_definition(false),
+		  constructor_template(false),
+		  class_specialization(false),
+		  hidden_friend(false),
+		  function_definition_validated(false),
+		  friend_class_scope(NULL),
+		placeholder(NULL)
 {
 }
 

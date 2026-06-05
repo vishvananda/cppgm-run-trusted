@@ -78,6 +78,15 @@ bool generated_copy_move_constructor_node(const Node& node)
 	    (!node.binding->is_generated_copy_move_constructor &&
 	     node.token_text != "copy-move-helper"))
 		return false;
+	if (node.token_text == "copy-move-helper")
+	{
+		bool empty_body = !node.children.empty() &&
+		                  starts_with(node.children.back().line,
+		                              "compound-statement") &&
+		                  node.children.back().children.empty();
+		if (empty_body)
+			return false;
+	}
 	bool template_context = false;
 	for (Scope* scope = node.binding->owner; scope != NULL; scope = scope->parent)
 	{
@@ -242,13 +251,23 @@ bool binding_mentions_template_specialization(const Binding* binding)
 	       type_mentions_template_specialization(binding->type);
 }
 
+bool same_binding_or_alias(const Binding* left, const Binding* right)
+{
+	return left == right ||
+	       (left != NULL && left->aliased_binding == right) ||
+	       (right != NULL && right->aliased_binding == left);
+}
+
 bool early_hidden_friend_definition(const Node& node,
                                     const set<const Binding*>& direct_calls)
 {
 	if (node.binding == NULL || !node.binding->is_hidden_friend)
 		return false;
-	if (direct_calls.find(node.binding) != direct_calls.end())
-		return true;
+	for (set<const Binding*>::const_iterator it = direct_calls.begin();
+	     it != direct_calls.end();
+	     ++it)
+		if (same_binding_or_alias(node.binding, *it))
+			return true;
 	if (node.binding->is_constexpr)
 		return false;
 	return !contains_call_expression(node) &&
@@ -862,19 +881,27 @@ void ProgramLowerer::register_inline_definition(const Node& node)
 		TypePtr owner_record = pa11::record_type_for_scope(node.binding->owner);
 		bool class_template_specialization =
 			record_is_template_specialization(owner_record);
-		if (!class_template_specialization && !copy_move_helper)
+		if (!class_template_specialization &&
+		    !copy_move_helper &&
+		    !binding_has_template_specialization_context(node.binding))
 			symbol_for(node.binding);
 	}
 	if (!copy_move_helper &&
 	    inline_definition_ranks.find(node.binding) == inline_definition_ranks.end())
 		inline_definition_ranks[node.binding] = inline_definition_ranks.size();
-	if (inline_definitions.find(node.binding) == inline_definitions.end())
+	if (inline_definitions.find(node.binding) == inline_definitions.end() ||
+	    binding_has_template_specialization_context(node.binding))
 		inline_definitions[node.binding] = &node;
 }
 
 void ProgramLowerer::demand_inline_function(const Binding* binding,
                                             bool complete_entry)
 {
+	if (binding != NULL &&
+	    binding->kind == BindingKind::Function &&
+	    binding->aliased_binding != NULL &&
+	    binding->aliased_binding->is_inline_definition)
+		binding = binding->aliased_binding;
 	if (binding == NULL || !binding->is_inline_definition)
 		return;
 	bool class_ctor = is_class_constructor(binding);
@@ -991,6 +1018,31 @@ void ProgramLowerer::place_record_return_before_matching_constructor(
 	}
 }
 
+void ProgramLowerer::place_record_return_before_owner_scalar_member(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (!function_returns_record(binding) ||
+	    binding->owner == NULL ||
+	    !binding_has_template_specialization_context(binding))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		const Binding* pending = *it;
+		bool pending_operator =
+			pending->name.compare(0, 8, "operator") == 0 ||
+			pending->name.compare(0, 9, "operator ") == 0;
+		if (pending->owner == binding->owner &&
+		    !is_class_constructor(pending) &&
+		    !pending_operator &&
+		    !function_returns_record(pending))
+		{
+			pos = it;
+			break;
+		}
+	}
+}
+
 void ProgramLowerer::place_constructor_inline_definition(
 	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
 {
@@ -1013,6 +1065,26 @@ void ProgramLowerer::place_constructor_inline_definition(
 		{
 			pos = it;
 			break;
+		}
+	}
+
+	if (pos == pending_inline_definitions.end() &&
+	    binding_has_template_specialization_context(binding))
+	{
+		for (PendingInlineIterator it = pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end(); ++it)
+		{
+			const Binding* pending = *it;
+			bool pending_operator =
+				pending->name.compare(0, 8, "operator") == 0 ||
+				pending->name.compare(0, 9, "operator ") == 0;
+			if (pending->owner == binding->owner &&
+			    !is_class_constructor(pending) &&
+			    !pending_operator)
+			{
+				pos = it;
+				break;
+			}
 		}
 	}
 
@@ -1206,7 +1278,22 @@ void ProgramLowerer::place_before_late_operator_or_generated_assignment(
 			{
 				pos = it;
 				break;
-			}
+	}
+}
+
+void ProgramLowerer::place_subscript_before_pending_operators(
+	const Binding* binding,
+	ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (binding->name != "operator[]")
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+		if ((*it)->name.compare(0, 8, "operator") == 0)
+		{
+			pos = it;
+			break;
+		}
 }
 
 void ProgramLowerer::place_active_destructor_dependency(
@@ -1232,11 +1319,13 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 	place_lvalue_assignment_before_rvalue_assignment(binding, pos);
 	place_user_assignment_before_owner_members(binding, pos);
 	place_record_return_before_matching_constructor(binding, pos);
+	place_record_return_before_owner_scalar_member(binding, pos);
 	place_constructor_inline_definition(binding, pos);
 	place_destructor_inline_definition(binding, pos);
 	place_const_conversion_before_mutable_conversion(binding, pos);
 	place_specialized_conversion_before_base_conversion(binding, pos);
 	place_ranked_owner_member(binding, pos);
+	place_subscript_before_pending_operators(binding, pos);
 	place_before_late_operator_or_generated_assignment(binding, pos);
 	place_active_destructor_dependency(binding, pos);
 	pending_inline_definitions.insert(pos, binding);
@@ -1328,7 +1417,6 @@ void ProgramLowerer::emit_pending_inline_definitions()
 	}
 }
 
-
 }  // namespace internal
 
 void emit_lowir(const vector<string>& srcfiles,
@@ -1357,13 +1445,11 @@ void emit_lowir(const vector<string>& srcfiles,
 						pa11::TypePtr node_type =
 							extra[j].type.get() != NULL
 							? extra[j].type : extra[j].binding->type;
-						pa11::TypePtr object = internal::strip_for_value(
-							node_type);
+							pa11::TypePtr object = internal::strip_for_value(node_type);
 						pa11::TypePtr bare = pa11::strip_cv(object);
-						bool braced_storage =
-							!extra[j].children.empty() &&
-							internal::starts_with(extra[j].children[0].line,
-							                      "braced-init-list");
+							bool braced_storage = !extra[j].children.empty() &&
+								internal::starts_with(extra[j].children[0].line,
+								                      "braced-init-list");
 						if (extra[j].binding->is_dependent_template_artifact &&
 						    (bare->kind == pa11::TypeKind::Array ||
 						     bare->kind == pa11::TypeKind::Record ||
@@ -1372,8 +1458,7 @@ void emit_lowir(const vector<string>& srcfiles,
 						if (bare->kind == pa11::TypeKind::Array ||
 						    bare->kind == pa11::TypeKind::Record ||
 						    braced_storage)
-							program.deferred_global_definitions[extra[j].binding] =
-								extra[j];
+								program.deferred_global_definitions[extra[j].binding] = extra[j];
 						else
 							program.collect_node(extra[j]);
 					}
@@ -1401,10 +1486,8 @@ void emit_lowir(const vector<string>& srcfiles,
 			program.demand_inline_function(extra[j].binding);
 			set<const pa11::Binding*> generated_calls;
 			internal::collect_direct_calls(extra[j], generated_calls);
-			for (set<const pa11::Binding*>::const_iterator it =
-			     generated_calls.begin();
-			     it != generated_calls.end();
-			     ++it)
+				for (set<const pa11::Binding*>::const_iterator it = generated_calls.begin();
+				     it != generated_calls.end(); ++it)
 				program.demand_inline_function(*it);
 		}
 		program.emit_pending_inline_definitions();
@@ -1414,6 +1497,4 @@ void emit_lowir(const vector<string>& srcfiles,
 	program.emit_global_lifecycle_functions();
 	program.write(outfile);
 }
-
-
 }  // namespace pa14

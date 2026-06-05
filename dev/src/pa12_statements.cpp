@@ -525,11 +525,17 @@ Expr Parser::convert_return_expression(Expr expr, TypePtr result)
 	TypePtr result_record = pa11::strip_cv(result);
 	TypePtr expr_record = expr.type.get() != NULL
 		? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr();
-	if (result_record->kind == pa11::TypeKind::Record)
-	{
-		if (expr.braced_init_list &&
-		    (expr_record.get() == NULL ||
-		     pa11::same_type(result_record, expr_record)))
+		if (result_record->kind == pa11::TypeKind::Record)
+		{
+			if (expr.braced_init_list &&
+			    expr.node.direct_call != NULL &&
+			    !expr.node.direct_call->is_generated_aggregate_constructor &&
+			    expr_record.get() != NULL &&
+			    pa11::same_type(result_record, expr_record))
+				return expr;
+			if (expr.braced_init_list &&
+			    (expr_record.get() == NULL ||
+			     pa11::same_type(result_record, expr_record)))
 			return convert_aggregate_return_expression(expr,
 			                                           result,
 			                                           result_record);

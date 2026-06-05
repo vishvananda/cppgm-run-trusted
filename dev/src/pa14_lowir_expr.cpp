@@ -54,14 +54,20 @@ Value FunctionLowerer::emit_pointer_index_binary(const Node& expr,
 	uint64_t scale = pa11::type_size(pa11::strip_cv(ptr_type)->base);
 	if (scale != 1)
 	{
-		if (!offset.text.empty() && offset.text[0] == '%')
+		string scaled = offset.text;
+		const Node& pointer_node = left_ptr ? expr.children[0] : expr.children[1];
+		bool member_pointer_operand =
+			pointer_node.binding != NULL &&
+			pointer_node.binding->owner != NULL &&
+			pointer_node.binding->owner->kind == ScopeKind::Class &&
+			!pointer_node.binding->is_static_member;
+		if (!member_pointer_operand && !scaled.empty() && scaled[0] == '%')
 		{
-			string copied = fresh_temp();
-			instr(copied + " = copy i64 " + offset.text);
-			offset = Value("i64", copied);
+			scaled = fresh_temp();
+			instr(scaled + " = copy i64 " + offset.text);
 		}
 		string mul = fresh_temp();
-		instr(mul + " = binary mul i64 " + offset.text + ", " +
+		instr(mul + " = binary mul i64 " + scaled + ", " +
 		      to_string(scale));
 		offset = Value("i64", mul);
 	}

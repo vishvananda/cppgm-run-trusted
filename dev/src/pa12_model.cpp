@@ -23,6 +23,22 @@ void append_unique(vector<Binding*>& out, Binding* binding)
 		out.push_back(binding);
 }
 
+bool scope_contains(Scope* ancestor, Scope* scope)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur == ancestor)
+			return true;
+	return false;
+}
+
+void append_unique_scope(vector<Scope*>& out, Scope* scope)
+{
+	if (scope == NULL)
+		return;
+	if (find(out.begin(), out.end(), scope) == out.end())
+		out.push_back(scope);
+}
+
 void collect_direct_in_scope(Scope* scope,
                              const string& name,
                              int mask,
@@ -185,6 +201,17 @@ bool cv_contains(unsigned target, unsigned source)
 	return (target & source) == source;
 }
 
+bool same_template_specialization_record(TypePtr left, TypePtr right)
+{
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
+	       l->name == r->name;
+}
+
 int record_base_distance_impl(TypePtr source, TypePtr target)
 {
 	TypePtr t = pa11::strip_cv(target);
@@ -193,7 +220,8 @@ int record_base_distance_impl(TypePtr source, TypePtr target)
 	     s.get() != NULL && s->kind == pa11::TypeKind::Record;
 	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
 	{
-		if (pa11::same_type(s, t))
+		if (pa11::same_type(s, t) ||
+		    same_template_specialization_record(s, t))
 			return distance;
 		++distance;
 	}
@@ -232,7 +260,8 @@ bool qualification_compatible_impl(TypePtr target,
 		                                     pointer_depth + 1,
 		                                     next_intermediate);
 	}
-	if (pa11::same_type(t, s))
+	if (pa11::same_type(t, s) ||
+	    same_template_specialization_record(t, s))
 		return true;
 	if (t->kind == pa11::TypeKind::Record && s->kind == pa11::TypeKind::Record)
 		return record_base_distance_impl(s, t) < 1000000;
@@ -467,28 +496,27 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
                                                 const string& name,
                                                 int mask)
 {
+	vector<Scope*> deferred_using_directives;
 	for (Scope* scope = start; scope != NULL; scope = scope->parent)
 	{
+		for (size_t i = 0; i < scope->using_directives.size(); ++i)
+			append_unique_scope(deferred_using_directives,
+			                    scope->using_directives[i]);
 		vector<Binding*> direct;
 		collect_direct_in_scope(scope, name, mask, direct);
-		if (!direct.empty())
-			return direct;
-		vector<Binding*> via_using;
-		for (size_t i = 0; i < scope->using_directives.size(); ++i)
+		for (size_t i = 0; i < deferred_using_directives.size(); ++i)
 		{
-			vector<Binding*> one_directive;
+			if (!scope_contains(scope, deferred_using_directives[i]))
+				continue;
 			set<Scope*> seen;
-			collect_in_scope(scope->using_directives[i],
+			collect_in_scope(deferred_using_directives[i],
 			                 name,
 			                 mask,
 			                 seen,
-			                 one_directive);
-			via_using.insert(via_using.end(),
-			                 one_directive.begin(),
-			                 one_directive.end());
+			                 direct);
 		}
-		if (!via_using.empty())
-			return via_using;
+		if (!direct.empty())
+			return direct;
 		TypePtr record = pa11::record_type_for_scope(scope);
 		TypePtr base = record.get() != NULL && record->base.get() != NULL
 			? pa11::strip_cv(record->base) : TypePtr();
@@ -584,6 +612,17 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 {
 	if (class_scope == NULL)
 		return false;
+	for (size_t i = scopes_.size(); i > 0; --i)
+	{
+		for (Scope* scope = scopes_[i - 1];
+		     scope != NULL;
+		     scope = scope->parent)
+			if (scope == class_scope)
+				return true;
+	}
+	for (size_t i = active_friend_class_scopes_.size(); i > 0; --i)
+		if (active_friend_class_scopes_[i - 1] == class_scope)
+			return true;
 	Binding* active = active_functions_.empty() ? NULL : active_functions_.back();
 	Scope* active_class =
 		active != NULL && active->owner != NULL &&

@@ -28,6 +28,19 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+bool record_has_base_type(TypePtr source, TypePtr target)
+{
+	TypePtr wanted = pa11::strip_cv(target);
+	for (TypePtr cur = pa11::strip_cv(source);
+	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
+	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	{
+		if (cur != pa11::strip_cv(source) && pa11::same_type(cur, wanted))
+			return true;
+	}
+	return false;
+}
+
 bool type_contains_template_parameter_name(TypePtr type, string& name)
 {
 	if (type.get() == NULL)
@@ -386,6 +399,9 @@ Expr Parser::make_binary_expr(ETokenType op,
                               Expr lhs,
                               Expr rhs)
 {
+	Expr pack;
+	if (make_binary_pack_expr(op, text, lhs, rhs, pack))
+		return pack;
 	vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs);
 	Expr builtin_converted;
 	bool have_builtin_converted =
@@ -395,13 +411,20 @@ Expr Parser::make_binary_expr(ETokenType op,
 	bool enum_operand =
 		left_object->kind == pa11::TypeKind::Enum ||
 		right_object->kind == pa11::TypeKind::Enum;
+		bool enum_integral_mix =
+			(left_object->kind == pa11::TypeKind::Enum &&
+			 right_object->kind != pa11::TypeKind::Enum &&
+			 pa11::is_integral_or_bool_type(right_object)) ||
+			(right_object->kind == pa11::TypeKind::Enum &&
+			 left_object->kind != pa11::TypeKind::Enum &&
+			 pa11::is_integral_or_bool_type(left_object));
 	if (have_builtin_converted &&
 	    left_object->kind != pa11::TypeKind::Record &&
 	    right_object->kind != pa11::TypeKind::Record)
 		return builtin_converted;
 	if (left_object->kind != pa11::TypeKind::Record &&
 	    right_object->kind != pa11::TypeKind::Record &&
-	    !enum_operand)
+	    (!enum_operand || enum_integral_mix))
 		candidates.clear();
 	bool candidate_accepts_operands = false;
 	for (size_t i = 0; i < candidates.size(); ++i)
@@ -622,9 +645,10 @@ bool Parser::make_builtin_converted_binary_expr(ETokenType op,
 				annotate_expr_node(out);
 				return true;
 			}
-			catch (const runtime_error&)
-			{
-			}
+				catch (const runtime_error&)
+				{
+					throw;
+				}
 		}
 	}
 	return false;
@@ -859,7 +883,16 @@ Expr Parser::make_overloaded_compound_assignment_expr(ETokenType op,
 		vector<Expr> args;
 		args.push_back(lhs);
 		args.push_back(rhs);
-		return make_call_expr(callee, args);
+		try
+		{
+			return make_call_expr(callee, args);
+		}
+		catch (const runtime_error& err)
+		{
+			if (string(err.what()).compare(0, 28,
+			                               "cannot resolve call overload") != 0)
+				throw;
+		}
 	}
 	if (lhs_bare->kind != pa11::TypeKind::Record || lhs_bare->scope == NULL)
 		return Expr();
@@ -874,25 +907,42 @@ Expr Parser::make_overloaded_compound_assignment_expr(ETokenType op,
 	return make_call_expr(callee, args);
 }
 
-Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare)
-{
-	if (rhs.category != ValueCategory::LValue)
-		ensure_copy_move_assignment(lhs_bare, true);
-	vector<Binding*> members =
-		lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION);
-	if (!members.empty())
+	Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare)
+	{
+		bool move_assign = rhs.category != ValueCategory::LValue;
+		Binding* op_binding = ensure_copy_move_assignment(lhs_bare, move_assign);
+		if (op_binding == NULL && move_assign)
+			op_binding = ensure_copy_move_assignment(lhs_bare, false);
+		TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type));
+		if (rhs_bare->kind == pa11::TypeKind::Record &&
+		    pa11::same_type(rhs_bare, lhs_bare))
+		{
+			if (op_binding == NULL)
+				throw runtime_error("copy assignment is deleted");
+			if (deleted_functions_.find(op_binding) != deleted_functions_.end())
+				throw runtime_error("call to deleted function");
+			Expr callee = make_member_expr(lhs, "operator=", ".");
+			callee.binding = op_binding;
+			callee.type = op_binding->type;
+			callee.overloads.clear();
+			callee.overloads.push_back(op_binding);
+			callee.node.binding = op_binding;
+			callee.node.type = op_binding->type;
+			vector<Expr> args;
+			args.push_back(rhs);
+			return make_call_expr(callee, args);
+		}
+		vector<Binding*> members =
+			lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION);
+		if (!members.empty())
 	{
 		Expr callee = make_member_expr(lhs, "operator=", ".");
 		vector<Expr> args;
 		args.push_back(rhs);
 		return make_call_expr(callee, args);
 	}
-	bool move_assign = rhs.category != ValueCategory::LValue;
-	Binding* op_binding = ensure_copy_move_assignment(lhs_bare, move_assign);
-	if (op_binding == NULL && move_assign)
-		op_binding = ensure_copy_move_assignment(lhs_bare, false);
-	if (op_binding == NULL)
-		throw runtime_error("copy assignment is deleted");
+		if (op_binding == NULL)
+			throw runtime_error("copy assignment is deleted");
 	Expr callee = make_member_expr(lhs, "operator=", ".");
 	vector<Expr> args;
 	args.push_back(rhs);
@@ -1202,7 +1252,9 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		throw runtime_error("member access on non-record");
 	vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
-	if (found.empty() && type_is_template_dependent(type))
+	if (found.empty() &&
+	    (type_is_template_dependent(type) ||
+	     record_dependent_base_lookup_skips_.count(bare.get()) != 0))
 		return make_dependent_member_expr(object, name, op);
 	if (found.empty())
 		throw runtime_error("member not found: " + name + " in " +
@@ -1297,40 +1349,14 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 	return out;
 }
 
-Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
-{
-	if (inner.pack_expansion)
+	Expr Parser::make_cast_expr(TypePtr target,
+	                            const string& op_text,
+	                            Expr inner,
+	                            bool suppress_target_pack)
 	{
-		string pack_name;
-		TemplateArgument subst;
-		if (!type_contains_template_parameter_name(target, pack_name) ||
-		    !find_template_value_substitution(pack_name, subst) ||
-		    subst.kind != TemplateArgumentKind::Pack ||
-		    subst.pack.size() != inner.pack.size())
-			throw runtime_error("cast pack expansion mismatch");
-		Expr out;
-		out.valid = true;
-		out.pack_expansion = true;
-		out.type = target;
-		out.category = ValueCategory::PRValue;
-		out.node = Node("pack-expression cast");
-		for (size_t i = 0; i < inner.pack.size(); ++i)
-		{
-			if (subst.pack[i].kind != TemplateArgumentKind::Type)
-				throw runtime_error("type pack required for cast");
-			TypePtr element_target =
-				substitute_template_type_parameter(target,
-				                                   pack_name,
-				                                   subst.pack[i].type);
-			Expr elem = make_cast_expr(element_target,
-			                           op_text,
-			                           inner.pack[i]);
-			out.pack.push_back(elem);
-			add_child(out.node, elem.node);
-		}
-		annotate_expr_node(out);
-		return out;
-	}
+	Expr pack;
+	if (make_cast_pack_expr(target, op_text, inner, suppress_target_pack, pack))
+		return pack;
 	Expr out;
 	out.type = target;
 	out.category = target->kind == pa11::TypeKind::LValueReference
@@ -1371,6 +1397,28 @@ Expr Parser::make_cast_expr(TypePtr target, const string& op_text, Expr inner)
 		                " " + inner.binding->name);
 		annotate_expr_node(out);
 		return out;
+	}
+	if ((target->kind == pa11::TypeKind::LValueReference ||
+	     target->kind == pa11::TypeKind::RValueReference) &&
+	    target->base.get() != NULL)
+	{
+		TypePtr target_object = pa11::strip_cv(target->base);
+		TypePtr source_object = pa11::strip_cv(expression_object_type(inner.type));
+		if (source_object->kind == pa11::TypeKind::Record &&
+		    target_object->kind == pa11::TypeKind::Record &&
+		    !pa11::same_type(source_object, target_object) &&
+		    record_has_base_type(source_object, target_object))
+		{
+			Node base("base-subobject-expression lvalue " +
+			          pa11::describe_type(target_object));
+			base.type = target_object;
+			base.category = ValueCategory::LValue;
+			add_child(base, inner.node);
+			inner.node = base;
+			inner.type = target_object;
+			inner.category = ValueCategory::LValue;
+			inner.binding = NULL;
+		}
 	}
 	TypePtr source_object = pa11::strip_cv(expression_object_type(inner.type));
 	TypePtr target_object = pa11::strip_cv(target);

@@ -4,6 +4,37 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+map<Binding*, Node>::const_iterator find_static_member_initializer(
+	const map<Binding*, Node>& initializers,
+	Binding* binding)
+{
+	map<Binding*, Node>::const_iterator found = initializers.find(binding);
+	if (found != initializers.end())
+		return found;
+	if (binding != NULL && binding->aliased_binding != NULL)
+	{
+		found = initializers.find(binding->aliased_binding);
+		if (found != initializers.end())
+			return found;
+	}
+	for (map<Binding*, Node>::const_iterator it = initializers.begin();
+	     it != initializers.end();
+	     ++it)
+	{
+		Binding* candidate = it->first;
+		if (candidate != NULL &&
+		    binding != NULL &&
+		    candidate->name == binding->name &&
+		    candidate->owner == binding->owner &&
+		    pa11::same_type(candidate->type, binding->type))
+			return it;
+	}
+	return initializers.end();
+}
+
+}  // namespace
 
 Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
                                              Scope* target,
@@ -24,6 +55,8 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		(specs.static_decl &&
 		 target->kind != ScopeKind::Namespace &&
 		 target->kind != ScopeKind::Class);
+	if (variable->is_local_static && !active_functions_.empty())
+		variable->local_static_function_owner = active_functions_.back();
 	variable->is_thread_local =
 		variable->is_thread_local || specs.thread_local_decl;
 	if (target->kind == ScopeKind::Class)
@@ -70,7 +103,8 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		else if (init == NULL && var.children.empty())
 		{
 			map<Binding*, Node>::const_iterator found =
-				static_member_initializers_.find(variable);
+				find_static_member_initializer(static_member_initializers_,
+				                               variable);
 			if (found != static_member_initializers_.end())
 				add_child(var, found->second);
 		}

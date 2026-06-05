@@ -495,6 +495,19 @@ string sanitized_symbol_part(const string& part)
 	return text;
 }
 
+string hex_symbol_text(const string& text)
+{
+	static const char* digits = "0123456789abcdef";
+	string out;
+	for (size_t i = 0; i < text.size(); ++i)
+	{
+		unsigned char ch = static_cast<unsigned char>(text[i]);
+		out.push_back(digits[ch >> 4]);
+		out.push_back(digits[ch & 0xf]);
+	}
+	return out;
+}
+
 string template_record_symbol_part(TypePtr record);
 
 vector<string> qualified_parts(const Binding* binding)
@@ -534,6 +547,20 @@ string source_symbol_base(const Binding* binding)
 {
 	if (binding != NULL && binding->is_local_static)
 	{
+		if (binding->local_static_function_owner != NULL &&
+		    !binding->local_static_function_owner
+		     ->function_specialization_symbol.empty())
+		{
+			ostringstream out;
+			out << "__local_static__function_symbol_"
+			    << hex_symbol_text(binding->local_static_function_owner
+			                       ->function_specialization_symbol)
+			    << "__" << sanitized_symbol_part(binding->name);
+			if (!binding->local_static_discriminator.empty())
+				out << "__" << sanitized_symbol_part(
+					binding->local_static_discriminator);
+			return out.str();
+		}
 		vector<string> parts;
 		for (Scope* s = binding->owner; s != NULL; s = s->parent)
 		{
@@ -558,13 +585,21 @@ string source_symbol_base(const Binding* binding)
 	    binding->kind == BindingKind::Function)
 	{
 		if (binding->name == "operatornew")
-			return "operator_new";
+			return binding->type.get() != NULL &&
+			               binding->type->parameters.size() == 1
+				? "operator_new" : "operatornew";
 		if (binding->name == "operatordelete")
-			return "operator_delete";
+			return binding->type.get() != NULL &&
+			               binding->type->parameters.size() == 1
+				? "operator_delete" : "operatordelete";
 		if (binding->name == "operatornew[]")
-			return "operator_new__";
+			return binding->type.get() != NULL &&
+			               binding->type->parameters.size() == 1
+				? "operator_new__" : "operatornew__";
 		if (binding->name == "operatordelete[]")
-			return "operator_delete__";
+			return binding->type.get() != NULL &&
+			               binding->type->parameters.size() == 1
+				? "operator_delete__" : "operatordelete__";
 	}
 	vector<string> parts = qualified_parts(binding);
 	ostringstream out;
@@ -636,6 +671,28 @@ string template_value_symbol_text(uint64_t value)
 	return to_string(value);
 }
 
+string template_type_symbol_text(TypePtr type);
+
+string function_type_parameter_symbol_suffix(TypePtr function_type)
+{
+	ostringstream out;
+	out << "_";
+	for (size_t i = 0; i < function_type->parameters.size(); ++i)
+	{
+		if (i != 0)
+			out << "_";
+		out << template_type_symbol_text(function_type->parameters[i]);
+	}
+	if (function_type->variadic)
+	{
+		if (!function_type->parameters.empty())
+			out << "_";
+		out << "ellipsis";
+	}
+	out << "_";
+	return out.str();
+}
+
 string template_type_symbol_text(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -646,6 +703,17 @@ string template_type_symbol_text(TypePtr type)
 	if (bare.get() != NULL &&
 	    (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum))
 		return template_display_symbol_text(bare->name);
+	if (bare.get() != NULL && bare->kind == TypeKind::Function)
+		return template_type_symbol_text(bare->base) +
+		       function_type_parameter_symbol_suffix(bare);
+	if (bare.get() != NULL &&
+	    bare->kind == TypeKind::Pointer &&
+	    pa11::strip_cv(bare->base)->kind == TypeKind::Function)
+	{
+		TypePtr function_type = pa11::strip_cv(bare->base);
+		return template_type_symbol_text(function_type->base) + "_____" +
+		       function_type_parameter_symbol_suffix(function_type);
+	}
 	return template_display_symbol_text(pa11::describe_type(type));
 }
 
@@ -671,14 +739,34 @@ string template_argument_symbol_part(
 	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 		return "tmpl_" + template_display_symbol_text(arg.template_name);
-	string out;
+	string out = "_";
 	for (size_t i = 0; i < arg.pack.size(); ++i)
 	{
 		if (i != 0)
 			out += "_";
 		out += template_argument_symbol_part(arg.pack[i]);
 	}
-	return out.empty() ? "_" : out;
+	return out;
+}
+
+void append_template_argument_separator(string& out, const string& next)
+{
+	if (next.size() >= 2 && next[0] == '_' && next[1] == '_')
+	{
+		if (out.empty() || out[out.size() - 1] != '_')
+			out += "_";
+		return;
+	}
+	size_t existing = 0;
+	for (size_t i = out.size(); i > 0 && out[i - 1] == '_'; --i)
+		++existing;
+	for (size_t i = 0; i < next.size() && next[i] == '_'; ++i)
+		++existing;
+	while (existing < 2)
+	{
+		out += "_";
+		++existing;
+	}
 }
 
 string template_record_symbol_part(TypePtr record)
@@ -693,9 +781,10 @@ string template_record_symbol_part(TypePtr record)
 	out += "_";
 	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
 	{
+		string arg = template_argument_symbol_part(bare->template_arguments[i]);
 		if (i != 0)
-			out += "_";
-		out += template_argument_symbol_part(bare->template_arguments[i]);
+			append_template_argument_separator(out, arg);
+		out += arg;
 	}
 	out += "_";
 	return out;
@@ -746,6 +835,11 @@ string rtti_symbol_for_record(TypePtr record)
 
 string ProgramLowerer::symbol_for(const Binding* binding)
 {
+	if (binding != NULL &&
+	    binding->kind == BindingKind::Function &&
+	    binding->aliased_binding != NULL &&
+	    binding->aliased_binding->is_inline_definition)
+		binding = binding->aliased_binding;
 	map<const Binding*, string>::const_iterator found = symbols.find(binding);
 	if (found != symbols.end())
 		return found->second;
@@ -761,6 +855,34 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 		{
 			symbols[binding] = fit->second;
 			return fit->second;
+		}
+		if (binding->is_generated_copy_move_assignment &&
+		    binding->type.get() != NULL &&
+		    binding->type->kind == TypeKind::Function &&
+		    binding->type->parameters.size() == 2 &&
+		    binding->type->parameters[1]->kind == TypeKind::RValueReference)
+		{
+			TypePtr record = pa11::strip_cv(binding->type->parameters[1]->base);
+			vector<TypePtr> copy_params;
+			copy_params.push_back(binding->type->parameters[0]);
+			copy_params.push_back(
+				pa11::make_lvalue_reference(
+					pa11::make_cv(record, pa11::CV_CONST)));
+			TypePtr copy_type = pa11::make_function(binding->type->base,
+			                                        copy_params,
+			                                        false);
+			string copy_key = base + " " +
+			                  string(binding->is_static_member
+			                         ? "static " : "nonstatic ") +
+			                  "refqual=" +
+			                  to_string(binding->ref_qualifier) + " " +
+			                  pa11::describe_type(copy_type);
+			if (function_symbols.find(copy_key) == function_symbols.end())
+			{
+				function_symbols[copy_key] = base;
+				if (used_symbols[base] < 1)
+					used_symbols[base] = 1;
+			}
 		}
 	}
 	int& count = used_symbols[base];

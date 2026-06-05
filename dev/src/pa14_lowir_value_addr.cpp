@@ -154,9 +154,19 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 				}
 			}
 			string tmp = fresh_temp();
-			instr(tmp + " = index i8 [projection=field] " + base.text +
+			TypePtr member_bare = pa11::strip_cv(member->type);
+			TypePtr expr_bare = pa11::strip_cv(expr.type);
+			bool reference_member =
+				member->is_reference_member ||
+				pa11::is_reference_type(pa11::strip_cv(member->type)) ||
+				pa11::is_reference_type(pa11::strip_cv(expr.type)) ||
+				(member_bare->kind == TypeKind::Pointer &&
+				 expr_bare->kind != TypeKind::Pointer);
+			string projection = reference_member
+				? "reference_field" : "field";
+			instr(tmp + " = index i8 [projection=" + projection + "] " + base.text +
 			      ", " + to_string(member->member_offset));
-			if (is_reference(member->type))
+			if (reference_member)
 			{
 				string ref = fresh_temp();
 				instr(ref + " = load ptr " + tmp);
@@ -268,6 +278,17 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 				Value base = emit_lvalue_addr(expr.children[0]);
 				return emit_base_subobject_addr(base, source, target);
 			}
+			if (record_has_base_subobject(target, source))
+			{
+				Value base = emit_lvalue_addr(expr.children[0]);
+				uint64_t offset = base_subobject_offset(target, source);
+				if (offset == 0)
+					return base;
+				string addr = fresh_temp();
+				instr(addr + " = index i8 [projection=derived_object] " +
+				      base.text + ", -" + to_string(offset));
+				return Value("ptr", addr);
+			}
 			string slot = fresh_aux_slot("tmpobj", slot_lowir_type(target));
 			string addr_name = fresh_temp();
 			instr(addr_name + " = addr $" + slot);
@@ -342,9 +363,19 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 		}
 	}
 	string tmp = fresh_temp();
-	instr(tmp + " = index i8 [projection=field] " + base.text +
+	TypePtr member_bare = pa11::strip_cv(member->type);
+	TypePtr expr_bare = pa11::strip_cv(expr.type);
+	bool reference_member =
+		member->is_reference_member ||
+		pa11::is_reference_type(pa11::strip_cv(member->type)) ||
+		pa11::is_reference_type(pa11::strip_cv(expr.type)) ||
+		(member_bare->kind == TypeKind::Pointer &&
+		 expr_bare->kind != TypeKind::Pointer);
+	string projection = reference_member
+		? "reference_field" : "field";
+	instr(tmp + " = index i8 [projection=" + projection + "] " + base.text +
 	      ", " + to_string(member->member_offset));
-	if (is_reference(member->type))
+	if (reference_member)
 	{
 		string ref = fresh_temp();
 		instr(ref + " = load ptr " + tmp);

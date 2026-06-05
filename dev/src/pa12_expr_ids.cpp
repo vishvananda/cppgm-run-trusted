@@ -40,12 +40,30 @@ Expr make_constant_binding_expr(Binding* binding, TypePtr type)
 	return out;
 }
 
+bool equivalent_nonfunction_binding(Binding* a, Binding* b)
+{
+	if (a == b)
+		return true;
+	if (a == NULL || b == NULL)
+		return false;
+	if (a->kind == BindingKind::Function || b->kind == BindingKind::Function)
+		return false;
+	return a->kind == b->kind &&
+	       a->owner == b->owner &&
+	       a->name == b->name &&
+	       a->target_scope == b->target_scope &&
+	       a->aliased_binding == b->aliased_binding &&
+	       pa11::same_type(a->type, b->type);
+}
+
 }  // namespace
 
 Expr Parser::make_implicit_member_id_expr(const QualifiedName& name,
                                           const vector<Binding*>& found,
                                           Binding* binding,
-                                          Binding* this_binding)
+                                          Binding* this_binding,
+                                          const map<Binding*, vector<TemplateArgument> >*
+                                              explicit_template_arguments)
 {
 	if ((!name.qualified ||
 	     (name.qualifier != NULL && name.qualifier->kind == ScopeKind::Class)) &&
@@ -69,28 +87,60 @@ Expr Parser::make_implicit_member_id_expr(const QualifiedName& name,
 					throw runtime_error("private member access");
 				throw runtime_error("protected member access");
 			}
+			Expr object_expr = make_deref_expr("*", this_expr);
+			TypePtr qualifier_record =
+				pa11::record_type_for_scope(name.qualifier);
+			qualifier_record = qualifier_record.get() != NULL
+				? pa11::strip_cv(qualifier_record) : TypePtr();
+			if (qualifier_record.get() != NULL &&
+			    object_record.get() != NULL &&
+			    !pa11::same_type(object_record, qualifier_record) &&
+			    record_base_distance(object_record, qualifier_record) < 1000000)
+			{
+				Expr base_expr;
+				base_expr.valid = true;
+				base_expr.type = qualifier_record;
+				base_expr.category = ValueCategory::LValue;
+				base_expr.node = Node("base-subobject-expression lvalue " +
+				                      pa11::describe_type(qualifier_record));
+				base_expr.node.type = qualifier_record;
+				base_expr.node.category = ValueCategory::LValue;
+				add_child(base_expr.node, object_expr.node);
+				annotate_expr_node(base_expr);
+				object_expr = base_expr;
+			}
 			Expr member;
 			member.valid = true;
 			member.binding = binding;
 			member.type = binding->type;
 			member.category = ValueCategory::LValue;
-			if (binding->kind == BindingKind::Function)
-			{
-				for (size_t i = 0; i < found.size(); ++i)
-					if (found[i]->kind == BindingKind::Function)
-						member.overloads.push_back(found[i]);
-			}
+				if (binding->kind == BindingKind::Function)
+				{
+					for (size_t i = 0; i < found.size(); ++i)
+						if (found[i]->kind == BindingKind::Function)
+						{
+							member.overloads.push_back(found[i]);
+							if (explicit_template_arguments != NULL)
+							{
+								map<Binding*, vector<TemplateArgument> >::const_iterator
+									eit = explicit_template_arguments->find(found[i]);
+								if (eit != explicit_template_arguments->end())
+									member.explicit_template_arguments[found[i]] =
+										eit->second;
+							}
+						}
+				}
 			else if (object_type.get() != NULL &&
 			         pa11::type_has_const(object_type) &&
 			         !binding->is_mutable_member)
 				member.type = pa11::make_cv(member.type, pa11::CV_CONST);
 			member.node = Node("member-expression lvalue " +
 			                   pa11::describe_type(member.type) +
-			                   " OP_ARROW:" + binding->name);
-			add_child(member.node, this_expr.node);
+			                   " OP_DOT:" + binding->name);
+			add_child(member.node, object_expr.node);
 			member.node.binding = binding;
 			member.node.has_op = true;
-			member.node.op = OP_ARROW;
+			member.node.op = OP_DOT;
 			member.node.token_text = binding->name;
 			member.node.suppress_virtual_dispatch = true;
 			annotate_expr_node(member);
@@ -338,6 +388,35 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 		return found;
 	vector<TemplateDeclaration*> templates = find_function_templates(name);
 	found.clear();
+	if (!name.qualified && templates.size() == 1 &&
+	    templates[0]->placeholder != NULL)
+	{
+		bool defer_deduced_pack = false;
+		for (size_t i = name.template_arguments.size();
+		     i < templates[0]->parameters.size();
+		     ++i)
+			if (templates[0]->parameters[i].is_pack)
+				defer_deduced_pack = true;
+		try
+		{
+			if (!defer_deduced_pack)
+			{
+				vector<TemplateArgument> full_args =
+					complete_template_arguments(templates[0],
+					                            name.template_arguments);
+				Binding* instantiated =
+					instantiate_function_template(templates[0], full_args);
+				found.push_back(instantiated);
+				if (instantiated == templates[0]->placeholder)
+					explicit_template_arguments[instantiated] =
+						name.template_arguments;
+				return found;
+			}
+		}
+			catch (const runtime_error&)
+			{
+			}
+	}
 	for (size_t i = 0; i < templates.size(); ++i)
 	{
 		if (templates[i]->placeholder == NULL)
@@ -403,13 +482,15 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 	Binding* nonfunction = NULL;
 	for (size_t i = 0; i < found.size(); ++i)
 	{
-		if (found[i]->kind == BindingKind::Function)
-			continue;
-		if (nonfunction != NULL)
-		{
-			bool found_local =
-				found[i]->owner != NULL &&
-				(found[i]->owner->kind == ScopeKind::Function ||
+			if (found[i]->kind == BindingKind::Function)
+				continue;
+			if (nonfunction != NULL)
+			{
+				if (equivalent_nonfunction_binding(nonfunction, found[i]))
+					continue;
+				bool found_local =
+					found[i]->owner != NULL &&
+					(found[i]->owner->kind == ScopeKind::Function ||
 				 found[i]->owner->kind == ScopeKind::Block);
 			bool previous_local =
 				nonfunction->owner != NULL &&
@@ -455,9 +536,16 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 	Binding* this_binding =
 		pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
 	prefer_static_qualified_overloads(name, out, binding);
-	Expr member = make_implicit_member_id_expr(name, found, binding, this_binding);
+	Expr member = make_implicit_member_id_expr(name,
+	                                           found,
+	                                           binding,
+	                                           this_binding,
+	                                           &explicit_template_arguments);
 	if (member.valid)
 		return member;
+	if (binding->kind == BindingKind::Variable &&
+	    binding->aliased_binding != NULL)
+		binding = binding->aliased_binding;
 	if (binding->kind == BindingKind::Variable &&
 	    binding->has_constant &&
 	    name.has_template_arguments)

@@ -542,7 +542,8 @@ bool FunctionLowerer::lower_braced_variable_init(const Node& var, TypePtr type)
 		    !record_has_ordinary_member_function_for_aggregate(type) &&
 		    var.children[0].direct_call == NULL)
 		{
-			ensure_pointer(emit_lvalue_addr(var));
+			if (!var.children[0].children.empty() || zero_init_has_store(type))
+				ensure_pointer(emit_lvalue_addr(var));
 			function<Value()> aggregate_addr_for = [this, &var]() {
 				return ensure_pointer(emit_lvalue_addr(var));
 			};
@@ -600,8 +601,7 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 		lower_local_static_decl(var);
 		return;
 	}
-	string slot = return_slot_variables_.find(var.binding) ==
-	              return_slot_variables_.end()
+	string slot = return_slot_variables_.find(var.binding) == return_slot_variables_.end()
 		? slot_for(var.binding) : string();
 	if (var.children.empty())
 	{
@@ -620,11 +620,19 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 	}
 	TypePtr type = var.binding->type;
 	if (starts_with(var.children[0].line, "no-op-initializer"))
+	{
+		if (type_contains_record(var.binding->type))
+		{
+			if (pa11::type_has_const(var.binding->type))
+				ensure_pointer(emit_lvalue_addr(var));
+			register_cleanup(var.binding, var.binding->type);
+		}
 		return;
+	}
 	if (starts_with(var.children[0].line, "constructor-action"))
 	{
-		Binding* ctor = !var.children[0].children.empty()
-			? var.children[0].children[0].direct_call : NULL;
+			Binding* ctor = !var.children[0].children.empty()
+				? var.children[0].children[0].direct_call : NULL;
 		if (no_op_generated_default_constructor(ctor, var.binding->type))
 		{
 			ensure_pointer(emit_lvalue_addr(var));
@@ -668,7 +676,7 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 	if (is_reference(type))
 	{
 		Value source = ensure_pointer(emit_lvalue_addr(var.children[0]));
-		TypePtr from_ptr = pa11::make_pointer(object_type(var.children[0].type));
+			TypePtr from_ptr = pa11::make_pointer(object_type(var.children[0].type));
 		TypePtr to_ptr = pa11::make_pointer(type->base);
 		Value converted = convert_value(source, from_ptr, to_ptr);
 		instr("store ptr " + converted.text + ", $" + slot);
@@ -684,24 +692,19 @@ void FunctionLowerer::lower_variable_decl(const Node& var)
 			Value init = emit_rvalue(var.children[0]);
 			if (!call_result_store_consumed_)
 			{
-				TypePtr init_bare =
-					pa11::strip_cv(strip_for_value(var.children[0].type));
+					TypePtr init_bare = pa11::strip_cv(strip_for_value(var.children[0].type));
 				TypePtr target_bare = pa11::strip_cv(strip_for_value(type));
-				bool literal_value = !init.text.empty() &&
-				                     init.text[0] != '%' &&
-				                     init.text[0] != '$' &&
-				                     init.text[0] != '@';
+					bool literal_value = !init.text.empty() && init.text[0] != '%' &&
+					                     init.text[0] != '$' && init.text[0] != '@';
 				bool materialize_widening_literal =
 					literal_value &&
 					pa11::is_integral_or_bool_type(init_bare) &&
 					pa11::is_integral_or_bool_type(target_bare) &&
 					pa11::type_size(target_bare) > pa11::type_size(init_bare);
-				init = convert_value(init,
-				                     var.children[0].type,
-				                     type,
-				                     !materialize_widening_literal);
-				instr("store " + scalar_lowir_type(type) + " " +
-				      init.text + ", $" + slot);
+					init = convert_value(init, var.children[0].type, type,
+					                     !materialize_widening_literal);
+					instr("store " + scalar_lowir_type(type) + " " + init.text +
+					      ", $" + slot);
 			}
 		call_result_store_slot_.clear();
 		call_result_store_type_.reset();

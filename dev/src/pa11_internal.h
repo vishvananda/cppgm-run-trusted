@@ -139,6 +139,8 @@ struct Binding
 	bool is_static_member;
 	bool is_local_static;
 	string local_static_discriminator;
+	Binding* local_static_function_owner;
+	string function_specialization_symbol;
 	bool is_inline_definition;
 	bool is_generated_default_constructor;
 	bool is_generated_aggregate_constructor;
@@ -150,6 +152,7 @@ struct Binding
 	bool is_private;
 	bool is_protected_member;
 	bool is_mutable_member;
+	bool is_reference_member;
 	bool is_hidden_friend;
 	bool is_thread_local;
 	bool is_object_root;

@@ -616,6 +616,30 @@ void FunctionLowerer::lower_compound(const Node& node)
 		if (record.get() != NULL)
 			lower_vptr_store(record);
 	}
+	if (top_function_body && is_class_constructor_binding(fn_.binding))
+	{
+		TypePtr record = class_record_for_member(fn_.binding);
+		TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		TypePtr direct_base =
+			bare.get() != NULL && bare->kind == TypeKind::Record
+			? bare->base : TypePtr();
+		if (direct_base.get() != NULL &&
+		    !record_has_storage_copy(direct_base) &&
+		    fn_.binding->type->parameters.size() == 2)
+		{
+			TypePtr param_record = pa11::strip_cv(
+				object_type(fn_.binding->type->parameters[1]));
+			if (param_record->kind == TypeKind::Record &&
+			    pa11::same_type(param_record, pa11::strip_cv(direct_base)))
+			{
+				string this_ptr = fresh_temp();
+				instr(this_ptr + " = load ptr $this");
+				emit_base_subobject_addr(Value("ptr", this_ptr),
+				                         bare,
+				                         direct_base);
+			}
+		}
+	}
 	Binding* final_return_binding = NULL;
 	bool earlier_return = false;
 	if (!node.children.empty())
@@ -967,16 +991,23 @@ void FunctionLowerer::lower_discarded_expr(const Node& expr)
 	TypePtr object = pa11::strip_cv(object_type(expr.type));
 	if (expr.category == ValueCategory::PRValue &&
 	    !is_reference(expr.type) &&
-	    object->kind == TypeKind::Record)
+	    (object->kind == TypeKind::Record ||
+	     object->kind == TypeKind::Array))
 	{
-		string slot = fresh_aux_slot("discard", slot_lowir_type(object));
+		string slot = fresh_aux_slot(object->kind == TypeKind::Array
+		                             ? "discardarr" : "discard",
+		                             slot_lowir_type(object));
 		string addr_name = fresh_temp();
 		instr(addr_name + " = addr $" + slot);
 		Value addr("ptr", addr_name);
 		function<Value()> addr_for = [addr]() {
 			return addr;
 		};
-		lower_object_init(addr_for, object, expr);
+		if (object->kind == TypeKind::Array &&
+		    starts_with(expr.line, "braced-init-list"))
+			lower_direct_array_init(addr, object, expr);
+		else
+			lower_object_init(addr_for, object, expr);
 		return;
 	}
 	if (expr.category == ValueCategory::LValue &&

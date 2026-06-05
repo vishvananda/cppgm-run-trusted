@@ -198,8 +198,13 @@ void Parser::parse_declaration_into(Node& out)
 	}
 	if (at(KW_EXTERN) && pos_ + 1 < tokens_.size() &&
 	    tokens_[pos_ + 1].kind == posttoken::TokenKind::Literal)
+		{
+			parse_linkage_specification(out);
+			return;
+		}
+	if (at(KW_EXTERN) && lookahead(KW_TEMPLATE, 1))
 	{
-		parse_linkage_specification(out);
+		parse_explicit_template_instantiation(true);
 		return;
 	}
 	if (at(KW_TEMPLATE))
@@ -515,7 +520,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			TypePtr bare = pa11::strip_cv(base);
 			Node simple("simple-declaration");
 			if (bare->kind == pa11::TypeKind::Record &&
-			    bare->tag == "union" &&
 			    bare->name.find("__anonymous_union_type__") == 0)
 			{
 				string storage_name = bare->name;
@@ -523,15 +527,24 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				storage_name.replace(0,
 				                     prefix.size(),
 				                     "__anonymous_union_storage__");
-				Binding* storage = add_value(current_scope(),
-				                             BindingKind::Variable,
-				                             storage_name,
-				                             bare);
-				Node var("variable " + storage_name + " " +
-				         pa11::describe_type(bare));
-				if (ensure_default_constructor(bare) != NULL)
-					add_child(var, default_constructor_action(storage));
-				add_child(simple, var);
+					Binding* storage = add_value(current_scope(),
+					                             BindingKind::Variable,
+					                             storage_name,
+					                             bare);
+					Node var("variable " + storage_name + " " +
+					         pa11::describe_type(bare));
+					try
+					{
+						if (ensure_default_constructor(bare) != NULL)
+							add_child(var, default_constructor_action(storage));
+					}
+					catch (const runtime_error& err)
+					{
+						if (string(err.what()) !=
+						    "member has no default constructor")
+							throw;
+					}
+					add_child(simple, var);
 				if (bare->scope != NULL)
 					inject_anonymous_union_members(bare->scope, storage);
 			}
@@ -591,10 +604,13 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			scopes_ = saved_declarator_scopes;
 		throw;
 	}
-	if (declarator_scope != NULL)
-		scopes_ = saved_declarator_scopes;
-	bool bit_field = false;
-	uint64_t bit_width = 0;
+		if (declarator_scope != NULL)
+			scopes_ = saved_declarator_scopes;
+		TypePtr declared_type = apply_declarator(declarator, base);
+		bool declares_function =
+			declared_type->kind == pa11::TypeKind::Function;
+		bool bit_field = false;
+		uint64_t bit_width = 0;
 	if (current_scope()->kind == ScopeKind::Class && consume(OP_COLON))
 	{
 		Expr width = parse_expression();
@@ -603,17 +619,26 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		bit_field = true;
 		bit_width = width.constant_value;
 	}
-	if (at(OP_LBRACE) && declarator_function_suffix(declarator) != NULL)
+		if (at(OP_LBRACE) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
-		Binding* function =
-			declare_one(specs, base, declarator, NULL, true, node);
-		if (current_scope()->kind == ScopeKind::Class)
-		{
-			const Suffix* suffix = declarator_function_suffix(declarator);
-			PendingFunctionBody pending;
-			pending.function = function;
+			Binding* function =
+				declare_one(specs, base, declarator, NULL, true, node);
+			if (current_scope()->kind == ScopeKind::Class)
+			{
+				if (force_new_function_binding_)
+				{
+					parse_function_body(function, declarator, node);
+					if (emit_node && !node.children.empty())
+						add_child(out, node.children.back());
+					else if (!node.children.empty())
+						extra_lowir_nodes_.push_back(node.children.back());
+					return;
+				}
+				const Suffix* suffix = declarator_function_suffix(declarator);
+				PendingFunctionBody pending;
+				pending.function = function;
 			pending.node = node.children.back();
 			if (suffix != NULL)
 				pending.parameters = suffix->parameters;
@@ -636,8 +661,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
-	if (at(OP_ASS) && lookahead(KW_DELETE, 1) &&
-	    declarator_function_suffix(declarator) != NULL)
+		if (at(OP_ASS) && lookahead(KW_DELETE, 1) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
@@ -663,8 +687,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
-	if (at(OP_ASS) && lookahead(KW_DEFAULT, 1) &&
-	    declarator_function_suffix(declarator) != NULL)
+		if (at(OP_ASS) && lookahead(KW_DEFAULT, 1) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
@@ -744,9 +767,9 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	}
 
-	if (at(OP_ASS) &&
-	    current_scope()->kind == ScopeKind::Class &&
-	    declarator_function_suffix(declarator) != NULL)
+		if (at(OP_ASS) &&
+		    current_scope()->kind == ScopeKind::Class &&
+		    declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
@@ -799,13 +822,13 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		--pos_;
 		init = parse_braced_init_list();
 	}
-	else if (at(OP_LPAREN) && !declarator_function_suffix(declarator))
-	{
+		else if (at(OP_LPAREN) && !declares_function)
+		{
 		expect(OP_LPAREN);
 		if (!at(OP_RPAREN))
 		{
 			vector<Expr> args = parse_argument_list();
-			TypePtr decl_type = apply_declarator(declarator, base);
+				TypePtr decl_type = declared_type;
 			if (pa11::strip_cv(decl_type)->kind == pa11::TypeKind::Record)
 			{
 				try
@@ -919,6 +942,15 @@ bool Parser::parse_friend_declaration()
 		expect(OP_SEMICOLON);
 		return true;
 	}
+	if (at(KW_TYPENAME))
+	{
+		TypePtr friend_type;
+		if (!try_parse_type_name(friend_type))
+			throw runtime_error("invalid friend type declaration");
+		add_friend_class(class_scope, friend_type);
+		expect(OP_SEMICOLON);
+		return true;
+	}
 
 	DeclSpecs specs = parse_decl_specifier_seq(false);
 	specs.friend_decl = true;
@@ -945,6 +977,70 @@ bool Parser::parse_friend_declaration()
 		TypePtr param = pa11::strip_cv(type->parameters[i]);
 		if (param->kind == pa11::TypeKind::Record && param->scope != NULL)
 			ensure_default_destructor(type->parameters[i]);
+	}
+	if (qname.has_template_arguments)
+	{
+		Scope* lookup_target = target;
+		if (lookup_target != NULL &&
+		    lookup_target->kind == ScopeKind::Namespace)
+		{
+			for (Scope* cur = lookup_target;
+			     cur != NULL && cur->kind == ScopeKind::Namespace;
+			     cur = cur->parent)
+			{
+				if (cur != lookup_target && cur->name != lookup_target->name)
+					break;
+				map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
+					sit = function_templates_.find(cur);
+				if (sit != function_templates_.end() &&
+				    sit->second.find(qname.name) != sit->second.end())
+				{
+					lookup_target = cur;
+					break;
+				}
+			}
+		}
+		QualifiedName template_name = qname;
+		if (template_name.qualifier == NULL)
+			template_name.qualifier = lookup_target;
+		vector<TemplateDeclaration*> templates =
+			find_function_templates(template_name);
+		TemplateDeclaration* selected = NULL;
+		vector<TemplateArgument> selected_args;
+		for (size_t i = 0; i < templates.size(); ++i)
+		{
+			vector<TemplateArgument> full_args;
+			if (!deduce_function_template_target_type(
+				    templates[i],
+				    type,
+				    qname.template_arguments,
+				    full_args))
+				continue;
+			bool selected_declaration =
+				selected != NULL && !selected->has_definition;
+			bool candidate_declaration = !templates[i]->has_definition;
+			if (selected == NULL ||
+			    (!selected_declaration && candidate_declaration))
+			{
+				selected = templates[i];
+				selected_args = full_args;
+				continue;
+			}
+			if (selected_declaration != candidate_declaration)
+				continue;
+			throw runtime_error("ambiguous friend function template");
+		}
+		if (selected == NULL || selected->placeholder == NULL)
+			throw runtime_error("function template not found");
+		add_friend_function(class_scope, selected->placeholder);
+		if (!selected->has_definition)
+		{
+			Binding* specialization =
+				instantiate_function_template(selected, selected_args);
+			add_friend_function(class_scope, specialization);
+		}
+		expect(OP_SEMICOLON);
+		return true;
 	}
 	if (suffix != NULL)
 	{
@@ -1154,10 +1250,11 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
                                          Scope* target,
                                          const string& name,
                                          TypePtr type,
-                                         const Declarator& declarator,
-                                         bool function_definition,
-                                         bool nonstatic_member_function,
-                                         Node& out)
+	                                         const Declarator& declarator,
+	                                         bool function_definition,
+	                                         bool nonstatic_member_function,
+	                                         bool hidden_friend,
+	                                         Node& out)
 {
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	int ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
@@ -1181,8 +1278,10 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			}
 		}
 	}
-	if (function == NULL)
-		function = add_value(target, BindingKind::Function, name, type);
+		if (function == NULL)
+			function = hidden_friend
+				? add_function_binding(target, name, type, true)
+				: add_value(target, BindingKind::Function, name, type);
 	function->language_linkage = current_language_linkage();
 	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
 	function->is_static_member = is_static_member;
@@ -1285,6 +1384,13 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 {
 	const QualifiedName& qname = declarator_name(declarator);
 	Scope* target = qname.qualifier != NULL ? qname.qualifier : current_scope();
+	Scope* friend_class_scope =
+		specs.friend_decl && current_scope()->kind == ScopeKind::Class
+		? current_scope() : NULL;
+	bool hidden_friend =
+		friend_class_scope != NULL && qname.qualifier == NULL;
+	if (friend_class_scope != NULL && qname.qualifier == NULL)
+		target = nearest_namespace_scope(friend_class_scope);
 	TypePtr type = apply_declarator(declarator, base);
 	if (specs.typedef_decl)
 	{
@@ -1340,14 +1446,19 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 		type = make_member_function_type(target, type);
 	if (type->kind == pa11::TypeKind::Function || function_definition)
 	{
-		return declare_function_entity(specs,
-		                               target,
-		                               qname.name,
-		                               type,
-		                               declarator,
-		                               function_definition,
-		                               nonstatic_member_function,
-		                               out);
+		Binding* function =
+			declare_function_entity(specs,
+			                        target,
+			                        qname.name,
+			                        type,
+			                        declarator,
+			                        function_definition,
+			                        nonstatic_member_function,
+			                        hidden_friend,
+			                        out);
+		if (specs.friend_decl && friend_class_scope != NULL)
+			add_friend_function(friend_class_scope, function);
+		return function;
 	}
 
 	Binding* variable = NULL;
@@ -1367,6 +1478,9 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
 	}
 	if (variable == NULL)
 		variable = add_value(target, BindingKind::Variable, qname.name, type);
+	if (target->kind == ScopeKind::Class &&
+	    pa11::is_reference_type(pa11::strip_cv(type)))
+		variable->is_reference_member = true;
 	return finish_variable_declaration(specs,
 	                                   target,
 	                                   variable,

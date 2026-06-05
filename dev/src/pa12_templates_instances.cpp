@@ -108,13 +108,16 @@ string template_type_key(TypePtr type)
 	case pa11::TypeKind::MemberPointer:
 		return "memptr(" + template_type_key(type->member_class) + "," +
 		       template_type_key(type->base) + ")";
-	case pa11::TypeKind::Record:
-	case pa11::TypeKind::Enum:
-	{
-		ostringstream out;
-		out << template_type_spelling(type) << "@" << type.get();
-		return out.str();
-	}
+		case pa11::TypeKind::Record:
+		case pa11::TypeKind::Enum:
+		{
+			if (type->kind == pa11::TypeKind::Record &&
+			    type->is_template_specialization)
+				return "spec(" + template_type_spelling(type) + ")";
+			ostringstream out;
+			out << template_type_spelling(type) << "@" << type.get();
+			return out.str();
+		}
 	default:
 		return template_type_spelling(type);
 	}
@@ -255,6 +258,37 @@ bool same_template_record_primary(TypePtr left, TypePtr right)
 	return left_owner == right_owner;
 }
 
+bool deducible_template_parameter_type(TypePtr type)
+{
+	if (type.get() == NULL ||
+	    type->kind != pa11::TypeKind::TemplateParameter)
+		return false;
+	return type->name.find("::") == string::npos &&
+	       type->name.find("<") == string::npos;
+}
+
+bool template_parameter_lists_match(const vector<TemplateParameterInfo>& left,
+                                    const vector<TemplateParameterInfo>& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+	{
+		if (left[i].kind != right[i].kind ||
+		    left[i].is_pack != right[i].is_pack ||
+		    left[i].template_parameters.size() !=
+			    right[i].template_parameters.size())
+			return false;
+		for (size_t j = 0; j < left[i].template_parameters.size(); ++j)
+			if (left[i].template_parameters[j].kind !=
+				    right[i].template_parameters[j].kind ||
+			    left[i].template_parameters[j].is_pack !=
+				    right[i].template_parameters[j].is_pack)
+				return false;
+	}
+	return true;
+}
+
 bool match_template_type_pattern(
 	TypePtr pattern,
 	TypePtr actual,
@@ -263,7 +297,7 @@ bool match_template_type_pattern(
 {
 	if (pattern.get() == NULL || actual.get() == NULL)
 		return pattern.get() == actual.get();
-	if (pattern->kind == pa11::TypeKind::TemplateParameter)
+	if (deducible_template_parameter_type(pattern))
 	{
 		TemplateArgument arg = TemplateArgument::type_arg(actual);
 		map<string, TemplateArgument>::iterator found =
@@ -355,7 +389,7 @@ bool match_template_type_pattern(
 	case pa11::TypeKind::TemplateTemplateParameter:
 		return pa11::same_type(pattern, actual);
 	case pa11::TypeKind::TemplateParameter:
-		break;
+		return pa11::same_type(pattern, actual);
 	}
 	throw logic_error("unknown type kind");
 }
@@ -401,7 +435,7 @@ bool match_template_argument_pattern(
 {
 	if (pattern.kind == TemplateArgumentKind::Type &&
 	    pattern.type.get() != NULL &&
-	    pattern.type->kind == pa11::TypeKind::TemplateParameter)
+	    deducible_template_parameter_type(pattern.type))
 	{
 		map<string, TemplateArgument>::iterator found =
 			deduced.find(pattern.type->name);
@@ -452,7 +486,39 @@ bool match_class_specialization(TemplateDeclaration* specialization,
 			    full_args[i],
 			    deduced,
 			    record_arguments))
-			return false;
+			{
+				if (specialization->class_specialization_pattern[i].kind ==
+				        TemplateArgumentKind::Type &&
+				    specialization->class_specialization_pattern[i].type.get() != NULL &&
+				    deducible_template_parameter_type(
+					    specialization->class_specialization_pattern[i].type) &&
+				    deduced.find(
+					    specialization->class_specialization_pattern[i].type->name) !=
+					    deduced.end())
+					return false;
+				if (specialization->class_specialization_pattern[i].kind ==
+				        TemplateArgumentKind::Type &&
+				    specialization->class_specialization_pattern[i].type.get() != NULL &&
+				    specialization->class_specialization_pattern[i].type->name.find(
+					    "<decltype>") != string::npos)
+					return false;
+				bool non_deducible_dependent_type =
+					specialization->class_specialization_pattern[i].kind ==
+						TemplateArgumentKind::Type &&
+					specialization->class_specialization_pattern[i].type.get() != NULL &&
+					specialization->class_specialization_pattern[i].type->kind ==
+						pa11::TypeKind::TemplateParameter &&
+					!deducible_template_parameter_type(
+						specialization->class_specialization_pattern[i].type);
+				if (non_deducible_dependent_type ||
+				    (template_argument_has_template_parameter(
+					    specialization->class_specialization_pattern[i],
+					    record_arguments) &&
+				    template_argument_has_template_parameter(full_args[i],
+				                                            record_arguments)))
+					continue;
+				return false;
+			}
 	for (size_t i = 0; i < specialization->parameters.size(); ++i)
 	{
 		const string& name = specialization->parameters[i].name;
@@ -507,6 +573,20 @@ TemplateDeclaration* Parser::find_class_template(Scope* scope,
 			if (found != NULL)
 				return found;
 		}
+		TypePtr record = pa11::record_type_for_scope(scope);
+		TypePtr base = record.get() != NULL && record->base.get() != NULL
+			? pa11::strip_cv(record->base) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL &&
+		    record_dependent_base_lookup_skips_.count(
+			    pa11::strip_cv(record).get()) == 0)
+		{
+			TemplateDeclaration* found =
+				find_class_template(base->scope, name);
+			if (found != NULL)
+				return found;
+		}
 		return NULL;
 	}
 	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
@@ -536,6 +616,20 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 		{
 			TemplateDeclaration* found =
 				find_alias_template(scope->using_directives[i], name);
+			if (found != NULL)
+				return found;
+		}
+		TypePtr record = pa11::record_type_for_scope(scope);
+		TypePtr base = record.get() != NULL && record->base.get() != NULL
+			? pa11::strip_cv(record->base) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL &&
+		    record_dependent_base_lookup_skips_.count(
+			    pa11::strip_cv(record).get()) == 0)
+		{
+			TemplateDeclaration* found =
+				find_alias_template(base->scope, name);
 			if (found != NULL)
 				return found;
 		}
@@ -650,6 +744,40 @@ TypePtr Parser::instantiate_class_template(
 		declaration->class_specializations.find(key);
 	if (existing != declaration->class_specializations.end())
 	{
+		TypePtr existing_record = pa11::strip_cv(existing->second);
+		map<const void*, TemplateDeclaration*>::iterator existing_decl =
+			record_template_declarations_.find(existing_record.get());
+		bool only_injected_type_members = true;
+			if (existing_record->scope != NULL)
+				for (size_t i = 0; i < existing_record->scope->binding_order.size(); ++i)
+				{
+					Binding* member = existing_record->scope->binding_order[i];
+					if (member->kind != BindingKind::Type ||
+					    member->name != existing_record->scope->name)
+						only_injected_type_members = false;
+				}
+			bool actively_completing = false;
+			for (size_t i = 0; i < active_class_instantiations_.size(); ++i)
+			{
+				TypePtr active_type =
+					pa11::strip_cv(active_class_instantiations_[i].type);
+				if (active_type.get() == existing_record.get())
+					actively_completing = true;
+			}
+			if (existing_decl != record_template_declarations_.end() &&
+			    ((existing_decl->second != selected_declaration &&
+			      (!existing_record->complete ||
+			       !existing_decl->second->has_definition ||
+			       selected_declaration->class_specialization)) ||
+			     (selected_declaration->has_definition &&
+			      existing_record->complete &&
+			      only_injected_type_members &&
+			      !actively_completing)))
+		{
+			existing_decl->second = selected_declaration;
+			record_template_arguments_[existing_record.get()] = selected_args;
+			existing_record->complete = false;
+		}
 		if (!dependent)
 			complete_template_record(existing->second);
 		return existing->second;
@@ -900,7 +1028,8 @@ void Parser::complete_member_class_template_record(Binding* binding)
 	declaration->completing_specializations.erase(key);
 }
 
-void Parser::instantiate_member_function_templates(TypePtr type)
+void Parser::instantiate_member_function_templates(TypePtr type,
+                                                   bool object_root)
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
@@ -920,22 +1049,30 @@ void Parser::instantiate_member_function_templates(TypePtr type)
 	     ++it)
 	{
 		if (it->first.first != outer->second)
-		{
-			TemplateDeclaration* candidate = it->first.first;
-			if (candidate == NULL ||
-			    candidate->name != outer->second->name ||
-			    candidate->owner != outer->second->owner)
-				continue;
-		}
+			continue;
 		for (size_t i = 0; i < it->second.size(); ++i)
 		{
-			string key = template_argument_key(args_it->second);
-			if (it->second[i]->completing_specializations.count(key) != 0)
+			TemplateDeclaration* declaration = it->second[i];
+			if (declaration->parameters.size() != args_it->second.size())
 				continue;
-			instantiate_function_template(it->second[i], args_it->second);
+			if (!declaration->constructor_template)
+			{
+				if (!declaration->outer_type_substitutions.empty() ||
+				    !declaration->outer_value_substitutions.empty() ||
+				    !template_parameter_lists_match(declaration->parameters,
+				                                    outer->second->parameters))
+					continue;
+			}
+			string key = template_argument_key(args_it->second);
+			if (declaration->completing_specializations.count(key) != 0)
+				continue;
+			Binding* binding =
+				instantiate_function_template(declaration, args_it->second);
+			if (object_root && binding != NULL)
+				binding->is_object_root = true;
+			}
 		}
 	}
-}
 
 void Parser::instantiate_member_variable_templates(TypePtr type)
 {
@@ -1115,6 +1252,38 @@ TypePtr Parser::substitute_template_type_parameter(TypePtr type,
 	return type;
 }
 
+TemplateArgument Parser::substitute_template_argument_type_parameter(
+	const TemplateArgument& arg,
+	const string& name,
+	TypePtr replacement) const
+{
+	if (arg.kind == TemplateArgumentKind::Type)
+		return TemplateArgument::type_arg(
+			substitute_template_type_parameter(arg.type,
+			                                   name,
+			                                   replacement));
+	if (arg.kind == TemplateArgumentKind::Value)
+	{
+		TemplateArgument out = arg;
+		if (out.type.get() != NULL)
+			out.type = substitute_template_type_parameter(out.type,
+			                                             name,
+			                                             replacement);
+		return out;
+	}
+	if (arg.kind == TemplateArgumentKind::Pack)
+	{
+		vector<TemplateArgument> pack;
+		for (size_t i = 0; i < arg.pack.size(); ++i)
+			pack.push_back(substitute_template_argument_type_parameter(
+				arg.pack[i],
+				name,
+				replacement));
+		return TemplateArgument::pack_arg(pack);
+	}
+	return arg;
+}
+
 TypePtr Parser::substitute_template_type(TypePtr type) const
 {
 	if (type.get() == NULL)
@@ -1167,72 +1336,6 @@ TypePtr Parser::substitute_template_type(TypePtr type) const
 			substitute_template_type(type->member_class),
 			substitute_template_type(type->base));
 	return type;
-}
-
-vector<TemplateDeclaration*> Parser::find_function_templates(
-	const QualifiedName& name)
-{
-	vector<TemplateDeclaration*> out;
-	if (name.qualifier != NULL)
-	{
-		map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
-			function_templates_.find(name.qualifier);
-		if (sit != function_templates_.end())
-		{
-			map<string, vector<TemplateDeclaration*> >::iterator it =
-				sit->second.find(name.name);
-			if (it != sit->second.end())
-				out = it->second;
-			if (!out.empty())
-				return out;
-		}
-		for (size_t i = 0; i < name.qualifier->using_directives.size(); ++i)
-		{
-			QualifiedName nested = name;
-			nested.qualifier = name.qualifier->using_directives[i];
-			out = find_function_templates(nested);
-			if (!out.empty())
-				return out;
-		}
-		return out;
-	}
-	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
-	{
-		map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
-			function_templates_.find(cur);
-		if (sit != function_templates_.end())
-		{
-			map<string, vector<TemplateDeclaration*> >::iterator it =
-				sit->second.find(name.name);
-			if (it != sit->second.end())
-				return it->second;
-		}
-		for (size_t i = 0; i < cur->using_directives.size(); ++i)
-		{
-			QualifiedName nested = name;
-			nested.qualifier = cur->using_directives[i];
-			out = find_function_templates(nested);
-			if (!out.empty())
-				return out;
-		}
-	}
-	return out;
-}
-
-bool Parser::visible_function_template_name(const QualifiedName& name)
-{
-	return !find_function_templates(name).empty();
-}
-
-vector<Binding*> Parser::instantiate_explicit_function_templates(
-	const QualifiedName& name)
-{
-	vector<Binding*> out;
-	vector<TemplateDeclaration*> declarations = find_function_templates(name);
-	for (size_t i = 0; i < declarations.size(); ++i)
-		out.push_back(instantiate_function_template(declarations[i],
-		                                            name.template_arguments));
-	return out;
 }
 
 void Parser::select_variable_template_specialization(

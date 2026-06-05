@@ -111,6 +111,8 @@ QualifiedName Parser::parse_id_expression_name()
 		name.spelling = spelling;
 		name.qualified = true;
 	}
+	if (name.qualified)
+		consume(KW_TEMPLATE);
 	if (consume(KW_OPERATOR))
 	{
 		--pos_;
@@ -128,6 +130,10 @@ QualifiedName Parser::parse_id_expression_name()
 		}
 		catch (const exception&)
 		{
+			vector<TemplateDeclaration*> templates =
+				find_function_templates(name);
+			if (!templates.empty())
+				throw;
 			name.has_template_arguments = false;
 			name.template_arguments.clear();
 			pos_ = template_save;
@@ -258,9 +264,13 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 	}
 	for (;;)
 	{
-		if (!at_identifier())
-			break;
 		size_t save = pos_;
+		consume(KW_TEMPLATE);
+		if (!at_identifier())
+		{
+			pos_ = save;
+			break;
+		}
 		string component = consume_identifier();
 		if (!at(OP_LT))
 		{

@@ -13,6 +13,7 @@ struct TemplateValidationState
 	vector<Scope*> scopes;
 	vector<TypePtr> function_returns;
 	vector<Binding*> active_functions;
+	vector<Scope*> active_friend_class_scopes;
 	vector<string> language_linkages;
 	vector<bool> class_private_access;
 	vector<bool> class_protected_access;
@@ -94,6 +95,7 @@ void TemplateValidationState::save_core(Parser& parser,
 	scopes = parser.scopes_;
 	function_returns = parser.function_returns_;
 	active_functions = parser.active_functions_;
+	active_friend_class_scopes = parser.active_friend_class_scopes_;
 	language_linkages = parser.language_linkages_;
 	class_private_access = parser.class_private_access_;
 	class_protected_access = parser.class_protected_access_;
@@ -181,6 +183,7 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.scopes_ = scopes;
 	parser.function_returns_ = function_returns;
 	parser.active_functions_ = active_functions;
+	parser.active_friend_class_scopes_ = active_friend_class_scopes;
 	parser.language_linkages_ = language_linkages;
 	parser.class_private_access_ = class_private_access;
 	parser.class_protected_access_ = class_protected_access;
@@ -387,6 +390,109 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		throw;
 	}
 	saved.restore(*this, declaration);
+}
+
+void Parser::validate_function_template_definition(TemplateDeclaration* declaration)
+{
+	if (declaration == NULL ||
+	    !declaration->has_definition ||
+	    declaration->function_definition_validated)
+		return;
+
+	TemplateValidationState saved(*this, declaration);
+	declaration->function_definition_validated = true;
+
+	map<string, TypePtr> subst;
+	map<string, TemplateArgument> value_subst;
+	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+	{
+		const TemplateParameterInfo& parameter = declaration->parameters[i];
+		string name = parameter.name;
+		if (name.empty())
+			name = "__template_param" + to_string(i);
+		if (parameter.kind == TemplateParameterKind::Type)
+		{
+			TypePtr param = pa11::make_template_parameter_type(name);
+			if (parameter.is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(TemplateArgument::type_arg(param));
+				TemplateArgument arg = TemplateArgument::pack_arg(pack);
+				if (!parameter.name.empty())
+				{
+					subst[parameter.name] = param;
+					value_subst[parameter.name] = arg;
+				}
+			}
+			else if (!parameter.name.empty())
+				subst[parameter.name] = param;
+		}
+		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
+		{
+			TemplateArgument arg = TemplateArgument::template_arg(NULL);
+			if (parameter.is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(arg);
+				arg = TemplateArgument::pack_arg(pack);
+			}
+			if (!parameter.name.empty())
+				value_subst[parameter.name] = arg;
+		}
+		else
+		{
+			TypePtr type = parameter.type.get() != NULL
+				? parameter.type : pa11::make_fundamental(FT_INT);
+			TemplateArgument arg = TemplateArgument::dependent_value_arg(type);
+			if (parameter.is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(arg);
+				arg = TemplateArgument::pack_arg(pack);
+			}
+			if (!parameter.name.empty())
+				value_subst[parameter.name] = arg;
+		}
+	}
+
+	template_type_substitutions_.insert(
+		template_type_substitutions_.end(),
+		declaration->outer_type_substitutions.begin(),
+		declaration->outer_type_substitutions.end());
+	template_value_substitutions_.insert(
+		template_value_substitutions_.end(),
+		declaration->outer_value_substitutions.begin(),
+		declaration->outer_value_substitutions.end());
+	template_type_substitutions_.push_back(subst);
+	template_value_substitutions_.push_back(value_subst);
+	scopes_.clear();
+	scopes_.push_back(declaration->lexical_scope != NULL
+	                  ? declaration->lexical_scope
+	                  : declaration->owner);
+	pos_ = declaration->decl_begin;
+	force_new_function_binding_ = true;
+
+	Node node;
+	try
+	{
+		parse_simple_or_function_declaration(node, true);
+	}
+	catch (const runtime_error& err)
+	{
+		string message = err.what();
+		saved.restore(*this, declaration);
+		if (message == "missing template disambiguator")
+			throw;
+		declaration->function_definition_validated = true;
+		return;
+	}
+	catch (const exception&)
+	{
+		saved.restore(*this, declaration);
+		throw;
+	}
+	saved.restore(*this, declaration);
+	declaration->function_definition_validated = true;
 }
 
 }  // namespace internal

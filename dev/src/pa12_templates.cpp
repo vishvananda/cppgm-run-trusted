@@ -45,28 +45,6 @@ void merge_template_defaults(vector<TemplateParameterInfo>& target,
 	}
 }
 
-bool template_argument_kind_matches_parameter(
-	const TemplateArgument& argument,
-	const TemplateParameterInfo& parameter)
-{
-	if (parameter.kind == TemplateParameterKind::Type)
-		return argument.kind == TemplateArgumentKind::Type;
-	if (parameter.kind == TemplateParameterKind::NonType)
-		return argument.kind == TemplateArgumentKind::Value;
-	if (argument.kind != TemplateArgumentKind::Template ||
-	    argument.template_declaration == NULL)
-		return false;
-	const vector<TemplateParameterInfo>& params =
-		argument.template_declaration->parameters;
-	if (params.size() != parameter.template_parameters.size())
-		return false;
-	for (size_t i = 0; i < params.size(); ++i)
-		if (params[i].kind != parameter.template_parameters[i].kind ||
-		    params[i].is_pack != parameter.template_parameters[i].is_pack)
-			return false;
-	return true;
-}
-
 Binding* find_matching_function(Scope* scope,
                                 const string& name,
                                 TypePtr type)
@@ -296,31 +274,8 @@ void Parser::parse_template_declaration()
 	expect(KW_TEMPLATE);
 	if (!at(OP_LT))
 	{
-		if (!starts_class_key())
-			throw runtime_error("unsupported explicit template instantiation");
-		++pos_;
-		TypePtr type;
-		if (!try_parse_type_name(type))
-			throw runtime_error("invalid explicit class instantiation");
-		complete_template_record(type);
-		instantiate_member_function_templates(type);
-		TypePtr bare = pa11::strip_cv(type);
-		if (bare->kind == pa11::TypeKind::Record && bare->scope != NULL)
-			for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
-			{
-				Binding* binding = bare->scope->binding_order[i];
-				if (binding->kind != BindingKind::Function ||
-				    binding->is_generated_default_constructor ||
-				    binding->is_generated_aggregate_constructor ||
-				    binding->is_generated_copy_move_constructor ||
-				    binding->is_generated_copy_move_assignment ||
-				    binding->is_generated_default_destructor ||
-				    binding->name == bare->scope->name ||
-				    (!binding->name.empty() && binding->name[0] == '~'))
-					continue;
-				binding->is_object_root = true;
-			}
-		expect(OP_SEMICOLON);
+		--pos_;
+		parse_explicit_template_instantiation(false);
 		return;
 	}
 	vector<TemplateParameterInfo> parameters = parse_template_parameter_clause();
@@ -328,6 +283,87 @@ void Parser::parse_template_declaration()
 	size_t decl_end = skip_template_declaration_body(decl_begin);
 	register_template_declaration(parameters, decl_begin, decl_end);
 	pos_ = decl_end;
+}
+
+void Parser::parse_explicit_template_instantiation(bool extern_declaration)
+{
+	if (extern_declaration)
+		expect(KW_EXTERN);
+	expect(KW_TEMPLATE);
+	if (starts_class_key())
+	{
+		++pos_;
+		TypePtr type;
+		if (!try_parse_type_name(type))
+			throw runtime_error("invalid explicit class instantiation");
+		if (!extern_declaration)
+		{
+			complete_template_record(type);
+			instantiate_member_function_templates(type, true);
+		}
+		expect(OP_SEMICOLON);
+		return;
+	}
+
+	DeclSpecs specs = parse_decl_specifier_seq(false);
+	TypePtr base = type_from_decl_specs(specs);
+	Declarator declarator = parse_declarator(false);
+	TypePtr declared_type = apply_declarator(declarator, base);
+	if (declared_type->kind != pa11::TypeKind::Function)
+		throw runtime_error("invalid explicit function instantiation");
+	const QualifiedName& qname = declarator_name(declarator);
+	if (qname.name.compare(0, 8, "operator") == 0)
+	{
+		bool overloaded_parameter = false;
+		for (size_t i = 0; i < declared_type->parameters.size(); ++i)
+		{
+			TypePtr param =
+				pa11::strip_cv(expression_object_type(declared_type->parameters[i]));
+			if (param->kind == pa11::TypeKind::Record ||
+			    param->kind == pa11::TypeKind::Enum)
+				overloaded_parameter = true;
+		}
+		if (!overloaded_parameter)
+			throw runtime_error("invalid overloaded operator instantiation");
+	}
+	vector<TemplateDeclaration*> declarations = find_function_templates(qname);
+	TemplateDeclaration* selected = NULL;
+	vector<TemplateArgument> selected_args;
+	for (size_t i = 0; i < declarations.size(); ++i)
+	{
+		vector<TemplateArgument> full_args;
+		if (!deduce_function_template_target_type(declarations[i],
+		                                          declared_type,
+		                                          qname.template_arguments,
+		                                          full_args))
+			continue;
+		if (selected != NULL)
+			throw runtime_error("ambiguous explicit function instantiation");
+		selected = declarations[i];
+		selected_args = full_args;
+	}
+	if (selected == NULL)
+		throw runtime_error("function template not found");
+	string key = template_argument_key(selected_args);
+	if (extern_declaration)
+	{
+		Binding* binding = add_function_binding(selected->owner,
+		                                        selected->name,
+		                                        declared_type,
+		                                        false);
+		binding->language_linkage = current_language_linkage();
+		binding->is_object_root = true;
+		selected->function_specializations[key] = binding;
+		function_template_placeholders_[binding] = selected;
+	}
+	else
+	{
+		selected->function_specializations.erase(key);
+		Binding* binding = instantiate_function_template(selected,
+		                                                 selected_args);
+		binding->is_object_root = true;
+	}
+	expect(OP_SEMICOLON);
 }
 
 TemplateDeclaration* Parser::register_template_declaration(
@@ -341,6 +377,8 @@ TemplateDeclaration* Parser::register_template_declaration(
 	holder->parameters = parameters;
 	holder->decl_begin = decl_begin;
 	holder->decl_end = decl_end;
+	holder->outer_type_substitutions = template_type_substitutions_;
+	holder->outer_value_substitutions = template_value_substitutions_;
 	TemplateDeclaration* declaration = holder.get();
 	template_declarations_.push_back(std::move(holder));
 
@@ -505,6 +543,7 @@ void Parser::register_class_template(TemplateDeclaration* declaration)
 void Parser::register_explicit_function_template_specialization(
 	TemplateDeclaration* declaration,
 	const QualifiedName& qname,
+	TypePtr declared_type,
 	size_t save_pos,
 	const vector<map<string, TypePtr> >& save_subst,
 	const vector<map<string, TemplateArgument> >& save_value_subst)
@@ -513,8 +552,12 @@ void Parser::register_explicit_function_template_specialization(
 	if (primaries.empty())
 		throw runtime_error("function template specialization without primary");
 	TemplateDeclaration* primary = primaries[0];
-	vector<TemplateArgument> full_args =
-		complete_template_arguments(primary, qname.template_arguments);
+	vector<TemplateArgument> full_args;
+	if (!deduce_function_template_target_type(primary,
+	                                          declared_type,
+	                                          qname.template_arguments,
+	                                          full_args))
+		throw runtime_error("function template specialization mismatch");
 	string key = template_argument_key(full_args);
 	template_type_substitutions_ = save_subst;
 	template_value_substitutions_ = save_value_subst;
@@ -571,13 +614,11 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 	map<string, TypePtr> parameter_types;
 	map<string, TemplateArgument> parameter_values;
 	collect_template_parameter_placeholders(declaration->parameters,
-	                                        parameter_types,
-	                                        parameter_values);
+	                                        parameter_types, parameter_values);
 
 	size_t save_pos = pos_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
-	vector<map<string, TemplateArgument> > save_value_subst =
-		template_value_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_;
 	template_type_substitutions_.push_back(parameter_types);
 	template_value_substitutions_.push_back(parameter_values);
 	pos_ = declaration->decl_begin;
@@ -590,15 +631,13 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 		if (type->kind != pa11::TypeKind::Function)
 		{
 			const QualifiedName& qname = declarator_name(declarator);
-			Scope* target = qname.qualifier != NULL ? qname.qualifier :
-				declaration->owner;
+				Scope* target = qname.qualifier != NULL ? qname.qualifier : declaration->owner;
 			declaration->owner = target;
 			declaration->name = qname.name;
 			if (qname.has_template_arguments)
 			{
 				declaration->class_specialization = true;
-				declaration->class_specialization_pattern =
-					qname.template_arguments;
+					declaration->class_specialization_pattern = qname.template_arguments;
 			}
 			template_type_substitutions_ = save_subst;
 			template_value_substitutions_ = save_value_subst;
@@ -608,27 +647,32 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 			declaration->kind = TemplateDeclarationKind::Variable;
 			variable_templates_[target][qname.name].push_back(declaration);
 			return;
-		}
-		const QualifiedName& qname = declarator_name(declarator);
-			Scope* target = qname.qualifier != NULL ? qname.qualifier :
-				declaration->owner;
-			if (declaration->parameters.empty() && qname.has_template_arguments)
-			{
-				register_explicit_function_template_specialization(
-					declaration,
-					qname,
-					save_pos,
-					save_subst,
-					save_value_subst);
+			}
+			const QualifiedName& qname = declarator_name(declarator);
+					Scope* friend_class_scope =
+						specs.friend_decl && declaration->owner != NULL &&
+						declaration->owner->kind == ScopeKind::Class ? declaration->owner : NULL;
+					Scope* target = qname.qualifier != NULL ? qname.qualifier
+						: (friend_class_scope != NULL
+						   ? nearest_namespace_scope(friend_class_scope) : declaration->owner);
+				if (declaration->parameters.empty())
+				{
+						register_explicit_function_template_specialization(
+							declaration, qname, type, save_pos, save_subst, save_value_subst);
 				return;
 			}
-		declaration->owner = target;
-		declaration->name = qname.name;
-		if (target->kind == ScopeKind::Class && !specs.static_decl)
-			type = make_member_function_type(target, type);
-		declaration->generic_function_type = type;
-		Binding* placeholder =
-			add_function_binding(target, qname.name, type, false);
+			declaration->owner = target;
+			declaration->friend_class_scope = friend_class_scope;
+			declaration->hidden_friend =
+				friend_class_scope != NULL && qname.qualifier == NULL;
+			declaration->name = qname.name;
+			if (target->kind == ScopeKind::Class && !specs.static_decl)
+				type = make_member_function_type(target, type);
+			declaration->generic_function_type = type;
+				declaration->has_definition = has_token(tokens_, pos_,
+				                                        declaration->decl_end, OP_LBRACE);
+				Binding* placeholder =
+					add_function_binding(target, qname.name, type, declaration->hidden_friend);
 		placeholder->is_static_member =
 			target->kind == ScopeKind::Class && specs.static_decl;
 		declaration->placeholder = placeholder;
@@ -642,9 +686,10 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 					names.push_back(primary_suffix->parameters[i].name);
 			function_parameter_names_[placeholder] = names;
 		}
-		function_template_placeholders_[placeholder] = declaration;
-		vector<TemplateDeclaration*>& overloads =
-			function_templates_[target][qname.name];
+			function_template_placeholders_[placeholder] = declaration;
+			if (friend_class_scope != NULL)
+				add_friend_function(friend_class_scope, placeholder);
+			vector<TemplateDeclaration*>& overloads = function_templates_[target][qname.name];
 		if (find(overloads.begin(), overloads.end(), declaration) ==
 		    overloads.end())
 			overloads.push_back(declaration);
@@ -655,8 +700,7 @@ void Parser::register_function_template(TemplateDeclaration* declaration)
 				record_template_declarations_.find(
 					pa11::strip_cv(owner_record).get());
 			if (outer != record_template_declarations_.end())
-				member_function_templates_[make_pair(outer->second,
-				                                    qname.name)]
+					member_function_templates_[make_pair(outer->second, qname.name)]
 					.push_back(declaration);
 		}
 	}
@@ -683,9 +727,8 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 		if (!declaration->parameters[i].name.empty() &&
 		    declaration->parameters[i].kind == TemplateParameterKind::Type)
-			parameter_types[declaration->parameters[i].name] =
-				pa11::make_template_parameter_type(
-					declaration->parameters[i].name);
+				parameter_types[declaration->parameters[i].name] =
+					pa11::make_template_parameter_type(declaration->parameters[i].name);
 		else if (!declaration->parameters[i].name.empty() &&
 		         declaration->parameters[i].kind ==
 		         TemplateParameterKind::TemplateTemplate)
@@ -695,65 +738,73 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 	size_t save_pos = pos_;
 	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
-	vector<map<string, TemplateArgument> > save_value_subst =
-		template_value_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_;
 	template_type_substitutions_.push_back(parameter_types);
 	template_value_substitutions_.push_back(parameter_values);
 	pos_ = declaration->decl_begin;
-	bool matched_constructor = false;
-	try
-	{
-		QualifiedName qname = parse_id_expression_name();
-		if (qname.qualifier == NULL ||
-		    qname.qualifier->kind != ScopeKind::Class ||
-		    qname.name != qname.qualifier->name)
-			throw runtime_error("not a constructor template definition");
-		matched_constructor = true;
-		TypePtr class_type = pa11::record_type_for_scope(qname.qualifier);
-		if (class_type.get() == NULL)
-			throw runtime_error("constructor without class type");
-		expect(OP_LPAREN);
-		vector<ParameterInfo> parameters;
-		bool variadic = false;
-		scopes_.push_back(qname.qualifier);
-		parse_parameter_clause(parameters, variadic);
-		scopes_.pop_back();
-		expect(OP_RPAREN);
-		Suffix suffix(SuffixKind::Function);
-		parse_function_suffix_tail(suffix);
-		if (!at(OP_LBRACE) && !at(OP_COLON) && !at(OP_ASS))
-			throw runtime_error("constructor template missing body");
+		bool matched_constructor = false;
+		try
+		{
+			bool explicit_ctor = consume(KW_EXPLICIT);
+			bool constexpr_ctor = consume(KW_CONSTEXPR);
+			if (!explicit_ctor)
+				explicit_ctor = consume(KW_EXPLICIT);
+			QualifiedName qname = parse_id_expression_name();
+			Scope* class_scope = qname.qualifier;
+			if (class_scope == NULL &&
+			    current_scope() != NULL &&
+			    current_scope()->kind == ScopeKind::Class &&
+			    qname.name == current_scope()->name)
+				class_scope = current_scope();
+			if (class_scope == NULL ||
+			    class_scope->kind != ScopeKind::Class ||
+			    qname.name != class_scope->name ||
+			    !at(OP_LPAREN))
+				throw runtime_error("not a constructor template definition");
+			matched_constructor = true;
+			TypePtr class_type = pa11::record_type_for_scope(class_scope);
+			if (class_type.get() == NULL)
+				throw runtime_error("constructor without class type");
+			expect(OP_LPAREN);
+			vector<ParameterInfo> parameters;
+			bool variadic = false;
+			scopes_.push_back(class_scope);
+			parse_parameter_clause(parameters, variadic);
+			scopes_.pop_back();
+			expect(OP_RPAREN);
+			Suffix suffix(SuffixKind::Function);
+			parse_function_suffix_tail(suffix);
+			if (!at(OP_LBRACE) && !at(OP_COLON) && !at(OP_ASS))
+				throw runtime_error("constructor template missing body");
 
-		vector<TypePtr> fn_params;
-		fn_params.push_back(pa11::make_pointer(class_type));
-		for (size_t i = 0; i < parameters.size(); ++i)
-			fn_params.push_back(parameters[i].type);
-		TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-		                                      fn_params,
-		                                      variadic);
-		Binding* existing =
-			find_matching_function(qname.qualifier, qname.name, fn_type);
+			vector<TypePtr> fn_params;
+			fn_params.push_back(pa11::make_pointer(class_type));
+				for (size_t i = 0; i < parameters.size(); ++i)
+					fn_params.push_back(parameters[i].type);
+				TypePtr fn_type =
+					pa11::make_function(pa11::make_fundamental(FT_VOID), fn_params, variadic);
+			Binding* existing =
+				find_matching_function(class_scope, qname.name, fn_type);
 		if (existing != NULL && existing->unwind_no != suffix.noexcept_decl)
 			throw runtime_error("exception specification mismatch");
 		Binding* placeholder = existing != NULL
-			? existing
-			: add_function_binding(qname.qualifier,
-			                       qname.name,
-			                       fn_type,
-			                       false);
-		placeholder->unwind_no = suffix.noexcept_decl;
-		declaration->kind = TemplateDeclarationKind::Function;
-		declaration->constructor_template = true;
-		declaration->owner = qname.qualifier;
-		declaration->name = qname.name;
+				? existing
+					: add_function_binding(class_scope, qname.name, fn_type, false);
+			placeholder->unwind_no = suffix.noexcept_decl;
+			placeholder->is_explicit = explicit_ctor;
+				placeholder->is_constexpr = placeholder->is_constexpr || constexpr_ctor;
+			declaration->kind = TemplateDeclarationKind::Function;
+			declaration->constructor_template = true;
+			declaration->owner = class_scope;
+			declaration->name = qname.name;
 		declaration->generic_function_type = fn_type;
 		declaration->placeholder = placeholder;
-		declaration->has_definition =
-			has_token(tokens_, pos_, declaration->decl_end, OP_LBRACE);
+		function_template_placeholders_[placeholder] = declaration;
+			declaration->has_definition = has_token(tokens_, pos_, declaration->decl_end, OP_LBRACE);
 		TemplateDeclaration* outer_template = NULL;
-		for (Scope* owner_scope = qname.qualifier;
-		     owner_scope != NULL && outer_template == NULL;
-		     owner_scope = owner_scope->parent)
+				for (Scope* owner_scope = class_scope;
+				     owner_scope != NULL && outer_template == NULL;
+				     owner_scope = owner_scope->parent)
 		{
 			TypePtr owner_record = pa11::record_type_for_scope(owner_scope);
 			if (owner_record.get() == NULL)
@@ -765,8 +816,7 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 				outer_template = outer->second;
 		}
 		if (outer_template != NULL)
-			member_function_templates_[make_pair(outer_template,
-			                                    qname.name)]
+				member_function_templates_[make_pair(outer_template, qname.name)]
 				.push_back(declaration);
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
@@ -862,6 +912,49 @@ bool Parser::register_static_member_variable_template(
 		pos_ = save_pos;
 		if (matched)
 			throw;
+		size_t fallback_pos = pos_;
+		vector<map<string, TypePtr> > fallback_subst =
+			template_type_substitutions_;
+		vector<map<string, TemplateArgument> > fallback_value_subst =
+			template_value_substitutions_;
+		try
+		{
+			template_type_substitutions_.push_back(parameter_types);
+			template_value_substitutions_.push_back(parameter_values);
+			pos_ = declaration->decl_begin;
+			DeclSpecs specs = parse_decl_specifier_seq(false);
+			(void)type_from_decl_specs(specs);
+			vector<PtrOp> ignored_ptrs;
+			parse_ptr_prefix(ignored_ptrs);
+			if (!at_identifier() || !lookahead(OP_LT, 1))
+				throw runtime_error("not a dependent static member template definition");
+			string root = consume_identifier();
+			TemplateDeclaration* outer_template = find_class_template(NULL, root);
+			if (outer_template == NULL)
+				throw runtime_error("static member template owner not found");
+			vector<TemplateArgument> ignored_args;
+			parse_template_argument_list(ignored_args);
+			expect(OP_COLON2);
+			if (!at_identifier())
+				throw runtime_error("static member template name missing");
+			string member_name = consume_identifier();
+			declaration->kind = TemplateDeclarationKind::Variable;
+			declaration->owner = outer_template->owner;
+			declaration->name = member_name;
+			member_variable_templates_[make_pair(outer_template,
+			                                    member_name)]
+				.push_back(declaration);
+			template_type_substitutions_ = fallback_subst;
+			template_value_substitutions_ = fallback_value_subst;
+			pos_ = fallback_pos;
+			return true;
+		}
+		catch (const exception&)
+		{
+			template_type_substitutions_ = fallback_subst;
+			template_value_substitutions_ = fallback_value_subst;
+			pos_ = fallback_pos;
+		}
 		return false;
 	}
 }
@@ -1010,7 +1103,14 @@ TemplateArgument Parser::parse_non_type_template_argument_expression()
 		}
 	}
 	if (!expr.has_constant_value)
+	{
+		if (!active_class_instantiations_.empty() ||
+		    !template_type_substitutions_.empty() ||
+		    !template_value_substitutions_.empty())
+			return TemplateArgument::dependent_value_arg(
+				expression_object_type(expr.type));
 		throw runtime_error("invalid non-type template argument");
+	}
 	return TemplateArgument::value_arg(expression_object_type(expr.type),
 	                                   expr.constant_value);
 }
@@ -1053,6 +1153,19 @@ bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 			{
 				string pack_name = consume_identifier();
 				expect(OP_DOTS);
+				TypePtr type_subst;
+				if (find_template_type_substitution(pack_name, type_subst))
+				{
+					TemplateArgument arg =
+						TemplateArgument::type_arg(type_subst);
+					arg.pack_expansion = true;
+					arguments.push_back(arg);
+					if (!at(OP_COMMA) && !at(OP_GT))
+						throw runtime_error("template argument is not a type");
+					if (!consume(OP_COMMA))
+						break;
+					continue;
+				}
 				TemplateArgument subst;
 				if (!find_template_value_substitution(pack_name, subst) ||
 				    subst.kind != TemplateArgumentKind::Pack)
@@ -1095,294 +1208,6 @@ bool Parser::parse_template_argument_list(vector<TemplateArgument>& arguments)
 	expect(OP_GT);
 	return true;
 }
-
-vector<TemplateArgument> Parser::expand_template_argument_pack(
-	const TemplateArgument& argument) const
-{
-	if (!argument.pack_expansion)
-	{
-		vector<TemplateArgument> single;
-		single.push_back(argument);
-		return single;
-	}
-	if (argument.kind == TemplateArgumentKind::Pack)
-		return argument.pack;
-
-	string pack_name;
-	if (argument.kind == TemplateArgumentKind::Type &&
-	    template_type_has_template_parameter_name(argument.type, pack_name))
-	{
-		TemplateArgument subst;
-		if (!find_template_value_substitution(pack_name, subst) ||
-		    subst.kind != TemplateArgumentKind::Pack)
-		{
-			vector<TemplateArgument> unresolved;
-			unresolved.push_back(argument);
-			return unresolved;
-		}
-		vector<TemplateArgument> out;
-		for (size_t i = 0; i < subst.pack.size(); ++i)
-		{
-			if (subst.pack[i].kind != TemplateArgumentKind::Type)
-				throw runtime_error("type template argument pack required");
-			TypePtr expanded =
-				substitute_template_type_parameter(argument.type,
-				                                   pack_name,
-				                                   subst.pack[i].type);
-			out.push_back(TemplateArgument::type_arg(expanded));
-		}
-		return out;
-	}
-	if (argument.kind == TemplateArgumentKind::Value)
-	{
-		TemplateArgument subst;
-		if (argument.type.get() != NULL &&
-		    template_type_has_template_parameter_name(argument.type, pack_name) &&
-		    find_template_value_substitution(pack_name, subst) &&
-		    subst.kind == TemplateArgumentKind::Pack)
-		{
-			vector<TemplateArgument> out;
-			for (size_t i = 0; i < subst.pack.size(); ++i)
-			{
-				if (subst.pack[i].kind != TemplateArgumentKind::Value)
-					throw runtime_error("value template argument pack required");
-				out.push_back(subst.pack[i]);
-			}
-			return out;
-		}
-		vector<TemplateArgument> unresolved;
-		unresolved.push_back(argument);
-		return unresolved;
-	}
-	throw runtime_error("unsupported template argument pack expansion");
-}
-
-void Parser::append_completed_template_pack_argument(
-	TemplateDeclaration* declaration,
-	size_t parameter_index,
-	const vector<TemplateArgument>& explicit_expanded,
-	size_t& explicit_index,
-	vector<TemplateArgument>& out)
-{
-	const TemplateParameterInfo& parameter =
-		declaration->parameters[parameter_index];
-	if (explicit_index < explicit_expanded.size() &&
-	    explicit_expanded[explicit_index].kind == TemplateArgumentKind::Pack)
-	{
-		TemplateArgument arg = explicit_expanded[explicit_index++];
-		for (size_t i = 0; i < arg.pack.size(); ++i)
-			if (!template_argument_kind_matches_parameter(arg.pack[i],
-			                                              parameter))
-				throw runtime_error("template pack argument kind mismatch");
-		out.push_back(arg);
-		return;
-	}
-	size_t required_after = 0;
-	for (size_t j = parameter_index + 1;
-	     j < declaration->parameters.size();
-	     ++j)
-		if (!declaration->parameters[j].is_pack &&
-		    !declaration->parameters[j].has_default)
-			++required_after;
-	if (explicit_index + required_after > explicit_expanded.size())
-		throw runtime_error("missing template argument");
-	size_t take =
-		explicit_expanded.size() - explicit_index - required_after;
-	vector<TemplateArgument> pack;
-	for (size_t i = 0; i < take; ++i)
-	{
-		TemplateArgument arg = explicit_expanded[explicit_index++];
-		if (arg.kind == TemplateArgumentKind::Pack)
-		{
-			for (size_t p = 0; p < arg.pack.size(); ++p)
-			{
-				if (!template_argument_kind_matches_parameter(arg.pack[p],
-				                                              parameter))
-					throw runtime_error("template pack argument kind mismatch");
-				pack.push_back(arg.pack[p]);
-			}
-			continue;
-		}
-		if (!template_argument_kind_matches_parameter(arg, parameter))
-			throw runtime_error("template pack argument kind mismatch");
-		pack.push_back(arg);
-	}
-	out.push_back(TemplateArgument::pack_arg(pack));
-}
-
-TemplateArgument Parser::parse_default_template_argument(
-	TemplateDeclaration* declaration,
-	size_t parameter_index,
-	const vector<TemplateArgument>& completed_args)
-{
-	const TemplateParameterInfo& parameter =
-		declaration->parameters[parameter_index];
-	size_t save_pos = pos_;
-	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
-	vector<map<string, TemplateArgument> > save_value_subst =
-		template_value_substitutions_;
-	map<string, TypePtr> subst;
-	map<string, TemplateArgument> value_subst;
-	for (size_t i = 0; i < completed_args.size(); ++i)
-		if (!declaration->parameters[i].name.empty())
-		{
-			if (declaration->parameters[i].is_pack)
-			{
-				subst[declaration->parameters[i].name] =
-					pa11::make_template_parameter_type(
-						declaration->parameters[i].name);
-				value_subst[declaration->parameters[i].name] =
-					completed_args[i];
-			}
-			else if (declaration->parameters[i].kind ==
-			    TemplateParameterKind::Type)
-				subst[declaration->parameters[i].name] =
-					completed_args[i].type;
-			else
-				value_subst[declaration->parameters[i].name] =
-					completed_args[i];
-		}
-	template_type_substitutions_.push_back(subst);
-	template_value_substitutions_.push_back(value_subst);
-	pos_ = parameter.default_begin;
-	TemplateArgument arg;
-	try
-	{
-		if (parameter.kind == TemplateParameterKind::Type)
-			arg = TemplateArgument::type_arg(parse_type_id());
-		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
-		{
-			if (!try_parse_template_template_argument(arg))
-				throw runtime_error("invalid default template argument");
-		}
-		else
-		{
-			bool default_dependent = type_is_template_dependent(parameter.type);
-			for (size_t i = 0; i < completed_args.size(); ++i)
-				if (template_argument_has_template_parameter(
-					    completed_args[i],
-					    record_template_arguments_))
-					default_dependent = true;
-			int save_expression_depth = template_argument_expression_depth_;
-			++template_argument_expression_depth_;
-			Expr expr;
-			try
-			{
-				expr = parse_assignment_expression();
-			}
-			catch (...)
-			{
-				template_argument_expression_depth_ = save_expression_depth;
-				if (!default_dependent)
-					throw;
-				expr = Expr();
-			}
-			template_argument_expression_depth_ = save_expression_depth;
-			if (expr.valid && !expr.has_constant_value)
-			{
-				ConstexprValue value;
-				if (try_evaluate_constexpr_expr(expr.node, value) &&
-				    !value.is_object)
-				{
-					expr.has_constant_value = true;
-					expr.constant_value = value.int_value;
-					expr.node.has_constant_value = true;
-					expr.node.constant_value = value.int_value;
-				}
-			}
-			if (expr.valid && !expr.has_constant_value)
-			{
-				try
-					{
-						Conversion conv =
-							convert_to(expr, pa11::make_fundamental(FT_BOOL));
-						if (conv.viable && !conv.expr.has_constant_value)
-						{
-							ConstexprValue value;
-							if (try_evaluate_constexpr_expr(conv.expr.node, value))
-								apply_constexpr_value(conv.expr, value);
-						}
-						if (conv.viable && conv.expr.has_constant_value)
-							expr = conv.expr;
-					}
-					catch (const runtime_error&)
-				{
-				}
-			}
-			if (!expr.has_constant_value && !default_dependent)
-				throw runtime_error("invalid default template argument");
-			if (expr.has_constant_value)
-				arg = TemplateArgument::value_arg(
-					expression_object_type(expr.type),
-					expr.constant_value);
-			else
-				arg = TemplateArgument::dependent_value_arg(parameter.type);
-		}
-		if (pos_ != parameter.default_end)
-			throw runtime_error("invalid default template argument");
-	}
-	catch (...)
-	{
-		template_type_substitutions_ = save_subst;
-		template_value_substitutions_ = save_value_subst;
-		pos_ = save_pos;
-		throw;
-	}
-	template_type_substitutions_ = save_subst;
-	template_value_substitutions_ = save_value_subst;
-	pos_ = save_pos;
-	return arg;
-}
-
-vector<TemplateArgument> Parser::complete_template_arguments(
-	TemplateDeclaration* declaration,
-	const vector<TemplateArgument>& explicit_arguments)
-{
-	vector<TemplateArgument> explicit_expanded;
-	for (size_t i = 0; i < explicit_arguments.size(); ++i)
-	{
-		vector<TemplateArgument> expansion =
-			expand_template_argument_pack(explicit_arguments[i]);
-		explicit_expanded.insert(explicit_expanded.end(),
-		                         expansion.begin(),
-		                         expansion.end());
-	}
-	vector<TemplateArgument> out;
-	size_t explicit_index = 0;
-	for (size_t param_index = 0;
-	     param_index < declaration->parameters.size();
-	     ++param_index)
-	{
-		const TemplateParameterInfo& parameter =
-			declaration->parameters[param_index];
-		if (parameter.is_pack)
-		{
-			append_completed_template_pack_argument(declaration,
-			                                        param_index,
-			                                        explicit_expanded,
-			                                        explicit_index,
-			                                        out);
-			continue;
-		}
-		if (explicit_index < explicit_expanded.size())
-		{
-			TemplateArgument arg = explicit_expanded[explicit_index++];
-			if (!template_argument_kind_matches_parameter(arg, parameter))
-				throw runtime_error("template argument kind mismatch");
-			out.push_back(arg);
-			continue;
-		}
-		if (!parameter.has_default)
-			throw runtime_error("missing template argument");
-		out.push_back(parse_default_template_argument(declaration,
-		                                             param_index,
-		                                             out));
-	}
-	if (explicit_index != explicit_expanded.size())
-		throw runtime_error("too many template arguments");
-	return out;
-}
-
 
 }  // namespace internal
 }  // namespace pa12

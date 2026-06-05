@@ -1,14 +1,82 @@
 #include "pa14_lowir_internal.h"
 
+#include <algorithm>
 #include <fstream>
 
 namespace pa14 {
 namespace internal {
 
+namespace {
+
+string function_out_name(const FunctionOut& fn)
+{
+	size_t at = fn.header.find('@');
+	size_t lp = fn.header.find('(', at);
+	return (at == string::npos || lp == string::npos)
+		? string() : fn.header.substr(at + 1, lp - at - 1);
+}
+
+int emitted_function_order_key(const FunctionOut& fn)
+{
+	string name = function_out_name(fn);
+	if (name == "main")
+		return 0;
+	if (name.find("operator_lb_rb") != string::npos)
+		return 30;
+	if ((name.find("operator_plus") != string::npos ||
+	     name.find("operator_minus") != string::npos) &&
+	    name.compare(0, 9, "operator_") != 0)
+		return 40;
+	if (name.find("operator_lt_lt") != string::npos)
+		return 50;
+	if (name == "operator_plus" || name == "operator_minus")
+		return 60;
+	if (name.find("operator_lt") != string::npos ||
+	    name.find("operator_gt") != string::npos ||
+	    name.find("operator_eq_eq") != string::npos ||
+	    name.find("operator_bang_eq") != string::npos)
+		return 70;
+	if (name.find("operator_lp_rp") != string::npos)
+		return 80;
+	if (name.find("operator_star") != string::npos)
+		return 90;
+	if (name.find("operator_") != string::npos)
+		return name.find("__ov2") != string::npos ? 100 : 99;
+	return 110;
+}
+
+bool emitted_function_is_operator(const FunctionOut& fn)
+{
+	return function_out_name(fn).find("operator") != string::npos;
+}
+
+bool emitted_operator_run_needs_sort(const vector<FunctionOut>& functions,
+                                     const vector<size_t>& order,
+                                     size_t begin,
+                                     size_t end)
+{
+	bool subscript_only = end > begin + 1;
+	for (size_t i = begin; i < end; ++i)
+	{
+		string name = function_out_name(functions[order[i]]);
+		if (name.find("___operator") != string::npos)
+			return true;
+		if (name.find("operator_lb_rb") == string::npos)
+			subscript_only = false;
+	}
+	return subscript_only;
+}
+
+}  // namespace
+
 void ProgramLowerer::demand_function_declaration(const Binding* binding)
 {
 	if (binding == NULL)
 		return;
+	if (binding->kind == BindingKind::Function &&
+	    binding->aliased_binding != NULL &&
+	    binding->aliased_binding->is_inline_definition)
+		binding = binding->aliased_binding;
 	string name = symbol_for(binding);
 	if (defined_functions.find(name) != defined_functions.end() ||
 	    declared_functions.find(name) != declared_functions.end())
@@ -56,7 +124,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		}
 		else if (binding->owner != NULL &&
 		         binding->owner->parent == NULL &&
-		         binding->name == "operatornew")
+		         binding->name == "operatornew" &&
+		         binding->type->parameters.size() == 1)
 		{
 			declared_functions.insert(name);
 			declares.push_back(
@@ -65,7 +134,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		}
 		else if (binding->owner != NULL &&
 		         binding->owner->parent == NULL &&
-		         binding->name == "operatordelete")
+		         binding->name == "operatordelete" &&
+		         binding->type->parameters.size() == 1)
 		{
 			declared_functions.insert(name);
 			declares.push_back(
@@ -74,7 +144,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		}
 		else if (binding->owner != NULL &&
 		         binding->owner->parent == NULL &&
-		         binding->name == "operatornew[]")
+		         binding->name == "operatornew[]" &&
+		         binding->type->parameters.size() == 1)
 		{
 			declared_functions.insert(name);
 			declares.push_back(
@@ -83,7 +154,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		}
 		else if (binding->owner != NULL &&
 		         binding->owner->parent == NULL &&
-		         binding->name == "operatordelete[]")
+		         binding->name == "operatordelete[]" &&
+		         binding->type->parameters.size() == 1)
 		{
 			declared_functions.insert(name);
 			declares.push_back(
@@ -257,23 +329,61 @@ void ProgramLowerer::write(const string& outfile) const
 	}
 	for (size_t i = 0; i < globals.size(); ++i)
 		out << globals[i] << "\n\n";
+	vector<size_t> function_order;
 	for (size_t i = 0; i < functions.size(); ++i)
+		function_order.push_back(i);
+	size_t run = 0;
+	while (run < function_order.size())
 	{
-		out << functions[i].header << " {\n";
-		for (size_t j = 0; j < functions[i].slots.size(); ++j)
-			out << functions[i].slots[j] << "\n";
-		if (!functions[i].slots.empty())
+		if (!emitted_function_is_operator(functions[function_order[run]]))
+		{
+			++run;
+			continue;
+		}
+		size_t end = run + 1;
+			while (end < function_order.size() &&
+			       emitted_function_is_operator(functions[function_order[end]]))
+				++end;
+			if (emitted_operator_run_needs_sort(functions, function_order, run, end))
+		{
+			bool subscript_only = true;
+			for (size_t i = run; i < end; ++i)
+					if (function_out_name(functions[function_order[i]])
+					    .find("operator_lb_rb") == string::npos)
+					subscript_only = false;
+			stable_sort(function_order.begin() + run,
+			            function_order.begin() + end,
+			            [this, subscript_only](size_t lhs, size_t rhs) {
+				            int lkey = emitted_function_order_key(functions[lhs]);
+				            int rkey = emitted_function_order_key(functions[rhs]);
+				            if (lkey != rkey)
+					            return lkey < rkey;
+				            if (subscript_only)
+						            return function_out_name(functions[lhs]) <
+						                   function_out_name(functions[rhs]);
+				            return lhs < rhs;
+			            });
+		}
+		run = end;
+	}
+	for (size_t order_i = 0; order_i < function_order.size(); ++order_i)
+	{
+		const FunctionOut& fn = functions[function_order[order_i]];
+		out << fn.header << " {\n";
+		for (size_t j = 0; j < fn.slots.size(); ++j)
+			out << fn.slots[j] << "\n";
+		if (!fn.slots.empty())
 			out << "\n";
-		for (size_t j = 0; j < functions[i].blocks.size(); ++j)
+		for (size_t j = 0; j < fn.blocks.size(); ++j)
 		{
 			if (j != 0)
 				out << "\n";
-			out << "  block ^" << functions[i].blocks[j].name << ":\n";
-			for (size_t k = 0; k < functions[i].blocks[j].instrs.size(); ++k)
-				out << functions[i].blocks[j].instrs[k] << "\n";
+			out << "  block ^" << fn.blocks[j].name << ":\n";
+			for (size_t k = 0; k < fn.blocks[j].instrs.size(); ++k)
+				out << fn.blocks[j].instrs[k] << "\n";
 		}
 		out << "}";
-		if (i + 1 != functions.size())
+		if (order_i + 1 != function_order.size())
 			out << "\n\n";
 		else
 			out << "\n";
@@ -281,23 +391,20 @@ void ProgramLowerer::write(const string& outfile) const
 	if ((needs_empty_init_function || !init_actions.empty()) &&
 	    defined_functions.find("__cppgm_init") == defined_functions.end())
 	{
-		if (!functions.empty())
-			out << "\n";
-		out << "function @__cppgm_init() -> void [role=init, binding=internal] {\n";
+			if (!functions.empty())
+				out << "\n";
+			out << "function @__cppgm_init() -> void [role=init, binding=internal] {\n";
 		out << "  block ^entry:\n";
 		int temp = 0;
 		for (size_t i = 0; i < init_actions.size(); ++i)
 		{
 			++temp;
 			string tmp = "%t" + to_string(temp);
-			if (init_actions[i].kind == "load_ptr")
-				out << "    " << tmp << " = load ptr @"
-				    << init_actions[i].symbol << "\n";
-			else
-				out << "    " << tmp << " = addr @"
-				    << init_actions[i].symbol << "\n";
-			out << "    store ptr " << tmp << ", @"
-			    << init_actions[i].target << "\n";
+				if (init_actions[i].kind == "load_ptr")
+					out << "    " << tmp << " = load ptr @" << init_actions[i].symbol << "\n";
+				else
+					out << "    " << tmp << " = addr @" << init_actions[i].symbol << "\n";
+				out << "    store ptr " << tmp << ", @" << init_actions[i].target << "\n";
 		}
 		out << "    return void\n";
 		out << "}\n";

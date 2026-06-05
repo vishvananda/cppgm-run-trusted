@@ -9,15 +9,6 @@ namespace pa12 {
 namespace internal {
 namespace {
 
-TypePtr adjust_parameter_type(TypePtr type)
-{
-	if (type->kind == pa11::TypeKind::Array)
-		return pa11::make_pointer(type->base);
-	if (type->kind == pa11::TypeKind::Function)
-		return pa11::make_pointer(type);
-	return type;
-}
-
 bool type_contains_template_parameter_name(TypePtr type, string& name)
 {
 	if (type.get() == NULL)
@@ -73,6 +64,33 @@ void skip_angle_tokens(const vector<Token>& tokens, size_t& pos)
 		}
 		++pos;
 	}
+}
+
+bool angle_tokens_contain_decltype(const vector<Token>& tokens, size_t pos)
+{
+	if (pos >= tokens.size() ||
+	    tokens[pos].kind != posttoken::TokenKind::Simple ||
+	    tokens[pos].type != OP_LT)
+		return false;
+	int depth = 0;
+	for (size_t i = pos; i < tokens.size(); ++i)
+	{
+		const Token& tok = tokens[i];
+		if (tok.kind == posttoken::TokenKind::Simple &&
+		    tok.type == OP_LT)
+			++depth;
+		else if (tok.kind == posttoken::TokenKind::Simple &&
+		         tok.type == OP_GT)
+		{
+			--depth;
+			if (depth == 0)
+				return false;
+		}
+		else if (tok.kind == posttoken::TokenKind::Simple &&
+		         tok.type == KW_DECLTYPE)
+			return true;
+	}
+	return false;
 }
 
 }  // namespace
@@ -221,8 +239,13 @@ TypePtr Parser::parse_decltype_specifier()
 	{
 	}
 	pos_ = save;
+	bool unparenthesized_operand = !at(OP_LPAREN);
 	Expr expr = parse_expression();
 	expect(OP_RPAREN);
+	if (unparenthesized_operand &&
+	    expr.binding != NULL &&
+	    expr.node.line.compare(0, 17, "member-expression") == 0)
+		return expr.binding->type;
 	TypePtr object = expression_object_type(expr.type);
 	if (expr.category == ValueCategory::LValue)
 		return pa11::make_lvalue_reference(object);
@@ -345,14 +368,38 @@ TypePtr Parser::parse_class_specifier()
 			++p;
 		}
 		while (p < tokens_.size() && depth > 0);
-		const bool injected_union =
-			key == KW_UNION && p < tokens_.size() &&
-			tokens_[p].kind == posttoken::TokenKind::Simple &&
-			tokens_[p].type == OP_SEMICOLON;
-		name = injected_union
+			const bool injected_anonymous_member =
+				(key == KW_UNION || key == KW_STRUCT) &&
+				current_scope()->kind != ScopeKind::Namespace &&
+				p < tokens_.size() &&
+				tokens_[p].kind == posttoken::TokenKind::Simple &&
+				tokens_[p].type == OP_SEMICOLON;
+		name = injected_anonymous_member
 			? "__anonymous_union_type__" + to_string(start_index) +
 			  "_" + to_string(p + 1)
 			: make_local_type_name("__local_type");
+	}
+	bool active_template_class =
+		!active_class_instantiations_.empty() &&
+		active_class_instantiations_.back().declaration != NULL &&
+		active_class_instantiations_.back().declaration->name == name;
+	if (!anonymous && !active_template_class)
+	{
+		Scope* owner = qualified_owner != NULL ? qualified_owner : current_scope();
+		Binding* existing = qualified_owner != NULL
+			? pa11::lookup_qualified(qualified_owner,
+			                         name,
+			                         pa11::LOOKUP_TYPE)
+			: pa11::lookup_unqualified(owner, name, pa11::LOOKUP_TYPE);
+		TypePtr existing_record = existing != NULL
+			? pa11::strip_cv(existing->type) : TypePtr();
+		if (existing_record.get() == NULL ||
+		    existing_record->kind != pa11::TypeKind::Record)
+			add_record(owner,
+			           name,
+			           class_tag(key),
+			           false,
+			           NULL);
 	}
 	TypePtr direct_base;
 	if (consume(OP_COLON))
@@ -370,10 +417,6 @@ TypePtr Parser::parse_class_specifier()
 		    base_bare->kind != pa11::TypeKind::TemplateParameter)
 			throw runtime_error("invalid base class");
 	}
-	bool active_template_class =
-		!active_class_instantiations_.empty() &&
-		active_class_instantiations_.back().declaration != NULL &&
-		active_class_instantiations_.back().declaration->name == name;
 	Scope* class_scope = NULL;
 	TypePtr type;
 	if (active_template_class)
@@ -426,15 +469,18 @@ TypePtr Parser::parse_class_specifier()
 		}
 	}
 	type->base = direct_base;
-	if (active_template_class && direct_base.get() != NULL)
-	{
-		TemplateDeclaration* declaration =
-			active_class_instantiations_.back().declaration;
-		if (type_is_template_dependent(direct_base))
-			class_templates_with_dependent_base_.insert(declaration);
-		if (class_templates_with_dependent_base_.count(declaration) != 0)
-			record_dependent_base_lookup_skips_.insert(type.get());
-	}
+		if (active_template_class && direct_base.get() != NULL)
+		{
+			TemplateDeclaration* declaration =
+				active_class_instantiations_.back().declaration;
+			bool dependent_base = type_is_template_dependent(direct_base);
+			if (dependent_base)
+				class_templates_with_dependent_base_.insert(declaration);
+			if (class_templates_with_dependent_base_.count(declaration) != 0)
+				record_dependent_base_lookup_skips_.insert(type.get());
+			else
+				record_dependent_base_lookup_skips_.erase(type.get());
+		}
 	if (forced_align > type->record_forced_align)
 	{
 		type->record_forced_align = forced_align;
@@ -450,7 +496,17 @@ TypePtr Parser::parse_class_specifier()
 		    extra_lowir_nodes_[i].binding->owner == class_scope)
 			resolve_pending_member_initializers(class_scope,
 			                                    extra_lowir_nodes_[i]);
-	pa11::layout_record_type(type);
+	try
+	{
+		pa11::layout_record_type(type);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+	}
 	return type;
 }
 
@@ -522,13 +578,27 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		(void)class_scope;
 	}
 	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() != NULL)
-	{
-		complete_class_virtuals(class_type);
-		pa11::layout_record_type(class_type);
-		for (size_t i = 0; i < defaulted_move_assignments_.size(); ++i)
+		if (class_type.get() != NULL)
 		{
-			Binding* function = defaulted_move_assignments_[i];
+			complete_class_virtuals(class_type);
+			bool layout_ok = true;
+			try
+			{
+				pa11::layout_record_type(class_type);
+			}
+			catch (const runtime_error& err)
+			{
+					if ((string(err.what()) != "incomplete class type" &&
+					     string(err.what()) != "incomplete object type") ||
+					    active_class_instantiations_.empty())
+						throw;
+				layout_ok = false;
+			}
+			for (size_t i = 0; i < defaulted_move_assignments_.size(); ++i)
+			{
+				if (!layout_ok)
+					break;
+				Binding* function = defaulted_move_assignments_[i];
 			if (function->owner != class_scope)
 				continue;
 			for (size_t j = 0; j < class_type->fields.size(); ++j)
@@ -636,13 +706,235 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		string dep_name = consume_identifier();
 		bool dependent_root = false;
 		TypePtr subst;
-		if (find_template_type_substitution(dep_name, subst) &&
+		bool have_type_subst =
+			find_template_type_substitution(dep_name, subst);
+		string root_name = dep_name;
+		TypePtr concrete_root;
+		Binding* concrete_root_binding = NULL;
+		if (have_type_subst &&
+		    pa11::strip_cv(subst)->kind !=
+		    pa11::TypeKind::TemplateParameter)
+			concrete_root = subst;
+		else if (!have_type_subst)
+		{
+			concrete_root_binding =
+				pa11::lookup_unqualified(current_scope(),
+				                         dep_name,
+				                         pa11::LOOKUP_TYPE);
+			if (concrete_root_binding != NULL)
+				concrete_root = concrete_root_binding->type;
+			if (concrete_root.get() != NULL)
+			{
+				complete_member_class_template_record(
+					concrete_root_binding);
+				if (!type_is_template_dependent(concrete_root))
+					complete_template_record(concrete_root);
+				if (pa11::strip_cv(concrete_root)->kind ==
+				    pa11::TypeKind::TemplateParameter)
+					concrete_root.reset();
+			}
+		}
+		if (concrete_root.get() != NULL && at(OP_COLON2))
+		{
+			TypePtr resolved = concrete_root;
+			bool resolved_ok = true;
+			while (consume(OP_COLON2))
+			{
+				consume(KW_TEMPLATE);
+				if (!at_identifier())
+				{
+					resolved_ok = false;
+					break;
+				}
+				TypePtr owner = pa11::strip_cv(resolved);
+				if (owner->kind != pa11::TypeKind::Record ||
+				    owner->scope == NULL)
+				{
+					resolved_ok = false;
+					break;
+				}
+				complete_template_record(owner);
+				string member_name = consume_identifier();
+				if (at(OP_LT))
+				{
+					vector<TemplateArgument> member_args;
+					TemplateDeclaration* alias =
+						find_alias_template(owner->scope, member_name);
+					TemplateDeclaration* klass =
+						alias == NULL
+						? find_class_template(owner->scope, member_name)
+						: NULL;
+					if (alias == NULL && klass == NULL)
+					{
+						resolved_ok = false;
+						break;
+					}
+					parse_template_argument_list(member_args);
+					resolved = alias != NULL
+						? instantiate_alias_template(alias, member_args)
+						: instantiate_class_template(klass, member_args);
+				}
+				else
+				{
+					vector<Binding*> found =
+						lookup_qualified_set(owner->scope,
+						                     member_name,
+						                     pa11::LOOKUP_TYPE);
+					if (found.empty())
+					{
+						resolved_ok = false;
+						break;
+					}
+					resolved = found[0]->type;
+					complete_member_class_template_record(found[0]);
+				}
+			}
+			if (resolved_ok && pos_ != dep_save)
+			{
+				out = resolved;
+				if (!type_is_template_dependent(out))
+					complete_template_record(out);
+				return true;
+			}
+			pos_ = dep_save;
+			dep_name = consume_identifier();
+		}
+		if (at(OP_COLON2))
+		{
+			Binding* ns_binding =
+				pa11::lookup_unqualified(current_scope(),
+				                         dep_name,
+				                         pa11::LOOKUP_NAMESPACE);
+			Scope* resolved_scope =
+				ns_binding != NULL ? ns_binding->target_scope : NULL;
+			if (resolved_scope != NULL)
+			{
+				size_t concrete_save = pos_;
+				TypePtr resolved;
+				bool have_resolved_type = false;
+				bool resolved_ok = true;
+				while (consume(OP_COLON2))
+				{
+					consume(KW_TEMPLATE);
+					if (!at_identifier())
+					{
+						resolved_ok = false;
+						break;
+					}
+					string member_name = consume_identifier();
+					if (!have_resolved_type)
+					{
+						if (at(OP_LT))
+						{
+							vector<TemplateArgument> member_args;
+							TemplateDeclaration* alias =
+								find_alias_template(resolved_scope,
+								                    member_name);
+							TemplateDeclaration* klass =
+								alias == NULL
+								? find_class_template(resolved_scope,
+								                      member_name)
+								: NULL;
+							if (alias == NULL && klass == NULL)
+							{
+								resolved_ok = false;
+								break;
+							}
+							parse_template_argument_list(member_args);
+							resolved = alias != NULL
+								? instantiate_alias_template(alias,
+								                             member_args)
+								: instantiate_class_template(klass,
+								                             member_args);
+							have_resolved_type = true;
+							continue;
+						}
+						vector<Binding*> namespaces =
+							lookup_qualified_set(resolved_scope,
+							                     member_name,
+							                     pa11::LOOKUP_NAMESPACE);
+						if (!namespaces.empty())
+						{
+							resolved_scope = namespaces[0]->target_scope;
+							continue;
+						}
+						vector<Binding*> found =
+							lookup_qualified_set(resolved_scope,
+							                     member_name,
+							                     pa11::LOOKUP_TYPE);
+						if (found.empty())
+						{
+							resolved_ok = false;
+							break;
+						}
+						resolved = found[0]->type;
+						complete_member_class_template_record(found[0]);
+						have_resolved_type = true;
+						continue;
+					}
+					TypePtr owner = pa11::strip_cv(resolved);
+					if (owner->kind != pa11::TypeKind::Record ||
+					    owner->scope == NULL)
+					{
+						resolved_ok = false;
+						break;
+					}
+					complete_template_record(owner);
+					if (at(OP_LT))
+					{
+						vector<TemplateArgument> member_args;
+						TemplateDeclaration* alias =
+							find_alias_template(owner->scope, member_name);
+						TemplateDeclaration* klass = alias == NULL
+							? find_class_template(owner->scope, member_name)
+							: NULL;
+						if (alias == NULL && klass == NULL)
+						{
+							resolved_ok = false;
+							break;
+						}
+						parse_template_argument_list(member_args);
+						resolved = alias != NULL
+							? instantiate_alias_template(alias,
+							                             member_args)
+							: instantiate_class_template(klass,
+							                             member_args);
+					}
+					else
+					{
+						vector<Binding*> found =
+							lookup_qualified_set(owner->scope,
+							                     member_name,
+							                     pa11::LOOKUP_TYPE);
+						if (found.empty())
+						{
+							resolved_ok = false;
+							break;
+						}
+						resolved = found[0]->type;
+						complete_member_class_template_record(found[0]);
+					}
+				}
+				if (resolved_ok && have_resolved_type && pos_ != concrete_save)
+				{
+					out = resolved;
+					if (!type_is_template_dependent(out))
+						complete_template_record(out);
+					return true;
+				}
+				pos_ = concrete_save;
+			}
+		}
+		if (have_type_subst &&
 		    pa11::strip_cv(subst)->kind ==
 		    pa11::TypeKind::TemplateParameter)
 			dependent_root = true;
+		vector<TemplateArgument> root_arguments;
+		bool have_root_arguments = false;
 		if (at(OP_LT))
 		{
-			vector<TemplateArgument> root_arguments;
+			bool root_has_decltype =
+				angle_tokens_contain_decltype(tokens_, pos_);
 			try
 			{
 				parse_template_argument_list(root_arguments);
@@ -654,7 +946,9 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			}
 			if (pos_ != dep_save)
 			{
-				dep_name += "<>";
+				have_root_arguments = true;
+				dep_name += root_has_decltype
+					? "<decltype>" : "<>";
 				for (size_t i = 0; i < root_arguments.size(); ++i)
 				{
 					vector<TemplateArgument> pending;
@@ -688,6 +982,81 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				}
 			}
 		}
+		if (!dependent_root && have_root_arguments && at(OP_COLON2))
+		{
+			size_t concrete_save = pos_;
+			TemplateDeclaration* alias = find_alias_template(NULL, root_name);
+			TemplateDeclaration* klass = alias == NULL
+				? find_class_template(NULL, root_name) : NULL;
+			if (alias != NULL || klass != NULL)
+			{
+				TypePtr resolved = alias != NULL
+					? instantiate_alias_template(alias, root_arguments)
+					: instantiate_class_template(klass, root_arguments);
+				bool resolved_ok = true;
+				while (consume(OP_COLON2))
+				{
+					consume(KW_TEMPLATE);
+					if (!at_identifier())
+					{
+						resolved_ok = false;
+						break;
+					}
+					TypePtr owner = pa11::strip_cv(resolved);
+					if (owner->kind != pa11::TypeKind::Record ||
+					    owner->scope == NULL)
+					{
+						resolved_ok = false;
+						break;
+					}
+					complete_template_record(owner);
+					string member_name = consume_identifier();
+					if (at(OP_LT))
+					{
+						vector<TemplateArgument> member_args;
+						TemplateDeclaration* member_alias =
+							find_alias_template(owner->scope, member_name);
+						TemplateDeclaration* member_class =
+							member_alias == NULL
+							? find_class_template(owner->scope, member_name)
+							: NULL;
+						if (member_alias == NULL && member_class == NULL)
+						{
+							resolved_ok = false;
+							break;
+						}
+						parse_template_argument_list(member_args);
+						resolved = member_alias != NULL
+							? instantiate_alias_template(member_alias,
+							                             member_args)
+							: instantiate_class_template(member_class,
+							                             member_args);
+					}
+					else
+					{
+						vector<Binding*> found =
+							lookup_qualified_set(owner->scope,
+							                     member_name,
+							                     pa11::LOOKUP_TYPE);
+						if (found.empty())
+						{
+							resolved_ok = false;
+							break;
+						}
+						resolved = found[0]->type;
+						complete_member_class_template_record(found[0]);
+					}
+				}
+				if (resolved_ok && pos_ != concrete_save)
+				{
+					out = resolved;
+					if (!type_is_template_dependent(out))
+						complete_template_record(out);
+					return true;
+				}
+			}
+			pos_ = concrete_save;
+		}
 		if (dependent_root && at(OP_COLON2))
 		{
 			while (consume(OP_COLON2))
@@ -708,11 +1077,55 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			}
 			if (pos_ != dep_save)
 			{
-			out = pa11::make_template_parameter_type(dep_name);
-			return true;
+				out = pa11::make_template_parameter_type(dep_name);
+				return true;
 			}
 		}
 		pos_ = dep_save;
+		if (typename_disambiguator)
+		{
+			string dependent_name;
+			if (at_identifier())
+			{
+				dependent_name = consume_identifier();
+				if (at(OP_LT))
+				{
+					bool root_has_decltype =
+						angle_tokens_contain_decltype(tokens_, pos_);
+					dependent_name += root_has_decltype
+						? "<decltype>" : "<>";
+					skip_angle_tokens(tokens_, pos_);
+				}
+				bool qualified_dependent = false;
+				while (consume(OP_COLON2))
+				{
+					qualified_dependent = true;
+					dependent_name += "::";
+					consume(KW_TEMPLATE);
+					if (!at_identifier())
+					{
+						pos_ = save;
+						return false;
+					}
+					dependent_name += consume_identifier();
+					if (at(OP_LT))
+					{
+						bool member_has_decltype =
+							angle_tokens_contain_decltype(tokens_, pos_);
+						dependent_name += member_has_decltype
+							? "<decltype>" : "<>";
+						skip_angle_tokens(tokens_, pos_);
+					}
+				}
+				if (qualified_dependent)
+				{
+					out = pa11::make_template_parameter_type(dependent_name);
+					return true;
+				}
+			}
+			pos_ = save;
+			return false;
+		}
 	}
 	if (at_identifier() && lookahead(OP_LT, 1))
 	{
@@ -744,6 +1157,8 @@ bool Parser::try_parse_type_name(TypePtr& out)
 	    (at_identifier() &&
 	     (lookahead(OP_COLON2, 1) || template_id_qualifier)))
 		qualifier = parse_nested_name_specifier(&spelling);
+	if (qualifier != NULL)
+		consume(KW_TEMPLATE);
 	if (!at_identifier())
 	{
 		pos_ = save;
@@ -1018,321 +1433,6 @@ Suffix Parser::parse_function_suffix()
 	}
 	scopes_ = saved_scopes;
 	return suffix;
-}
-
-void Parser::parse_function_suffix_tail(Suffix& suffix)
-{
-	for (;;)
-	{
-		if (at_simple_cv())
-		{
-			suffix.function_cv |= consume_cv_flag();
-			continue;
-		}
-		if (consume(OP_AMP))
-		{
-			suffix.ref_qualifier = 1;
-			continue;
-		}
-		if (consume(OP_LAND))
-		{
-			suffix.ref_qualifier = 2;
-			continue;
-		}
-		if (consume(KW_NOEXCEPT))
-		{
-			suffix.noexcept_decl = true;
-			if (at(OP_LPAREN))
-				skip_balanced(OP_LPAREN, OP_RPAREN);
-			continue;
-		}
-		if (consume(KW_THROW))
-		{
-			suffix.noexcept_decl = true;
-			if (at(OP_LPAREN))
-				skip_balanced(OP_LPAREN, OP_RPAREN);
-			continue;
-		}
-		if (at_identifier() && current().source == "override")
-		{
-			++pos_;
-			suffix.override_decl = true;
-			continue;
-		}
-		if (at_identifier() && current().source == "final")
-		{
-			++pos_;
-			suffix.final_decl = true;
-			continue;
-		}
-		if (consume(OP_ARROW))
-		{
-			vector<Scope*> saved_scopes = scopes_;
-			Scope* parameter_scope =
-				pa11::create_child_scope(current_scope(),
-				                         ScopeKind::Function,
-				                         "");
-			scopes_.push_back(parameter_scope);
-			for (size_t i = 0; i < suffix.parameters.size(); ++i)
-			{
-				const ParameterInfo& parameter = suffix.parameters[i];
-				if (parameter.name.empty())
-					continue;
-				pa11::add_binding(parameter_scope,
-				                  BindingKind::Parameter,
-				                  parameter.name,
-				                  parameter.type);
-			}
-			try
-			{
-				suffix.trailing_return = parse_type_id();
-			}
-			catch (const exception&)
-			{
-				scopes_ = saved_scopes;
-				throw;
-			}
-			scopes_ = saved_scopes;
-			continue;
-		}
-		break;
-	}
-}
-
-void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
-                                    bool& variadic)
-{
-	variadic = false;
-	Scope* parameter_scope =
-		pa11::create_child_scope(current_scope(), ScopeKind::Function, "");
-	scopes_.push_back(parameter_scope);
-	try
-	{
-		if (consume(OP_DOTS))
-		{
-			variadic = true;
-		}
-		else if (!at(OP_RPAREN))
-		{
-			for (;;)
-			{
-				ParameterInfo parsed = parse_parameter_declaration();
-				vector<ParameterInfo> expanded =
-					expand_parameter_pack(parsed);
-				for (size_t i = 0; i < expanded.size(); ++i)
-				{
-					parameters.push_back(expanded[i]);
-					ParameterInfo& parameter = parameters.back();
-					if (!parameter.name.empty())
-						pa11::add_binding(parameter_scope,
-						                  BindingKind::Parameter,
-						                  parameter.name,
-						                  parameter.type);
-				}
-				if (!consume(OP_COMMA))
-					break;
-				if (consume(OP_DOTS))
-				{
-					variadic = true;
-					break;
-				}
-			}
-			if (!variadic && !parameters.empty() &&
-			    !parameters.back().is_pack_expansion &&
-			    consume(OP_DOTS))
-				variadic = true;
-		}
-	}
-	catch (...)
-	{
-		scopes_.pop_back();
-		throw;
-	}
-	scopes_.pop_back();
-}
-
-vector<ParameterInfo> Parser::expand_parameter_pack(
-	const ParameterInfo& parameter) const
-{
-	vector<ParameterInfo> out;
-	if (!parameter.is_pack_expansion)
-	{
-		out.push_back(parameter);
-		return out;
-	}
-	TemplateArgument subst;
-	if (!find_template_value_substitution(parameter.pack_name, subst) ||
-	    subst.kind != TemplateArgumentKind::Pack)
-	{
-		out.push_back(parameter);
-		return out;
-	}
-	if (subst.pack.empty() && !parameter.pack_expression_name.empty())
-	{
-		ParameterInfo marker = parameter;
-		marker.name.clear();
-		marker.type.reset();
-		marker.is_pack_expansion = false;
-		out.push_back(marker);
-		return out;
-	}
-	for (size_t i = 0; i < subst.pack.size(); ++i)
-	{
-		if (subst.pack[i].kind != TemplateArgumentKind::Type)
-			throw runtime_error("type parameter pack required");
-		ParameterInfo expanded = parameter;
-		expanded.is_pack_expansion = false;
-		expanded.type =
-			substitute_template_type_parameter(parameter.type,
-			                                   parameter.pack_name,
-			                                   subst.pack[i].type);
-		if (!parameter.name.empty() && i > 0)
-			expanded.name = parameter.name + "__pack" + to_string(i + 1);
-		out.push_back(expanded);
-	}
-	return out;
-}
-
-ParameterInfo Parser::parse_parameter_declaration()
-{
-	DeclSpecs specs = parse_decl_specifier_seq(false);
-	TypePtr base = type_from_decl_specs(specs);
-	ParameterInfo info;
-	size_t save = pos_;
-	if (starts_declarator())
-	{
-		try
-		{
-			Declarator declarator = parse_declarator(true);
-			info.type = adjust_parameter_type(apply_declarator(declarator, base));
-			if (declarator_has_name(declarator))
-				info.name = declarator_name(declarator).name;
-			string pack_name;
-			if (at(OP_DOTS) &&
-			    type_contains_template_parameter_name(info.type, pack_name))
-			{
-				expect(OP_DOTS);
-				info.is_pack_expansion = true;
-				info.pack_name = pack_name;
-				if (info.name.empty() && at_identifier())
-					info.name = consume_identifier();
-				info.pack_expression_name = info.name;
-			}
-			if (consume(OP_ASS))
-			{
-				info.has_default = true;
-				info.default_value = parse_assignment_expression();
-			}
-			return info;
-		}
-		catch (const exception&)
-		{
-			pos_ = save;
-		}
-	}
-	if (starts_abstract_declarator())
-		info.type = adjust_parameter_type(
-			apply_declarator(parse_abstract_declarator(), base));
-	else
-		info.type = adjust_parameter_type(base);
-	string pack_name;
-	if (at(OP_DOTS) &&
-	    type_contains_template_parameter_name(info.type, pack_name))
-	{
-		expect(OP_DOTS);
-		info.is_pack_expansion = true;
-		info.pack_name = pack_name;
-		if (info.name.empty() && at_identifier())
-			info.name = consume_identifier();
-		info.pack_expression_name = info.name;
-	}
-	if (consume(OP_ASS))
-	{
-		info.has_default = true;
-		info.default_value = parse_assignment_expression();
-	}
-	return info;
-}
-
-bool Parser::starts_declaration()
-{
-	if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
-	    at(KW_STATIC) || at(KW_DECLTYPE) || at(KW_TYPENAME) ||
-	    starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT))
-		return true;
-	if (at_simple_cv() || at_simple_builtin())
-		return true;
-	if (at_identifier() &&
-	    pos_ + 1 < tokens_.size() &&
-	    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier)
-		return true;
-	if (!at_identifier() && !at(OP_COLON2) && !at(KW_TYPENAME))
-		return false;
-	TypePtr type;
-	size_t save = pos_;
-	bool ok = try_parse_type_name(type);
-	pos_ = save;
-	return ok;
-}
-
-bool Parser::starts_class_key() const
-{
-	return at(KW_STRUCT) || at(KW_CLASS) || at(KW_UNION);
-}
-
-bool Parser::starts_ptr_operator() const
-{
-	return at(OP_STAR) || at(OP_AMP) || at(OP_LAND) ||
-	       (at_identifier() && lookahead(OP_COLON2, 1));
-}
-
-bool Parser::starts_declarator() const
-{
-	return starts_ptr_operator() || at(OP_LPAREN) || at(OP_COLON2) ||
-	       at_identifier();
-}
-
-bool Parser::starts_abstract_declarator() const
-{
-	return starts_ptr_operator() || at(OP_LPAREN) || at(OP_LSQUARE);
-}
-
-bool Parser::starts_parenthesized_abstract_declarator() const
-{
-	if (!at(OP_LPAREN))
-		return false;
-	return lookahead(OP_STAR, 1) || lookahead(OP_AMP, 1) ||
-	       lookahead(OP_LAND, 1) || lookahead(OP_LPAREN, 1) ||
-	       lookahead(OP_RPAREN, 1);
-}
-
-bool Parser::at_simple_ignored_specifier() const
-{
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_storage_or_function_specifier(tokens_[pos_].type);
-}
-
-bool Parser::at_simple_cv() const
-{
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_cv_token(tokens_[pos_].type);
-}
-
-bool Parser::at_simple_builtin() const
-{
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_builtin_type_token(tokens_[pos_].type);
-}
-
-unsigned Parser::consume_cv_flag()
-{
-	if (consume(KW_CONST))
-		return pa11::CV_CONST;
-	expect(KW_VOLATILE);
-	return pa11::CV_VOLATILE;
 }
 
 }  // namespace internal

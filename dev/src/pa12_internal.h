@@ -261,11 +261,16 @@ struct TemplateDeclaration
 	vector<TemplateParameterInfo> parameters;
 	size_t decl_begin;
 	size_t decl_end;
-	bool has_definition;
-	bool constructor_template;
-	bool class_specialization;
+		bool has_definition;
+			bool constructor_template;
+			bool class_specialization;
+			bool hidden_friend;
+			bool function_definition_validated;
+			Scope* friend_class_scope;
 	TypePtr generic_function_type;
 	Binding* placeholder;
+	vector<map<string, TypePtr> > outer_type_substitutions;
+	vector<map<string, TemplateArgument> > outer_value_substitutions;
 	vector<TemplateArgument> class_specialization_pattern;
 	vector<TemplateDeclaration*> class_specialization_declarations;
 	map<string, TypePtr> class_specializations;
@@ -350,6 +355,7 @@ private:
 	vector<Scope*> scopes_;
 	vector<TypePtr> function_returns_;
 	vector<Binding*> active_functions_;
+	vector<Scope*> active_friend_class_scopes_;
 	vector<string> language_linkages_;
 	vector<bool> class_private_access_;
 	vector<bool> class_protected_access_;
@@ -386,10 +392,8 @@ private:
 	map<Scope*, map<string, vector<TemplateDeclaration*> > > function_templates_;
 	map<Scope*, map<string, vector<TemplateDeclaration*> > > variable_templates_;
 	map<pair<TemplateDeclaration*, string>, TemplateDeclaration*> member_class_templates_;
-	map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> >
-		member_function_templates_;
-	map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> >
-		member_variable_templates_;
+		map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> > member_function_templates_;
+		map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> > member_variable_templates_;
 	map<Binding*, TemplateDeclaration*> function_template_placeholders_;
 	map<const void*, TemplateDeclaration*> record_template_declarations_;
 	map<const void*, vector<TemplateArgument> > record_template_arguments_;
@@ -428,35 +432,31 @@ private:
 	void parse_using_family(Node& out);
 	void parse_static_assert_declaration();
 		void parse_linkage_specification(Node& out);
-		void parse_template_declaration();
+			void parse_template_declaration();
+			void parse_explicit_template_instantiation(bool extern_declaration);
 		vector<TemplateParameterInfo> parse_template_parameter_clause();
 		TemplateParameterInfo parse_template_parameter_info();
 		void skip_template_parameter_default(TemplateParameterInfo& parameter);
-				TemplateDeclaration* register_template_declaration(
-					const vector<TemplateParameterInfo>& parameters,
-					size_t decl_begin, size_t decl_end);
+					TemplateDeclaration* register_template_declaration(
+						const vector<TemplateParameterInfo>& parameters, size_t decl_begin, size_t decl_end);
 			void register_class_template(TemplateDeclaration* declaration);
 			void register_alias_template(TemplateDeclaration* declaration);
 			void register_function_template(TemplateDeclaration* declaration);
-			void register_explicit_function_template_specialization(
-				TemplateDeclaration* declaration,
-				const QualifiedName& qname,
-				size_t save_pos,
-				const vector<map<string, TypePtr> >& save_subst,
-				const vector<map<string, TemplateArgument> >& save_value_subst);
+				void register_explicit_function_template_specialization(
+					TemplateDeclaration* declaration, const QualifiedName& qname,
+					TypePtr declared_type, size_t save_pos,
+					const vector<map<string, TypePtr> >& save_subst,
+					const vector<map<string, TemplateArgument> >& save_value_subst);
 			bool register_constructor_template(TemplateDeclaration* declaration);
 		bool register_static_member_variable_template(TemplateDeclaration* declaration);
 		size_t skip_template_declaration_body(size_t begin) const;
 		bool find_template_type_substitution(const string& name, TypePtr& out) const;
-		bool find_template_value_substitution(const string& name,
-		                                      TemplateArgument& out) const;
-		bool find_function_parameter_pack_substitution(const string& name,
-		                                               vector<Binding*>& out) const;
+			bool find_template_value_substitution(const string& name, TemplateArgument& out) const;
+			bool find_function_parameter_pack_substitution(const string& name, vector<Binding*>& out) const;
 				bool try_parse_template_template_argument(TemplateArgument& out);
 				TemplateArgument parse_non_type_template_argument_expression();
 				bool parse_template_argument_list(vector<TemplateArgument>& arguments);
-			vector<TemplateArgument> expand_template_argument_pack(
-				const TemplateArgument& argument) const;
+				vector<TemplateArgument> expand_template_argument_pack(const TemplateArgument& argument) const;
 			void append_completed_template_pack_argument(
 				TemplateDeclaration* declaration,
 				size_t parameter_index,
@@ -483,51 +483,44 @@ private:
 		                                   const vector<TemplateArgument>& arguments);
 	void complete_template_record(TypePtr type);
 	void complete_member_class_template_record(Binding* binding);
-	void instantiate_member_function_templates(TypePtr type);
+			void instantiate_member_function_templates(TypePtr type,
+			                                           bool object_root = false);
 	void instantiate_member_variable_templates(TypePtr type);
-	void validate_class_template_definition(TemplateDeclaration* declaration);
+			void validate_class_template_definition(TemplateDeclaration* declaration);
+			void validate_function_template_definition(TemplateDeclaration* declaration);
 		bool type_is_template_dependent(TypePtr type) const;
 		TypePtr substitute_template_type(TypePtr type) const;
 		TypePtr substitute_template_type_parameter(TypePtr type,
 		                                           const string& name,
 		                                           TypePtr replacement) const;
-			vector<Binding*> instantiate_explicit_function_templates(
-				const QualifiedName& name);
-			void select_variable_template_specialization(
-				TemplateDeclaration* declaration,
-				const vector<TemplateArgument>& full_args,
-				TemplateDeclaration*& selected_declaration,
-				vector<TemplateArgument>& selected_args);
-			Binding* instantiate_variable_template(
-				TemplateDeclaration* declaration,
-				const vector<TemplateArgument>& arguments);
-		vector<TemplateDeclaration*> find_function_templates(
-			const QualifiedName& name);
+		TemplateArgument substitute_template_argument_type_parameter(
+			const TemplateArgument& arg,
+			const string& name,
+			TypePtr replacement) const;
+					vector<Binding*> instantiate_explicit_function_templates(const QualifiedName& name);
+					void select_variable_template_specialization(
+					TemplateDeclaration* declaration, const vector<TemplateArgument>& full_args,
+					TemplateDeclaration*& selected_declaration, vector<TemplateArgument>& selected_args);
+				Binding* instantiate_variable_template(TemplateDeclaration* declaration,
+				                                       const vector<TemplateArgument>& arguments);
+			vector<TemplateDeclaration*> find_function_templates(const QualifiedName& name);
 		bool visible_function_template_name(const QualifiedName& name);
 		Binding* instantiate_function_template(
 			TemplateDeclaration* declaration,
 			const vector<TemplateArgument>& arguments);
-		bool deduce_function_template_arguments(
-			TemplateDeclaration* declaration,
-			const vector<Expr>& args,
-			const vector<TemplateArgument>& explicit_arguments,
-			vector<TemplateArgument>& out);
-		bool deduce_function_template_target_type(
-			TemplateDeclaration* declaration,
-			TypePtr target,
-			const vector<TemplateArgument>& explicit_arguments,
-			vector<TemplateArgument>& out);
-		bool deduce_template_type(TypePtr pattern,
-		                          TypePtr argument,
-		                          map<string, TypePtr>& deduced,
-		                          const map<string, TypePtr>* fixed) const;
+			bool deduce_function_template_arguments(TemplateDeclaration* declaration,
+				const vector<Expr>& args, const vector<TemplateArgument>& explicit_arguments,
+				vector<TemplateArgument>& out);
+			bool deduce_function_template_target_type(TemplateDeclaration* declaration, TypePtr target,
+				const vector<TemplateArgument>& explicit_arguments, vector<TemplateArgument>& out);
+			bool deduce_template_type(TypePtr pattern, TypePtr argument,
+			                          map<string, TypePtr>& deduced,
+			                          const map<string, TypePtr>* fixed) const;
 		void parse_simple_or_function_declaration(Node& out, bool emit_node);
 		bool parse_qualified_constructor_definition(Node& out, bool emit_node);
 		bool parse_qualified_conversion_definition(Node& out, bool emit_node);
-		bool parse_constructor_like_member(bool explicit_ctor = false,
-		                                   bool constexpr_ctor = false);
-		bool parse_conversion_function_member(bool explicit_conv = false,
-		                                      bool constexpr_conv = false);
+			bool parse_constructor_like_member(bool explicit_ctor = false, bool constexpr_ctor = false);
+			bool parse_conversion_function_member(bool explicit_conv = false, bool constexpr_conv = false);
 		bool parse_destructor_like_member();
 		bool parse_friend_declaration();
 		void parse_class_body(Scope* class_scope, bool default_private);
@@ -553,15 +546,13 @@ private:
 
 	Declarator parse_declarator(bool abstract_allowed);
 	Declarator parse_abstract_declarator();
-	void parse_noptr_declarator_root(Declarator& declarator,
-	                                 bool abstract_allowed);
+		void parse_noptr_declarator_root(Declarator& declarator, bool abstract_allowed);
 	void parse_ptr_prefix(vector<PtrOp>& ops);
 	void parse_suffixes(vector<Suffix>& suffixes);
 	Suffix parse_array_suffix();
 	Suffix parse_function_suffix();
 	void parse_function_suffix_tail(Suffix& suffix);
-	void parse_parameter_clause(vector<ParameterInfo>& parameters,
-	                            bool& variadic);
+		void parse_parameter_clause(vector<ParameterInfo>& parameters, bool& variadic);
 	ParameterInfo parse_parameter_declaration();
 	vector<ParameterInfo> expand_parameter_pack(
 		const ParameterInfo& parameter) const;
@@ -572,17 +563,11 @@ private:
 	bool declarator_has_name(const Declarator& declarator) const;
 	const Suffix* declarator_function_suffix(const Declarator& declarator) const;
 
-	void parse_function_body(Binding* function,
-	                         const Declarator& declarator,
-	                         Node& function_node);
-	void parse_function_body_from_parameters(Binding* function,
-	                                         const vector<ParameterInfo>& parameters,
-	                                         Node& function_node);
-	void parse_constructor_body_from_parameters(
-		Binding* function,
-		TypePtr class_type,
-		const vector<ParameterInfo>& parameters,
-		Node& function_node);
+		void parse_function_body(Binding* function, const Declarator& declarator, Node& function_node);
+		void parse_function_body_from_parameters(Binding* function,
+		                                         const vector<ParameterInfo>& parameters, Node& function_node);
+		void parse_constructor_body_from_parameters(Binding* function, TypePtr class_type,
+		                                            const vector<ParameterInfo>& parameters, Node& function_node);
 	void remember_function_body(Binding* function, const Node& function_node);
 	void parse_pending_member_bodies(Scope* class_scope);
 	void parse_deferred_nested_member_bodies(Scope* class_scope);
@@ -596,13 +581,9 @@ private:
 		Node parse_for_statement();
 		Node parse_jump_statement();
 		Expr convert_return_expression(Expr expr, TypePtr result);
-		Expr convert_aggregate_return_expression(Expr expr,
-		                                         TypePtr result,
-		                                         TypePtr result_record);
-		Expr convert_record_constructor_return_expression(Expr expr,
-		                                                  TypePtr result);
-		void validate_same_record_return_expression(const Expr& expr,
-		                                            TypePtr result);
+			Expr convert_aggregate_return_expression(Expr expr, TypePtr result, TypePtr result_record);
+			Expr convert_record_constructor_return_expression(Expr expr, TypePtr result);
+			void validate_same_record_return_expression(const Expr& expr, TypePtr result);
 		Node parse_labeled_statement();
 		Node parse_expression_statement();
 		Node parse_condition(TypePtr target);
@@ -637,10 +618,11 @@ private:
 			                                 Scope* target,
 			                                 const string& name,
 			                                 TypePtr type,
-		                                 const Declarator& declarator,
-			                                 bool function_definition,
-			                                 bool nonstatic_member_function,
-			                                 Node& out);
+				                                 const Declarator& declarator,
+				                                 bool function_definition,
+				                                 bool nonstatic_member_function,
+				                                 bool hidden_friend,
+				                                 Node& out);
 			Binding* finish_variable_declaration(const DeclSpecs& specs,
 			                                     Scope* target,
 			                                     Binding* variable,
@@ -734,11 +716,14 @@ private:
 	Scope* nearest_namespace_scope(Scope* scope) const;
 
 	Conversion convert_to(const Expr& expr, TypePtr target);
-	Conversion convert_reference(const Expr& expr, TypePtr target);
-	Conversion try_reference_conversion_functions(const Expr& selected,
-	                                              TypePtr target);
-	Conversion convert_value(const Expr& expr, TypePtr target);
-	Expr select_overload_expr(const Expr& expr, TypePtr target);
+		Conversion convert_reference(const Expr& expr, TypePtr target);
+		Conversion try_reference_conversion_functions(const Expr& selected,
+		                                              TypePtr target);
+		Conversion convert_value(const Expr& expr, TypePtr target);
+		Expr select_overload_expr(const Expr& expr, TypePtr target);
+		bool make_call_pack_expr(const Expr& callee,
+		                         const vector<Expr>& args,
+		                         Expr& out);
 	Binding* resolve_call_candidate(const vector<Binding*>& overloads,
 	                                const vector<Expr>& args,
 	                                const map<Binding*, vector<TemplateArgument> >&
@@ -796,11 +781,18 @@ private:
 		void prefer_static_qualified_overloads(const QualifiedName& name,
 		                                       Expr& out,
 		                                       Binding*& binding);
-		Expr make_implicit_member_id_expr(const QualifiedName& name,
-		                                  const vector<Binding*>& found,
-		                                  Binding* binding,
-		                                  Binding* this_binding);
-	Expr make_binary_expr(ETokenType op, const string& text, Expr lhs, Expr rhs);
+			Expr make_implicit_member_id_expr(const QualifiedName& name,
+			                                  const vector<Binding*>& found,
+			                                  Binding* binding,
+			                                  Binding* this_binding,
+			                                  const map<Binding*, vector<TemplateArgument> >*
+			                                      explicit_template_arguments = NULL);
+		Expr make_binary_expr(ETokenType op, const string& text, Expr lhs, Expr rhs);
+		bool make_binary_pack_expr(ETokenType op,
+		                           const string& text,
+		                           const Expr& lhs,
+		                           const Expr& rhs,
+		                           Expr& out);
 	bool make_builtin_converted_binary_expr(ETokenType op,
 	                                        const string& text,
 	                                        const Expr& lhs,
@@ -841,9 +833,15 @@ private:
 		Expr make_dependent_member_expr(const Expr& object,
 		                                const string& name,
 		                                const string& op);
-	Expr make_cast_expr(TypePtr target,
-	                    const string& op_text,
-	                    Expr inner);
+		Expr make_cast_expr(TypePtr target,
+		                    const string& op_text,
+		                    Expr inner,
+		                    bool suppress_target_pack = false);
+		bool make_cast_pack_expr(TypePtr target,
+		                         const string& op_text,
+		                         const Expr& inner,
+		                         bool suppress_target_pack,
+		                         Expr& out);
 	Expr make_sizeof_expr(uint64_t value);
 	Expr make_address_expr(const string& text, Expr inner);
 	Expr make_deref_expr(const string& text, Expr inner);

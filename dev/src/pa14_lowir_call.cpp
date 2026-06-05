@@ -18,6 +18,13 @@ void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 		demand_record_return_calls(program, node.children[i]);
 }
 
+bool call_binding_has_template_cleanup_context(const Binding* binding)
+{
+	return binding != NULL &&
+	       (!binding->function_specialization_symbol.empty() ||
+	        binding_has_template_specialization_context(binding));
+}
+
 }  // namespace
 
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
@@ -32,9 +39,11 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 	{
 		TypePtr object = pa11::strip_cv(object_type(materialized->type));
 		TypePtr target = pa11::strip_cv(param->base);
-		string prefix = starts_with(materialized->line, "call-expression")
-			? "refcall"
-			: (pa11::same_type(object, target) ? "arg" : "tmpobj");
+		bool indirect_call_result =
+			starts_with(materialized->line, "call-expression") &&
+			record_return_by_address(materialized->type);
+		string prefix = indirect_call_result ? "refcall" :
+		                (pa11::same_type(object, target) ? "arg" : "tmpobj");
 		string slot = fresh_aux_slot(prefix, scalar_lowir_type(object));
 		string addr_name = fresh_temp();
 		Value temp_addr("ptr", addr_name);
@@ -109,6 +118,7 @@ bool FunctionLowerer::lower_temporary_record_pointer_argument(const Node& arg,
 	    !starts_with(arg.line, "unary-expression") ||
 	    !arg.has_op || arg.op != OP_AMP || arg.children.empty() ||
 	    arg.children[0].category == ValueCategory::LValue ||
+	    arg.children[0].category == ValueCategory::XValue ||
 	    pa11::strip_cv(object_type(arg.children[0].type))->kind != TypeKind::Record)
 		return false;
 	TypePtr object = pa11::strip_cv(object_type(arg.children[0].type));
@@ -159,6 +169,39 @@ bool FunctionLowerer::call_argument_may_create_temp_cleanup(const Node& arg,
 	return false;
 }
 
+bool call_argument_needs_setup_cleanup_protection(const Node& arg,
+                                                  TypePtr param)
+{
+	TypePtr bare_param = pa11::strip_cv(param);
+	if (is_reference(param))
+	{
+		const Node* materialized = record_prvalue_child_for_xvalue(arg);
+		if (materialized != NULL &&
+		    pa11::strip_cv(param->base)->kind == TypeKind::Record &&
+		    type_needs_destructor(object_type(materialized->type)))
+			return true;
+		if (arg.category == ValueCategory::PRValue &&
+		    pa11::strip_cv(param->base)->kind == TypeKind::Record &&
+		    pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record &&
+		    type_needs_destructor(object_type(arg.type)))
+			return true;
+	}
+	if (bare_param->kind == TypeKind::Record &&
+	    arg.category == ValueCategory::PRValue &&
+	    pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record &&
+	    type_needs_destructor(object_type(arg.type)))
+		return true;
+	if (bare_param->kind == TypeKind::Pointer &&
+	    starts_with(arg.line, "unary-expression") &&
+	    arg.has_op && arg.op == OP_AMP && !arg.children.empty() &&
+	    arg.children[0].category != ValueCategory::LValue &&
+	    pa11::strip_cv(object_type(arg.children[0].type))->kind ==
+	    TypeKind::Record &&
+	    type_needs_destructor(object_type(arg.children[0].type)))
+		return true;
+	return false;
+}
+
 bool FunctionLowerer::call_setup_can_use_outer_eh(const Node& expr,
                                                   TypePtr callee_type,
                                                   size_t arg_start) const
@@ -175,7 +218,8 @@ bool FunctionLowerer::call_setup_can_use_outer_eh(const Node& expr,
 			: expr.children[i].type;
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
 			param = pa11::make_fundamental(FT_DOUBLE);
-		if (call_argument_may_create_temp_cleanup(expr.children[i], param))
+		if (call_argument_needs_setup_cleanup_protection(expr.children[i],
+		                                                 param))
 			return false;
 	}
 	return true;
@@ -372,12 +416,39 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	}
 	vector<string> args;
 	vector<pair<Value, TypePtr> > temp_cleanups;
+	bool setup_may_create_temp_cleanup = false;
+	if (call_binding_has_template_cleanup_context(direct))
+		for (size_t i = arg_start; i < expr.children.size(); ++i)
+		{
+			bool variadic_extra =
+				i - arg_start >= callee_type->parameters.size();
+			TypePtr param = !variadic_extra
+				? callee_type->parameters[i - arg_start]
+				: expr.children[i].type;
+			if (variadic_extra &&
+			    scalar_lowir_type(expr.children[i].type) == "f32")
+				param = pa11::make_fundamental(FT_DOUBLE);
+			if (call_argument_needs_setup_cleanup_protection(expr.children[i],
+			                                                 param))
+			{
+				setup_may_create_temp_cleanup = true;
+				break;
+			}
+		}
+	bool protect_setup_only =
+		eh_try_depth_ == 0 &&
+		has_active_cleanups() &&
+		setup_may_create_temp_cleanup &&
+		!call_setup_can_use_outer_eh(expr, callee_type, arg_start);
 	bool protected_setup =
-		eh_try_depth_ == 0 && has_active_cleanups() &&
-		call_setup_can_use_outer_eh(expr, callee_type, arg_start);
+		eh_try_depth_ == 0 &&
+		!protect_setup_only &&
+		((has_active_cleanups() &&
+		  call_setup_can_use_outer_eh(expr, callee_type, arg_start)) ||
+		 (!has_active_cleanups() && setup_may_create_temp_cleanup));
 	string protected_dispatch;
 	bool protected_define_dispatch = false;
-	if (protected_setup)
+	if (protected_setup || protect_setup_only)
 	{
 		protected_dispatch = active_unwind_dispatch_.empty()
 			? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
@@ -416,6 +487,21 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
 			param = pa11::make_fundamental(FT_DOUBLE);
 		lower_call_argument(expr.children[i], param, args, &temp_cleanups);
+	}
+	if (protect_setup_only)
+	{
+		--eh_try_depth_;
+		instr("eh_end");
+		if (protected_define_dispatch)
+		{
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = protected_dispatch;
+			start_block(protected_dispatch);
+			emit_unwind_cleanups();
+			terminate("resume");
+			start_block(end);
+		}
 	}
 		if (direct != NULL && delay_direct_demand)
 		{
@@ -538,10 +624,17 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		}
 		call << ") -> " << ret;
 	}
+	bool cleanup_temps_in_call =
+		call_binding_has_template_cleanup_context(direct);
 	if (protected_setup)
 	{
 		bool spill_result = ret != "void" &&
 		                    ret.compare(0, 4, "obj<") != 0;
+		bool consume_store = spill_result &&
+		                     !call_result_store_slot_.empty();
+		bool normal_temp_cleanup =
+			!temp_cleanups.empty() &&
+			(cleanup_temps_in_call || consume_store);
 		string slot = preallocated_call_slot;
 		string loaded;
 		instr(call.str());
@@ -552,24 +645,32 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			instr("store " + ret + " " + tmp + ", $" + slot);
 			loaded = fresh_temp();
 			instr(loaded + " = load " + ret + " $" + slot);
-		}
-		if (spill_result && !call_result_store_slot_.empty())
+			}
+		if (consume_store)
 		{
 			Value stored = convert_value(Value(ret, loaded),
 			                             callee_type->base,
 			                             call_result_store_type_);
 			instr("store " + scalar_lowir_type(call_result_store_type_) +
-			      " " + stored.text + ", $" + call_result_store_slot_);
+		      " " + stored.text + ", $" + call_result_store_slot_);
 			call_result_store_consumed_ = true;
 		}
+		if (normal_temp_cleanup)
+			emit_temporary_cleanups(temp_cleanups);
 		--eh_try_depth_;
 		instr("eh_end");
+		if (!normal_temp_cleanup)
+			for (size_t i = 0; i < temp_cleanups.size(); ++i)
+				add_pending_temp_cleanup(temp_cleanups[i].first,
+				                         temp_cleanups[i].second);
 		if (!protected_define_dispatch)
 			return spill_result ? Value(ret, loaded) : Value(ret, tmp);
 		string end = fresh_block("call_unwind_end");
 		terminate("jump ^" + end);
 		active_unwind_dispatch_ = protected_dispatch;
 		start_block(protected_dispatch);
+		if (!temp_cleanups.empty())
+			emit_temporary_cleanups(temp_cleanups);
 		emit_unwind_cleanups();
 		terminate("resume");
 		start_block(end);
@@ -580,13 +681,14 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		string slot;
 		bool spill_result = ret != "void" &&
 		                    ret.compare(0, 4, "obj<") != 0;
-		bool consume_logical = spill_result &&
-		                       !logical_call_result_slot_.empty();
-		bool consume_store = spill_result &&
-		                     !call_result_store_slot_.empty();
-		if (spill_result)
-			slot = preallocated_call_slot.empty()
-				? fresh_aux_slot("call", ret)
+			bool consume_logical = spill_result &&
+			                       !logical_call_result_slot_.empty();
+			bool consume_store = spill_result &&
+			                     !call_result_store_slot_.empty();
+			bool normal_temp_cleanup = cleanup_temps_in_call;
+			if (spill_result)
+				slot = preallocated_call_slot.empty()
+					? fresh_aux_slot("call", ret)
 				: preallocated_call_slot;
 		string loaded;
 		string dispatch = fresh_block("call_unwind_dispatch");
@@ -604,36 +706,40 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		{
 			Value rv = bool_value(Value(ret, loaded),
 			                      logical_call_result_type_);
-			instr("store i64 " + rv.text + ", $" +
-			      logical_call_result_slot_);
-			emit_temporary_cleanups(temp_cleanups);
-			logical_call_result_consumed_ = true;
-		}
-		else if (consume_store)
+				instr("store i64 " + rv.text + ", $" +
+				      logical_call_result_slot_);
+				emit_temporary_cleanups(temp_cleanups);
+				normal_temp_cleanup = true;
+				logical_call_result_consumed_ = true;
+			}
+			else if (consume_store)
 		{
 			Value stored = convert_value(Value(ret, loaded),
 			                             callee_type->base,
 			                             call_result_store_type_);
 			instr("store " + scalar_lowir_type(call_result_store_type_) +
 			      " " + stored.text + ", $" + call_result_store_slot_);
-			call_result_store_consumed_ = true;
-			emit_temporary_cleanups(temp_cleanups);
-		}
-		--eh_try_depth_;
-		instr("eh_end");
+				call_result_store_consumed_ = true;
+				emit_temporary_cleanups(temp_cleanups);
+				normal_temp_cleanup = true;
+			}
+			else if (normal_temp_cleanup)
+				emit_temporary_cleanups(temp_cleanups);
+			--eh_try_depth_;
+			instr("eh_end");
 		terminate("jump ^" + end);
 		start_block(dispatch);
 		emit_temporary_cleanups(temp_cleanups);
-		emit_unwind_cleanups();
-		terminate("resume");
-		start_block(end);
-		if (!consume_logical && !consume_store)
-			for (size_t i = 0; i < temp_cleanups.size(); ++i)
-				add_pending_temp_cleanup(temp_cleanups[i].first,
-				                         temp_cleanups[i].second);
-		if (spill_result)
-			return Value(ret, loaded);
-		return Value(ret, tmp);
+			emit_unwind_cleanups();
+			terminate("resume");
+			start_block(end);
+			if (!normal_temp_cleanup)
+				for (size_t i = 0; i < temp_cleanups.size(); ++i)
+					add_pending_temp_cleanup(temp_cleanups[i].first,
+					                         temp_cleanups[i].second);
+			if (spill_result)
+				return Value(ret, loaded);
+			return Value(ret, tmp);
 	}
 	if (temp_cleanups.empty() && eh_try_depth_ == 0 && has_active_cleanups())
 	{

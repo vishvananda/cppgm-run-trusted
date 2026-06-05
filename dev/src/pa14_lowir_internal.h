@@ -209,6 +209,8 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_record_return_before_matching_constructor(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_record_return_before_owner_scalar_member(
+			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_inline_definition(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_destructor_inline_definition(
@@ -218,6 +220,8 @@ struct ProgramLowerer
 		void place_specialized_conversion_before_base_conversion(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_ranked_owner_member(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_subscript_before_pending_operators(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_before_late_operator_or_generated_assignment(
 			const Binding* binding, PendingInlineIterator& pos);
@@ -371,7 +375,8 @@ private:
 		TypePtr param,
 		vector<string>& lowered,
 		vector<pair<Value, TypePtr> >& temp_cleanups,
-		vector<PendingConstructorConversion>& pending_conversions);
+		vector<PendingConstructorConversion>& pending_conversions,
+		bool force_refcall_slot = false);
 	void emit_constructor_call_with_cleanups(
 		Binding* ctor,
 		vector<string>& lowered,

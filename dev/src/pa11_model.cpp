@@ -161,6 +161,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_constexpr(false),
 	  is_static_member(false),
 	  is_local_static(false),
+	  local_static_function_owner(NULL),
 	  is_inline_definition(false),
 	  is_generated_default_constructor(false),
 	  is_generated_aggregate_constructor(false),
@@ -172,7 +173,8 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_private(false),
 	  is_protected_member(false),
 	  is_mutable_member(false),
-		  is_hidden_friend(false),
+	  is_reference_member(false),
+	  is_hidden_friend(false),
 		  is_thread_local(false),
 		  is_object_root(false),
 		  is_dependent_template_artifact(false),
@@ -842,6 +844,10 @@ Binding* add_using_declaration(Scope* scope,
 	binding->is_static_member = target->is_static_member;
 	binding->is_local_static = target->is_local_static;
 	binding->local_static_discriminator = target->local_static_discriminator;
+	binding->local_static_function_owner =
+		target->local_static_function_owner;
+	binding->function_specialization_symbol =
+		target->function_specialization_symbol;
 	binding->is_generated_default_constructor =
 		target->is_generated_default_constructor;
 	binding->is_generated_aggregate_constructor =
@@ -854,6 +860,7 @@ Binding* add_using_declaration(Scope* scope,
 		target->is_generated_default_destructor;
 	binding->is_defaulted = target->is_defaulted;
 	binding->is_mutable_member = target->is_mutable_member;
+	binding->is_reference_member = target->is_reference_member;
 	binding->is_thread_local = target->is_thread_local;
 	binding->is_dependent_template_artifact =
 		target->is_dependent_template_artifact;

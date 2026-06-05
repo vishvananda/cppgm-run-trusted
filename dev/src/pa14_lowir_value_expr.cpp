@@ -1001,7 +1001,7 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 		    TypeKind::Record)
 			ensure_pointer(emit_lvalue_addr(expr.children[0]));
 		else
-			emit_rvalue(expr.children[0]);
+			lower_discarded_expr(expr.children[0]);
 		return Value("void", "");
 	}
 	if (is_reference(expr.type))

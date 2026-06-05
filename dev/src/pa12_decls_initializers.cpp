@@ -18,6 +18,45 @@ void Parser::apply_braced_variable_initializer(Scope* target,
 	if (record->kind != pa11::TypeKind::Record &&
 	    record->kind != pa11::TypeKind::Array)
 	{
+		if (type_is_template_dependent(type))
+		{
+			list.line += " lvalue " + pa11::describe_type(type);
+			list.type = type;
+			if (target->kind == ScopeKind::Class && !variable->is_static_member)
+				default_member_initializers_[variable] = list;
+			add_child(var, list);
+			return;
+		}
+		TypePtr init_object = init.type.get() == NULL
+			? TypePtr() : pa11::strip_cv(expression_object_type(init.type));
+		TypePtr target_object = pa11::strip_cv(type);
+		if (init.node.children.empty() &&
+		    (init_object.get() == NULL ||
+		     pa11::same_type(init_object, target_object)))
+		{
+			Expr zero;
+			zero.valid = true;
+			zero.type = type;
+			zero.category = ValueCategory::PRValue;
+			zero.constant_expression = true;
+			zero.has_constant_value = true;
+			zero.constant_value = 0;
+			zero.null_pointer_constant =
+				pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
+			zero.node = Node("literal prvalue " +
+			                 pa11::describe_type(type) + " 0");
+			zero.node.token_text = "0";
+			annotate_expr_node(zero);
+			if (target->kind == ScopeKind::Class && !variable->is_static_member)
+				default_member_initializers_[variable] = zero.node;
+			add_child(var, zero.node);
+			if (pa11::type_has_const(type))
+			{
+				variable->has_constant = true;
+				variable->constant_value = 0;
+			}
+			return;
+		}
 		Conversion conv = convert_to(init, type);
 		if (!conv.viable)
 			throw runtime_error("invalid initializer conversion");

@@ -22,6 +22,23 @@ bool record_has_reference_field(TypePtr type)
 	return bare->base.get() != NULL && record_has_reference_field(bare->base);
 }
 
+vector<Binding*> declared_instance_fields(TypePtr type)
+{
+	vector<Binding*> fields;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return fields;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member->kind == BindingKind::Variable &&
+		    !member->is_static_member &&
+		    member->aliased_binding == NULL)
+			fields.push_back(member);
+	}
+	return fields;
+}
+
 }  // namespace
 
 bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
@@ -336,10 +353,23 @@ void Parser::parse_constructor_body_from_parameters(
 		Node base_action = make_base_init_action(direct_base, NULL);
 		add_child(body, base_action);
 	}
-	pa11::layout_record_type(class_type);
-	for (size_t i = 0; i < class_type->fields.size(); ++i)
+	vector<Binding*> fields;
+	try
 	{
-		Binding* field = class_type->fields[i];
+		pa11::layout_record_type(class_type);
+		fields = class_type->fields;
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		fields = declared_instance_fields(class_type);
+	}
+	for (size_t i = 0; i < fields.size(); ++i)
+	{
+		Binding* field = fields[i];
 		map<Binding*, Node>::const_iterator explicit_init =
 			explicit_member_initializers.find(field);
 		if (explicit_init != explicit_member_initializers.end())
@@ -347,12 +377,24 @@ void Parser::parse_constructor_body_from_parameters(
 			add_child(body, explicit_init->second);
 			continue;
 		}
-		map<Binding*, Node>::const_iterator init =
-			default_member_initializers_.find(field);
-		if (init != default_member_initializers_.end())
-			add_child(body, make_member_init_action(field, &init->second));
-		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record)
-			add_child(body, make_member_init_action(field, NULL));
+			map<Binding*, Node>::const_iterator init =
+				default_member_initializers_.find(field);
+			if (init != default_member_initializers_.end())
+				add_child(body, make_member_init_action(field, &init->second));
+			else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record)
+			{
+				try
+				{
+					if (ensure_default_constructor(field->type) != NULL)
+						add_child(body, make_member_init_action(field, NULL));
+				}
+				catch (const runtime_error& err)
+				{
+					if (string(err.what()) !=
+					    "member has no default constructor")
+						throw;
+				}
+			}
 	}
 	Node parsed_body = parse_compound_statement();
 	for (size_t i = 0; i < parsed_body.children.size(); ++i)
@@ -454,11 +496,22 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = ctor;
-	fn.type = fn_type;
-	if (ctor->is_inline_definition)
-	{
-		PendingFunctionBody pending;
-		pending.function = ctor;
+		fn.type = fn_type;
+		if (ctor->is_inline_definition)
+		{
+			if (force_new_function_binding_)
+			{
+				Node holder("constructor-definition-holder");
+				add_child(holder, fn);
+				parse_constructor_body_from_parameters(ctor,
+				                                       class_type,
+				                                       parameters,
+				                                       holder);
+				extra_lowir_nodes_.push_back(holder.children.back());
+				return true;
+			}
+			PendingFunctionBody pending;
+			pending.function = ctor;
 		pending.node = fn;
 		pending.parameters = parameters;
 		pending.body_pos = pos_;
@@ -634,10 +687,23 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		Node base_action = make_base_init_action(direct_base, NULL);
 		add_child(body, base_action);
 	}
-	pa11::layout_record_type(class_type);
-	for (size_t i = 0; i < class_type->fields.size(); ++i)
+	vector<Binding*> fields;
+	try
 	{
-		Binding* field = class_type->fields[i];
+		pa11::layout_record_type(class_type);
+		fields = class_type->fields;
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		fields = declared_instance_fields(class_type);
+	}
+	for (size_t i = 0; i < fields.size(); ++i)
+	{
+		Binding* field = fields[i];
 		map<Binding*, Node>::const_iterator explicit_init =
 			explicit_member_initializers.find(field);
 		if (explicit_init != explicit_member_initializers.end())
@@ -645,12 +711,24 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 			add_child(body, explicit_init->second);
 			continue;
 		}
-		map<Binding*, Node>::const_iterator init =
-			default_member_initializers_.find(field);
-		if (init != default_member_initializers_.end())
-			add_child(body, make_member_init_action(field, &init->second));
-		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record)
-			add_child(body, make_member_init_action(field, NULL));
+			map<Binding*, Node>::const_iterator init =
+				default_member_initializers_.find(field);
+			if (init != default_member_initializers_.end())
+				add_child(body, make_member_init_action(field, &init->second));
+			else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record)
+			{
+				try
+				{
+					if (ensure_default_constructor(field->type) != NULL)
+						add_child(body, make_member_init_action(field, NULL));
+				}
+				catch (const runtime_error& err)
+				{
+					if (string(err.what()) !=
+					    "member has no default constructor")
+						throw;
+				}
+			}
 	}
 	if (!defaulted)
 	{
@@ -934,6 +1012,17 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	fn.type = fn_type;
 	if (ctor->is_inline_definition)
 	{
+		if (force_new_function_binding_)
+		{
+			Node holder("constructor-definition-holder");
+			add_child(holder, fn);
+			parse_constructor_body_from_parameters(ctor,
+			                                       class_type,
+			                                       parameters,
+			                                       holder);
+			extra_lowir_nodes_.push_back(holder.children.back());
+			return true;
+		}
 		PendingFunctionBody pending;
 		pending.function = ctor;
 		pending.node = fn;

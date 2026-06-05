@@ -79,6 +79,18 @@ void Parser::parse_static_assert_declaration()
 	}
 	expect(OP_RPAREN);
 	expect(OP_SEMICOLON);
+	try
+	{
+		Conversion conv = convert_to(condition, pa11::make_fundamental(FT_BOOL));
+		if (conv.viable)
+			condition = conv.expr;
+	}
+	catch (const runtime_error&)
+	{
+		if (dependent_context)
+			return;
+		throw;
+	}
 	ConstexprValue value;
 	if (try_evaluate_constexpr_expr(condition.node, value) && value.valid)
 	{

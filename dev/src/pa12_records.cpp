@@ -288,7 +288,28 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 
 namespace {
 
-Binding* find_copy_move_constructor_binding(TypePtr type, bool move)
+bool constructor_trailing_parameters_have_defaults(
+	Binding* binding,
+	const map<Binding*, vector<Expr> >* default_arguments)
+{
+	if (binding->type->parameters.size() <= 2)
+		return true;
+	if (default_arguments == NULL)
+		return false;
+	map<Binding*, vector<Expr> >::const_iterator found =
+		default_arguments->find(binding);
+	if (found == default_arguments->end())
+		return false;
+	for (size_t i = 2; i < binding->type->parameters.size(); ++i)
+		if (i >= found->second.size() || !found->second[i].valid)
+			return false;
+	return true;
+}
+
+Binding* find_copy_move_constructor_binding(
+	TypePtr type,
+	bool move,
+	const map<Binding*, vector<Expr> >* default_arguments = NULL)
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
@@ -302,8 +323,11 @@ Binding* find_copy_move_constructor_binding(TypePtr type, bool move)
 		Binding* binding = found->second[i];
 		if (binding->kind != BindingKind::Function ||
 		    binding->type->kind != pa11::TypeKind::Function ||
-		    binding->type->parameters.size() != 2 ||
+		    binding->type->parameters.size() < 2 ||
 		    !pa11::is_reference_type(binding->type->parameters[1]))
+			continue;
+		if (!constructor_trailing_parameters_have_defaults(binding,
+		                                                   default_arguments))
 			continue;
 		TypePtr param = binding->type->parameters[1];
 		if (move && param->kind != pa11::TypeKind::RValueReference)
@@ -320,6 +344,7 @@ bool is_copy_move_assignment_for_record(Binding* binding, TypePtr record)
 {
 	if (binding->kind != BindingKind::Function ||
 	    binding->name != "operator=" ||
+	    !binding->function_specialization_symbol.empty() ||
 	    binding->type->kind != pa11::TypeKind::Function ||
 	    binding->type->parameters.size() != 2 ||
 	    !pa11::is_reference_type(binding->type->parameters[1]))
@@ -352,7 +377,9 @@ Binding* find_copy_move_assignment_binding(TypePtr type, bool move)
 	return NULL;
 }
 
-bool suppresses_implicit_move(TypePtr type)
+bool suppresses_implicit_move(
+	TypePtr type,
+	const map<Binding*, vector<Expr> >* default_arguments)
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
@@ -362,8 +389,10 @@ bool suppresses_implicit_move(TypePtr type)
 	if (ctors != bare->scope->members.end())
 		for (size_t i = 0; i < ctors->second.size(); ++i)
 			if (!ctors->second[i]->is_generated_copy_move_constructor &&
-			    (find_copy_move_constructor_binding(bare, false) == ctors->second[i] ||
-			     find_copy_move_constructor_binding(bare, true) == ctors->second[i]))
+			    (find_copy_move_constructor_binding(
+				     bare, false, default_arguments) == ctors->second[i] ||
+			     find_copy_move_constructor_binding(
+				     bare, true, default_arguments) == ctors->second[i]))
 				return true;
 	map<string, vector<Binding*> >::const_iterator dtors =
 		bare->scope->members.find("~" + bare->scope->name);
@@ -384,7 +413,10 @@ bool suppresses_implicit_move(TypePtr type)
 	return false;
 }
 
-bool type_needs_copy_move_helper(TypePtr type, bool move);
+bool type_needs_copy_move_helper(
+	TypePtr type,
+	bool move,
+	const map<Binding*, vector<Expr> >* default_arguments);
 
 bool constructor_binding_needs_helper(Binding* binding)
 {
@@ -393,38 +425,48 @@ bool constructor_binding_needs_helper(Binding* binding)
 	       !binding->is_defaulted;
 }
 
-bool record_needs_copy_move_helper(TypePtr type, bool move)
+bool record_needs_copy_move_helper(
+	TypePtr type,
+	bool move,
+	const map<Binding*, vector<Expr> >* default_arguments)
 {
 	TypePtr bare = pa11::strip_cv(type);
-	Binding* exact = find_copy_move_constructor_binding(bare, move);
+	Binding* exact =
+		find_copy_move_constructor_binding(bare, move, default_arguments);
 	if (constructor_binding_needs_helper(exact))
 		return true;
 	if (move &&
 	    constructor_binding_needs_helper(
-		    find_copy_move_constructor_binding(bare, false)))
+		    find_copy_move_constructor_binding(
+			    bare, false, default_arguments)))
 		return true;
 	pa11::layout_record_type(bare);
 	if (bare->base.get() != NULL &&
-	    type_needs_copy_move_helper(bare->base, move))
+	    type_needs_copy_move_helper(bare->base, move, default_arguments))
 		return true;
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 	{
 		if (bare->fields[i]->is_bit_field)
 			continue;
-		if (type_needs_copy_move_helper(bare->fields[i]->type, move))
+		if (type_needs_copy_move_helper(
+			    bare->fields[i]->type, move, default_arguments))
 			return true;
 	}
 	return false;
 }
 
-bool type_needs_copy_move_helper(TypePtr type, bool move)
+bool type_needs_copy_move_helper(
+	TypePtr type,
+	bool move,
+	const map<Binding*, vector<Expr> >* default_arguments)
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind == pa11::TypeKind::Array)
-		return type_needs_copy_move_helper(bare->base, move);
+		return type_needs_copy_move_helper(
+			bare->base, move, default_arguments);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return false;
-	return record_needs_copy_move_helper(bare, move);
+	return record_needs_copy_move_helper(bare, move, default_arguments);
 }
 
 bool type_needs_copy_move_assignment_helper(TypePtr type, bool move);
@@ -581,7 +623,8 @@ bool Parser::copy_move_constructor_available(TypePtr type, bool move)
 		return copy_move_constructor_available(bare->base, move);
 	if (bare->kind != pa11::TypeKind::Record)
 		return true;
-	Binding* exact = find_copy_move_constructor_binding(bare, move);
+	Binding* exact =
+		find_copy_move_constructor_binding(bare, move, &default_arguments_);
 	if (exact != NULL)
 	{
 		if (exact->is_defaulted)
@@ -590,13 +633,15 @@ bool Parser::copy_move_constructor_available(TypePtr type, bool move)
 	}
 	if (move)
 	{
-		Binding* copy = find_copy_move_constructor_binding(bare, false);
+		Binding* copy =
+			find_copy_move_constructor_binding(
+				bare, false, &default_arguments_);
 		if (copy != NULL)
 			return deleted_functions_.find(copy) == deleted_functions_.end();
-		if (suppresses_implicit_move(bare))
+		if (suppresses_implicit_move(bare, &default_arguments_))
 			return false;
 	}
-	if (!record_needs_copy_move_helper(bare, move))
+	if (!record_needs_copy_move_helper(bare, move, &default_arguments_))
 		return true;
 	Binding* generated = ensure_copy_move_constructor(bare, move);
 	return generated != NULL &&
@@ -608,21 +653,12 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return NULL;
-	Binding* existing = find_copy_move_constructor_binding(bare, move);
-	pa11::layout_record_type(bare);
-	bool needs_helper = record_needs_copy_move_helper(bare, move);
-	bool defaulted_storage_copy = false;
-	if (existing != NULL &&
-	    (!existing->is_defaulted || (!needs_helper && !defaulted_storage_copy)))
-		return existing;
-	if (existing == NULL && move && suppresses_implicit_move(bare))
+	Binding* existing =
+		find_copy_move_constructor_binding(bare, move, &default_arguments_);
+	if (existing == NULL &&
+	    move &&
+	    suppresses_implicit_move(bare, &default_arguments_))
 		return NULL;
-	if (!needs_helper && !defaulted_storage_copy)
-		return NULL;
-	bool deleted = false;
-	vector<Node> init_actions;
-	TypePtr direct_base = bare->base.get() != NULL
-		? pa11::strip_cv(bare->base) : TypePtr();
 	TypePtr source_record = move ? bare : pa11::make_cv(bare, pa11::CV_CONST);
 	TypePtr source_ref = move
 		? pa11::make_rvalue_reference(bare)
@@ -636,16 +672,48 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	                                      false);
 	set<const void*>& generated = move ? generated_move_ctors_ : generated_copy_ctors_;
 	const void* key = bare.get();
-	if (generated.find(key) != generated.end())
-		return find_copy_move_constructor_binding(bare, move);
-	generated.insert(key);
-	Binding* ctor = existing != NULL
-		? existing
-		: add_value(bare->scope, BindingKind::Function,
-		            bare->scope->name, fn_type);
-	ctor->is_inline_definition = true;
-	if (existing == NULL)
+	Binding* ctor = existing;
+	if (ctor == NULL)
+	{
+		ctor = add_value(bare->scope, BindingKind::Function,
+		                 bare->scope->name, fn_type);
 		ctor->is_generated_copy_move_constructor = true;
+		ctor->is_defaulted = true;
+		ctor->is_inline_definition = true;
+		ctor->type = fn_type;
+		function_parameter_names_[ctor] = vector<string>(2, "this");
+		function_parameter_names_[ctor][1] = "other";
+	}
+	try
+	{
+		pa11::layout_record_type(bare);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		return ctor;
+	}
+	bool needs_helper =
+		record_needs_copy_move_helper(bare, move, &default_arguments_);
+	bool defaulted_storage_copy = false;
+	if (existing != NULL &&
+	    !existing->is_generated_copy_move_constructor &&
+	    (!existing->is_defaulted || (!needs_helper && !defaulted_storage_copy)))
+		return existing;
+	if (!needs_helper && !defaulted_storage_copy)
+		return ctor;
+	if (generated.find(key) != generated.end())
+		return find_copy_move_constructor_binding(
+			bare, move, &default_arguments_);
+	generated.insert(key);
+	bool deleted = false;
+	vector<Node> init_actions;
+	TypePtr direct_base = bare->base.get() != NULL
+		? pa11::strip_cv(bare->base) : TypePtr();
+	ctor->is_inline_definition = true;
 	ctor->type = fn_type;
 	string other_name = "other";
 	if (existing != NULL)
@@ -688,7 +756,8 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
 			Binding* field = bare->fields[i];
-			if (!type_needs_copy_move_helper(field->type, move))
+			if (!type_needs_copy_move_helper(
+				    field->type, move, &default_arguments_))
 				continue;
 			copied_prefix = field->member_offset;
 			break;
@@ -710,9 +779,11 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 			deleted = true;
 		if (copied_prefix != 0 &&
 		    field->member_offset < copied_prefix &&
-		    !type_needs_copy_move_helper(field->type, move))
+		    !type_needs_copy_move_helper(
+			    field->type, move, &default_arguments_))
 			continue;
-		if (!type_needs_copy_move_helper(field->type, move))
+		if (!type_needs_copy_move_helper(
+			    field->type, move, &default_arguments_))
 			continue;
 		Node source = source_field_expr(field, other, move);
 		init_actions.push_back(
@@ -771,7 +842,7 @@ bool Parser::copy_move_assignment_available(TypePtr type, bool move)
 		Binding* copy = find_copy_move_assignment_binding(bare, false);
 		if (copy != NULL)
 			return deleted_functions_.find(copy) == deleted_functions_.end();
-		if (suppresses_implicit_move(bare))
+		if (suppresses_implicit_move(bare, &default_arguments_))
 			return false;
 	}
 	Binding* generated = ensure_copy_move_assignment(bare, move);
@@ -787,7 +858,7 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	Binding* existing = find_copy_move_assignment_binding(bare, move);
 	if (existing != NULL)
 		return existing;
-	if (move && suppresses_implicit_move(bare))
+	if (move && suppresses_implicit_move(bare, &default_arguments_))
 		return NULL;
 	set<const void*>& generated =
 		move ? generated_move_assignments_ : generated_copy_assignments_;
@@ -983,7 +1054,18 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	Binding* existing = find_destructor_binding(bare);
 	if (existing != NULL)
 		return existing;
-	pa11::layout_record_type(bare);
+	try
+	{
+		pa11::layout_record_type(bare);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		return NULL;
+	}
 	vector<Node> fini_actions;
 	TypePtr direct_base = bare->base.get() != NULL
 		? pa11::strip_cv(bare->base) : TypePtr();
@@ -1113,11 +1195,48 @@ void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& in
 	}
 	if (bare->kind != pa11::TypeKind::Record)
 		return;
+	bool has_reference_field = false;
+	try
+	{
+		has_reference_field = record_has_reference_field(bare);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		return;
+	}
 	if (pa11::type_has_const(type) ||
-	    record_has_reference_field(bare) ||
+	    has_reference_field ||
 	    record_has_ordinary_member_function(bare))
-		ensure_aggregate_constructor(bare, init.children.size());
-	pa11::layout_record_type(bare);
+	{
+		try
+		{
+			ensure_aggregate_constructor(bare, init.children.size());
+		}
+		catch (const runtime_error& err)
+		{
+			if ((string(err.what()) != "incomplete class type" &&
+			     string(err.what()) != "incomplete object type") ||
+			    active_class_instantiations_.empty())
+				throw;
+			return;
+		}
+	}
+	try
+	{
+		pa11::layout_record_type(bare);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type") ||
+		    active_class_instantiations_.empty())
+			throw;
+		return;
+	}
 	for (size_t i = 0; i < init.children.size() && i < bare->fields.size(); ++i)
 		ensure_aggregate_constructors_for_init(bare->fields[i]->type,
 		                                       init.children[i]);
@@ -1278,6 +1397,22 @@ void Parser::resolve_pending_member_initializers(Scope* class_scope, Node& node)
 			TypePtr bare = pa11::strip_cv(field->type);
 			if (bare->kind == pa11::TypeKind::Record)
 				node.direct_call = ensure_default_constructor(field->type);
+		}
+		else
+		{
+			TypePtr record = pa11::record_type_for_scope(class_scope);
+			TypePtr direct_base =
+				record.get() != NULL ? pa11::strip_cv(record)->base : TypePtr();
+			if (direct_base.get() != NULL &&
+			    initializer_names_direct_base(class_scope,
+			                                  direct_base,
+			                                  node.token_text))
+			{
+				TypePtr bare_base = pa11::strip_cv(direct_base);
+				node.line = "base-init-action " + bare_base->name;
+				node.type = direct_base;
+				node.binding = NULL;
+			}
 		}
 	}
 	for (size_t i = 0; i < node.children.size(); ++i)
