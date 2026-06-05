@@ -85,6 +85,7 @@ struct TemplateArgument
 	TemplateArgumentKind kind;
 	TypePtr type;
 	TemplateDeclaration* template_declaration;
+	Binding* value_binding;
 	uint64_t value;
 	bool dependent;
 	bool pack_expansion;
@@ -224,6 +225,10 @@ struct PendingFunctionBody
 	bool constructor_body;
 	bool prebuilt_node;
 	TypePtr class_type;
+	vector<Scope*> scopes;
+	vector<Scope*> friend_class_scopes;
+	vector<map<string, TypePtr> > type_substitutions;
+	vector<map<string, TemplateArgument> > value_substitutions;
 
 	PendingFunctionBody();
 };
@@ -364,8 +369,11 @@ private:
 	vector<Node> extra_lowir_nodes_;
 	int local_type_counter_;
 	bool force_new_function_binding_;
+	bool defer_function_template_bodies_;
+	bool validating_template_definition_;
 	bool override_function_parameter_names_;
 	int template_argument_expression_depth_;
+	int unevaluated_expression_depth_;
 	set<const void*> generated_default_ctors_;
 	set<pair<const void*, size_t> > generated_aggregate_ctors_;
 	set<const void*> generated_copy_ctors_;
@@ -384,6 +392,7 @@ private:
 	map<Scope*, vector<Binding*> > class_friend_functions_;
 	map<Scope*, vector<TypePtr> > class_friend_classes_;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies_;
+	map<Binding*, PendingFunctionBody> pending_function_bodies_;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes_;
 	vector<Binding*> defaulted_move_assignments_;
 	vector<unique_ptr<TemplateDeclaration> > template_declarations_;
@@ -447,6 +456,7 @@ private:
 					TypePtr declared_type, size_t save_pos,
 					const vector<map<string, TypePtr> >& save_subst,
 					const vector<map<string, TemplateArgument> >& save_value_subst);
+			bool register_conversion_function_template(TemplateDeclaration* declaration);
 			bool register_constructor_template(TemplateDeclaration* declaration);
 		bool register_static_member_variable_template(TemplateDeclaration* declaration);
 		size_t skip_template_declaration_body(size_t begin) const;
@@ -572,6 +582,12 @@ private:
 		void parse_constructor_body_from_parameters(Binding* function, TypePtr class_type,
 		                                            const vector<ParameterInfo>& parameters, Node& function_node);
 	void remember_function_body(Binding* function, const Node& function_node);
+	void enqueue_pending_member_body(Scope* class_scope,
+	                                 PendingFunctionBody pending);
+	void enqueue_pending_function_body(PendingFunctionBody pending);
+	void parse_pending_member_body_now(const PendingFunctionBody& pending);
+	bool parse_pending_function_body(Binding* function);
+	bool parse_pending_member_body(Binding* function);
 	void parse_pending_member_bodies(Scope* class_scope);
 	void parse_deferred_nested_member_bodies(Scope* class_scope);
 	Node parse_compound_statement();
@@ -710,74 +726,56 @@ private:
 	Scope* resolve_qualifier(Binding* binding);
 	vector<Binding*> resolve_name_set(const QualifiedName& name, int mask);
 	Binding* resolve_single_name(const QualifiedName& name, int mask);
-	vector<Binding*> lookup_unqualified_set(Scope* start,
-	                                        const string& name,
-	                                        int mask);
-	vector<Binding*> lookup_qualified_set(Scope* scope,
-	                                      const string& name,
-	                                      int mask);
+	vector<Binding*> lookup_unqualified_set(Scope* start, const string& name, int mask);
+	vector<Binding*> lookup_qualified_set(Scope* scope, const string& name, int mask);
 	Scope* nearest_namespace_scope(Scope* scope) const;
 
 	Conversion convert_to(const Expr& expr, TypePtr target);
 		Conversion convert_reference(const Expr& expr, TypePtr target);
 		Conversion try_reference_conversion_functions(const Expr& selected,
 		                                              TypePtr target);
+		Binding* instantiate_conversion_function_template_candidate(Binding* op, TypePtr target);
 		Conversion convert_value(const Expr& expr, TypePtr target);
 		Expr select_overload_expr(const Expr& expr, TypePtr target);
-		bool make_call_pack_expr(const Expr& callee,
-		                         const vector<Expr>& args,
-		                         Expr& out);
+		bool make_call_pack_expr(const Expr& callee, const vector<Expr>& args, Expr& out);
+		bool make_template_id_callee_pack_expr(const Expr& callee, Expr& out);
 	Binding* resolve_call_candidate(const vector<Binding*>& overloads,
 	                                const vector<Expr>& args,
 	                                const map<Binding*, vector<TemplateArgument> >&
 	                                       explicit_template_arguments,
 	                                vector<Expr>& converted);
 	bool call_candidate_has_arguments(Binding* fn, size_t arg_count) const;
-	bool convert_call_candidate_arguments(Binding* fn,
-	                                      const vector<Expr>& args,
-	                                      vector<Expr>& conv_args,
-	                                      vector<int>& ranks,
+	bool convert_call_candidate_arguments(Binding* fn, const vector<Expr>& args,
+	                                      vector<Expr>& conv_args, vector<int>& ranks,
 	                                      int& object_rank);
-	Binding* instantiate_template_call_candidate(
-		Binding* fn,
-		const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments,
-		const vector<Expr>& args);
-	Binding* resolve_constructor_candidate(TypePtr type,
-	                                       const vector<Expr>& args,
-	                                       bool copy_initialization,
-	                                       vector<Expr>& converted);
-	Expr make_constructor_init_expr(TypePtr type,
-	                                const vector<Expr>& args,
-	                                bool copy_initialization);
+	Binding* instantiate_template_call_candidate(Binding* fn,
+	                                             const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments,
+	                                             const vector<Expr>& args);
+	Binding* resolve_constructor_candidate(TypePtr type, const vector<Expr>& args,
+	                                       bool copy_initialization, vector<Expr>& converted);
+	Expr make_constructor_init_expr(TypePtr type, const vector<Expr>& args, bool copy_initialization);
 	Expr make_call_expr(Expr callee, vector<Expr> args);
 	public:
 		bool try_evaluate_constexpr_call(Binding* function,
 		                                 const vector<Node>& args,
 		                                 ConstexprValue& out);
-		bool try_evaluate_constexpr_call_values(
-			Binding* function,
-			const vector<ConstexprValue>& args,
-			ConstexprValue& out);
-		bool try_evaluate_constexpr_constructor(
-			Binding* function,
-			TypePtr object_type,
-			const vector<ConstexprValue>& args,
-			ConstexprValue& out);
+		bool try_evaluate_constexpr_call_values(Binding* function, const vector<ConstexprValue>& args,
+		                                        ConstexprValue& out);
+		bool try_evaluate_constexpr_constructor(Binding* function, TypePtr object_type,
+		                                        const vector<ConstexprValue>& args,
+		                                        ConstexprValue& out);
 		bool try_evaluate_constexpr_expr(const Node& node, ConstexprValue& out);
 		bool try_evaluate_constexpr_binding(Binding* binding,
 		                                    ConstexprValue& out);
 	private:
 	void apply_constexpr_value(Expr& expr, const ConstexprValue& value);
-		Expr make_dependent_call_expr(const Expr& callee,
-		                              const vector<Expr>& args);
+		Expr make_dependent_call_expr(const Expr& callee, const vector<Expr>& args);
 		Expr make_id_expr(const QualifiedName& name);
 		Expr make_template_substitution_id_expr(const QualifiedName& name);
-		vector<Binding*> resolve_id_expr_bindings(
-			const QualifiedName& name,
-			map<Binding*, vector<TemplateArgument> >& explicit_template_arguments);
+		vector<Binding*> resolve_id_expr_bindings(const QualifiedName& name,
+		                                          map<Binding*, vector<TemplateArgument> >& explicit_template_arguments);
 			Expr make_builtin_id_expr(const QualifiedName& name);
-		void synthesize_default_assignment_lookup(const QualifiedName& name,
-		                                          vector<Binding*>& found);
+		void synthesize_default_assignment_lookup(const QualifiedName& name, vector<Binding*>& found);
 		Expr make_missing_id_expr(const QualifiedName& name);
 		Expr make_aliased_member_variable_id_expr(Binding* binding);
 		Expr make_enumerator_id_expr(Binding* binding);

@@ -366,14 +366,35 @@ Expr Parser::make_template_substitution_id_expr(const QualifiedName& name)
 			? value_arg.type : pa11::make_fundamental(FT_INT);
 		out.category = ValueCategory::PRValue;
 		out.constant_expression = true;
-		out.has_constant_value = true;
+		out.has_constant_value = value_arg.value_binding == NULL;
 		out.constant_value = value_arg.dependent ? 1 : value_arg.value;
 		out.null_pointer_constant = out.constant_value == 0;
-		out.node = Node("literal prvalue " +
-		                pa11::describe_type(out.type) + " " +
-		                to_string(out.constant_value));
-		out.node.token_text = to_string(out.constant_value);
+		if (value_arg.value_binding != NULL)
+		{
+			if (unevaluated_expression_depth_ == 0 &&
+			    value_arg.value_binding->kind == BindingKind::Function)
+			{
+				parse_pending_function_body(value_arg.value_binding);
+				parse_pending_member_body(value_arg.value_binding);
+			}
+			out.type = value_arg.value_binding->type;
+			out.category = ValueCategory::LValue;
+			out.constant_value = 0;
+			out.null_pointer_constant = false;
+			out.node = Node("id-expression lvalue " +
+			                pa11::describe_type(out.type) + " " +
+			                qualified_decl_name(value_arg.value_binding));
+		}
+		else
+		{
+			out.node = Node("literal prvalue " +
+			                pa11::describe_type(out.type) + " " +
+			                to_string(out.constant_value));
+			out.node.token_text = to_string(out.constant_value);
+		}
 		annotate_expr_node(out);
+		if (value_arg.value_binding != NULL)
+			out.node.binding = value_arg.value_binding;
 		return out;
 	}
 	return Expr();
@@ -388,8 +409,7 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 		return found;
 	vector<TemplateDeclaration*> templates = find_function_templates(name);
 	found.clear();
-	if (!name.qualified && templates.size() == 1 &&
-	    templates[0]->placeholder != NULL)
+	if (templates.size() == 1 && templates[0]->placeholder != NULL)
 	{
 		bool defer_deduced_pack = false;
 		for (size_t i = name.template_arguments.size();
@@ -406,10 +426,13 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 					                            name.template_arguments);
 				Binding* instantiated =
 					instantiate_function_template(templates[0], full_args);
+				if (unevaluated_expression_depth_ == 0)
+				{
+					parse_pending_function_body(instantiated);
+					parse_pending_member_body(instantiated);
+				}
 				found.push_back(instantiated);
-				if (instantiated == templates[0]->placeholder)
-					explicit_template_arguments[instantiated] =
-						name.template_arguments;
+				explicit_template_arguments[instantiated] = full_args;
 				return found;
 			}
 		}

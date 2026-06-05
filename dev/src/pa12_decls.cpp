@@ -141,20 +141,6 @@ bool inherits_virtual_destructor(TypePtr record)
 	return false;
 }
 
-bool array_redeclaration_compatible(TypePtr existing, TypePtr redeclared)
-{
-	TypePtr lhs = pa11::strip_cv(existing);
-	TypePtr rhs = pa11::strip_cv(redeclared);
-	if (lhs->kind == pa11::TypeKind::Array && rhs->kind == pa11::TypeKind::Array)
-	{
-		if (!lhs->unknown_bound && !rhs->unknown_bound &&
-		    lhs->bound != rhs->bound)
-			return false;
-		return array_redeclaration_compatible(lhs->base, rhs->base);
-	}
-	return pa11::same_type(lhs, rhs);
-}
-
 size_t local_static_decl_span_begin(const vector<Token>& tokens,
                                     size_t begin,
                                     size_t end)
@@ -349,6 +335,8 @@ void Parser::parse_using_family(Node& out)
 				if (inherited->kind != BindingKind::Function ||
 				    inherited->type->parameters.empty())
 					continue;
+				parse_pending_function_body(inherited);
+				parse_pending_member_body(inherited);
 				vector<TypePtr> params;
 				params.push_back(pa11::make_pointer(derived));
 				for (size_t j = 1; j < inherited->type->parameters.size(); ++j)
@@ -619,15 +607,24 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		bit_field = true;
 		bit_width = width.constant_value;
 	}
-		if (at(OP_LBRACE) && declares_function)
+	if (at(OP_LBRACE) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
+		bool defer_body =
+			defer_function_template_bodies_ &&
+			current_scope()->kind == ScopeKind::Namespace;
 			Binding* function =
-				declare_one(specs, base, declarator, NULL, true, node);
+				declare_one(specs,
+				            base,
+				            declarator,
+				            NULL,
+				            !defer_body,
+				            node);
 			if (current_scope()->kind == ScopeKind::Class)
 			{
-				if (force_new_function_binding_)
+				if (force_new_function_binding_ &&
+				    active_class_instantiations_.empty())
 				{
 					parse_function_body(function, declarator, node);
 					if (emit_node && !node.children.empty())
@@ -644,7 +641,39 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				pending.parameters = suffix->parameters;
 			pending.body_pos = pos_;
 			skip_balanced(OP_LBRACE, OP_RBRACE);
-			pending_member_bodies_[current_scope()].push_back(pending);
+			enqueue_pending_member_body(current_scope(), pending);
+			if (force_new_function_binding_ && emit_node &&
+			    !node.children.empty())
+			{
+				if (node.line.empty())
+					add_child(out, node.children.back());
+				else
+					add_child(out, node);
+			}
+			return;
+		}
+		if (defer_body)
+		{
+			const Suffix* suffix = declarator_function_suffix(declarator);
+			Node fn("function-definition " + qualified_decl_name(function) +
+			        " " + pa11::describe_type(function->type));
+			fn.binding = function;
+			fn.type = function->type;
+			PendingFunctionBody pending;
+			pending.function = function;
+			pending.node = fn;
+			if (suffix != NULL)
+				pending.parameters = suffix->parameters;
+			pending.body_pos = pos_;
+			skip_balanced(OP_LBRACE, OP_RBRACE);
+			enqueue_pending_function_body(pending);
+			if (emit_node)
+			{
+				if (node.line.empty())
+					add_child(out, node.children.back());
+				else
+					add_child(out, node);
+			}
 			return;
 		}
 		parse_function_body(function, declarator, node);
@@ -1072,7 +1101,7 @@ bool Parser::parse_friend_declaration()
 			pending.parameters = suffix->parameters;
 		pending.body_pos = pos_;
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		pending_member_bodies_[class_scope].push_back(pending);
+		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}
 	expect(OP_SEMICOLON);
@@ -1262,8 +1291,7 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		target->kind == ScopeKind::Class && !nonstatic_member_function;
 	Binding* function = NULL;
 	map<string, vector<Binding*> >::iterator found = target->members.find(name);
-	if ((!force_new_function_binding_ || target->kind == ScopeKind::Class) &&
-	    found != target->members.end())
+	if (!force_new_function_binding_ && found != target->members.end())
 	{
 		for (size_t i = 0; i < found->second.size(); ++i)
 		{
@@ -1374,121 +1402,6 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	return function;
 }
 
-
-Binding* Parser::declare_one(const DeclSpecs& specs,
-                             TypePtr base,
-                             const Declarator& declarator,
-                             const Expr* init,
-                             bool function_definition,
-                             Node& out)
-{
-	const QualifiedName& qname = declarator_name(declarator);
-	Scope* target = qname.qualifier != NULL ? qname.qualifier : current_scope();
-	Scope* friend_class_scope =
-		specs.friend_decl && current_scope()->kind == ScopeKind::Class
-		? current_scope() : NULL;
-	bool hidden_friend =
-		friend_class_scope != NULL && qname.qualifier == NULL;
-	if (friend_class_scope != NULL && qname.qualifier == NULL)
-		target = nearest_namespace_scope(friend_class_scope);
-	TypePtr type = apply_declarator(declarator, base);
-	if (specs.typedef_decl)
-	{
-		Binding* alias = add_alias(target, qname.name, type);
-		add_child(out, Node("type-alias " + qname.name + " " +
-		                    pa11::describe_type(alias->type)));
-		return alias;
-	}
-
-	if (specs.constexpr_decl &&
-	    !pa11::is_reference_type(type) &&
-	    type->kind != pa11::TypeKind::Function)
-		type = pa11::make_cv(type, pa11::CV_CONST);
-	if (init != NULL &&
-	    init->braced_init_list &&
-	    type->kind == pa11::TypeKind::Array &&
-	    type->unknown_bound)
-		type = pa11::make_array(type->base, false, init->node.children.size());
-	if (init != NULL &&
-	    type->kind == pa11::TypeKind::Array &&
-	    type->unknown_bound)
-	{
-		uint64_t elements = 0;
-		if (string_literal_initializes_array(type, *init, &elements))
-			type = pa11::make_array(type->base, false, elements);
-	}
-	bool existing_static_member_function = false;
-	if (target->kind == ScopeKind::Class &&
-	    type->kind == pa11::TypeKind::Function &&
-	    !specs.static_decl)
-	{
-		map<string, vector<Binding*> >::iterator found =
-			target->members.find(qname.name);
-		if (found != target->members.end())
-			for (size_t i = 0; i < found->second.size(); ++i)
-			{
-				Binding* candidate = found->second[i];
-				if (candidate->kind == BindingKind::Function &&
-				    candidate->is_static_member &&
-				    pa11::same_type(candidate->type, type))
-				{
-					existing_static_member_function = true;
-					break;
-				}
-			}
-	}
-	bool nonstatic_member_function =
-		target->kind == ScopeKind::Class &&
-		type->kind == pa11::TypeKind::Function &&
-		!specs.static_decl &&
-		!existing_static_member_function;
-	if (nonstatic_member_function)
-		type = make_member_function_type(target, type);
-	if (type->kind == pa11::TypeKind::Function || function_definition)
-	{
-		Binding* function =
-			declare_function_entity(specs,
-			                        target,
-			                        qname.name,
-			                        type,
-			                        declarator,
-			                        function_definition,
-			                        nonstatic_member_function,
-			                        hidden_friend,
-			                        out);
-		if (specs.friend_decl && friend_class_scope != NULL)
-			add_friend_function(friend_class_scope, function);
-		return function;
-	}
-
-	Binding* variable = NULL;
-	if ((target->kind == ScopeKind::Namespace ||
-	     target->kind == ScopeKind::Class) &&
-	    (qname.qualifier != NULL || target->kind == ScopeKind::Namespace))
-	{
-		Binding* existing =
-			pa11::find_owned_binding(target, qname.name, BindingKind::Variable);
-		if (existing != NULL &&
-		    (pa11::same_type(existing->type, type) ||
-		     array_redeclaration_compatible(existing->type, type)))
-		{
-			variable = existing;
-			type = existing->type;
-		}
-	}
-	if (variable == NULL)
-		variable = add_value(target, BindingKind::Variable, qname.name, type);
-	if (target->kind == ScopeKind::Class &&
-	    pa11::is_reference_type(pa11::strip_cv(type)))
-		variable->is_reference_member = true;
-	return finish_variable_declaration(specs,
-	                                   target,
-	                                   variable,
-	                                   qname,
-	                                   type,
-	                                   init,
-	                                   out);
-}
 
 }  // namespace internal
 }  // namespace pa12

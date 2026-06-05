@@ -28,12 +28,82 @@ bool function_parameter_pack_name(TemplateDeclaration* declaration,
 	return declaration_parameter_is_pack(declaration, name);
 }
 
+bool record_declares_pure_virtual(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	if (bare->base.get() != NULL && record_declares_pure_virtual(bare->base))
+		return true;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* binding = bare->scope->binding_order[i];
+		if (binding->kind == BindingKind::Function &&
+		    binding->is_pure_virtual)
+			return true;
+	}
+	return false;
+}
+
+bool substituted_type_is_valid(TypePtr type)
+{
+	if (type.get() == NULL)
+		return true;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array)
+	{
+		TypePtr element = pa11::strip_cv(bare->base);
+		if (element->kind == pa11::TypeKind::Record &&
+		    record_declares_pure_virtual(element))
+			return false;
+		return substituted_type_is_valid(bare->base);
+	}
+	if (bare->kind == pa11::TypeKind::Pointer ||
+	    bare->kind == pa11::TypeKind::LValueReference ||
+	    bare->kind == pa11::TypeKind::RValueReference)
+		return substituted_type_is_valid(bare->base);
+	if (bare->kind == pa11::TypeKind::Function)
+	{
+		if (!substituted_type_is_valid(bare->base))
+			return false;
+		for (size_t i = 0; i < bare->parameters.size(); ++i)
+			if (!substituted_type_is_valid(bare->parameters[i]))
+				return false;
+	}
+	if (bare->kind == pa11::TypeKind::MemberPointer)
+		return substituted_type_is_valid(bare->member_class) &&
+		       substituted_type_is_valid(bare->base);
+	return true;
+}
+
+TypePtr remove_pattern_cv_from_argument(TypePtr argument, unsigned cv)
+{
+	if (argument.get() == NULL || cv == pa11::CV_NONE)
+		return argument;
+	if (argument->kind == pa11::TypeKind::Cv)
+		return pa11::make_cv(argument->base, argument->cv & ~cv);
+	if (argument->kind == pa11::TypeKind::Array)
+	{
+		TypePtr base = remove_pattern_cv_from_argument(argument->base, cv);
+		if (base.get() == argument->base.get())
+			return argument;
+		return pa11::make_array(base, argument->unknown_bound, argument->bound);
+	}
+	return argument;
+}
+
 string abi_source_name(const string& name)
 {
 	string unqualified = name;
 	size_t pos = unqualified.rfind("::");
 	if (pos != string::npos)
 		unqualified = unqualified.substr(pos + 2);
+	if (unqualified == "operator[]")
+		return "ix";
+	if (unqualified == "operator=")
+		return "aS";
+	if (unqualified == "operator()")
+		return "cl";
 	return to_string(unqualified.size()) + unqualified;
 }
 
@@ -186,20 +256,34 @@ string abi_function_template_specialization_symbol(
 		if (!declaration->parameters[i].name.empty())
 			template_parameters[declaration->parameters[i].name] = i;
 	string encoded_name;
+	TypePtr fn_type = declaration->generic_function_type;
 	if (binding->owner != NULL && binding->owner->kind == ScopeKind::Class)
 	{
 		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
-		encoded_name = "N" +
-		               abi_record_type(owner_record, template_parameters);
+		encoded_name = "N";
+		if (fn_type.get() != NULL &&
+		    fn_type->kind == pa11::TypeKind::Function &&
+		    !fn_type->parameters.empty() &&
+		    pa11::strip_cv(fn_type->parameters[0])->kind ==
+			    pa11::TypeKind::Pointer &&
+		    pa11::type_has_const(pa11::strip_cv(fn_type->parameters[0])->base))
+			encoded_name += "K";
+		encoded_name += abi_record_type(owner_record, template_parameters);
 	}
-	encoded_name += abi_source_name(declaration->name) + "I";
+	bool conversion_operator_template =
+		declaration->name.compare(0, 9, "operator ") == 0 &&
+		fn_type.get() != NULL &&
+		fn_type->kind == pa11::TypeKind::Function;
+	if (conversion_operator_template)
+		encoded_name += "cv" + abi_type(fn_type->base, template_parameters) + "I";
+	else
+		encoded_name += abi_source_name(declaration->name) + "I";
 	for (size_t i = 0; i < full_args.size(); ++i)
 		encoded_name += abi_template_argument(full_args[i],
 		                                      template_parameters);
 	encoded_name += "E";
 	if (binding->owner != NULL && binding->owner->kind == ScopeKind::Class)
 		encoded_name += "E";
-	TypePtr fn_type = declaration->generic_function_type;
 	string bare = abi_type(fn_type->base, template_parameters);
 	size_t first_param =
 		binding->owner != NULL &&
@@ -244,6 +328,8 @@ Binding* Parser::instantiate_function_template(
 	vector<map<string, TemplateArgument> > save_value_subst =
 		template_value_substitutions_;
 	bool save_force_new_function_binding = force_new_function_binding_;
+	bool save_defer_function_template_bodies =
+		defer_function_template_bodies_;
 	map<string, TypePtr> subst;
 	map<string, TemplateArgument> value_subst;
 	for (size_t i = 0; i < full_args.size() &&
@@ -331,6 +417,8 @@ Binding* Parser::instantiate_function_template(
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		force_new_function_binding_ = save_force_new_function_binding;
+		defer_function_template_bodies_ =
+			save_defer_function_template_bodies;
 		return binding;
 	}
 	scopes_.clear();
@@ -339,6 +427,7 @@ Binding* Parser::instantiate_function_template(
 	                  : declaration->owner);
 	pos_ = declaration->decl_begin;
 	force_new_function_binding_ = true;
+	defer_function_template_bodies_ = true;
 	size_t friend_scope_depth = active_friend_class_scopes_.size();
 	if (declaration->friend_class_scope != NULL)
 		active_friend_class_scopes_.push_back(declaration->friend_class_scope);
@@ -376,7 +465,17 @@ Binding* Parser::instantiate_function_template(
 			}
 		}
 		else
+		{
+			size_t extra_before = extra_lowir_nodes_.size();
 			parse_simple_or_function_declaration(node, true);
+			if (node.binding == NULL &&
+			    node.children.empty() &&
+			    extra_lowir_nodes_.size() > extra_before)
+			{
+				node = extra_lowir_nodes_.back();
+				extra_lowir_nodes_.pop_back();
+			}
+		}
 	}
 	catch (const exception&)
 	{
@@ -387,6 +486,8 @@ Binding* Parser::instantiate_function_template(
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		force_new_function_binding_ = save_force_new_function_binding;
+		defer_function_template_bodies_ =
+			save_defer_function_template_bodies;
 		throw;
 	}
 	active_friend_class_scopes_.resize(friend_scope_depth);
@@ -395,16 +496,25 @@ Binding* Parser::instantiate_function_template(
 	scopes_ = save_scopes;
 	pos_ = save_pos;
 	force_new_function_binding_ = save_force_new_function_binding;
+	defer_function_template_bodies_ = save_defer_function_template_bodies;
 	Node fn;
-	if (node.line.compare(0, 19, "function-definition") == 0 &&
+	if (((node.line.compare(0, 19, "function-definition") == 0) ||
+	     (node.line.compare(0, 20, "function-declaration") == 0)) &&
 	    node.binding != NULL)
 		fn = node;
 	else if (!node.children.empty())
 		fn = node.children.back();
+	if (fn.binding == NULL && !fn.children.empty())
+		fn = fn.children.back();
 	if (fn.binding == NULL)
 	{
 		declaration->completing_specializations.erase(key);
 		throw runtime_error("function template instantiation failed");
+	}
+	if (!substituted_type_is_valid(fn.binding->type))
+	{
+		declaration->completing_specializations.erase(key);
+		throw runtime_error("invalid substituted function type");
 	}
 	if (fn.line.compare(0, 19, "function-definition") != 0)
 	{
@@ -451,12 +561,8 @@ bool Parser::deduce_template_type(TypePtr pattern,
 	if (pattern->kind == pa11::TypeKind::Cv &&
 	    type_is_template_dependent(pattern->base))
 	{
-		unsigned argument_cv = argument->kind == pa11::TypeKind::Cv
-			? argument->cv : pa11::CV_NONE;
-		TypePtr argument_base = argument->kind == pa11::TypeKind::Cv
-			? argument->base : argument;
 		TypePtr remaining_argument =
-			pa11::make_cv(argument_base, argument_cv & ~pattern->cv);
+			remove_pattern_cv_from_argument(argument, pattern->cv);
 		return deduce_template_type(pattern->base,
 		                            remaining_argument,
 		                            deduced,
@@ -869,6 +975,12 @@ bool Parser::deduce_function_template_arguments(
 	for (size_t i = 0; i < fn->parameters.size(); ++i)
 	{
 		TypePtr pattern = fn->parameters[i];
+		for (map<string, TypePtr>::const_iterator fit = fixed.begin();
+		     fit != fixed.end();
+		     ++fit)
+			pattern = substitute_template_type_parameter(pattern,
+			                                             fit->first,
+			                                             fit->second);
 		string pack_name;
 		bool parameter_pack =
 			function_parameter_pack_name(declaration, pattern, pack_name);

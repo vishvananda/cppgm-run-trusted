@@ -44,6 +44,7 @@ QualifiedName::QualifiedName()
 TemplateArgument::TemplateArgument()
 	: kind(TemplateArgumentKind::Type),
 	  template_declaration(NULL),
+	  value_binding(NULL),
 	  value(0),
 	  dependent(false),
 	  pack_expansion(false)
@@ -285,8 +286,11 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  root_("translation-unit"),
 	  local_type_counter_(0),
 	  force_new_function_binding_(false),
+	  defer_function_template_bodies_(false),
+	  validating_template_definition_(false),
 	  override_function_parameter_names_(false),
-	  template_argument_expression_depth_(0)
+	  template_argument_expression_depth_(0),
+	  unevaluated_expression_depth_(0)
 {
 	pa10::Options pa10_options;
 	pa10_options.preprocess = options.preprocess;

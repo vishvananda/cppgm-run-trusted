@@ -68,9 +68,27 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
 		return NULL;
+	bool reemit_stale_generated_default = false;
 	Binding* existing = find_default_constructor(bare);
 	if (existing != NULL)
-		return existing;
+	{
+		parse_pending_member_body(existing);
+		bool have_extra_definition = false;
+		for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+			if (extra_lowir_nodes_[i].binding == existing)
+				have_extra_definition = true;
+		if (existing->is_generated_default_constructor &&
+		    existing->is_inline_definition &&
+		    !have_extra_definition)
+			existing->is_inline_definition = false;
+		bool stale_generated_default =
+			!existing->is_inline_definition &&
+			existing->is_generated_default_constructor;
+		if (!stale_generated_default)
+			return existing;
+		existing->is_generated_default_constructor = true;
+		reemit_stale_generated_default = true;
+	}
 	pa11::layout_record_type(bare);
 	vector<Node> init_actions;
 	if (!force_trivial || !bare->fields.empty())
@@ -159,7 +177,14 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 
 	const void* key = bare.get();
 	if (generated_default_ctors_.find(key) != generated_default_ctors_.end())
-		return find_default_constructor(bare);
+	{
+		Binding* generated = find_default_constructor(bare);
+		if (!(generated != NULL &&
+		      generated->is_generated_default_constructor &&
+		      !generated->is_inline_definition))
+			return generated;
+		existing = generated;
+	}
 	generated_default_ctors_.insert(key);
 
 	TypePtr this_type = pa11::make_pointer(bare);
@@ -168,9 +193,14 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      params,
 	                                      false);
-	Binding* ctor = add_value(bare->scope, BindingKind::Function,
-	                          bare->scope->name, fn_type);
+	Binding* ctor = existing != NULL
+		? existing
+		: add_value(bare->scope, BindingKind::Function,
+		            bare->scope->name, fn_type);
+	ctor->type = fn_type;
 	ctor->is_inline_definition = true;
+	if (reemit_stale_generated_default)
+		ctor->is_inline_definition = false;
 	ctor->is_generated_default_constructor = true;
 	ctor->unwind_no = init_actions.empty();
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
@@ -1053,7 +1083,10 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 		return NULL;
 	Binding* existing = find_destructor_binding(bare);
 	if (existing != NULL)
+	{
+		parse_pending_member_body(existing);
 		return existing;
+	}
 	try
 	{
 		pa11::layout_record_type(bare);

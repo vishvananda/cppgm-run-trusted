@@ -618,8 +618,18 @@ Expr Parser::parse_postfix_suffixes(Expr expr)
 				expr = make_member_expr(expr, member_name.name, op);
 			if (member_name.has_template_arguments)
 				for (size_t i = 0; i < expr.overloads.size(); ++i)
-					expr.explicit_template_arguments[expr.overloads[i]] =
-						member_name.template_arguments;
+				{
+					Binding* overload = expr.overloads[i];
+					map<Binding*, TemplateDeclaration*>::iterator templ =
+						function_template_placeholders_.find(overload);
+					Binding* placeholder =
+						overload->aliased_binding != NULL
+						? overload->aliased_binding : overload;
+					if (templ != function_template_placeholders_.end() &&
+					    templ->second->placeholder == placeholder)
+						expr.explicit_template_arguments[overload] =
+							member_name.template_arguments;
+				}
 		}
 		else if (at(OP_INC) || at(OP_DEC))
 		{
@@ -778,6 +788,11 @@ Expr Parser::parse_new_expression()
 		    !dependent_new_args)
 			throw runtime_error("no matching constructor for new " +
 			                    pa11::describe_type(type));
+		if (ctor != NULL && unevaluated_expression_depth_ == 0)
+		{
+			parse_pending_function_body(ctor);
+			parse_pending_member_body(ctor);
+		}
 	}
 	Binding* opnew = NULL;
 	if (have_placement)
@@ -1099,9 +1114,9 @@ Expr Parser::parse_functional_cast(TypePtr target)
 						throw;
 					active_incomplete_default = true;
 				}
-				if (init.node.direct_call == NULL &&
-				    !active_incomplete_default)
-					throw runtime_error("no matching constructor");
+					if (init.node.direct_call == NULL &&
+					    !active_incomplete_default)
+						throw runtime_error("no matching constructor");
 				bool force_dtor =
 					pa11::strip_cv(target)->base.get() != NULL;
 				try

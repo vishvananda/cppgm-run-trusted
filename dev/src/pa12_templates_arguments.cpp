@@ -100,8 +100,7 @@ void Parser::append_completed_template_pack_argument(
 	size_t& explicit_index,
 	vector<TemplateArgument>& out)
 {
-	const TemplateParameterInfo& parameter =
-		declaration->parameters[parameter_index];
+	const TemplateParameterInfo& parameter = declaration->parameters[parameter_index];
 	if (explicit_index < explicit_expanded.size() &&
 	    explicit_expanded[explicit_index].kind == TemplateArgumentKind::Pack)
 	{
@@ -187,6 +186,7 @@ TemplateArgument Parser::parse_default_template_argument(
 	const TemplateParameterInfo& parameter =
 		declaration->parameters[parameter_index];
 	size_t save_pos = pos_;
+	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
 	vector<map<string, TemplateArgument> > save_value_subst =
 		template_value_substitutions_;
@@ -197,22 +197,22 @@ TemplateArgument Parser::parse_default_template_argument(
 		{
 			if (declaration->parameters[i].is_pack)
 			{
-				subst[declaration->parameters[i].name] =
-					pa11::make_template_parameter_type(
-						declaration->parameters[i].name);
-				value_subst[declaration->parameters[i].name] =
-					completed_args[i];
+					subst[declaration->parameters[i].name] =
+						pa11::make_template_parameter_type(declaration->parameters[i].name);
+					value_subst[declaration->parameters[i].name] = completed_args[i];
 			}
 			else if (declaration->parameters[i].kind ==
 			         TemplateParameterKind::Type)
-				subst[declaration->parameters[i].name] =
-					completed_args[i].type;
+					subst[declaration->parameters[i].name] = completed_args[i].type;
 			else
-				value_subst[declaration->parameters[i].name] =
-					completed_args[i];
+					value_subst[declaration->parameters[i].name] = completed_args[i];
 		}
 	template_type_substitutions_.push_back(subst);
 	template_value_substitutions_.push_back(value_subst);
+	scopes_.clear();
+	scopes_.push_back(declaration->lexical_scope != NULL
+	                  ? declaration->lexical_scope
+	                  : declaration->owner);
 	pos_ = parameter.default_begin;
 	TemplateArgument arg;
 	try
@@ -250,8 +250,7 @@ TemplateArgument Parser::parse_default_template_argument(
 			if (expr.valid && !expr.has_constant_value)
 			{
 				ConstexprValue value;
-				if (try_evaluate_constexpr_expr(expr.node, value) &&
-				    !value.is_object)
+					if (try_evaluate_constexpr_expr(expr.node, value) && !value.is_object)
 				{
 					expr.has_constant_value = true;
 					expr.constant_value = value.int_value;
@@ -263,8 +262,7 @@ TemplateArgument Parser::parse_default_template_argument(
 			{
 				try
 				{
-					Conversion conv =
-						convert_to(expr, pa11::make_fundamental(FT_BOOL));
+						Conversion conv = convert_to(expr, pa11::make_fundamental(FT_BOOL));
 					if (conv.viable && !conv.expr.has_constant_value)
 					{
 						ConstexprValue value;
@@ -292,11 +290,13 @@ TemplateArgument Parser::parse_default_template_argument(
 	}
 	catch (...)
 	{
+		scopes_ = save_scopes;
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		pos_ = save_pos;
 		throw;
 	}
+	scopes_ = save_scopes;
 	template_type_substitutions_ = save_subst;
 	template_value_substitutions_ = save_value_subst;
 	pos_ = save_pos;

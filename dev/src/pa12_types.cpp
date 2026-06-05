@@ -124,6 +124,11 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 			specs.friend_decl = true;
 			saw_any = true;
 		}
+		else if (!type_id_context && consume(KW_ALIGNAS))
+		{
+			skip_balanced(OP_LPAREN, OP_RPAREN);
+			saw_any = true;
+		}
 		else if (!type_id_context && at_simple_ignored_specifier())
 		{
 			if (at(KW_STATIC))
@@ -217,7 +222,18 @@ TypePtr Parser::parse_decltype_specifier()
 	expect(OP_LPAREN);
 	if (at(KW_SIZEOF))
 	{
-		Expr expr = parse_type_trait_expression(KW_SIZEOF);
+		++unevaluated_expression_depth_;
+		Expr expr;
+		try
+		{
+			expr = parse_type_trait_expression(KW_SIZEOF);
+		}
+		catch (...)
+		{
+			--unevaluated_expression_depth_;
+			throw;
+		}
+		--unevaluated_expression_depth_;
 		expect(OP_RPAREN);
 		return expr.type;
 	}
@@ -242,7 +258,18 @@ TypePtr Parser::parse_decltype_specifier()
 	}
 	pos_ = save;
 	bool unparenthesized_operand = !at(OP_LPAREN);
-	Expr expr = parse_expression();
+	++unevaluated_expression_depth_;
+	Expr expr;
+	try
+	{
+		expr = parse_expression();
+	}
+	catch (...)
+	{
+		--unevaluated_expression_depth_;
+		throw;
+	}
+	--unevaluated_expression_depth_;
 	expect(OP_RPAREN);
 	if (unparenthesized_operand &&
 	    expr.binding != NULL &&
@@ -505,7 +532,8 @@ TypePtr Parser::parse_class_specifier()
 	catch (const runtime_error& err)
 	{
 		if ((string(err.what()) != "incomplete class type" &&
-		     string(err.what()) != "incomplete object type") ||
+		     string(err.what()) != "incomplete object type" &&
+		     string(err.what()) != "incomplete array type") ||
 		    active_class_instantiations_.empty())
 			throw;
 	}
@@ -591,7 +619,8 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 			catch (const runtime_error& err)
 			{
 					if ((string(err.what()) != "incomplete class type" &&
-					     string(err.what()) != "incomplete object type") ||
+					     string(err.what()) != "incomplete object type" &&
+					     string(err.what()) != "incomplete array type") ||
 					    active_class_instantiations_.empty())
 						throw;
 				layout_ok = false;

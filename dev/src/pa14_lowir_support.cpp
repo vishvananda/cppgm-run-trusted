@@ -536,8 +536,12 @@ vector<string> qualified_parts(const Binding* binding)
 	    !binding->name.empty() &&
 	    binding->name[0] == '~')
 		out.push_back("_" + binding->name.substr(1));
+	else if (binding->name == "operator[]")
+		out.push_back("operator__");
 	else if (binding->name == "operator=")
 		out.push_back("operator_");
+	else if (binding->name.compare(0, 18, "operator typename ") == 0)
+		out.push_back("operator" + binding->name.substr(18));
 	else
 		out.push_back(binding->name);
 	return out;
@@ -672,6 +676,7 @@ string template_value_symbol_text(uint64_t value)
 }
 
 string template_type_symbol_text(TypePtr type);
+string template_abi_component_for_type(TypePtr type);
 
 string function_type_parameter_symbol_suffix(TypePtr function_type)
 {
@@ -790,6 +795,143 @@ string template_record_symbol_part(TypePtr record)
 	return out;
 }
 
+string template_abi_builtin_code(EFundamentalType type)
+{
+	switch (type)
+	{
+	case FT_VOID: return "v";
+	case FT_BOOL: return "b";
+	case FT_CHAR: return "c";
+	case FT_SIGNED_CHAR: return "a";
+	case FT_UNSIGNED_CHAR: return "h";
+	case FT_SHORT_INT: return "s";
+	case FT_UNSIGNED_SHORT_INT: return "t";
+	case FT_INT: return "i";
+	case FT_UNSIGNED_INT: return "j";
+	case FT_LONG_INT: return "l";
+	case FT_UNSIGNED_LONG_INT: return "m";
+	case FT_LONG_LONG_INT: return "x";
+	case FT_UNSIGNED_LONG_LONG_INT: return "y";
+	case FT_FLOAT: return "f";
+	case FT_DOUBLE: return "d";
+	default: return "i";
+	}
+}
+
+string template_abi_component_for_argument(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return template_abi_component_for_type(arg.type);
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return "L" + template_abi_component_for_type(arg.type) +
+		       to_string(arg.value) + "E";
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return to_string(arg.template_name.size()) + arg.template_name;
+	string out;
+	for (size_t i = 0; i < arg.pack.size(); ++i)
+		out += template_abi_component_for_argument(arg.pack[i]);
+	return out;
+}
+
+string template_abi_component_for_type(TypePtr type)
+{
+	if (type.get() == NULL)
+		return "";
+	if (type->kind == TypeKind::Cv)
+	{
+		string prefix;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			prefix += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			prefix += "V";
+		return prefix + template_abi_component_for_type(type->base);
+	}
+	if (type->kind == TypeKind::LValueReference)
+		return "R" + template_abi_component_for_type(type->base);
+	if (type->kind == TypeKind::RValueReference)
+		return "O" + template_abi_component_for_type(type->base);
+	if (type->kind == TypeKind::Pointer)
+		return "P" + template_abi_component_for_type(type->base);
+	if (type->kind == TypeKind::Array)
+		return "A" + (type->unknown_bound ? string("") : to_string(type->bound)) +
+		       "_" + template_abi_component_for_type(type->base);
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Fundamental)
+		return template_abi_builtin_code(bare->fundamental);
+	if (bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+	{
+		string primary = !bare->template_primary_name.empty()
+			? bare->template_primary_name
+			: (bare->scope != NULL ? bare->scope->name : bare->name);
+		string out = to_string(primary.size()) + primary + "I";
+		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+			out += template_abi_component_for_argument(
+				bare->template_arguments[i]);
+		out += "E";
+		return out;
+	}
+	if (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum)
+		return to_string(bare->name.size()) + bare->name;
+	return template_display_symbol_text(pa11::describe_type(type));
+}
+
+bool template_argument_uses_abi_global_symbol(
+	const pa11::TemplateInstanceArgument& arg);
+
+bool type_uses_abi_global_symbol(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	if (type->kind == TypeKind::Cv ||
+	    type->kind == TypeKind::Pointer)
+		return type_uses_abi_global_symbol(type->base);
+	if (type->kind == TypeKind::LValueReference ||
+	    type->kind == TypeKind::RValueReference ||
+	    type->kind == TypeKind::Array)
+		return true;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+		return template_record_uses_abi_global_symbol(bare);
+	return false;
+}
+
+bool template_argument_uses_abi_global_symbol(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return type_uses_abi_global_symbol(arg.type);
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Pack)
+	{
+		for (size_t i = 0; i < arg.pack.size(); ++i)
+			if (template_argument_uses_abi_global_symbol(arg.pack[i]))
+				return true;
+	}
+	return false;
+}
+
+bool template_record_uses_abi_global_symbol(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (!record_is_template_specialization(bare))
+		return false;
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		if (template_argument_uses_abi_global_symbol(
+			    bare->template_arguments[i]))
+			return true;
+	return false;
+}
+
+string template_record_global_symbol_part(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (template_record_uses_abi_global_symbol(bare))
+		return "type_" + template_abi_component_for_type(bare);
+	return record_lowir_name(bare);
+}
+
 string record_lowir_name(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -824,12 +966,17 @@ string record_lowir_name(TypePtr record)
 
 string vtable_symbol_for_record(TypePtr record)
 {
+	TypePtr bare = pa11::strip_cv(record);
+	if (template_record_uses_abi_global_symbol(bare))
+		return "__vtable_" + template_record_global_symbol_part(bare);
 	return record_lowir_name(record) + "__vtable";
 }
 
 string rtti_symbol_for_record(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
+	if (template_record_uses_abi_global_symbol(bare))
+		return "__rtti_" + template_record_global_symbol_part(bare);
 	return "__rtti_" + bare->tag + "_" + record_lowir_name(bare);
 }
 
@@ -846,7 +993,11 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 	string base = source_symbol_base(binding);
 	if (binding->kind == BindingKind::Function)
 	{
-		string key = base + " " +
+		string specialization =
+			binding->function_specialization_symbol.empty()
+			? string()
+			: binding->function_specialization_symbol + " ";
+		string key = base + " " + specialization +
 		             string(binding->is_static_member ? "static " : "nonstatic ") +
 		             "refqual=" + to_string(binding->ref_qualifier) + " " +
 		             pa11::describe_type(binding->type);
@@ -893,7 +1044,11 @@ string ProgramLowerer::symbol_for(const Binding* binding)
 	symbols[binding] = name;
 	if (binding->kind == BindingKind::Function)
 	{
-		string key = base + " " +
+		string specialization =
+			binding->function_specialization_symbol.empty()
+			? string()
+			: binding->function_specialization_symbol + " ";
+		string key = base + " " + specialization +
 		             string(binding->is_static_member ? "static " : "nonstatic ") +
 		             "refqual=" + to_string(binding->ref_qualifier) + " " +
 		             pa11::describe_type(binding->type);

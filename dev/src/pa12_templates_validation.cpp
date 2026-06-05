@@ -24,6 +24,8 @@ struct TemplateValidationState
 	vector<ActiveClassInstantiation> active_class_instantiations;
 	int local_type_counter;
 	bool force_new_function_binding;
+	bool defer_function_template_bodies;
+	bool validating_template_definition;
 	bool override_function_parameter_names;
 	vector<string> function_parameter_name_override;
 	set<const void*> generated_default_ctors;
@@ -42,9 +44,11 @@ struct TemplateValidationState
 	map<Scope*, vector<Binding*> > class_friend_functions;
 	map<Scope*, vector<TypePtr> > class_friend_classes;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies;
+	map<Binding*, PendingFunctionBody> pending_function_bodies;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes;
 	vector<Binding*> defaulted_move_assignments;
 	int template_argument_expression_depth;
+	int unevaluated_expression_depth;
 	size_t template_declaration_count;
 	vector<TemplateDeclaration> template_values;
 	map<Scope*, map<string, TemplateDeclaration*> > class_templates;
@@ -106,12 +110,16 @@ void TemplateValidationState::save_core(Parser& parser,
 	active_class_instantiations = parser.active_class_instantiations_;
 	local_type_counter = parser.local_type_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
+	defer_function_template_bodies = parser.defer_function_template_bodies_;
+	validating_template_definition = parser.validating_template_definition_;
 	override_function_parameter_names =
 		parser.override_function_parameter_names_;
 	function_parameter_name_override =
 		parser.function_parameter_name_override_;
 	template_argument_expression_depth =
 		parser.template_argument_expression_depth_;
+	unevaluated_expression_depth =
+		parser.unevaluated_expression_depth_;
 	extra_lowir_nodes = parser.extra_lowir_nodes_;
 	validation_found_dependent_base =
 		parser.class_templates_with_dependent_base_.count(declaration) != 0;
@@ -140,6 +148,7 @@ void TemplateValidationState::save_semantic_tables(Parser& parser)
 	class_friend_functions = parser.class_friend_functions_;
 	class_friend_classes = parser.class_friend_classes_;
 	pending_member_bodies = parser.pending_member_bodies_;
+	pending_function_bodies = parser.pending_function_bodies_;
 	deferred_nested_member_body_scopes =
 		parser.deferred_nested_member_body_scopes_;
 	defaulted_move_assignments = parser.defaulted_move_assignments_;
@@ -192,12 +201,16 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.extra_lowir_nodes_ = extra_lowir_nodes;
 	parser.local_type_counter_ = local_type_counter;
 	parser.force_new_function_binding_ = force_new_function_binding;
+	parser.defer_function_template_bodies_ = defer_function_template_bodies;
+	parser.validating_template_definition_ = validating_template_definition;
 	parser.override_function_parameter_names_ =
 		override_function_parameter_names;
 	parser.function_parameter_name_override_ =
 		function_parameter_name_override;
 	parser.template_argument_expression_depth_ =
 		template_argument_expression_depth;
+	parser.unevaluated_expression_depth_ =
+		unevaluated_expression_depth;
 	parser.template_type_substitutions_ = template_type_substitutions;
 	parser.template_value_substitutions_ = template_value_substitutions;
 	parser.active_class_instantiations_ = active_class_instantiations;
@@ -226,6 +239,7 @@ void TemplateValidationState::restore_semantic_tables(Parser& parser)
 	parser.class_friend_functions_ = class_friend_functions;
 	parser.class_friend_classes_ = class_friend_classes;
 	parser.pending_member_bodies_ = pending_member_bodies;
+	parser.pending_function_bodies_ = pending_function_bodies;
 	parser.deferred_nested_member_body_scopes_ =
 		deferred_nested_member_body_scopes;
 	parser.defaulted_move_assignments_ = defaulted_move_assignments;
@@ -367,6 +381,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	                  ? declaration->lexical_scope
 	                  : declaration->owner);
 	pos_ = declaration->decl_begin;
+	validating_template_definition_ = true;
 	try
 	{
 		TypePtr parsed = parse_class_specifier();
@@ -377,6 +392,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		saved.restore(*this, declaration);
 		if (string(err.what()) == "incomplete object type" ||
 		    string(err.what()) == "incomplete class type" ||
+		    string(err.what()) == "incomplete array type" ||
 		    string(err.what()) == "no matching constructor" ||
 		    string(err.what()) == "invalid initializer conversion" ||
 		    string(err.what()) == "invalid array bound" ||

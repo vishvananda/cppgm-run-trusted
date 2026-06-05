@@ -161,13 +161,109 @@ bool Parser::make_cast_pack_expr(TypePtr target,
 	return true;
 }
 
+bool Parser::make_template_id_callee_pack_expr(const Expr& callee, Expr& out)
+{
+	if (callee.pack_expansion ||
+	    !at(OP_DOTS) ||
+	    callee.explicit_template_arguments.empty())
+		return false;
+	bool have_template_pack = false;
+	size_t template_pack_size = 0;
+	for (map<Binding*, vector<TemplateArgument> >::const_iterator it =
+		     callee.explicit_template_arguments.begin();
+	     it != callee.explicit_template_arguments.end(); ++it)
+		for (size_t i = 0; i < it->second.size(); ++i)
+		{
+			const TemplateArgument& arg = it->second[i];
+			size_t size = 0;
+			bool is_pack = false;
+			if (arg.kind == TemplateArgumentKind::Pack)
+			{
+				is_pack = true;
+				size = arg.pack.size();
+			}
+			else if (arg.kind == TemplateArgumentKind::Type)
+			{
+				string pack_name;
+				TemplateArgument subst;
+				if (type_contains_template_parameter_name(arg.type, pack_name) &&
+				    find_template_value_substitution(pack_name, subst) &&
+				    subst.kind == TemplateArgumentKind::Pack)
+				{
+					is_pack = true;
+					size = subst.pack.size();
+				}
+			}
+			if (!is_pack)
+				continue;
+			if (!have_template_pack)
+			{
+				have_template_pack = true;
+				template_pack_size = size;
+			}
+			else if (template_pack_size != size)
+				throw runtime_error("pack expansion size mismatch");
+		}
+	if (!have_template_pack)
+		return false;
+	out = callee;
+	out.pack_expansion = true;
+	out.pack.clear();
+	out.node = Node("pack-expression template-id callee");
+	for (size_t p = 0; p < template_pack_size; ++p)
+	{
+		Expr elem = callee;
+		elem.pack_expansion = false;
+		elem.pack.clear();
+		elem.explicit_template_arguments.clear();
+		for (map<Binding*, vector<TemplateArgument> >::const_iterator it =
+			     callee.explicit_template_arguments.begin();
+		     it != callee.explicit_template_arguments.end(); ++it)
+		{
+			vector<TemplateArgument> elem_args = it->second;
+			for (size_t i = 0; i < elem_args.size(); ++i)
+			{
+				TemplateArgument& arg = elem_args[i];
+				if (arg.kind == TemplateArgumentKind::Pack)
+				{
+					arg = arg.pack[p];
+					continue;
+				}
+				if (arg.kind != TemplateArgumentKind::Type)
+					continue;
+				string pack_name;
+				TemplateArgument subst;
+				if (!type_contains_template_parameter_name(arg.type, pack_name) ||
+				    !find_template_value_substitution(pack_name, subst) ||
+				    subst.kind != TemplateArgumentKind::Pack)
+					continue;
+				if (subst.pack[p].kind != TemplateArgumentKind::Type)
+					throw runtime_error("type pack required");
+				arg = TemplateArgument::type_arg(
+					substitute_template_type_parameter(arg.type,
+					                                   pack_name,
+					                                   subst.pack[p].type));
+			}
+			elem.explicit_template_arguments[it->first] = elem_args;
+		}
+		out.pack.push_back(elem);
+		add_child(out.node, elem.node);
+	}
+	annotate_expr_node(out);
+	return true;
+}
+
 bool Parser::make_call_pack_expr(const Expr& callee,
                                  const vector<Expr>& args,
                                  Expr& out)
 {
+	Expr expanded_callee;
+	const Expr* effective_callee = &callee;
+	if (make_template_id_callee_pack_expr(callee, expanded_callee))
+		effective_callee = &expanded_callee;
 	bool have_pack = false;
 	size_t pack_size = 0;
-	note_expression_pack_size(callee, have_pack, pack_size);
+	note_expression_pack_size(*effective_callee, have_pack, pack_size);
 	for (size_t i = 0; i < args.size(); ++i)
 		note_expression_pack_size(args[i], have_pack, pack_size);
 	if (!have_pack)
@@ -182,7 +278,7 @@ bool Parser::make_call_pack_expr(const Expr& callee,
 		vector<Expr> element_args;
 		for (size_t j = 0; j < args.size(); ++j)
 			element_args.push_back(expression_pack_element(args[j], i));
-		Expr elem = make_call_expr(expression_pack_element(callee, i),
+		Expr elem = make_call_expr(expression_pack_element(*effective_callee, i),
 		                           element_args);
 		if (i == 0)
 		{
@@ -194,7 +290,7 @@ bool Parser::make_call_pack_expr(const Expr& callee,
 	}
 	if (pack_size == 0)
 	{
-		out.type = callee.type;
+		out.type = effective_callee->type;
 		out.category = ValueCategory::PRValue;
 	}
 	annotate_expr_node(out);

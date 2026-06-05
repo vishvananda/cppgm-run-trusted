@@ -134,6 +134,8 @@ TypePtr class_record_for_member(const Binding* binding);
 bool record_is_template_specialization(TypePtr record);
 bool binding_has_template_specialization_context(const Binding* binding);
 string record_lowir_name(TypePtr record);
+bool template_record_uses_abi_global_symbol(TypePtr record);
+string template_record_global_symbol_part(TypePtr record);
 string vtable_symbol_for_record(TypePtr record);
 string rtti_symbol_for_record(TypePtr record);
 

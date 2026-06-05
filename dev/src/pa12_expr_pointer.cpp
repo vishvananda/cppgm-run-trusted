@@ -52,18 +52,16 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 	    inner.binding->kind == BindingKind::Function &&
 	    inner.binding->owner != NULL &&
 	    inner.binding->owner->kind == ScopeKind::Class)
-	{
-		TypePtr owner_record = pa11::record_type_for_scope(inner.binding->owner);
-		owner_record = owner_record.get() == NULL
-			? TypePtr() : pa11::strip_cv(owner_record);
-		map<const void*, vector<TemplateArgument> >::const_iterator args_it =
-			owner_record.get() == NULL
-			? record_template_arguments_.end()
-			: record_template_arguments_.find(owner_record.get());
-		map<const void*, TemplateDeclaration*>::const_iterator decl_it =
-			owner_record.get() == NULL
-			? record_template_declarations_.end()
-			: record_template_declarations_.find(owner_record.get());
+		{
+			TypePtr owner_record = pa11::record_type_for_scope(inner.binding->owner);
+			owner_record = owner_record.get() == NULL ? TypePtr()
+				: pa11::strip_cv(owner_record);
+			map<const void*, vector<TemplateArgument> >::const_iterator args_it =
+				owner_record.get() == NULL ? record_template_arguments_.end()
+				: record_template_arguments_.find(owner_record.get());
+			map<const void*, TemplateDeclaration*>::const_iterator decl_it =
+				owner_record.get() == NULL ? record_template_declarations_.end()
+				: record_template_declarations_.find(owner_record.get());
 		string pack_name;
 		TemplateArgument pack_subst;
 		bool owner_has_pack = false;
@@ -72,11 +70,9 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 			for (size_t i = 0; i < args_it->second.size(); ++i)
 				if (args_it->second[i].kind == TemplateArgumentKind::Type &&
 				    args_it->second[i].type.get() != NULL &&
-				    template_type_has_template_parameter_name(
-					    args_it->second[i].type,
-					    pack_name) &&
-				    find_template_value_substitution(pack_name,
-				                                     pack_subst) &&
+					    template_type_has_template_parameter_name(
+						    args_it->second[i].type, pack_name) &&
+					    find_template_value_substitution(pack_name, pack_subst) &&
 				    pack_subst.kind == TemplateArgumentKind::Pack)
 				{
 					owner_has_pack = true;
@@ -86,8 +82,7 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 		{
 			vector<TemplateArgument> explicit_args;
 			if (!inner.explicit_template_arguments.empty())
-				explicit_args =
-					inner.explicit_template_arguments.begin()->second;
+				explicit_args = inner.explicit_template_arguments.begin()->second;
 			Expr out;
 			out.valid = true;
 			out.pack_expansion = true;
@@ -115,14 +110,23 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 					instantiate_class_template(decl_it->second, owner_args);
 				element_owner = pa11::strip_cv(element_owner);
 				vector<TemplateDeclaration*> templates;
-				map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
-					function_templates_.find(element_owner->scope);
+					map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
+						sit = function_templates_.find(element_owner->scope);
 				if (sit != function_templates_.end())
 				{
 					map<string, vector<TemplateDeclaration*> >::iterator fit =
 						sit->second.find(inner.binding->name);
 					if (fit != sit->second.end())
 						templates = fit->second;
+				}
+				if (templates.empty())
+				{
+						map<pair<TemplateDeclaration*, string>,
+						    vector<TemplateDeclaration*> >::iterator mit =
+							member_function_templates_.find(
+								make_pair(decl_it->second, inner.binding->name));
+					if (mit != member_function_templates_.end())
+						templates = mit->second;
 				}
 				if (templates.empty())
 					throw runtime_error("function template not found");
@@ -168,6 +172,14 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 			return out;
 		}
 	}
+	if (!inner.pack_expansion &&
+	    inner.binding != NULL &&
+	    inner.binding->kind == BindingKind::Function &&
+	    unevaluated_expression_depth_ == 0)
+	{
+		parse_pending_function_body(inner.binding);
+		parse_pending_member_body(inner.binding);
+	}
 	Expr out;
 	out.valid = true;
 	out.category = ValueCategory::PRValue;
@@ -194,7 +206,10 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 		out.type = pa11::make_member_pointer(class_type, member_fn);
 	}
 	else if (inner.type->kind == pa11::TypeKind::Function)
+	{
 		out.type = pa11::make_pointer(inner.type);
+		out.binding = inner.binding;
+	}
 	else
 		out.type = pa11::make_pointer(expression_object_type(inner.type));
 	out.node = Node("unary-expression prvalue " + pa11::describe_type(out.type) +

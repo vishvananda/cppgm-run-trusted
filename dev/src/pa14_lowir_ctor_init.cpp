@@ -614,6 +614,17 @@ void FunctionLowerer::lower_member_init(const Node& node)
 				if (no_op_generated_default_constructor(node.direct_call,
 				                                        node.binding->type))
 					return;
+				if (node.direct_call->is_generated_default_constructor &&
+				    node.direct_call->unwind_no &&
+				    pa11::strip_cv(node.binding->type)->kind == TypeKind::Record &&
+				    pa11::strip_cv(node.binding->type)->base.get() != NULL)
+				{
+					Value addr = member_addr();
+					if (zero_init_has_store(node.binding->type))
+						lower_storage_zero(addr,
+						                   pa11::type_size(node.binding->type));
+					return;
+				}
 				Value addr = member_addr();
 				if (node.direct_call->is_generated_default_constructor)
 					lower_storage_zero(addr, pa11::type_size(node.binding->type));
@@ -624,6 +635,17 @@ void FunctionLowerer::lower_member_init(const Node& node)
 			for (size_t i = 0; i < node.children[0].children.size(); ++i)
 				args.push_back(&node.children[0].children[i]);
 			lower_constructor_call(same_addr, node.direct_call, args);
+			return;
+		}
+		if (node.children[0].direct_call != NULL &&
+		    node.children[0].direct_call->is_generated_default_constructor &&
+		    node.children[0].direct_call->unwind_no &&
+		    pa11::strip_cv(node.binding->type)->kind == TypeKind::Record &&
+		    pa11::strip_cv(node.binding->type)->base.get() != NULL)
+		{
+			Value addr = member_addr();
+			if (zero_init_has_store(node.binding->type))
+				lower_storage_zero(addr, pa11::type_size(node.binding->type));
 			return;
 		}
 		lower_object_init(member_addr, node.binding->type, node.children[0]);
@@ -679,6 +701,16 @@ bool FunctionLowerer::lower_direct_member_constructor_init(
 	if (no_op_generated_default_constructor(node.direct_call,
 	                                        node.binding->type))
 		return true;
+	if (node.direct_call->is_generated_default_constructor &&
+	    node.direct_call->unwind_no &&
+	    pa11::strip_cv(node.binding->type)->kind == TypeKind::Record &&
+	    pa11::strip_cv(node.binding->type)->base.get() != NULL)
+	{
+		Value addr = member_addr();
+		if (zero_init_has_store(node.binding->type))
+			lower_storage_zero(addr, pa11::type_size(node.binding->type));
+		return true;
+	}
 	if (node.children.size() == 1 &&
 	    node.children[0].category == ValueCategory::PRValue &&
 	    pa11::strip_cv(node.binding->type)->kind == TypeKind::Record &&

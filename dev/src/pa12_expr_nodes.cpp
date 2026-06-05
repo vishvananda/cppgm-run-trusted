@@ -402,8 +402,7 @@ Expr Parser::make_binary_expr(ETokenType op,
                               Expr rhs)
 {
 	Expr pack;
-	if (make_binary_pack_expr(op, text, lhs, rhs, pack))
-		return pack;
+	if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack;
 	vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs);
 	Expr builtin_converted;
 	bool have_builtin_converted =
@@ -430,7 +429,9 @@ Expr Parser::make_binary_expr(ETokenType op,
 		candidates.clear();
 	bool candidate_accepts_operands = false;
 	for (size_t i = 0; i < candidates.size(); ++i)
-		if (binary_candidate_accepts_operands(candidates[i], lhs, rhs))
+		if (function_template_placeholders_.find(candidates[i]) !=
+			    function_template_placeholders_.end() ||
+		    binary_candidate_accepts_operands(candidates[i], lhs, rhs))
 			candidate_accepts_operands = true;
 	if (have_builtin_converted && !candidate_accepts_operands)
 		return builtin_converted;
@@ -1256,6 +1257,8 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 		return make_dependent_member_expr(object, name, op);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		throw runtime_error("member access on non-record");
+	if (bare->is_template_specialization)
+		instantiate_member_function_templates(bare);
 	vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
 	if (found.empty() &&
 	    (type_is_template_dependent(type) ||

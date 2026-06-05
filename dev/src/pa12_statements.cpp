@@ -7,6 +7,8 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+static void mark_empty_destructor(Binding* function, const Node& fn);
+
 void Parser::parse_function_body(Binding* function,
                                  const Declarator& declarator,
                                  Node& function_node)
@@ -128,6 +130,129 @@ void Parser::remember_function_body(Binding* function, const Node& function_node
 		function_bodies_[function] = function_node;
 }
 
+void Parser::enqueue_pending_member_body(Scope* class_scope,
+                                         PendingFunctionBody pending)
+{
+	pending.scopes = scopes_;
+	pending.friend_class_scopes = active_friend_class_scopes_;
+	pending.type_substitutions = template_type_substitutions_;
+	pending.value_substitutions = template_value_substitutions_;
+	pending_member_bodies_[class_scope].push_back(pending);
+}
+
+void Parser::enqueue_pending_function_body(PendingFunctionBody pending)
+{
+	pending.scopes = scopes_;
+	pending.friend_class_scopes = active_friend_class_scopes_;
+	pending.type_substitutions = template_type_substitutions_;
+	pending.value_substitutions = template_value_substitutions_;
+	pending_function_bodies_[pending.function] = pending;
+}
+
+void Parser::parse_pending_member_body_now(const PendingFunctionBody& pending)
+{
+	if (pending.prebuilt_node)
+	{
+		if (pending.function != NULL &&
+		    pending.node.line.compare(0, 19, "function-definition") == 0)
+			pending.function->is_inline_definition = true;
+		extra_lowir_nodes_.push_back(pending.node);
+		if (pending.node.line.compare(0, 19, "function-definition") == 0)
+			remember_function_body(pending.function, pending.node);
+		return;
+	}
+
+	size_t saved_pos = pos_;
+	vector<Scope*> saved_scopes = scopes_;
+	vector<Scope*> saved_friend_class_scopes = active_friend_class_scopes_;
+	vector<map<string, TypePtr> > saved_type_substitutions =
+		template_type_substitutions_;
+	vector<map<string, TemplateArgument> > saved_value_substitutions =
+		template_value_substitutions_;
+
+	pos_ = pending.body_pos;
+	scopes_ = pending.scopes;
+	active_friend_class_scopes_ = pending.friend_class_scopes;
+	template_type_substitutions_ = pending.type_substitutions;
+	template_value_substitutions_ = pending.value_substitutions;
+
+	Node wrapper;
+	add_child(wrapper, pending.node);
+	if (pending.function != NULL &&
+	    pending.node.line.compare(0, 19, "function-definition") == 0)
+		pending.function->is_inline_definition = true;
+	try
+	{
+		if (pending.constructor_body)
+			parse_constructor_body_from_parameters(pending.function,
+			                                       pending.class_type,
+			                                       pending.parameters,
+			                                       wrapper);
+		else
+			parse_function_body_from_parameters(pending.function,
+			                                    pending.parameters,
+			                                    wrapper);
+	}
+	catch (...)
+	{
+		template_value_substitutions_ = saved_value_substitutions;
+		template_type_substitutions_ = saved_type_substitutions;
+		active_friend_class_scopes_ = saved_friend_class_scopes;
+		scopes_ = saved_scopes;
+		pos_ = saved_pos;
+		throw;
+	}
+	if (!wrapper.children.empty())
+		mark_empty_destructor(pending.function, wrapper.children.back());
+	if (!wrapper.children.empty())
+		extra_lowir_nodes_.push_back(wrapper.children.back());
+
+	template_value_substitutions_ = saved_value_substitutions;
+	template_type_substitutions_ = saved_type_substitutions;
+	active_friend_class_scopes_ = saved_friend_class_scopes;
+	scopes_ = saved_scopes;
+	pos_ = saved_pos;
+}
+
+bool Parser::parse_pending_function_body(Binding* function)
+{
+	if (function == NULL)
+		return false;
+	map<Binding*, PendingFunctionBody>::iterator found =
+		pending_function_bodies_.find(function);
+	if (found == pending_function_bodies_.end())
+		return false;
+	PendingFunctionBody body = found->second;
+	pending_function_bodies_.erase(found);
+	parse_pending_member_body_now(body);
+	return true;
+}
+
+bool Parser::parse_pending_member_body(Binding* function)
+{
+	if (function == NULL)
+		return false;
+	for (map<Scope*, vector<PendingFunctionBody> >::iterator it =
+		     pending_member_bodies_.begin();
+	     it != pending_member_bodies_.end();
+	     ++it)
+	{
+		vector<PendingFunctionBody>& pending = it->second;
+		for (size_t i = 0; i < pending.size(); ++i)
+		{
+			if (pending[i].function != function)
+				continue;
+			PendingFunctionBody body = pending[i];
+			pending.erase(pending.begin() + i);
+			if (pending.empty())
+				pending_member_bodies_.erase(it);
+			parse_pending_member_body_now(body);
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool function_body_empty(const Node& fn)
 {
 	if (fn.children.empty())
@@ -167,34 +292,13 @@ void Parser::parse_pending_member_bodies(Scope* class_scope)
 		pending_member_bodies_.find(class_scope);
 	if (found == pending_member_bodies_.end())
 		return;
+	if (!active_class_instantiations_.empty() &&
+	    !validating_template_definition_)
+		return;
 	vector<PendingFunctionBody> pending = found->second;
 	pending_member_bodies_.erase(found);
-	size_t saved = pos_;
 	for (size_t i = 0; i < pending.size(); ++i)
-	{
-		if (pending[i].prebuilt_node)
-		{
-			extra_lowir_nodes_.push_back(pending[i].node);
-			continue;
-		}
-		pos_ = pending[i].body_pos;
-		Node wrapper;
-		add_child(wrapper, pending[i].node);
-		if (pending[i].constructor_body)
-			parse_constructor_body_from_parameters(pending[i].function,
-			                                       pending[i].class_type,
-			                                       pending[i].parameters,
-			                                       wrapper);
-		else
-			parse_function_body_from_parameters(pending[i].function,
-			                                    pending[i].parameters,
-			                                    wrapper);
-		if (!wrapper.children.empty())
-			mark_empty_destructor(pending[i].function, wrapper.children.back());
-		if (!wrapper.children.empty())
-			extra_lowir_nodes_.push_back(wrapper.children.back());
-	}
-	pos_ = saved;
+		parse_pending_member_body_now(pending[i]);
 }
 
 void Parser::parse_deferred_nested_member_bodies(Scope* class_scope)

@@ -135,6 +135,9 @@ bool FunctionLowerer::lower_temporary_record_pointer_argument(const Node& arg,
 		return temp_addr;
 	};
 	lower_temporary_init_with_unwind(addr_for, object, arg.children[0]);
+	if (temp_cleanups != NULL && object->is_polymorphic &&
+	    type_needs_cleanup(object))
+		temp_cleanups->push_back(make_pair(temp_addr, object));
 	args.push_back(convert_value(temp_addr, pa11::make_pointer(object), param).text);
 	return true;
 }
@@ -198,7 +201,10 @@ bool call_argument_needs_setup_cleanup_protection(const Node& arg,
 	    pa11::strip_cv(object_type(arg.children[0].type))->kind ==
 	    TypeKind::Record &&
 	    type_needs_destructor(object_type(arg.children[0].type)))
-		return true;
+	{
+		TypePtr object = pa11::strip_cv(object_type(arg.children[0].type));
+		return !object->is_polymorphic;
+	}
 	return false;
 }
 
@@ -376,6 +382,10 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			}
 		if (!delay_direct_demand && !virtual_call)
 		{
+			TypePtr result_record = pa11::strip_cv(callee_type->base);
+			if (result_record->kind == TypeKind::Record &&
+			    result_record->is_polymorphic)
+				program_.demand_vtable(result_record);
 			program_.demand_function_declaration(direct);
 			program_.demand_inline_function(direct);
 			callee = "@" + program_.symbol_for(direct);
@@ -407,6 +417,21 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			    pa11::strip_cv(object_type(arg.type))->kind == TypeKind::Record &&
 			    type_needs_cleanup(object_type(arg.type)))
 				cleanup_arg = true;
+			TypePtr bare_param = pa11::strip_cv(param);
+			if (!cleanup_arg &&
+			    bare_param->kind == TypeKind::Pointer &&
+			    starts_with(arg.line, "unary-expression") &&
+			    arg.has_op && arg.op == OP_AMP &&
+			    !arg.children.empty() &&
+			    arg.children[0].category != ValueCategory::LValue)
+			{
+				TypePtr object =
+					pa11::strip_cv(object_type(arg.children[0].type));
+				if (object->kind == TypeKind::Record &&
+				    object->is_polymorphic &&
+				    type_needs_cleanup(object))
+					cleanup_arg = true;
+			}
 			if (cleanup_arg)
 			{
 				preallocated_call_slot = fresh_aux_slot("call", ret);
@@ -448,6 +473,9 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		 (!has_active_cleanups() && setup_may_create_temp_cleanup));
 	string protected_dispatch;
 	bool protected_define_dispatch = false;
+	bool temp_cleanup_region_open = false;
+	string temp_cleanup_dispatch;
+	string temp_cleanup_end;
 	if (protected_setup || protect_setup_only)
 	{
 		protected_dispatch = active_unwind_dispatch_.empty()
@@ -487,6 +515,19 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
 			param = pa11::make_fundamental(FT_DOUBLE);
 		lower_call_argument(expr.children[i], param, args, &temp_cleanups);
+		if (!temp_cleanup_region_open &&
+		    !temp_cleanups.empty() &&
+		    !protected_setup &&
+		    !protect_setup_only &&
+		    call_temp_cleanup_defer_depth_ == 0 &&
+		    eh_try_depth_ == 0)
+		{
+			temp_cleanup_dispatch = fresh_block("call_unwind_dispatch");
+			temp_cleanup_end = fresh_block("call_unwind_end");
+			instr("eh_try ^" + temp_cleanup_dispatch);
+			++eh_try_depth_;
+			temp_cleanup_region_open = true;
+		}
 	}
 	if (protect_setup_only)
 	{
@@ -691,10 +732,15 @@ Value FunctionLowerer::emit_call(const Node& expr)
 					? fresh_aux_slot("call", ret)
 				: preallocated_call_slot;
 		string loaded;
-		string dispatch = fresh_block("call_unwind_dispatch");
-		string end = fresh_block("call_unwind_end");
-		instr("eh_try ^" + dispatch);
-		++eh_try_depth_;
+		string dispatch = temp_cleanup_region_open
+			? temp_cleanup_dispatch : fresh_block("call_unwind_dispatch");
+		string end = temp_cleanup_region_open
+			? temp_cleanup_end : fresh_block("call_unwind_end");
+		if (!temp_cleanup_region_open)
+		{
+			instr("eh_try ^" + dispatch);
+			++eh_try_depth_;
+		}
 		instr(call.str());
 		if (spill_result)
 		{

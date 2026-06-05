@@ -122,6 +122,11 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 	}
 	if (found == NULL)
 		throw runtime_error("no overloaded function id target");
+	if (unevaluated_expression_depth_ == 0)
+	{
+		parse_pending_function_body(found);
+		parse_pending_member_body(found);
+	}
 
 	Expr out = expr;
 	out.overloads.clear();

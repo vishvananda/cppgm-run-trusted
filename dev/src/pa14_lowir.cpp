@@ -377,6 +377,8 @@ FunctionOut FunctionLowerer::lower()
 		metadata.push_back("binding=weak");
 	else
 		metadata.push_back("binding=strong");
+	if (!binding->function_specialization_symbol.empty())
+		metadata.push_back("object=" + binding->function_specialization_symbol);
 	if (binding->is_object_root)
 		metadata.push_back("object_root=yes");
 	header << metadata_suffix(metadata);

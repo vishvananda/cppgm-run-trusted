@@ -130,7 +130,7 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 		pending.node = fn;
 		pending.body_pos = pos_;
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		pending_member_bodies_[class_scope].push_back(pending);
+		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}
 	Scope* function_scope =
@@ -243,6 +243,11 @@ void Parser::parse_constructor_body_from_parameters(
 		for (;;)
 		{
 			string name = consume_identifier();
+			if (at(OP_LT))
+			{
+				vector<TemplateArgument> ignored;
+				parse_template_argument_list(ignored);
+			}
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        name,
 			                                        pa11::LOOKUP_VARIABLE);
@@ -300,10 +305,29 @@ void Parser::parse_constructor_body_from_parameters(
 				}
 				else
 				{
-					init.valid = true;
-					init.category = ValueCategory::PRValue;
-					init.braced_init_list = true;
-					init.node = Node("braced-init-list");
+					TypePtr init_target;
+					if (name == class_scope->name)
+						init_target = class_type;
+					else if (direct_base.get() != NULL &&
+					    initializer_names_direct_base(class_scope,
+					                                  direct_base,
+					                                  name))
+						init_target = direct_base;
+					else if (field != NULL)
+						init_target = field->type;
+					if (init_target.get() != NULL &&
+					    pa11::strip_cv(init_target)->kind ==
+					    pa11::TypeKind::Record)
+						init = make_constructor_init_expr(init_target,
+						                                  vector<Expr>(),
+						                                  false);
+					else
+					{
+						init.valid = true;
+						init.category = ValueCategory::PRValue;
+						init.braced_init_list = true;
+						init.node = Node("braced-init-list");
+					}
 					have_init = true;
 				}
 				expect(OP_RPAREN);
@@ -499,7 +523,8 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		fn.type = fn_type;
 		if (ctor->is_inline_definition)
 		{
-			if (force_new_function_binding_)
+			if (force_new_function_binding_ &&
+			    active_class_instantiations_.empty())
 			{
 				Node holder("constructor-definition-holder");
 				add_child(holder, fn);
@@ -532,7 +557,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 			}
 		}
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		pending_member_bodies_[class_scope].push_back(pending);
+		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}
 	Scope* function_scope =
@@ -579,6 +604,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		for (;;)
 		{
 			string init_name = consume_identifier();
+			if (at(OP_LT))
+			{
+				vector<TemplateArgument> ignored;
+				parse_template_argument_list(ignored);
+			}
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        init_name,
 			                                        pa11::LOOKUP_VARIABLE);
@@ -636,10 +666,29 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 				}
 				else
 				{
-					init.valid = true;
-					init.category = ValueCategory::PRValue;
-					init.braced_init_list = true;
-					init.node = Node("braced-init-list");
+					TypePtr init_target;
+					if (init_name == class_scope->name)
+						init_target = class_type;
+					else if (direct_base.get() != NULL &&
+					    initializer_names_direct_base(class_scope,
+					                                  direct_base,
+					                                  init_name))
+						init_target = direct_base;
+					else if (field != NULL)
+						init_target = field->type;
+					if (init_target.get() != NULL &&
+					    pa11::strip_cv(init_target)->kind ==
+					    pa11::TypeKind::Record)
+						init = make_constructor_init_expr(init_target,
+						                                  vector<Expr>(),
+						                                  false);
+					else
+					{
+						init.valid = true;
+						init.category = ValueCategory::PRValue;
+						init.braced_init_list = true;
+						init.node = Node("braced-init-list");
+					}
 					have_init = true;
 				}
 				expect(OP_RPAREN);
@@ -872,12 +921,23 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 	        pa11::describe_type(fn_type));
 	fn.binding = function;
 	fn.type = fn_type;
+	if (force_new_function_binding_ &&
+	    active_class_instantiations_.empty())
+	{
+		Node node("simple-declaration");
+		add_child(node, fn);
+		vector<ParameterInfo> parameters;
+		parse_function_body_from_parameters(function, parameters, node);
+		if (!node.children.empty())
+			extra_lowir_nodes_.push_back(node.children.back());
+		return true;
+	}
 	PendingFunctionBody pending;
 	pending.function = function;
 	pending.node = fn;
 	pending.body_pos = pos_;
 	skip_balanced(OP_LBRACE, OP_RBRACE);
-	pending_member_bodies_[class_scope].push_back(pending);
+	enqueue_pending_member_body(class_scope, pending);
 	return true;
 }
 
@@ -962,7 +1022,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 				pending.function = ctor;
 				pending.node = fn;
 				pending.prebuilt_node = true;
-				pending_member_bodies_[class_scope].push_back(pending);
+				enqueue_pending_member_body(class_scope, pending);
 			}
 				if (parameters.size() == 1 &&
 				    pa11::is_reference_type(parameters[0].type) &&
@@ -990,7 +1050,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 				pending.function = ctor;
 				pending.node = fn;
 				pending.prebuilt_node = true;
-				pending_member_bodies_[class_scope].push_back(pending);
+				enqueue_pending_member_body(class_scope, pending);
 			}
 			expect(OP_SEMICOLON);
 			return true;
@@ -1004,7 +1064,18 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		throw runtime_error("unsupported constructor definition");
 	}
 	if (consume(OP_SEMICOLON))
+	{
+		if (force_new_function_binding_ &&
+		    active_class_instantiations_.empty())
+		{
+			Node fn("function-declaration " + qualified_decl_name(ctor) +
+			        " " + pa11::describe_type(fn_type));
+			fn.binding = ctor;
+			fn.type = fn_type;
+			extra_lowir_nodes_.push_back(fn);
+		}
 		return true;
+	}
 
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
@@ -1012,7 +1083,8 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	fn.type = fn_type;
 	if (ctor->is_inline_definition)
 	{
-		if (force_new_function_binding_)
+		if (force_new_function_binding_ &&
+		    active_class_instantiations_.empty())
 		{
 			Node holder("constructor-definition-holder");
 			add_child(holder, fn);
@@ -1045,7 +1117,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 			}
 		}
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		pending_member_bodies_[class_scope].push_back(pending);
+		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}
 	Node holder("constructor-definition-holder");
@@ -1130,7 +1202,7 @@ bool Parser::parse_destructor_like_member()
 		pending.node = fn;
 		pending.body_pos = pos_;
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		pending_member_bodies_[class_scope].push_back(pending);
+		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}
 	Scope* function_scope =

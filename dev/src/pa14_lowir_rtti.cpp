@@ -10,6 +10,8 @@ namespace {
 string typeinfo_name_symbol(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
+	if (template_record_uses_abi_global_symbol(bare))
+		return "__typeinfo_name_" + template_record_global_symbol_part(bare);
 	return "__typeinfo_name__" + bare->tag + "_" + record_lowir_name(bare);
 }
 
@@ -99,9 +101,28 @@ string template_typeinfo_component(TypePtr record)
 
 string typeinfo_component_for_type(TypePtr type)
 {
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
+	if (type.get() == NULL)
 		return "";
+	if (type->kind == TypeKind::Cv)
+	{
+		string prefix;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			prefix += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			prefix += "V";
+		return prefix + typeinfo_component_for_type(type->base);
+	}
+	if (type->kind == TypeKind::LValueReference)
+		return "R" + typeinfo_component_for_type(type->base);
+	if (type->kind == TypeKind::RValueReference)
+		return "O" + typeinfo_component_for_type(type->base);
+	if (type->kind == TypeKind::Pointer)
+		return "P" + typeinfo_component_for_type(type->base);
+	if (type->kind == TypeKind::Array)
+		return "A" +
+		       (type->unknown_bound ? string("") : to_string(type->bound)) +
+		       "_" + typeinfo_component_for_type(type->base);
+	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind == TypeKind::Fundamental)
 	{
 		string code = typeinfo_builtin_code(bare->fundamental);
