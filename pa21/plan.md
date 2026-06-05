@@ -66,6 +66,39 @@ ownership units and tightening a few overlong LowIR lowering functions.
   or semantic method groups into focused `dev/src/*.cpp` files and extracting
   helpers from oversized functions over rewriting logic while tests are green.
 
+## Architecture Review
+
+The PA21 implementation is centered on `TemplateDeclaration` objects owned by
+the parser and indexed by semantic owner scope. Class, alias, variable, and
+function templates use typed `TemplateArgument` values for type, value,
+template-template, and pack arguments. Partial-specialization matching lives in
+`pa12_templates_instances.cpp`, function-template deduction and specialization
+materialization live in `pa12_templates_functions.cpp`, and shared argument
+completion/dependency helpers live in the focused `pa12_templates_*.cpp` split
+listed by `dev/frontend_source_sets.mk`.
+
+Instantiation reuses the ordinary PA12 declaration/parser path by saving parser
+state, installing type/value substitutions, reparsing the selected declaration
+body, and restoring state afterward. Completed class specializations are cached
+under canonical keys derived from typed arguments, while the record itself also
+stores PA11 template-instance arguments for downstream LowIR naming and RTTI.
+Member function and variable templates remain attached to the owning template
+declaration, so lookup, access, constructor resolution, and hidden-friend ADL
+use semantic owner links rather than source filenames or test shapes.
+
+The audit found that some dependent qualified/template-id types were represented
+only as `TemplateParameter` names with textual suffixes such as `<>` and
+`<decltype>`. That worked for passing tests but made later decisions recover
+facts from formatted type names. The cleanup adds explicit PA11 dependent
+typename metadata and makes pack detection, deducibility, deferred validation,
+and partial-specialization matching use those flags and typed active
+instantiation arguments.
+
+LowIR lowering receives ordinary semantic bindings and types. Function
+specialization symbols and local-static ownership are attached to bindings
+during semantic instantiation; LowIR no longer parses a binding name containing
+`::` to decide whether a static member definition should be deferred.
+
 ## Validation Plan
 
 1. Use focused `make -C pa21 check TEST=...` and
@@ -87,3 +120,19 @@ ownership units and tightening a few overlong LowIR lowering functions.
   warnings only.
 - Temporary diagnostic sweep over `dev/src`: no PA21 debug markers found; only
   normal `cerrno` includes and the test runner `std::cerr` reset remain.
+
+## Final Architecture Review
+
+The audited implementation now matches the PA21 architecture target: a typed
+template declaration/specialization graph feeds the existing PA14-PA20 LowIR
+path without dummy output, skipped phases, embedded payloads, or reference-tool
+execution. Remaining strings in the template path are presentation names,
+diagnostics, ABI/LowIR symbol spelling, or deterministic cache keys derived from
+typed semantic values; they are not used to rediscover dependent typename,
+specialization owner, or active-instantiation facts.
+
+The specialization-selection work remains intentionally local to the registered
+candidate sets for each primary template or variable template. No audit evidence
+showed repeated full-suite walks, timeout workarounds, or unchecked helper files.
+The PA21 split source files are present in `dev/frontend_source_sets.mk`, and
+the required file audit passes.

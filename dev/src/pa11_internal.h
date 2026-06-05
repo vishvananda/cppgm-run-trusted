@@ -95,6 +95,10 @@ struct Type
 	bool scoped_enum;
 	bool complete;
 	bool is_template_specialization;
+	bool is_dependent_typename;
+	bool dependent_typename_qualified;
+	bool dependent_typename_template_id;
+	bool dependent_typename_decltype;
 	string template_primary_name;
 	vector<TemplateInstanceArgument> template_arguments;
 	EFundamentalType enum_underlying;
@@ -246,7 +250,13 @@ TypePtr make_enum_type(const string& name,
                        bool complete,
                        Scope* scope);
 TypePtr make_template_parameter_type(const string& name);
+TypePtr make_dependent_typename_type(const string& name,
+                                     bool qualified,
+                                     bool template_id,
+                                     bool decltype_id);
 TypePtr make_template_template_parameter_type(const string& name);
+bool is_deducible_template_parameter_type(const TypePtr& type);
+bool is_dependent_typename_type(const TypePtr& type);
 
 TypePtr strip_top_level_cv(TypePtr type);
 TypePtr strip_cv(TypePtr type);

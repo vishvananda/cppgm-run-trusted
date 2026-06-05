@@ -216,10 +216,15 @@ pa11::TemplateInstanceArgument template_instance_argument(
 		                                                argument.value);
 	}
 	if (argument.kind == TemplateArgumentKind::Template)
-		return pa11::TemplateInstanceArgument::template_arg(
-			argument.template_declaration != NULL
-			? argument.template_declaration->name
-			: string("template_parameter"));
+	{
+		pa11::TemplateInstanceArgument out =
+			pa11::TemplateInstanceArgument::template_arg(
+				argument.template_declaration != NULL
+				? argument.template_declaration->name
+				: string("template_parameter"));
+		out.dependent = argument.template_declaration == NULL;
+		return out;
+	}
 	vector<pa11::TemplateInstanceArgument> pack;
 	for (size_t i = 0; i < argument.pack.size(); ++i)
 		pack.push_back(template_instance_argument(argument.pack[i]));
@@ -260,11 +265,7 @@ bool same_template_record_primary(TypePtr left, TypePtr right)
 
 bool deducible_template_parameter_type(TypePtr type)
 {
-	if (type.get() == NULL ||
-	    type->kind != pa11::TypeKind::TemplateParameter)
-		return false;
-	return type->name.find("::") == string::npos &&
-	       type->name.find("<") == string::npos;
+	return pa11::is_deducible_template_parameter_type(type);
 }
 
 bool template_parameter_lists_match(const vector<TemplateParameterInfo>& left,
@@ -499,8 +500,8 @@ bool match_class_specialization(TemplateDeclaration* specialization,
 				if (specialization->class_specialization_pattern[i].kind ==
 				        TemplateArgumentKind::Type &&
 				    specialization->class_specialization_pattern[i].type.get() != NULL &&
-				    specialization->class_specialization_pattern[i].type->name.find(
-					    "<decltype>") != string::npos)
+				    specialization->class_specialization_pattern[i].type
+					    ->dependent_typename_decltype)
 					return false;
 				bool non_deducible_dependent_type =
 					specialization->class_specialization_pattern[i].kind ==

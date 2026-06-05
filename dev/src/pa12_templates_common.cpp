@@ -35,6 +35,8 @@ bool template_type_has_template_parameter_name(TypePtr type, string& name)
 	type = pa11::strip_cv(type);
 	if (type->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(type))
+			return false;
 		name = type->name;
 		return true;
 	}
@@ -105,6 +107,29 @@ bool template_type_has_template_parameter(
 					return true;
 	}
 	return false;
+}
+
+bool Parser::template_arguments_dependent(
+	const vector<TemplateArgument>& arguments) const
+{
+	for (size_t i = 0; i < arguments.size(); ++i)
+		if (template_argument_has_template_parameter(
+			    arguments[i],
+			    record_template_arguments_))
+			return true;
+	return false;
+}
+
+bool Parser::active_class_instantiation_dependent() const
+{
+	if (active_class_instantiations_.empty())
+		return false;
+	TypePtr active = pa11::strip_cv(active_class_instantiations_.back().type);
+	map<const void*, vector<TemplateArgument> >::const_iterator found =
+		record_template_arguments_.find(active.get());
+	if (found == record_template_arguments_.end())
+		return type_is_template_dependent(active);
+	return template_arguments_dependent(found->second);
 }
 
 }  // namespace internal

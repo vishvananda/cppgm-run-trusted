@@ -95,8 +95,7 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		{
 			static_member_initializers_[variable] = var.children[0];
 			if (!active_class_instantiations_.empty() &&
-			    active_class_instantiations_.back().specialization_name.find(
-				    "dependent") == string::npos &&
+			    !active_class_instantiation_dependent() &&
 			    pa11::strip_cv(variable->type)->kind == pa11::TypeKind::Array)
 				extra_lowir_nodes_.push_back(var);
 		}

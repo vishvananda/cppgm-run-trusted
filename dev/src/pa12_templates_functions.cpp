@@ -9,37 +9,6 @@ namespace pa12 {
 namespace internal {
 namespace {
 
-bool type_contains_template_parameter_name(TypePtr type, string& name)
-{
-	if (type.get() == NULL)
-		return false;
-	type = pa11::strip_cv(type);
-	if (type->kind == pa11::TypeKind::TemplateParameter)
-	{
-		name = type->name;
-		return true;
-	}
-	if (type->kind == pa11::TypeKind::Pointer ||
-	    type->kind == pa11::TypeKind::LValueReference ||
-	    type->kind == pa11::TypeKind::RValueReference ||
-	    type->kind == pa11::TypeKind::Array)
-		return type_contains_template_parameter_name(type->base, name);
-	if (type->kind == pa11::TypeKind::Function)
-	{
-		if (type_contains_template_parameter_name(type->base, name))
-			return true;
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-			if (type_contains_template_parameter_name(type->parameters[i],
-			                                          name))
-				return true;
-	}
-	if (type->kind == pa11::TypeKind::MemberPointer)
-		return type_contains_template_parameter_name(type->member_class,
-		                                             name) ||
-		       type_contains_template_parameter_name(type->base, name);
-	return false;
-}
-
 bool declaration_parameter_is_pack(TemplateDeclaration* declaration,
                                    const string& name)
 {
@@ -54,7 +23,7 @@ bool function_parameter_pack_name(TemplateDeclaration* declaration,
                                   TypePtr pattern,
                                   string& name)
 {
-	if (!type_contains_template_parameter_name(pattern, name))
+	if (!template_type_has_template_parameter_name(pattern, name))
 		return false;
 	return declaration_parameter_is_pack(declaration, name);
 }
@@ -503,6 +472,8 @@ bool Parser::deduce_template_type(TypePtr pattern,
 	}
 	if (pattern->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(pattern))
+			return true;
 		if (fixed != NULL && fixed->find(pattern->name) != fixed->end())
 			return pa11::same_type(fixed->find(pattern->name)->second,
 			                       argument);
@@ -576,7 +547,7 @@ bool Parser::deduce_template_type(TypePtr pattern,
 						}
 						else if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 						{
-							if (arg.template_name == "template_parameter")
+							if (arg.dependent)
 								pattern_dependent = true;
 						}
 						else
@@ -922,6 +893,8 @@ bool Parser::deduce_function_template_arguments(
 				    pa11::TypeKind::RValueReference &&
 				    pa11::strip_cv(bare_pattern->base)->kind ==
 					    pa11::TypeKind::TemplateParameter &&
+				    pa11::is_deducible_template_parameter_type(
+					    pa11::strip_cv(bare_pattern->base)) &&
 				    actual_expr.category == ValueCategory::LValue)
 				{
 					if (!deduce_template_type(
@@ -965,6 +938,8 @@ bool Parser::deduce_function_template_arguments(
 		if (bare_pattern->kind == pa11::TypeKind::RValueReference &&
 		    pa11::strip_cv(bare_pattern->base)->kind ==
 			    pa11::TypeKind::TemplateParameter &&
+		    pa11::is_deducible_template_parameter_type(
+			    pa11::strip_cv(bare_pattern->base)) &&
 		    args[arg_index].category == ValueCategory::LValue)
 		{
 			if (!deduce_template_type(bare_pattern->base,

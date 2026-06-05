@@ -48,6 +48,8 @@ bool type_contains_template_parameter_name(TypePtr type, string& name)
 	type = pa11::strip_cv(type);
 	if (type->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(type))
+			return false;
 		name = type->name;
 		return true;
 	}
@@ -1228,7 +1230,10 @@ Expr Parser::make_dependent_member_expr(const Expr& object,
 {
 	Expr out;
 	out.valid = true;
-	out.type = pa11::make_template_parameter_type("__dependent_member");
+	out.type = pa11::make_dependent_typename_type("__dependent_member",
+	                                             false,
+	                                             false,
+	                                             false);
 	out.category = ValueCategory::LValue;
 	out.node = Node("member-expression lvalue " +
 	                pa11::describe_type(out.type) + " OP_DOT:" + name);

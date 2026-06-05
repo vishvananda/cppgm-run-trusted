@@ -353,6 +353,8 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		                  declaration->name,
 		                  validation_type);
 	injected->target_scope = class_scope;
+	record_template_declarations_[validation_type.get()] = declaration;
+	record_template_arguments_[validation_type.get()] = args;
 	template_type_substitutions_.push_back(subst);
 	template_value_substitutions_.push_back(value_subst);
 	active_class_instantiations_.push_back(

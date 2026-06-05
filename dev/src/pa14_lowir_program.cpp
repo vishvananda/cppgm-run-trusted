@@ -41,11 +41,7 @@ bool defer_static_constexpr_member_definition(const Node& node)
 {
 	if (node.binding == NULL)
 		return false;
-	bool qualified_member_definition =
-		node.binding->owner != NULL &&
-		node.binding->owner->kind == ScopeKind::Namespace &&
-		node.binding->name.find("::") != string::npos;
-	if (!node.binding->is_static_member && !qualified_member_definition)
+	if (!node.binding->is_static_member)
 		return false;
 	TypePtr object = strip_for_value(node.binding->type);
 	TypePtr bare = pa11::strip_cv(object);

@@ -24,6 +24,8 @@ bool type_contains_template_parameter_name(TypePtr type, string& name)
 	type = pa11::strip_cv(type);
 	if (type->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(type))
+			return false;
 		name = type->name;
 		return true;
 	}

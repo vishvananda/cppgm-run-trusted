@@ -137,6 +137,10 @@ Type::Type(TypeKind k)
 	  scoped_enum(false),
 	  complete(true),
 	  is_template_specialization(false),
+	  is_dependent_typename(false),
+	  dependent_typename_qualified(false),
+	  dependent_typename_template_id(false),
+	  dependent_typename_decltype(false),
 	  enum_underlying(FT_INT),
 	  scope(NULL),
 	  record_size(0),
@@ -401,11 +405,38 @@ TypePtr make_template_parameter_type(const string& name)
 	return type;
 }
 
+TypePtr make_dependent_typename_type(const string& name,
+                                     bool qualified,
+                                     bool template_id,
+                                     bool decltype_id)
+{
+	TypePtr type = make_template_parameter_type(name);
+	type->is_dependent_typename = true;
+	type->dependent_typename_qualified = qualified;
+	type->dependent_typename_template_id = template_id;
+	type->dependent_typename_decltype = decltype_id;
+	return type;
+}
+
 TypePtr make_template_template_parameter_type(const string& name)
 {
 	TypePtr type = new_type(TypeKind::TemplateTemplateParameter);
 	type->name = name;
 	return type;
+}
+
+bool is_deducible_template_parameter_type(const TypePtr& type)
+{
+	return type.get() != NULL &&
+	       type->kind == TypeKind::TemplateParameter &&
+	       !type->is_dependent_typename;
+}
+
+bool is_dependent_typename_type(const TypePtr& type)
+{
+	return type.get() != NULL &&
+	       type->kind == TypeKind::TemplateParameter &&
+	       type->is_dependent_typename;
 }
 
 TypePtr strip_top_level_cv(TypePtr type)

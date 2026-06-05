@@ -168,7 +168,10 @@ Expr Parser::make_dependent_call_expr(const Expr& callee,
                                       const vector<Expr>& args)
 {
 	Expr out;
-	out.type = pa11::make_template_parameter_type("__dependent_call");
+	out.type = pa11::make_dependent_typename_type("__dependent_call",
+	                                             false,
+	                                             false,
+	                                             false);
 	out.category = ValueCategory::PRValue;
 	out.node = Node("call-expression prvalue " + pa11::describe_type(out.type));
 	add_child(out.node, callee.node);

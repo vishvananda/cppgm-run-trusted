@@ -16,6 +16,8 @@ bool type_contains_template_parameter_name(TypePtr type, string& name)
 	type = pa11::strip_cv(type);
 	if (type->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(type))
+			return false;
 		name = type->name;
 		return true;
 	}
@@ -705,6 +707,9 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		size_t dep_save = pos_;
 		string dep_name = consume_identifier();
 		bool dependent_root = false;
+		bool dep_name_qualified = false;
+		bool dep_name_template_id = false;
+		bool dep_name_decltype = false;
 		TypePtr subst;
 		bool have_type_subst =
 			find_template_type_substitution(dep_name, subst);
@@ -947,6 +952,8 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			if (pos_ != dep_save)
 			{
 				have_root_arguments = true;
+				dep_name_template_id = true;
+				dep_name_decltype = dep_name_decltype || root_has_decltype;
 				dep_name += root_has_decltype
 					? "<decltype>" : "<>";
 				for (size_t i = 0; i < root_arguments.size(); ++i)
@@ -1061,6 +1068,7 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		{
 			while (consume(OP_COLON2))
 			{
+				dep_name_qualified = true;
 				dep_name += "::";
 				consume(KW_TEMPLATE);
 				if (!at_identifier())
@@ -1071,13 +1079,21 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				dep_name += consume_identifier();
 				if (at(OP_LT))
 				{
+					dep_name_decltype =
+						dep_name_decltype ||
+						angle_tokens_contain_decltype(tokens_, pos_);
+					dep_name_template_id = true;
 					dep_name += "<>";
 					skip_angle_tokens(tokens_, pos_);
 				}
 			}
 			if (pos_ != dep_save)
 			{
-				out = pa11::make_template_parameter_type(dep_name);
+				out = pa11::make_dependent_typename_type(
+					dep_name,
+					dep_name_qualified,
+					dep_name_template_id,
+					dep_name_decltype);
 				return true;
 			}
 		}
@@ -1085,6 +1101,8 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		if (typename_disambiguator)
 		{
 			string dependent_name;
+			bool dependent_name_template_id = false;
+			bool dependent_name_decltype = false;
 			if (at_identifier())
 			{
 				dependent_name = consume_identifier();
@@ -1092,6 +1110,9 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				{
 					bool root_has_decltype =
 						angle_tokens_contain_decltype(tokens_, pos_);
+					dependent_name_template_id = true;
+					dependent_name_decltype =
+						dependent_name_decltype || root_has_decltype;
 					dependent_name += root_has_decltype
 						? "<decltype>" : "<>";
 					skip_angle_tokens(tokens_, pos_);
@@ -1112,6 +1133,9 @@ bool Parser::try_parse_type_name(TypePtr& out)
 					{
 						bool member_has_decltype =
 							angle_tokens_contain_decltype(tokens_, pos_);
+						dependent_name_template_id = true;
+						dependent_name_decltype =
+							dependent_name_decltype || member_has_decltype;
 						dependent_name += member_has_decltype
 							? "<decltype>" : "<>";
 						skip_angle_tokens(tokens_, pos_);
@@ -1119,7 +1143,11 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				}
 				if (qualified_dependent)
 				{
-					out = pa11::make_template_parameter_type(dependent_name);
+					out = pa11::make_dependent_typename_type(
+						dependent_name,
+						true,
+						dependent_name_template_id,
+						dependent_name_decltype);
 					return true;
 				}
 			}
@@ -1189,7 +1217,11 @@ bool Parser::try_parse_type_name(TypePtr& out)
 						subst.template_declaration,
 						arguments);
 				else
-					out = pa11::make_template_parameter_type(name + "<>");
+					out = pa11::make_dependent_typename_type(
+						name + "<>",
+						false,
+						true,
+						false);
 				return true;
 			}
 			}
@@ -1390,14 +1422,8 @@ Suffix Parser::parse_array_suffix()
 		bound.has_constant_value = true;
 		bound.constant_value = value.int_value;
 	}
-	bool dependent_validation =
-		!active_class_instantiations_.empty() &&
-		(active_class_instantiations_.back().specialization_name.find(
-			 "dependent") != string::npos ||
-		 active_class_instantiations_.back().specialization_name.find(
-			 "typename ") != string::npos);
 	if ((!bound.has_constant_value || bound.constant_value == 0) &&
-	    dependent_validation)
+	    active_class_instantiation_dependent())
 	{
 		suffix.unknown_bound = true;
 		expect(OP_RSQUARE);

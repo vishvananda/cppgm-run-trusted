@@ -452,7 +452,10 @@ private:
 		size_t skip_template_declaration_body(size_t begin) const;
 		bool find_template_type_substitution(const string& name, TypePtr& out) const;
 			bool find_template_value_substitution(const string& name, TemplateArgument& out) const;
-			bool find_function_parameter_pack_substitution(const string& name, vector<Binding*>& out) const;
+		bool find_function_parameter_pack_substitution(const string& name, vector<Binding*>& out) const;
+		bool template_arguments_dependent(
+			const vector<TemplateArgument>& arguments) const;
+		bool active_class_instantiation_dependent() const;
 				bool try_parse_template_template_argument(TemplateArgument& out);
 				TemplateArgument parse_non_type_template_argument_expression();
 				bool parse_template_argument_list(vector<TemplateArgument>& arguments);

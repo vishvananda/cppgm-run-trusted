@@ -71,6 +71,8 @@ bool type_contains_template_parameter_name(TypePtr type, string& name)
 	type = pa11::strip_cv(type);
 	if (type->kind == pa11::TypeKind::TemplateParameter)
 	{
+		if (!pa11::is_deducible_template_parameter_type(type))
+			return false;
 		name = type->name;
 		return true;
 	}
@@ -1305,13 +1307,7 @@ bool Parser::try_parse_static_member_pack_expansion(vector<Expr>& out)
 		complete_template_record(record);
 		if (record->kind != pa11::TypeKind::Record || record->scope == NULL)
 		{
-			bool dependent_validation =
-				!active_class_instantiations_.empty() &&
-				(active_class_instantiations_.back().specialization_name.find(
-					 "dependent") != string::npos ||
-				 active_class_instantiations_.back().specialization_name.find(
-					 "typename ") != string::npos);
-			if (dependent_validation)
+			if (active_class_instantiation_dependent())
 			{
 				pos_ = save;
 				out.clear();
