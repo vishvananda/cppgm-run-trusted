@@ -67,6 +67,19 @@ string template_value_typeinfo_component(TypePtr type, uint64_t value)
 	return "L" + code + to_string(value) + "E";
 }
 
+string template_value_typeinfo_component(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (!arg.value_name.empty())
+	{
+		string code = typeinfo_component_for_type(arg.type);
+		if (code.empty())
+			code = "i";
+		return "L" + code + "_" + arg.value_name + "E";
+	}
+	return template_value_typeinfo_component(arg.type, arg.value);
+}
+
 string typeinfo_component_for_argument(
 	const pa11::TemplateInstanceArgument& arg)
 {
@@ -76,7 +89,7 @@ string typeinfo_component_for_argument(
 	{
 		if (arg.dependent)
 			return "Lii0E";
-		return template_value_typeinfo_component(arg.type, arg.value);
+		return template_value_typeinfo_component(arg);
 	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 		return to_string(arg.template_name.size()) + arg.template_name;

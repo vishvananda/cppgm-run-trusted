@@ -675,6 +675,13 @@ string template_value_symbol_text(uint64_t value)
 	return to_string(value);
 }
 
+string template_value_symbol_text(const pa11::TemplateInstanceArgument& arg)
+{
+	if (!arg.value_name.empty())
+		return template_display_symbol_text(arg.value_name);
+	return template_value_symbol_text(arg.value);
+}
+
 string template_type_symbol_text(TypePtr type);
 string template_abi_component_for_type(TypePtr type);
 
@@ -739,8 +746,8 @@ string template_argument_symbol_part(
 			return arg.value != 0 ? "true" : "false";
 		if (bare.get() != NULL && bare->kind == TypeKind::Enum)
 			return "__" + template_type_symbol_text(bare) + "_" +
-		       template_value_symbol_text(arg.value);
-		return "_" + template_value_symbol_text(arg.value);
+		       template_value_symbol_text(arg);
+		return "_" + template_value_symbol_text(arg);
 	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 		return "tmpl_" + template_display_symbol_text(arg.template_name);
@@ -824,8 +831,13 @@ string template_abi_component_for_argument(
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
 		return template_abi_component_for_type(arg.type);
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		if (!arg.value_name.empty())
+			return "L" + template_abi_component_for_type(arg.type) +
+			       template_display_symbol_text(arg.value_name) + "E";
 		return "L" + template_abi_component_for_type(arg.type) +
 		       to_string(arg.value) + "E";
+	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 		return to_string(arg.template_name.size()) + arg.template_name;
 	string out;

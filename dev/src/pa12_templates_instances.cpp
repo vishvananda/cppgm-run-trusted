@@ -221,9 +221,22 @@ pa11::TemplateInstanceArgument template_instance_argument(
 	if (argument.kind == TemplateArgumentKind::Value)
 	{
 		if (argument.value_binding != NULL)
-			return pa11::TemplateInstanceArgument::value_arg(
-				argument.type,
-				argument.value);
+		{
+			Binding* binding = argument.value_binding->aliased_binding != NULL
+				? argument.value_binding->aliased_binding
+				: argument.value_binding;
+			pa11::TemplateInstanceArgument out =
+				pa11::TemplateInstanceArgument::value_arg(
+					argument.type,
+					argument.value);
+			for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+				if ((scope->kind == ScopeKind::Namespace ||
+				     scope->kind == ScopeKind::Class) &&
+				    !scope->name.empty() && scope->name != "<unnamed>")
+					out.value_name = scope->name + "::" + out.value_name;
+			out.value_name += binding->name;
+			return out;
+		}
 		if (argument.dependent)
 			return pa11::TemplateInstanceArgument::dependent_value_arg(
 				argument.type);

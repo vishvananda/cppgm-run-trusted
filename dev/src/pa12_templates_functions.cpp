@@ -132,6 +132,90 @@ string abi_fundamental_type(EFundamentalType type)
 
 string abi_type(TypePtr type, const map<string, size_t>& template_parameters);
 
+vector<string> abi_scope_parts(const Binding* binding)
+{
+	vector<string> reversed;
+	for (Scope* scope = binding != NULL ? binding->owner : NULL;
+	     scope != NULL;
+	     scope = scope->parent)
+	{
+		if ((scope->kind == ScopeKind::Namespace ||
+		     scope->kind == ScopeKind::Class) &&
+		    !scope->name.empty() &&
+		    scope->name != "<unnamed>")
+			reversed.push_back(scope->name);
+	}
+	vector<string> out;
+	for (size_t i = reversed.size(); i > 0; --i)
+		out.push_back(reversed[i - 1]);
+	return out;
+}
+
+string abi_encode_name_path(const vector<string>& scopes,
+                            const string& name)
+{
+	if (scopes.empty())
+		return abi_source_name(name);
+	string out = "N";
+	for (size_t i = 0; i < scopes.size(); ++i)
+		out += abi_source_name(scopes[i]);
+	out += abi_source_name(name);
+	out += "E";
+	return out;
+}
+
+string abi_binding_symbol(const Binding* binding,
+                          const map<string, size_t>& template_parameters)
+{
+	if (binding == NULL)
+		return "_Z0v";
+	if (binding->aliased_binding != NULL)
+		binding = binding->aliased_binding;
+	if (binding->kind == BindingKind::Function &&
+	    !binding->function_specialization_symbol.empty())
+		return binding->function_specialization_symbol;
+	string encoded_name =
+		abi_encode_name_path(abi_scope_parts(binding), binding->name);
+	if (binding->kind != BindingKind::Function ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != pa11::TypeKind::Function)
+		return "_Z" + encoded_name;
+	string bare;
+	size_t first_param =
+		binding->owner != NULL &&
+		binding->owner->kind == ScopeKind::Class &&
+		!binding->is_static_member ? 1 : 0;
+	for (size_t i = first_param; i < binding->type->parameters.size(); ++i)
+		bare += abi_type(binding->type->parameters[i],
+		                 template_parameters);
+	if (binding->type->parameters.size() == first_param)
+		bare += "v";
+	return "_Z" + encoded_name + bare;
+}
+
+string abi_encoded_stable_value_name(const string& name)
+{
+	vector<string> parts;
+	size_t begin = 0;
+	while (begin <= name.size())
+	{
+		size_t pos = name.find("::", begin);
+		string part = name.substr(begin,
+		                          pos == string::npos
+		                          ? string::npos : pos - begin);
+		if (!part.empty())
+			parts.push_back(part);
+		if (pos == string::npos)
+			break;
+		begin = pos + 2;
+	}
+	if (parts.empty())
+		return "0v";
+	string leaf = parts.back();
+	parts.pop_back();
+	return abi_encode_name_path(parts, leaf);
+}
+
 string abi_template_instance_argument(
 	const pa11::TemplateInstanceArgument& arg,
 	const map<string, size_t>& template_parameters)
@@ -139,8 +223,13 @@ string abi_template_instance_argument(
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
 		return abi_type(arg.type, template_parameters);
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		if (!arg.value_name.empty())
+			return "L" + abi_type(arg.type, template_parameters) +
+			       abi_encoded_stable_value_name(arg.value_name) + "E";
 		return "L" + abi_type(arg.type, template_parameters) +
 		       to_string(arg.value) + "E";
+	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Pack)
 	{
 		string out = "J";
@@ -159,8 +248,15 @@ string abi_template_argument(const TemplateArgument& arg,
 	if (arg.kind == TemplateArgumentKind::Type)
 		return abi_type(arg.type, template_parameters);
 	if (arg.kind == TemplateArgumentKind::Value)
+	{
+		if (arg.value_binding != NULL)
+			return "XadL" +
+			       abi_binding_symbol(arg.value_binding,
+			                          template_parameters) +
+			       "E";
 		return "L" + abi_type(arg.type, template_parameters) +
 		       to_string(arg.value) + "E";
+	}
 	if (arg.kind == TemplateArgumentKind::Pack)
 	{
 		string out = "J";

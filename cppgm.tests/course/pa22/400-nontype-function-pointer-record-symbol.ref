@@ -1,0 +1,127 @@
+declare global @__external_rtti_vtable____class_type_info [binding=strong]
+
+global @__typeinfo_name__struct_S__square_ [storage=readonly, binding=weak] = {
+  i8 49
+  i8 83
+  i8 73
+  i8 76
+  i8 80
+  i8 51
+  i8 49
+  i8 102
+  i8 117
+  i8 110
+  i8 99
+  i8 116
+  i8 105
+  i8 111
+  i8 110
+  i8 32
+  i8 111
+  i8 102
+  i8 32
+  i8 40
+  i8 105
+  i8 110
+  i8 116
+  i8 41
+  i8 32
+  i8 114
+  i8 101
+  i8 116
+  i8 117
+  i8 114
+  i8 110
+  i8 105
+  i8 110
+  i8 103
+  i8 32
+  i8 105
+  i8 110
+  i8 116
+  i8 95
+  i8 115
+  i8 113
+  i8 117
+  i8 97
+  i8 114
+  i8 101
+  i8 69
+  i8 69
+  i8 0
+}
+
+global @__rtti_struct_S__square_ [storage=readonly, binding=weak] = {
+  ptr addr @__external_rtti_vtable____class_type_info + 16
+  ptr addr @__typeinfo_name__struct_S__square_
+}
+
+global @S__square___vtable [storage=readonly, binding=weak] = {
+  i64 0
+  ptr addr @__rtti_struct_S__square_
+  ptr addr @S__square___run
+}
+
+function @square(%x : i32) -> i32 [binding=strong] {
+  slot $x : i32
+
+  block ^entry:
+    store i32 %x, $x
+    %t1 = load i32 $x
+    %t2 = load i32 $x
+    %t3 = binary mul i32 %t1, %t2
+    return i32 %t3
+}
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $s : obj<8x8>
+  slot $cond__1 : i32
+
+  block ^entry:
+    %t1 = addr $s
+    call void @S__square___S(%t1)
+    %t2 = addr $s
+    %t3 = load ptr %t2
+    %t4 = load ptr %t3
+    %t5 = call i32 %t4(%t2, 5) as (%arg0 : ptr, %arg1 : i32) -> i32
+    %t6 = cmp eq i32 %t5, 25
+    branch %t6, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t7 = load i32 $cond__1
+    return i32 %t7
+}
+
+function @S__square___S(%this : ptr) -> void [unwind=no, binding=weak] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = addr @S__square___vtable
+    %t3 = index i8 %t2, 16
+    store ptr %t3, %t1
+    return void
+}
+
+function @S__square___run(%this : ptr, %x : i32) -> i32 [binding=weak] {
+  slot $this : ptr
+  slot $x : i32
+
+  block ^entry:
+    store ptr %this, $this
+    store i32 %x, $x
+    %t1 = load i32 $x
+    %t2 = addr @square
+    %t3 = unary decay ptr %t2
+    %t4 = call i32 %t3(%t1) as (%arg0 : i32) -> i32
+    return i32 %t4
+}

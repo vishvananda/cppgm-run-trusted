@@ -91,3 +91,56 @@ preserve the existing source split rather than adding broad monolithic code.
 
 - `make test-report-through-pa22` passes all PA1 through PA22 tests.
 - `perl scripts/cppgm_file_audit.pl --stage pa22 --paths dev/src` passes.
+
+## Architecture Review
+
+The PA22 implementation extends the existing semantic pipeline rather than
+adding a separate template interpreter. Function templates are represented by
+`TemplateDeclaration` objects, placeholder `Binding`s, typed
+`TemplateArgument`s, and substituted `TypePtr` function signatures. Call,
+constructor, conversion, and address-taking paths instantiate candidates through
+`instantiate_template_call_candidate()` and related helpers, and selected
+specializations are lowered by the ordinary PA14 LowIR function/constructor
+lowerers.
+
+Deferred template body handling is owned by the PA12 parser state:
+namespace-scope function template bodies are captured in
+`pending_function_bodies_`, class/member bodies remain in
+`pending_member_bodies_`, and ordinary semantic use calls
+`parse_pending_function_body()` or `parse_pending_member_body()` before LowIR
+needs the selected definition. The validation pass snapshots and restores the
+same parser state, including pending bodies and template substitutions, so
+definition probes do not leak generated declarations or partial parse state into
+the real translation unit.
+
+Non-type template arguments keep their typed value in `TemplateArgument`; when
+the value is a function/reference binding, the binding remains attached as
+`value_binding` for semantic identity and specialization matching. The PA11
+template-instance argument used by record types now carries a stable
+`value_name`, so LowIR type, RTTI, vtable, and ABI-support symbol construction
+does not recover identity from raw pointer values.
+
+LowIR emission remains declaration-driven. `pa14_lowir_emit.cpp` collects parser
+output and demands inline definitions, object roots, hidden friends, generated
+copy/move dependencies, globals, constructors, destructors, RTTI, and vtables
+through `ProgramLowerer`. Generated empty constructors are still emitted only
+for typed generated default/aggregate constructor bindings; arbitrary one-pointer
+`void` functions are no longer converted into empty function bodies.
+
+## Final Architecture Review
+
+The audited architecture satisfies the PA22 handoff requirements:
+
+- Template deduction, substitution, and SFINAE candidate dropping stay in PA12
+  semantic code and use typed declarations, types, expressions, and template
+  arguments.
+- Deferred instantiation has a single parser-owned body queue model; LowIR does
+  not parse source text, use reference binaries, or embed earlier IR payloads.
+- Function-pointer and reference non-type template arguments have stable typed
+  identity for both semantic caches and emitted LowIR naming.
+- LowIR generation consumes selected semantic bindings and emits ordinary
+  functions, constructors, globals, RTTI, and vtables without broad dummy-body
+  fallbacks.
+- The new `pa12_decls_declare_one.cpp` and `pa12_templates_variables.cpp` splits
+  are listed in `dev/frontend_source_sets.mk`, and the audited source set passes
+  the PA22 file audit.

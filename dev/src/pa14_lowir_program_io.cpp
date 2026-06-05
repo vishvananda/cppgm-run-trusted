@@ -159,21 +159,6 @@ bool demand_generated_empty_constructor(ProgramLowerer& program,
 	return true;
 }
 
-bool demand_synthetic_void_pointer_function(ProgramLowerer& program,
-                                            const Binding* binding,
-                                            const string& name)
-{
-	if (is_class_constructor_binding(binding) ||
-	    binding->type->kind != TypeKind::Function ||
-	    binding->type->parameters.size() != 1 ||
-	    pa11::strip_cv(binding->type->parameters[0])->kind != TypeKind::Pointer ||
-	    scalar_lowir_type(binding->type->base) != "void")
-		return false;
-	if (program.defined_functions.insert(name).second)
-		emit_empty_this_function(program, name);
-	return true;
-}
-
 string ordinary_function_declaration(const Binding* binding, const string& name)
 {
 	bool indirect_result =
@@ -376,8 +361,7 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		declares.push_back(ordinary_function_declaration(binding, name));
 		return;
 	}
-	if (demand_generated_empty_constructor(*this, binding, name) ||
-	    demand_synthetic_void_pointer_function(*this, binding, name))
+	if (demand_generated_empty_constructor(*this, binding, name))
 		return;
 	declared_functions.insert(name);
 	declares.push_back(found->second);

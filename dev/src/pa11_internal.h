@@ -57,6 +57,7 @@ struct TemplateInstanceArgument
 	TemplateInstanceArgumentKind kind;
 	TypePtr type;
 	string template_name;
+	string value_name;
 	uint64_t value;
 	bool dependent;
 	vector<TemplateInstanceArgument> pack;
