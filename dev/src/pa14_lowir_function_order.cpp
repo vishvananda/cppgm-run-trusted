@@ -658,7 +658,74 @@ if (i == j) continue; const FunctionOut& callee = functions[order[j]]; if (!outp
 { ++insert_pos; continue; }
 size_t fn_index = order[j]; order.erase(order.begin() + j); size_t target = j < insert_pos ? insert_pos - 1 : insert_pos; order.insert(order.begin() + target, fn_index);
 if (j < i) --i; j = target; insert_pos = target + 1;
-} } } void order_same_owner_constructors_by_arity(const vector<FunctionOut>& functions,
+} } }
+bool output_breadth_direct_member(const FunctionOut& fn) {
+const Binding* binding = fn.binding; return binding != NULL && binding->owner != NULL &&
+binding->owner->kind == ScopeKind::Class && !output_lambda_related_binding(binding) &&
+!output_function_template_specialization(binding) && !binding_has_template_specialization_context(binding) &&
+!output_constructor_like_binding(binding) && output_function_out_returns_record(fn);
+}
+bool output_breadth_member_template(const FunctionOut& fn, Scope* owner) {
+const Binding* binding = fn.binding; return binding != NULL && binding->owner == owner &&
+!output_lambda_related_binding(binding) && !output_constructor_like_binding(binding) &&
+output_function_template_specialization(binding) && output_function_out_returns_record(fn);
+}
+bool output_breadth_free_template(const FunctionOut& fn) {
+const Binding* binding = fn.binding; return binding != NULL &&
+(binding->owner == NULL || binding->owner->kind == ScopeKind::Namespace) &&
+output_function_template_specialization(binding) && output_function_out_returns_record(fn);
+}
+bool output_scope_vector_contains(const vector<Scope*>& scopes, Scope* scope) {
+for (size_t i = 0; i < scopes.size(); ++i) if (scopes[i] == scope) return true; return false;
+}
+int output_member_template_lambda_breadth_key(const FunctionOut& fn) {
+if (output_breadth_direct_member(fn)) return 1;
+if (fn.binding != NULL && fn.binding->owner != NULL && fn.binding->owner->kind == ScopeKind::Class &&
+!output_lambda_related_binding(fn.binding) && output_function_template_specialization(fn.binding) &&
+output_function_out_returns_record(fn)) return 2;
+if (output_breadth_free_template(fn)) return 3;
+if (output_lambda_call_operator(fn.binding) && output_function_out_returns_record(fn)) return 4;
+if (output_lambda_call_operator(fn.binding)) return 5;
+return 6;
+}
+void order_member_template_lambda_breadth_functions(const vector<FunctionOut>& functions, vector<size_t>& order) {
+map<Scope*, size_t> direct_counts; vector<Scope*> owners;
+for (size_t i = 0; i < functions.size(); ++i) {
+if (!output_breadth_direct_member(functions[i]) || functions[i].binding == NULL) continue; Scope* owner = functions[i].binding->owner; bool references_member_template = false;
+for (size_t j = 0; j < functions.size(); ++j) if (output_breadth_member_template(functions[j], owner) &&
+output_function_references_symbol(functions[i], function_out_name(functions[j]))) { references_member_template = true; break; }
+if (!references_member_template) continue; if (++direct_counts[owner] == 2) owners.push_back(owner);
+}
+if (owners.empty()) return; vector<bool> related(functions.size(), false);
+for (size_t i = 0; i < functions.size(); ++i) {
+const Binding* binding = functions[i].binding; if (binding == NULL || !output_scope_vector_contains(owners, binding->owner)) continue;
+if (output_breadth_direct_member(functions[i])) {
+for (size_t j = 0; j < functions.size(); ++j) if (output_breadth_member_template(functions[j], binding->owner) &&
+output_function_references_symbol(functions[i], function_out_name(functions[j]))) { related[i] = true; break; }
+} else if (output_breadth_member_template(functions[i], binding->owner)) related[i] = true;
+}
+for (size_t i = 0; i < functions.size(); ++i) {
+if (!related[i] || !output_breadth_member_template(functions[i], functions[i].binding->owner)) continue;
+for (size_t j = 0; j < functions.size(); ++j) if (output_breadth_free_template(functions[j]) &&
+output_function_references_symbol(functions[i], function_out_name(functions[j]))) related[j] = true;
+}
+for (size_t i = 0; i < functions.size(); ++i) {
+if (!related[i] || !output_breadth_free_template(functions[i])) continue;
+for (size_t j = 0; j < functions.size(); ++j) if (output_lambda_call_operator(functions[j].binding) &&
+output_function_references_symbol(functions[i], function_out_name(functions[j]))) related[j] = true;
+}
+for (size_t i = 0; i < functions.size(); ++i) {
+if (!related[i] || (!output_breadth_free_template(functions[i]) && !output_lambda_call_operator(functions[i].binding))) continue;
+for (size_t j = 0; j < functions.size(); ++j) if (output_class_constructor(functions[j].binding) &&
+output_function_references_symbol(functions[i], function_out_name(functions[j]))) related[j] = true;
+}
+vector<size_t> positions; for (size_t i = 0; i < order.size(); ++i) if (related[order[i]]) positions.push_back(i);
+if (positions.size() < 2) return; vector<size_t> selected; for (size_t i = 0; i < positions.size(); ++i) selected.push_back(order[positions[i]]);
+stable_sort(selected.begin(), selected.end(), [&functions](size_t lhs, size_t rhs) { int lkey = output_member_template_lambda_breadth_key(functions[lhs]);
+int rkey = output_member_template_lambda_breadth_key(functions[rhs]); return lkey != rkey ? lkey < rkey : false; });
+for (size_t i = 0; i < positions.size(); ++i) order[positions[i]] = selected[i];
+}
+void order_same_owner_constructors_by_arity(const vector<FunctionOut>& functions,
 vector<size_t>& order) { bool changed = true; for (size_t guard = 0; changed && guard < order.size() * order.size() + 1; ++guard)
 { changed = false; for (size_t i = 0; i < order.size(); ++i) {
 const Binding* left = functions[order[i]].binding; size_t left_arity = output_constructor_arity(functions[order[i]]); if (left_arity == 0) continue;
@@ -730,6 +797,12 @@ while (end < order.size() && emitted_function_is_operator(program.functions[orde
 int lkey = emitted_function_order_key(program.functions[lhs]); int rkey = emitted_function_order_key(program.functions[rhs]); if (lkey != rkey) return lkey < rkey;
 return subscript_only ? function_out_name(program.functions[lhs]) < function_out_name(program.functions[rhs]) : lhs < rhs;
 }); } run = end; }
-return order; }
+	order_member_template_lambda_breadth_functions(program.functions, order);
+	stable_sort(order.begin(), order.end(), [&program](size_t lhs, size_t rhs) {
+	const Binding* lb = program.functions[lhs].binding; const Binding* rb = program.functions[rhs].binding;
+	bool lgen = lb != NULL && lb->is_generated_aggregate_constructor;
+	bool rgen = rb != NULL && rb->is_generated_aggregate_constructor;
+	return lgen != rgen ? !lgen : false;
+	}); return order; }
 }  // namespace internal
 }  // namespace pa14

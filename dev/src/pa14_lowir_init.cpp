@@ -27,7 +27,7 @@ if (param->kind != TypeKind::RValueReference) continue; } else if (param->kind !
 continue; TypePtr param_record = pa11::strip_cv(param->base); if (param_record->kind == TypeKind::Record && pa11::same_type(param_record, bare))
 return binding; } return NULL; }
 bool type_needs_defaulted_copy_move_helper(TypePtr type, bool move); bool record_needs_defaulted_copy_move_helper(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type);
-if (bare->kind != TypeKind::Record) return false; Binding* exact = find_any_copy_move_constructor(bare, move); if (exact != NULL && !exact->is_defaulted)
+if (bare->kind != TypeKind::Record) return false; if (bare->is_polymorphic) return true; Binding* exact = find_any_copy_move_constructor(bare, move); if (exact != NULL && !exact->is_defaulted)
 return true; if (exact == NULL && move) { Binding* copy = find_any_copy_move_constructor(bare, false);
 if (copy != NULL && !copy->is_defaulted) return true; } pa11::layout_record_type(bare);
 if (bare->base.get() != NULL && type_needs_defaulted_copy_move_helper(bare->base, move)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
@@ -124,6 +124,7 @@ return true; } return false; }
 bool FunctionLowerer::lower_braced_variable_init(const Node& var, TypePtr type) { TypePtr bare = pa11::strip_cv(type); Value direct_base;
 if (bare->kind == TypeKind::Array) direct_base = ensure_pointer(emit_lvalue_addr(var)); shared_ptr<Value> cached_base(new Value(direct_base)); function<Value()> addr_for = [this, &var, cached_base]() {
 if (cached_base->text.empty()) *cached_base = ensure_pointer(emit_lvalue_addr(var)); return *cached_base; };
+if (is_initializer_list_type(type, NULL)) { lower_object_init(addr_for, type, var.children[0]); emit_pending_temp_cleanups(); register_cleanup(var.binding, type); return true; }
 if (bare->kind == TypeKind::Array) { direct_base = *cached_base; lower_direct_array_init(direct_base, type, var.children[0]);
 } else { if (!record_has_real_inline_constructor(type) &&
 !record_has_ordinary_member_function_for_aggregate(type) && var.children[0].direct_call == NULL) { if (!var.children[0].children.empty() ||
@@ -181,11 +182,18 @@ arg = tmp; } instr("call void @" + program_.symbol_for(dtor) + "(" + arg + ")");
 continue; } } lower_scope_destructor_for_object(addr_for, type);
 } } void FunctionLowerer::emit_all_cleanups() {
 for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 - n; emit_scope_cleanups(cleanups_[i]);
-} } bool FunctionLowerer::has_active_cleanups() const {
-for (size_t i = 0; i < cleanups_.size(); ++i) for (size_t j = 0; j < cleanups_[i].size(); ++j) if (cleanups_[i][j].instruction.empty()) return true;
-return false; } void FunctionLowerer::emit_unwind_cleanups() {
-for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 - n; emit_scope_cleanups(cleanups_[i]);
-} } function<Value()> FunctionLowerer::global_storage_addr_for(const Node& var) {
+	} } bool FunctionLowerer::has_active_cleanups() const {
+	for (size_t i = 0; i < cleanups_.size(); ++i) for (size_t j = 0; j < cleanups_[i].size(); ++j) if (cleanups_[i][j].instruction.empty()) return true;
+	return false; } void FunctionLowerer::emit_unwind_cleanups() {
+	for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 - n; emit_scope_cleanups(cleanups_[i]);
+	} } void FunctionLowerer::emit_active_catch_clause(const ActiveCatchContext& ctx) {
+	if (ctx.catch_all) instr("eh_catch_all, " + to_string(ctx.selector));
+	else instr("eh_catch @" + ctx.rtti + ", " + to_string(ctx.selector));
+	} void FunctionLowerer::emit_unwind_object_cleanups() {
+	for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 - n; vector<Cleanup> objects;
+	for (size_t j = 0; j < cleanups_[i].size(); ++j) if (cleanups_[i][j].instruction.empty()) objects.push_back(cleanups_[i][j]);
+	if (!objects.empty()) emit_scope_cleanups(objects); }
+	} function<Value()> FunctionLowerer::global_storage_addr_for(const Node& var) {
 const Node* var_ptr = &var; return [this, var_ptr]() { program_.demand_global_declaration(var_ptr->binding); string tmp = fresh_temp();
 instr(tmp + " = addr @" + program_.symbol_for(var_ptr->binding)); return Value("ptr", tmp); }; }
 function<Value()> FunctionLowerer::global_variable_addr_for(const Node& var) { const Node* var_ptr = &var; return [this, var_ptr]() {

@@ -195,7 +195,7 @@ Node iter("iteration"); add_child(iter, parse_expression().node); add_child(node
 expect(OP_RPAREN); add_child(node, parse_statement()); return node; }
 Node Parser::parse_range_for_statement() { DeclSpecs specs = parse_decl_specifier_seq(false); TypePtr base = type_from_decl_specs(specs);
 Declarator declarator = parse_declarator(false); if (!consume(OP_COLON)) throw runtime_error("not range-for"); Expr range = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
-bool hidden_range = false; Node range_node; TypePtr range_array_type; if (range.braced_init_list && range.type.get() == NULL)
+bool hidden_range = false; bool initializer_list_range = false; TypePtr initializer_list_element; Node range_node; TypePtr range_array_type; if (range.braced_init_list && range.type.get() == NULL)
 { if (range.node.children.empty()) throw runtime_error("empty range braced-list"); Expr first = expr_from_node(range.node.children[0]);
 TypePtr elem = lvalue_to_rvalue_type(first.type); range_array_type = pa11::make_array(elem, false, range.node.children.size()); Node typed("braced-init-list");
 typed.type = range_array_type; typed.category = ValueCategory::PRValue; for (size_t i = 0; i < range.node.children.size(); ++i) {
@@ -203,7 +203,8 @@ Expr child = expr_from_node(range.node.children[i]); Conversion conv = convert_t
 add_child(typed, conv.expr.node); } range.node = typed; range.type = range_array_type;
 range.category = ValueCategory::PRValue; annotate_expr_node(range); hidden_range = true; }
 else { range_array_type = expression_object_type(range.type); TypePtr bare_range = pa11::strip_cv(range_array_type);
-if (bare_range->kind == pa11::TypeKind::Record && bare_range->scope != NULL) { auto make_hidden_var =
+if (is_std_initializer_list_type(range_array_type, &initializer_list_element)) { normalize_std_initializer_list_type(range_array_type); initializer_list_range = true; }
+else if (bare_range->kind == pa11::TypeKind::Record && bare_range->scope != NULL) { auto make_hidden_var =
 [&](const string& prefix, const Expr& init) -> Node { string name = prefix + to_string(++range_for_counter_); Binding* binding = add_value(current_scope(), BindingKind::Variable,
 name, init.type); Node var("variable " + name + " " + pa11::describe_type(init.type)); var.binding = binding;
 var.type = init.type; add_child(var, init.node); return var; };
@@ -221,8 +222,8 @@ declare_one(specs, base, declarator, &deref, false, loop_decl); if (loop_binding
 Expr inc = make_unary_expr(OP_INC, "++", begin_id); expect(OP_RPAREN); Node node("range-for-statement"); node.token_text = "iterator";
 add_child(node, begin_var); add_child(node, end_var); add_child(node, loop_decl.children[0]); add_child(node, cond.node);
 add_child(node, deref.node); add_child(node, inc.node); add_child(node, parse_statement()); return node;
-} if (bare_range->kind != pa11::TypeKind::Array || bare_range->unknown_bound) throw runtime_error("unsupported range-for");
-} TypePtr range_bare = pa11::strip_cv(range_array_type); TypePtr element_type = range_bare->base; Expr element;
+} if (!initializer_list_range && (bare_range->kind != pa11::TypeKind::Array || bare_range->unknown_bound)) throw runtime_error("unsupported range-for");
+} TypePtr range_bare = pa11::strip_cv(range_array_type); TypePtr element_type = initializer_list_range ? initializer_list_element : range_bare->base; Expr element;
 element.valid = true; element.type = element_type; element.category = ValueCategory::LValue; element.node = Node("range-element lvalue " +
 pa11::describe_type(element_type)); annotate_expr_node(element); Node loop_decl("simple-declaration"); Binding* loop_binding =
 declare_one(specs, base, declarator, &element, false, loop_decl); if (loop_binding == NULL || loop_decl.children.empty()) throw runtime_error("invalid range declaration"); Node loop_var = loop_decl.children[0];
@@ -234,14 +235,18 @@ Binding* idx_binding = add_value(current_scope(), BindingKind::Variable, idx_nam
 idx_var.binding = idx_binding; idx_var.type = int_type; Expr zero; zero.valid = true;
 zero.type = int_type; zero.category = ValueCategory::PRValue; zero.constant_expression = true; zero.has_constant_value = true;
 zero.constant_value = 0; zero.node = Node("literal prvalue " + pa11::describe_type(int_type) + " 0"); zero.node.token_text = "0";
-annotate_expr_node(zero); add_child(idx_var, zero.node); expect(OP_RPAREN); Node node("range-for-statement");
+annotate_expr_node(zero); add_child(idx_var, zero.node); expect(OP_RPAREN); Node node("range-for-statement"); if (initializer_list_range) node.token_text = "initializer-list";
 add_child(node, range_node); add_child(node, idx_var); add_child(node, loop_var); add_child(node, parse_statement());
 return node; } Node Parser::parse_try_statement() {
 expect(KW_TRY); Node node("try-statement"); Node try_block("try-block"); add_child(try_block, parse_compound_statement());
 add_child(node, try_block); do { expect(KW_CATCH);
-expect(OP_LPAREN); Node catch_node("catch-clause"); if (consume(OP_DOTS)) catch_node.token_text = "catch-all";
-else { TypePtr catch_type = parse_type_id(); catch_node.type = catch_type;
-catch_node.line += " " + pa11::describe_type(catch_type); } expect(OP_RPAREN); add_child(catch_node, parse_compound_statement());
+expect(OP_LPAREN); Node catch_node("catch-clause"); string catch_name; Binding* catch_binding = NULL; if (consume(OP_DOTS)) catch_node.token_text = "catch-all";
+else { TypePtr catch_type = parse_type_id(); if (at_identifier()) catch_name = consume_identifier(); catch_node.type = catch_type;
+catch_node.line += " " + pa11::describe_type(catch_type); } expect(OP_RPAREN); expect(OP_LBRACE); Node body("compound-statement");
+Scope* block = pa11::create_child_scope(current_scope(), ScopeKind::Block, ""); scopes_.push_back(block);
+if (!catch_name.empty()) { catch_binding = add_value(block, BindingKind::Variable, catch_name, catch_node.type); catch_node.binding = catch_binding; }
+while (!at(OP_RBRACE)) { Node item = parse_block_item(); if (!item.line.empty()) add_child(body, item); }
+scopes_.pop_back(); expect(OP_RBRACE); add_child(catch_node, body);
 add_child(node, catch_node); } while (at(KW_CATCH)); return node;
 } Expr Parser::convert_aggregate_return_expression(Expr expr, TypePtr result, TypePtr result_record)
 { expr.type = result; expr.node.type = result; ensure_aggregate_constructors_for_init(result, expr.node);

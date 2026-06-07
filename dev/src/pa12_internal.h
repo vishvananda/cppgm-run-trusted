@@ -527,6 +527,10 @@ public:
 			bool resolve_template_name_spelling(const string& spelling, Scope*& qualifier, string& name);
 			TypePtr instantiate_alias_template(TemplateDeclaration* declaration, const vector<TemplateArgument>& arguments);
 			TypePtr instantiate_class_template(TemplateDeclaration* declaration, const vector<TemplateArgument>& arguments);
+	TypePtr make_std_initializer_list_type(TypePtr element);
+	bool is_std_initializer_list_type(TypePtr type, TypePtr* element = NULL) const;
+	void normalize_std_initializer_list_type(TypePtr type);
+	Expr make_initializer_list_expr(const Expr& init, TypePtr target);
 	void complete_template_record(TypePtr type);
 	void mark_template_specialization_demanded(TypePtr type);
 	void mark_template_argument_demanded(const TemplateArgument& argument);

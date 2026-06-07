@@ -3,6 +3,60 @@
 namespace pa14 {
 namespace internal {
 
+Value FunctionLowerer::emit_typeid_lvalue_addr(const Node& expr)
+{
+	if (expr.children.empty())
+		throw runtime_error("typeid expression missing operand");
+	const Node& operand = expr.children[0];
+	TypePtr target = object_type(operand.type);
+	TypePtr bare = pa11::strip_cv(target);
+	bool type_operand = starts_with(operand.line, "type-id");
+	if (!type_operand &&
+	    operand.category == ValueCategory::LValue &&
+	    bare.get() != NULL &&
+	    bare->kind == TypeKind::Record &&
+	    bare->is_polymorphic)
+	{
+		program_.emit_rtti(bare);
+		if (program_.declared_functions.insert(
+			    "__external_runtime____cxa_bad_typeid").second)
+			program_.declares.push_back(
+				"declare function @__external_runtime____cxa_bad_typeid() "
+				"-> void [effects=readnone, unwind=may, return=noreturn, "
+				"linkage=c, binding=strong, object=__cxa_bad_typeid]");
+		Value object_addr = ensure_pointer(emit_lvalue_addr(operand));
+		string is_null = fresh_temp();
+		instr(is_null + " = cmp eq ptr " + object_addr.text + ", 0");
+		string fail = fresh_block("typeid_fail");
+		string scan = fresh_block("typeid_scan");
+		terminate("branch " + is_null + ", ^" + fail + ", ^" + scan);
+		start_block(fail);
+		instr("call void @__external_runtime____cxa_bad_typeid()");
+		TypePtr ret = fn_.binding != NULL && fn_.binding->type.get() != NULL
+			? fn_.binding->type->base : pa11::make_fundamental(FT_VOID);
+		if (pa11::is_void_type(ret) ||
+		    pa11::strip_cv(ret)->kind == TypeKind::Record)
+			terminate("return void");
+		else
+			terminate("return " + scalar_lowir_type(ret) + " 0");
+		start_block(scan);
+		string vptr = fresh_temp();
+		instr(vptr + " = load ptr " + object_addr.text);
+		string rtti_addr = fresh_temp();
+		instr(rtti_addr + " = index i8 " + vptr + ", -8");
+		string rtti = fresh_temp();
+		instr(rtti + " = load ptr " + rtti_addr);
+		return Value("ptr", rtti);
+	}
+	program_.emit_typeinfo(target);
+	string symbol = program_.typeid_rtti_symbol(target);
+	if (symbol.empty())
+		throw runtime_error("unsupported typeid operand");
+	string tmp = fresh_temp();
+	instr(tmp + " = addr @" + symbol);
+	return Value("ptr", tmp);
+}
+
 Value FunctionLowerer::emit_literal(const Node& expr)
 {
 	if (expr.token_text.size() > 0 &&
@@ -132,24 +186,7 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 {
 	if (starts_with(expr.line, "typeid-expression"))
-	{
-		if (expr.children.empty())
-			throw runtime_error("typeid expression missing operand");
-		TypePtr target = object_type(expr.children[0].type);
-		program_.emit_typeinfo(target);
-		string symbol = program_.catch_rtti_symbol(target);
-		if (symbol.empty())
-		{
-			TypePtr bare = pa11::strip_cv(target);
-			if (bare.get() != NULL && bare->kind == TypeKind::Record)
-				symbol = rtti_symbol_for_record(bare);
-		}
-		if (symbol.empty())
-			throw runtime_error("unsupported typeid operand");
-		string tmp = fresh_temp();
-		instr(tmp + " = addr @" + symbol);
-		return Value("ptr", tmp);
-	}
+		return emit_typeid_lvalue_addr(expr);
 	if (starts_with(expr.line, "id-expression") && expr.binding != NULL)
 	{
 		if (expr.binding->kind == BindingKind::Function)
@@ -301,6 +338,8 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	if (starts_with(expr.line, "cast-expression") &&
 	    is_reference(expr.type) && !expr.children.empty())
 	{
+		if (expr.token_text.find("dynamic_cast") != string::npos)
+			return emit_dynamic_cast(expr, true);
 		TypePtr target = pa11::strip_cv(expr.type->base);
 		TypePtr source = pa11::strip_cv(object_type(expr.children[0].type));
 		if (target->kind == TypeKind::Record &&
@@ -395,6 +434,16 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 			                                object_record,
 			                                owner_record);
 		}
+	}
+	if (!expr.children.empty() &&
+	    starts_with(expr.children[0].line, "member-expression") &&
+	    expr.children[0].binding != NULL &&
+	    expr.children[0].binding->name == "__this")
+	{
+		string projected = fresh_temp();
+		instr(projected + " = index i8 [projection=base_subobject] " +
+		      base.text + ", 0");
+		base = Value("ptr", projected);
 	}
 	string tmp = fresh_temp();
 	TypePtr member_bare = pa11::strip_cv(member->type);

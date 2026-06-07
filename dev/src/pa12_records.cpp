@@ -147,10 +147,11 @@ return true; return false; } bool type_needs_copy_move_helper(
 TypePtr type, bool move, const map<Binding*, vector<Expr> >* default_arguments); bool constructor_binding_needs_helper(Binding* binding)
 { return binding != NULL && !binding->is_defaulted && !binding->is_generated_copy_move_constructor;
 } bool record_needs_copy_move_helper( TypePtr type, bool move,
-const map<Binding*, vector<Expr> >* default_arguments) { TypePtr bare = pa11::strip_cv(type); Binding* exact =
-find_copy_move_constructor_binding(bare, move, default_arguments); if (constructor_binding_needs_helper(exact)) return true; if (move &&
-constructor_binding_needs_helper( find_copy_move_constructor_binding( bare, false, default_arguments))) return true;
-pa11::layout_record_type(bare); if (bare->base.get() != NULL && type_needs_copy_move_helper(bare->base, move, default_arguments)) return true;
+	const map<Binding*, vector<Expr> >* default_arguments) { TypePtr bare = pa11::strip_cv(type); Binding* exact =
+	find_copy_move_constructor_binding(bare, move, default_arguments); if (constructor_binding_needs_helper(exact)) return true; if (move &&
+	constructor_binding_needs_helper( find_copy_move_constructor_binding( bare, false, default_arguments))) return true;
+	if (bare->is_polymorphic) return true;
+	pa11::layout_record_type(bare); if (bare->base.get() != NULL && type_needs_copy_move_helper(bare->base, move, default_arguments)) return true;
 for (size_t i = 0; i < bare->fields.size(); ++i) { if (bare->fields[i]->is_bit_field) continue;
 if (type_needs_copy_move_helper( bare->fields[i]->type, move, default_arguments)) return true; }
 return false; } bool type_needs_copy_move_helper( TypePtr type,
@@ -337,11 +338,11 @@ TypePtr field = bare->fields[i]->type; if (field->kind == pa11::TypeKind::LValue
 void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& init) { if (init.line.compare(0, 16, "braced-init-list") != 0) return;
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array) { for (size_t i = 0; i < init.children.size(); ++i)
 ensure_aggregate_constructors_for_init(bare->base, init.children[i]); return; } if (bare->kind != pa11::TypeKind::Record)
-return; bool has_reference_field = false; try {
-has_reference_field = record_has_reference_field(bare); } catch (const runtime_error& err) {
-if ((string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw;
-return; } if (pa11::type_has_const(type) || has_reference_field ||
-record_has_ordinary_member_function(bare)) { try {
+	return; bool has_reference_field = false; try {
+	has_reference_field = record_has_reference_field(bare); } catch (const runtime_error& err) {
+	if ((string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw;
+	return; } if (!init.children.empty() || pa11::type_has_const(type) || has_reference_field ||
+	record_has_ordinary_member_function(bare)) { try {
 ensure_aggregate_constructor(bare, init.children.size()); } catch (const runtime_error& err) {
 if (string(err.what()) == "member has no default constructor") return; if ((string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") ||
 active_class_instantiations_.empty()) throw; return; }

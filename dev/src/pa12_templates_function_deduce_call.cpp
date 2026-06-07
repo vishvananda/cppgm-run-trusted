@@ -202,6 +202,9 @@ bool Parser::deduce_function_template_arguments(
 			for (size_t j = 0; j < take; ++j)
 			{
 				const Expr& actual_expr = args[arg_index + j];
+				if (actual_expr.braced_init_list &&
+				    actual_expr.type.get() == NULL)
+					return false;
 				TypePtr argument =
 					expression_object_type(actual_expr.type);
 				TypePtr element_pattern = pattern;
@@ -412,6 +415,28 @@ bool Parser::deduce_function_template_arguments(
 				++arg_index;
 				continue;
 			}
+		TypePtr initializer_element_pattern;
+		if (args[arg_index].braced_init_list &&
+		    args[arg_index].type.get() == NULL &&
+		    is_std_initializer_list_type(pattern,
+		                                 &initializer_element_pattern))
+		{
+			for (size_t ci = 0; ci < args[arg_index].node.children.size(); ++ci)
+			{
+				const Node& child = args[arg_index].node.children[ci];
+				if (!deduce_template_type(initializer_element_pattern,
+				                          lvalue_to_rvalue_type(child.type),
+				                          deduced,
+				                          &fixed,
+				                          &fixed_arguments))
+					return false;
+			}
+			++arg_index;
+			continue;
+		}
+		if (args[arg_index].braced_init_list &&
+		    args[arg_index].type.get() == NULL)
+			return false;
 		TypePtr argument = expression_object_type(args[arg_index].type);
 		TypePtr bare_pattern = pa11::strip_cv(pattern);
 		if (bare_pattern->kind == pa11::TypeKind::RValueReference &&

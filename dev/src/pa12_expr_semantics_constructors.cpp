@@ -667,6 +667,9 @@ Expr Parser::make_constructor_init_expr(TypePtr type,
                                         bool copy_initialization)
 {
 	vector<Expr> constructor_args = args;
+	for (size_t i = 0; i < constructor_args.size(); ++i)
+		if (is_lambda_helper_expr(constructor_args[i]))
+			constructor_args[i] = lambda_closure_expr(constructor_args[i]);
 	TypePtr record = pa11::strip_cv(type);
 	if (record->kind == pa11::TypeKind::Record &&
 	    !constructor_args.empty() &&

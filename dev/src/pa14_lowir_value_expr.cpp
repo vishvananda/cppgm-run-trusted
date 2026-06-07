@@ -15,6 +15,8 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 		return emit_binary(expr);
 	if (starts_with(expr.line, "assignment-expression"))
 		return emit_assignment(expr);
+	if (starts_with(expr.line, "throw-expression"))
+		return emit_throw(expr);
 	if (starts_with(expr.line, "unary-expression"))
 		return emit_unary(expr);
 	if (starts_with(expr.line, "postfix-expression"))
@@ -656,6 +658,18 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 		emit_rvalue(expr.children[0]);
 		return emit_rvalue(expr.children[1]);
 	}
+	if (expr.has_op && (expr.op == OP_EQ || expr.op == OP_NE) &&
+	    expr.children.size() == 2 &&
+	    starts_with(expr.children[0].line, "typeid-expression") &&
+	    starts_with(expr.children[1].line, "typeid-expression"))
+	{
+		Value lhs = emit_lvalue_addr(expr.children[0]);
+		Value rhs = emit_lvalue_addr(expr.children[1]);
+		string tmp = fresh_temp();
+		instr(tmp + " = cmp " + string(expr.op == OP_EQ ? "eq" : "ne") +
+		      " ptr " + lhs.text + ", " + rhs.text);
+		return Value("u8", tmp);
+	}
 	if (expr.has_op && (expr.op == OP_LAND || expr.op == OP_LOR))
 		return emit_logical_binary(expr);
 	Value lhs = emit_rvalue(expr.children[0]);
@@ -1071,6 +1085,8 @@ Value FunctionLowerer::emit_postfix(const Node& expr)
 
 Value FunctionLowerer::emit_cast(const Node& expr)
 {
+	if (expr.token_text.find("dynamic_cast") != string::npos)
+		return emit_dynamic_cast(expr, is_reference(expr.type));
 	if (pa11::is_void_type(expr.type))
 	{
 		if (expr.children[0].category == ValueCategory::LValue &&
@@ -1122,6 +1138,113 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 	return convert_value(emit_rvalue(expr.children[0]),
 	                     expr.children[0].type,
 	                     expr.type);
+}
+
+Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
+                                         bool reference_result)
+{
+	if (expr.children.empty())
+		throw runtime_error("dynamic_cast missing operand");
+	if (program_.declared_functions.insert(
+		    "__external_runtime___Unwind_Resume").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime___Unwind_Resume() -> void "
+			"[return=noreturn, role=eh_resume, linkage=c, "
+			"binding=strong, object=_Unwind_Resume]");
+	if (program_.declared_functions.insert(
+		    "__external_runtime____gxx_personality_v0").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____gxx_personality_v0() "
+			"-> void [role=eh_personality, linkage=c, binding=strong, "
+			"object=__gxx_personality_v0]");
+	if (program_.declared_functions.insert(
+		    "__external_runtime____dynamic_cast").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____dynamic_cast"
+			"(%arg0 : ptr, %arg1 : ptr, %arg2 : ptr, %arg3 : i64) -> ptr "
+			"[linkage=c, binding=strong, object=__dynamic_cast]");
+	if (reference_result &&
+	    program_.declared_functions.insert(
+		    "__external_runtime____cxa_bad_cast").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____cxa_bad_cast() -> void "
+			"[effects=readnone, unwind=may, return=noreturn, linkage=c, "
+			"binding=strong, object=__cxa_bad_cast]");
+	const Node& operand = expr.children[0];
+	TypePtr target_type = pa11::strip_cv(expr.type);
+	TypePtr target_object = reference_result
+		? pa11::strip_cv(target_type->base)
+		: pa11::strip_cv(target_type->base);
+	TypePtr source_object;
+	Value source_ptr;
+	if (reference_result)
+	{
+		source_object = pa11::strip_cv(object_type(operand.type));
+		source_ptr = ensure_pointer(emit_lvalue_addr(operand));
+	}
+	else
+	{
+		TypePtr source_type = pa11::strip_cv(strip_for_value(operand.type));
+		if (source_type->kind != TypeKind::Pointer)
+			throw runtime_error("dynamic_cast source is not pointer");
+		source_object = pa11::strip_cv(source_type->base);
+		source_ptr = ensure_pointer(emit_rvalue(operand));
+	}
+	if (source_object.get() == NULL || target_object.get() == NULL ||
+	    source_object->kind != TypeKind::Record ||
+	    target_object->kind != TypeKind::Record)
+		throw runtime_error("unsupported dynamic_cast type");
+	program_.emit_rtti(source_object);
+	program_.emit_rtti(target_object);
+	program_.demand_vtable(target_object, false);
+	string source_rtti = program_.typeid_rtti_symbol(source_object);
+	string target_rtti = program_.typeid_rtti_symbol(target_object);
+	if (source_rtti.empty() || target_rtti.empty())
+		throw runtime_error("unsupported dynamic_cast rtti");
+	string slot = fresh_aux_slot("dyn_cast", "ptr");
+	instr("store ptr 0, $" + slot);
+	string is_null = fresh_temp();
+	instr(is_null + " = cmp eq ptr " + source_ptr.text + ", 0");
+	string scan = fresh_block("dyn_cast_scan");
+	string end = fresh_block("dyn_cast_end");
+	terminate("branch " + is_null + ", ^" + end + ", ^" + scan);
+	start_block(scan);
+	string source_addr = fresh_temp();
+	instr(source_addr + " = addr @" + source_rtti);
+	string target_addr = fresh_temp();
+	instr(target_addr + " = addr @" + target_rtti);
+	string result = fresh_temp();
+	instr(result + " = call ptr @__external_runtime____dynamic_cast(" +
+	      source_ptr.text + ", " + source_addr + ", " + target_addr +
+	      ", 0)");
+	instr("store ptr " + result + ", $" + slot);
+	if (reference_result)
+	{
+		string failed = fresh_temp();
+		instr(failed + " = cmp eq ptr " + result + ", 0");
+		string fail = fresh_block("dyn_cast_fail");
+		string found = fresh_block("dyn_cast_found");
+		terminate("branch " + failed + ", ^" + fail + ", ^" + found);
+		start_block(fail);
+		instr("call void @__external_runtime____cxa_bad_cast()");
+		TypePtr ret = fn_.binding != NULL && fn_.binding->type.get() != NULL
+			? fn_.binding->type->base : pa11::make_fundamental(FT_VOID);
+		if (pa11::is_void_type(ret) ||
+		    pa11::strip_cv(ret)->kind == TypeKind::Record)
+			terminate("return void");
+		else
+			terminate("return " + scalar_lowir_type(ret) + " 0");
+		start_block(found);
+		terminate("jump ^" + end);
+		start_block(fresh_block("block"));
+		terminate("jump ^" + end);
+	}
+	else
+		terminate("jump ^" + end);
+	start_block(end);
+	string loaded = fresh_temp();
+	instr(loaded + " = load ptr $" + slot);
+	return Value("ptr", loaded);
 }
 
 Value FunctionLowerer::emit_conditional(const Node& expr)

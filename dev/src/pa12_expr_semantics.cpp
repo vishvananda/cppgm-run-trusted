@@ -25,6 +25,134 @@ return true; TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right)
 r->kind == pa11::TypeKind::Record && l->is_template_specialization && r->is_template_specialization && !l->template_primary_name.empty() &&
 l->template_primary_name == r->template_primary_name && same_template_specialization_arguments(l->template_arguments, r->template_arguments); }
 }  // namespace
+bool Parser::is_std_initializer_list_type(TypePtr type,
+                                          TypePtr* element) const
+{
+	if (type.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    bare->template_primary_name != "initializer_list")
+		return false;
+	Scope* owner = bare->scope != NULL ? bare->scope->parent : NULL;
+	if (owner == NULL || owner->kind != ScopeKind::Namespace ||
+	    owner->name != "std")
+		return false;
+	if (bare->template_arguments.size() != 1 ||
+	    bare->template_arguments[0].kind !=
+		    pa11::TemplateInstanceArgumentKind::Type)
+		return false;
+	if (element != NULL)
+		*element = bare->template_arguments[0].type;
+	return true;
+}
+
+void Parser::normalize_std_initializer_list_type(TypePtr type)
+{
+	TypePtr element;
+	if (!is_std_initializer_list_type(type, &element))
+		return;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->scope == NULL)
+		return;
+	bool has_begin = false;
+	bool has_size = false;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* binding = bare->scope->binding_order[i];
+		if (binding->kind != BindingKind::Variable ||
+		    binding->is_static_member)
+			continue;
+		if (binding->name == "__begin_" || binding->name == "first")
+			has_begin = true;
+		if (binding->name == "__size_" || binding->name == "count")
+			has_size = true;
+	}
+	if (!has_begin)
+		add_value(bare->scope,
+		          BindingKind::Variable,
+		          "__begin_",
+		          pa11::make_pointer(pa11::make_cv(element,
+		                                           pa11::CV_CONST)));
+	if (!has_size)
+		add_value(bare->scope,
+		          BindingKind::Variable,
+		          "__size_",
+		          pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
+	bare->complete = true;
+	bare->layout_valid = false;
+}
+
+TypePtr Parser::make_std_initializer_list_type(TypePtr element)
+{
+	Binding* std_binding =
+		pa11::lookup_qualified(global_scope(), "std", pa11::LOOKUP_NAMESPACE);
+	Scope* std_scope =
+		std_binding != NULL ? std_binding->target_scope : NULL;
+	TemplateDeclaration* templ =
+		std_scope != NULL ? find_class_template(std_scope, "initializer_list")
+		                  : NULL;
+	if (templ == NULL)
+		throw runtime_error("std::initializer_list is not declared");
+	TemplateArgument arg;
+	arg.kind = TemplateArgumentKind::Type;
+	arg.type = element;
+	vector<TemplateArgument> args;
+	args.push_back(arg);
+	TypePtr list_type = instantiate_class_template(templ, args);
+	normalize_std_initializer_list_type(list_type);
+	return list_type;
+}
+
+Expr Parser::make_initializer_list_expr(const Expr& init, TypePtr target)
+{
+	if (!init.braced_init_list)
+		throw runtime_error("initializer_list requires braced-init-list");
+	TypePtr element;
+	if (target.get() != NULL)
+	{
+		if (!is_std_initializer_list_type(target, &element))
+			throw runtime_error("target is not std::initializer_list");
+		normalize_std_initializer_list_type(target);
+	}
+	else
+	{
+		if (init.node.children.empty())
+			throw runtime_error("empty auto initializer_list");
+		const Node& first = init.node.children[0];
+		element = lvalue_to_rvalue_type(first.type);
+		target = make_std_initializer_list_type(element);
+	}
+	Expr out;
+	out.valid = true;
+	out.type = target;
+	out.category = ValueCategory::PRValue;
+	out.braced_init_list = true;
+	out.node = Node("braced-init-list");
+	out.node.type = target;
+	out.node.category = out.category;
+	out.node.token_text = "initializer-list";
+	for (size_t i = 0; i < init.node.children.size(); ++i)
+	{
+		Expr child;
+		child.valid = true;
+		child.node = init.node.children[i];
+		child.type = child.node.type;
+		child.category = child.node.category;
+		child.binding = child.node.binding;
+		child.has_constant_value = child.node.has_constant_value;
+		child.constant_value = child.node.constant_value;
+		child.braced_init_list =
+			child.node.line.compare(0, 16, "braced-init-list") == 0;
+		Conversion conv = convert_to(child, element);
+		if (!conv.viable)
+			throw runtime_error("invalid initializer_list element");
+		add_child(out.node, conv.expr.node);
+	}
+	annotate_expr_node(out);
+	return out;
+}
 bool template_declaration_has_body(const vector<Token>& tokens, const TemplateDeclaration* declaration) { if (declaration == NULL || !declaration->has_definition)
 return false; for (size_t i = declaration->decl_begin; i < declaration->decl_end && i < tokens.size(); ++i)
 if (tokens[i].kind == posttoken::TokenKind::Simple && tokens[i].type == OP_LBRACE) return true; return false;
@@ -183,7 +311,9 @@ annotate_expr_node(out); return out; } void filter_static_class_member_overloads
 } } if (has_class_member && !static_overloads.empty()) callee.overloads = static_overloads;
 } Conversion Parser::convert_to(const Expr& expr, TypePtr target) { if (target->kind == pa11::TypeKind::LValueReference ||
 target->kind == pa11::TypeKind::RValueReference) return convert_reference(expr, target); return convert_value(expr, target); }
-Conversion Parser::convert_reference(const Expr& expr, TypePtr target) { if (expr.braced_init_list && expr.type.get() == NULL) {
+Conversion Parser::convert_reference(const Expr& expr, TypePtr target) { if (expr.braced_init_list && expr.type.get() == NULL && is_std_initializer_list_type(target->base, NULL))
+{ Expr list = make_initializer_list_expr(expr, target->base); return Conversion(true, 1, list); }
+if (expr.braced_init_list && expr.type.get() == NULL) {
 TypePtr target_object = pa11::strip_cv(target->base); if (target_object->kind == pa11::TypeKind::Record) { complete_template_record(target_object);
 if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion(); vector<Expr> args;
 for (size_t i = 0; i < expr.node.children.size(); ++i) { Expr child; child.valid = true;
@@ -291,7 +421,9 @@ continue; tail.rank += 2; if (!best.viable || tail.rank < best.rank ||
 } else if (best.viable && tail.rank == best.rank && best_template == op_template)
 throw runtime_error("ambiguous conversion function"); } catch (const runtime_error&) {
 } } return best; }
-Conversion Parser::convert_value(const Expr& expr, TypePtr target) { Expr selected = select_overload_expr(expr, target); TypePtr src = lvalue_to_rvalue_type(selected.type);
+Conversion Parser::convert_value(const Expr& expr, TypePtr target) { if (expr.braced_init_list && expr.type.get() == NULL && is_std_initializer_list_type(target, NULL))
+{ Expr list = make_initializer_list_expr(expr, target); return Conversion(true, 0, list); }
+Expr selected = select_overload_expr(expr, target); TypePtr src = lvalue_to_rvalue_type(selected.type);
 TypePtr dst = pa11::strip_top_level_cv(target); TypePtr dst_bare = pa11::strip_cv(dst); if (selected.binding != NULL && selected.binding->kind == BindingKind::Function &&
 dst_bare->kind == pa11::TypeKind::Pointer && dst_bare->base.get() != NULL && dst_bare->base->kind == pa11::TypeKind::Function && unevaluated_expression_depth_ == 0)
 { parse_pending_function_body(selected.binding); parse_pending_member_body(selected.binding); }

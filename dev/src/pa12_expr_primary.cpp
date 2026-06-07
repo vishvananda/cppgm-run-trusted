@@ -29,7 +29,12 @@ name = name.substr(pos + 2); return lambda_abi_source_name(name); } return "i";
 } string lambda_abi_parameter_list(const vector<ParameterInfo>& parameters) { string out;
 for (size_t i = 0; i < parameters.size(); ++i) if (parameters[i].type.get() != NULL) out += lambda_abi_type(parameters[i].type); return out.empty() ? string("v") : out;
 } string lambda_abi_local_source_name(size_t ordinal) { string name = "$_" + to_string(ordinal);
-return to_string(name.size()) + name; } bool lambda_capture_binding_candidate(Binding* binding) {
+return to_string(name.size()) + name; } string lambda_specialization_name_part(const TemplateArgument& arg) {
+string text; if (arg.kind == TemplateArgumentKind::Type && arg.type.get() != NULL) text = pa11::describe_type(pa11::strip_cv(arg.type));
+else if (arg.kind == TemplateArgumentKind::Value) text = arg.value_name.empty() ? to_string(arg.value) : arg.value_name;
+else if (arg.kind == TemplateArgumentKind::Pack) { for (size_t i = 0; i < arg.pack.size(); ++i) text += "__" + lambda_specialization_name_part(arg.pack[i]); return text; }
+else text = "template"; string out; for (size_t i = 0; i < text.size(); ++i) { unsigned char ch = static_cast<unsigned char>(text[i]); if (isalnum(ch)) out.push_back(text[i]); else if (!out.empty() && out[out.size() - 1] != '_') out.push_back('_'); }
+while (!out.empty() && out[out.size() - 1] == '_') out.resize(out.size() - 1); return out.empty() ? string("arg") : out; } bool lambda_capture_binding_candidate(Binding* binding) {
 return binding != NULL && (binding->kind == BindingKind::Variable || binding->kind == BindingKind::Parameter) && binding->owner != NULL &&
 (binding->owner->kind == ScopeKind::Function || binding->owner->kind == ScopeKind::Block); } bool node_is_parameter_decl(const Node& node)
 { return node.line.compare(0, 10, "parameter ") == 0; } bool node_is_variable_decl(const Node& node)
@@ -46,7 +51,7 @@ record->scope != NULL && !scope_is_lambda_closure(record->scope)) return it->sec
 } return NULL; } void collect_lambda_local_bindings(const Node& node, set<Binding*>& out)
 { if ((node_is_parameter_decl(node) || node_is_variable_decl(node)) && node.binding != NULL) out.insert(node.binding);
 for (size_t i = 0; i < node.children.size(); ++i) collect_lambda_local_bindings(node.children[i], out); } void collect_lambda_capture_uses(const Node& node,
-set<Binding*>& excluded, set<Binding*>& out) { if (!node_is_parameter_decl(node) &&
+set<Binding*>& excluded, set<Binding*>& out) { if (!node_is_parameter_decl(node) && node_starts_with(node, "member-expression") && node.binding != NULL && node.binding->owner != NULL && scope_is_lambda_closure(node.binding->owner)) { out.insert(node.binding); return; } if (!node_is_parameter_decl(node) &&
 lambda_capture_binding_candidate(node.binding) && excluded.count(node.binding) == 0) out.insert(node.binding); for (size_t i = 0; i < node.children.size(); ++i)
 collect_lambda_capture_uses(node.children[i], excluded, out); } Node lambda_capture_id_node(Binding* binding) {
 Node node("id-expression lvalue " + pa11::describe_type(binding->type) + " " + binding->name); node.binding = binding; node.type = binding->type;
@@ -84,7 +89,7 @@ Expr operand = parse_expression(); expect(OP_RPAREN); operand_type = expression_
 "std", pa11::LOOKUP_NAMESPACE); Scope* std_scope = std_binding != NULL ? std_binding->target_scope : NULL;
 Binding* type_info = std_scope != NULL ? pa11::lookup_qualified(std_scope, "type_info",
 pa11::LOOKUP_TYPE) : NULL; if (type_info != NULL && type_info->type.get() != NULL) type_info_type = pa11::make_cv(type_info->type, pa11::CV_CONST);
-else type_info_type = pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST); Expr out;
+else throw runtime_error("typeid requires declared std::type_info"); Expr out;
 out.valid = true; out.type = type_info_type; out.category = ValueCategory::LValue; out.node = Node("typeid-expression lvalue " +
 pa11::describe_type(out.type)); out.node.type = out.type; out.node.category = out.category; out.node.token_text = pa11::describe_type(operand_type);
 add_child(out.node, operand_node); annotate_expr_node(out); return out; }
@@ -125,7 +130,7 @@ suffix = parse_function_suffix(); bool mutable_lambda = consume(KW_MUTABLE); if 
 size_t signature_end_token = pos_; TypePtr result = suffix.trailing_return.get() != NULL ? suffix.trailing_return : pa11::make_fundamental(FT_VOID);
 vector<TypePtr> params; for (size_t i = 0; i < suffix.parameters.size(); ++i) params.push_back(suffix.parameters[i].type); TypePtr function_type =
 pa11::make_function(result, params, suffix.variadic); function_type->cv = suffix.function_cv; string name = "__lambda"; if (!active_functions_.empty())
-name += "_" + qualified_decl_name(active_functions_.back()); name += "_t" + to_string(close_bracket_token) + "_" + to_string(signature_end_token); Binding* context_function =
+{ Binding* active = active_functions_.back(); name += "_" + qualified_decl_name(active); map<Binding*, vector<TemplateArgument> >::const_iterator spec_args = function_template_specialization_arguments_.find(active); if (spec_args != function_template_specialization_arguments_.end()) for (size_t ai = 0; ai < spec_args->second.size(); ++ai) name += "__" + lambda_specialization_name_part(spec_args->second[ai]); } name += "_t" + to_string(close_bracket_token) + "_" + to_string(signature_end_token); Binding* context_function =
 active_functions_.empty() ? NULL : active_functions_.back(); size_t ordinal = lambda_counts_[context_function]++; Scope* closure_parent = current_scope(); Scope* closure_scope =
 pa11::create_child_scope(closure_parent, ScopeKind::Class, name); TypePtr closure = add_record(closure_parent, name, "class", true, closure_scope); TypePtr operator_function_type = pa11::make_function(result,
 params, suffix.variadic); operator_function_type->cv = mutable_lambda ? pa11::CV_NONE :
@@ -215,14 +220,9 @@ if (consume(OP_LSQUARE)) { array_new = true; bound = parse_expression();
 expect(OP_RSQUARE); } vector<Expr> args; bool have_initializer_parens = false;
 if (consume(OP_LPAREN)) { have_initializer_parens = true; if (!at(OP_RPAREN))
 args = parse_argument_list(); expect(OP_RPAREN); } TypePtr record = pa11::strip_cv(type);
-Binding* ctor = NULL; if (!array_new && record->kind == pa11::TypeKind::Record && record->scope != NULL) { complete_template_record(record);
-map<string, vector<Binding*> >::const_iterator found = record->scope->members.find(record->scope->name); if (found != record->scope->members.end()) {
-for (size_t i = 0; i < found->second.size(); ++i) { Binding* candidate = found->second[i]; if (candidate->kind == BindingKind::Function &&
-candidate->type->parameters.size() == args.size() + 1) { ctor = candidate; break;
-} } } if (ctor == NULL && args.empty())
-ctor = ensure_default_constructor(record, true); bool dependent_new_args = false; for (size_t i = 0; i < args.size(); ++i) if (type_is_template_dependent(args[i].type) ||
-args[i].pack_expansion) dependent_new_args = true; if (ctor == NULL && !type_is_template_dependent(record) &&
-!dependent_new_args) throw runtime_error("no matching constructor for new " + pa11::describe_type(type)); if (ctor != NULL && unevaluated_expression_depth_ == 0)
+Binding* ctor = NULL; if (!array_new && record->kind == pa11::TypeKind::Record && record->scope != NULL) { bool dependent_new_args = false; for (size_t i = 0; i < args.size(); ++i) if (type_is_template_dependent(args[i].type) ||
+args[i].pack_expansion) dependent_new_args = true; if (!type_is_template_dependent(record) && !dependent_new_args) { vector<Expr> converted; ctor = resolve_constructor_candidate(record, args, false, converted); args = converted;
+} else if (args.empty()) ctor = ensure_default_constructor(record, true); if (ctor != NULL && unevaluated_expression_depth_ == 0)
 { parse_pending_function_body(ctor); parse_pending_member_body(ctor); }
 } Binding* opnew = NULL; if (have_placement) {
 vector<Binding*> news = lookup_unqualified_set(current_scope(), "operatornew", pa11::LOOKUP_FUNCTION); for (size_t i = 0; i < news.size(); ++i) {

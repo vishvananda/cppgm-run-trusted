@@ -17,7 +17,17 @@ return true; default: return false; }
 { case FT_UNSIGNED_CHAR: case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT:
 case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: case FT_CHAR16_T: case FT_CHAR32_T:
 case FT_BOOL: return true; default: return false;
-} } string scalar_lowir_type(TypePtr type) {
+} } bool is_initializer_list_type(TypePtr type, TypePtr* element) {
+if (type.get() == NULL) return false; TypePtr bare = pa11::strip_cv(type);
+if (bare->kind != TypeKind::Record || !bare->is_template_specialization ||
+bare->template_primary_name != "initializer_list") return false;
+Scope* owner = bare->scope != NULL ? bare->scope->parent : NULL;
+if (owner == NULL || owner->kind != ScopeKind::Namespace || owner->name != "std") return false;
+if (bare->template_arguments.size() != 1 ||
+bare->template_arguments[0].kind != pa11::TemplateInstanceArgumentKind::Type) return false;
+if (element != NULL) *element = bare->template_arguments[0].type;
+return true;
+} string scalar_lowir_type(TypePtr type) {
 TypePtr bare = pa11::strip_cv(object_type(type)); if (is_reference(type)) return "ptr"; if (bare->kind == TypeKind::Pointer ||
 bare->kind == TypeKind::Function || bare->kind == TypeKind::Array) return "ptr"; if (bare->kind == TypeKind::Record)
 { ostringstream out; out << "obj<" << pa11::type_size(bare) << "x" << pa11::type_align(bare) << ">";
@@ -89,10 +99,10 @@ return false; } bool type_has_abi_indirect_special_member(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array) return type_has_abi_indirect_special_member(bare->base); if (bare->kind == TypeKind::Record)
 return record_has_abi_indirect_special_member(bare); return false; }
 }  // namespace
-bool record_pass_by_address(TypePtr type) { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record)
+bool record_pass_by_address(TypePtr type) { if (is_initializer_list_type(type, NULL)) return false; TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record)
 return false; if (pa11::type_size(bare) > 16) return true; return record_has_abi_indirect_special_member(bare);
 } bool record_return_by_address(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
-if (bare->kind != TypeKind::Record) return false; if (pa11::type_size(bare) > 16) return true;
+if (bare->kind != TypeKind::Record) return false; if (is_initializer_list_type(type, NULL)) return false; if (pa11::type_size(bare) > 16) return true;
 return record_has_user_copy_move_or_destructor(bare); } bool record_has_nontrivial_value_transfer(TypePtr type) {
 return record_has_user_copy_move_or_destructor(type); } bool record_has_storage_copy(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array) return record_has_storage_copy(bare->base); if (bare->kind != TypeKind::Record)
@@ -245,6 +255,9 @@ return ""; if (type->kind == TypeKind::Cv) { string prefix;
 if ((type->cv & pa11::CV_CONST) != 0) prefix += "K"; if ((type->cv & pa11::CV_VOLATILE) != 0) prefix += "V";
 return prefix + template_abi_component_for_type(type->base); } if (type->kind == TypeKind::LValueReference) return "R" + template_abi_component_for_type(type->base);
 if (type->kind == TypeKind::RValueReference) return "O" + template_abi_component_for_type(type->base); if (type->kind == TypeKind::Pointer) return "P" + template_abi_component_for_type(type->base);
+if (type->kind == TypeKind::Function) { string out = "F" + template_abi_component_for_type(type->base);
+for (size_t i = 0; i < type->parameters.size(); ++i) out += template_abi_component_for_type(type->parameters[i]);
+if (type->parameters.empty()) out += "v"; out += "E"; return out; }
 if (type->kind == TypeKind::Array) return "A" + (type->unknown_bound ? string("") : to_string(type->bound)) + "_" + template_abi_component_for_type(type->base); TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Fundamental) return template_abi_builtin_code(bare->fundamental); if (bare->kind == TypeKind::Record && record_is_template_specialization(bare))
 { string primary = !bare->template_primary_name.empty() ? bare->template_primary_name : (bare->scope != NULL ? bare->scope->name : bare->name);

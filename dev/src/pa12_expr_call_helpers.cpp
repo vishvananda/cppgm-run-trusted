@@ -309,18 +309,21 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 Expr Parser::make_dependent_call_expr(const Expr& callee,
                                       const vector<Expr>& args)
 {
-	for (map<Binding*, vector<TemplateArgument> >::const_iterator it =
-		     callee.explicit_template_arguments.begin();
-	     it != callee.explicit_template_arguments.end();
-	     ++it)
+	if (replaying_dependent_decltype_)
 	{
-		Binding* binding = it->first;
-		Binding* placeholder =
-			binding != NULL && binding->aliased_binding != NULL
-			? binding->aliased_binding : binding;
-		if (function_template_placeholders_.find(placeholder) !=
-		    function_template_placeholders_.end())
-			placeholder->reserve_primary_function_symbol = true;
+		for (map<Binding*, vector<TemplateArgument> >::const_iterator it =
+			     callee.explicit_template_arguments.begin();
+		     it != callee.explicit_template_arguments.end();
+		     ++it)
+		{
+			Binding* binding = it->first;
+			Binding* placeholder =
+				binding != NULL && binding->aliased_binding != NULL
+				? binding->aliased_binding : binding;
+			if (function_template_placeholders_.find(placeholder) !=
+			    function_template_placeholders_.end())
+				placeholder->reserve_primary_function_symbol = true;
+		}
 	}
 	Expr out;
 	TypePtr result;

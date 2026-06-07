@@ -140,7 +140,7 @@ if (binding == NULL || !binding->is_defaulted || binding->owner == NULL || bindi
 binding->type->kind != TypeKind::Function || binding->type->parameters.size() != 2 || !is_reference(binding->type->parameters[1])) return false;
 bool special = binding->name == binding->owner->name || binding->name == "operator="; if (!special) return false;
 for (size_t i = 0; i < fn_.children.size(); ++i) if (starts_with(fn_.children[i].line, "compound-statement") && !fn_.children[i].children.empty()) return false;
-TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return false; string other_name = "__param1";
+	TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return false; if (binding->name == binding->owner->name && pa11::strip_cv(record)->is_polymorphic) return false; string other_name = "__param1";
 if (fn_.children.size() > 1 && starts_with(fn_.children[1].line, "parameter ")) { other_name = fn_.children[1].line.substr(10);
 size_t space = other_name.find(' '); other_name = space == string::npos ? other_name : other_name.substr(0, space); if (other_name.empty())
 other_name = "__param1"; } if (binding->name == "operator=") {
@@ -183,8 +183,8 @@ suffix) == 0); } if (pa11::strip_cv(fn_.binding->type->base)->kind == TypeKind::
 node.children[i].children[0].binding != NULL && !earlier_return && node.children[i].children[0].binding == final_return_binding))) return_slot_variables_.insert(node.children[i].children[0].binding);
 lower_stmt(node.children[i]); } if (top_function_body && is_class_constructor_binding(fn_.binding) && !constructor_vptr_written)
 { TypePtr record = class_record_for_member(fn_.binding); if (record.get() != NULL) lower_vptr_store(record);
-} if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions); if (current_ != NULL && !current_->terminated)
-emit_scope_cleanups(cleanups_.back()); cleanups_.pop_back(); } void FunctionLowerer::lower_stmt(const Node& node)
+	} if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions); if (current_ != NULL && !current_->terminated) { bool ended_with_throw = false; for (size_t n = 0; n < current_->instrs.size(); ++n) { const string& inst = current_->instrs[current_->instrs.size() - 1 - n]; if (inst.find("@__external_runtime____cxa_throw") != string::npos) { ended_with_throw = true; break; } if (inst.find("eh_end") == string::npos) break; } if (!ended_with_throw) emit_scope_cleanups(cleanups_.back()); }
+cleanups_.pop_back(); } void FunctionLowerer::lower_stmt(const Node& node)
 { if (starts_with(node.line, "compound-statement")) lower_compound(node); else if (starts_with(node.line, "base-init-action"))
 lower_base_init(node); else if (starts_with(node.line, "member-init-action")) lower_member_init(node); else if (starts_with(node.line, "delegating-init-action"))
 lower_delegating_init(node); else if (starts_with(node.line, "storage-copy-action")) lower_storage_copy_action(node); else if (starts_with(node.line, "base-fini-action"))
@@ -296,12 +296,12 @@ lower_discarded_expr(increment); terminate("jump ^" + cond_block); break_targets
 start_block(end_block); return; } if (node.children.size() != 4)
 throw runtime_error("invalid range-for node"); const Node& range = node.children[0]; const Node& idx_var = node.children[1]; const Node& loop_var = node.children[2];
 const Node& body = node.children[3]; if (starts_with(range.line, "variable ")) lower_variable_decl(range); lower_variable_decl(idx_var);
-TypePtr array_type = object_type(range.type); TypePtr array_bare = pa11::strip_cv(array_type); if (array_bare->kind != TypeKind::Array || array_bare->unknown_bound) throw runtime_error("unsupported range-for");
-TypePtr element_type = array_bare->base; string cond_block = fresh_block("for_cond"); string body_block = fresh_block("for_body"); string iter_block = fresh_block("for_iter");
+TypePtr array_type = object_type(range.type); TypePtr array_bare = pa11::strip_cv(array_type); TypePtr initializer_list_element; bool initializer_list_range = is_initializer_list_type(array_type, &initializer_list_element); if (!initializer_list_range && (array_bare->kind != TypeKind::Array || array_bare->unknown_bound)) throw runtime_error("unsupported range-for");
+TypePtr element_type = initializer_list_range ? initializer_list_element : array_bare->base; string cond_block = fresh_block("for_cond"); string body_block = fresh_block("for_body"); string iter_block = fresh_block("for_iter");
 string end_block = fresh_block("for_end"); terminate("jump ^" + cond_block); start_block(cond_block); continue_targets_.push_back(iter_block);
-break_targets_.push_back(end_block); string idx_loaded = fresh_temp(); instr(idx_loaded + " = load i32 $" + slot_for(idx_var.binding)); string cmp = fresh_temp();
-instr(cmp + " = cmp lt i32 " + idx_loaded + ", " + to_string(array_bare->bound)); terminate("branch " + cmp + ", ^" + body_block + ", ^" + end_block); start_block(body_block);
-Value range_addr = ensure_pointer(emit_lvalue_addr(range)); string decay = fresh_temp(); instr(decay + " = unary decay ptr " + range_addr.text); string idx_body = fresh_temp();
+break_targets_.push_back(end_block); string idx_loaded = fresh_temp(); instr(idx_loaded + " = load i32 $" + slot_for(idx_var.binding)); string cmp;
+if (initializer_list_range) { Value range_addr = ensure_pointer(emit_lvalue_addr(range)); string size_addr = fresh_temp(); instr(size_addr + " = index i8 [projection=field] " + range_addr.text + ", 8"); string size_value = fresh_temp(); instr(size_value + " = load i64 " + size_addr); string idx64 = fresh_temp(); instr(idx64 + " = convert sext i64 i32 " + idx_loaded); cmp = fresh_temp(); instr(cmp + " = cmp lt i64 " + idx64 + ", " + size_value); } else { cmp = fresh_temp(); instr(cmp + " = cmp lt i32 " + idx_loaded + ", " + to_string(array_bare->bound)); } terminate("branch " + cmp + ", ^" + body_block + ", ^" + end_block); start_block(body_block);
+Value range_addr = ensure_pointer(emit_lvalue_addr(range)); string decay; if (initializer_list_range) { string begin_addr = fresh_temp(); instr(begin_addr + " = index i8 [projection=field] " + range_addr.text + ", 0"); decay = fresh_temp(); instr(decay + " = load ptr " + begin_addr); } else { decay = fresh_temp(); instr(decay + " = unary decay ptr " + range_addr.text); } string idx_body = fresh_temp();
 instr(idx_body + " = load i32 $" + slot_for(idx_var.binding)); string elem_addr_name = fresh_temp(); TypePtr elem_object = pa11::strip_cv(element_type); if (elem_object->kind == TypeKind::Record ||
 elem_object->kind == TypeKind::Array) { string scaled = fresh_temp(); instr(scaled + " = binary mul i64 " + idx_body + ", " +
 to_string(pa11::type_size(elem_object))); instr(elem_addr_name + " = index i8 [projection=array_element] " + decay + ", " + scaled); }
@@ -318,25 +318,145 @@ instr("store " + scalar_lowir_type(loop_type) + " " + value.text + ", $" + loop_
 if (!current_->terminated) terminate("jump ^" + iter_block); start_block(iter_block); string iter_loaded = fresh_temp();
 instr(iter_loaded + " = load i32 $" + slot_for(idx_var.binding)); string incremented = fresh_temp(); instr(incremented + " = binary add i32 " + iter_loaded + ", 1"); instr("store i32 " + incremented + ", $" + slot_for(idx_var.binding));
 terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.pop_back(); start_block(end_block);
-} void FunctionLowerer::lower_try(const Node& node) { if (node.children.size() != 2 ||
-node.children[0].children.empty() || !starts_with(node.children[1].line, "catch-clause") || node.children[1].children.empty()) throw runtime_error("unsupported try statement");
-const Node& protected_body = node.children[0].children[0]; const Node& catch_clause = node.children[1]; TypePtr catch_type = catch_clause.type; if (catch_type.get() == NULL)
-throw runtime_error("unsupported catch clause"); TypePtr catch_object = object_type(catch_type); program_.emit_typeinfo(catch_object); string rtti = program_.catch_rtti_symbol(catch_object);
-if (rtti.empty()) throw runtime_error("unsupported catch type"); demand_host_eh_declarations(program_, true); string dispatch = fresh_block("catch_dispatch");
-string entry = fresh_block("catch_entry"); string try_end = fresh_block("try_end"); string catch_body = fresh_block("catch_body"); string catch_next = fresh_block("catch_next");
-string catch_cleanup = fresh_block("catch_cleanup"); instr("eh_try ^" + dispatch); ++eh_try_depth_; cleanups_.push_back(vector<Cleanup>());
-cleanups_.back().push_back(Cleanup("eh_end")); lower_stmt(protected_body); cleanups_.pop_back(); --eh_try_depth_;
-if (!current_->terminated) { instr("eh_end"); terminate("jump ^" + try_end);
-} start_block(dispatch); instr("eh_catch @" + rtti + ", 1"); terminate("jump ^" + entry);
-start_block(entry); string exception = fresh_temp(); instr(exception + " = exception ptr"); string selector = fresh_temp();
-instr(selector + " = exception_selector i32"); string selected = fresh_temp(); instr(selected + " = cmp eq i32 " + selector + ", 1"); terminate("branch " + selected + ", ^" + catch_body + ", ^" +
-catch_next); start_block(catch_body); string caught = fresh_temp(); instr(caught +
-" = call ptr @__external_runtime____cxa_begin_catch(" + exception + ")"); instr("eh_cleanup ^" + catch_cleanup); cleanups_.push_back(vector<Cleanup>());
-cleanups_.back().push_back( Cleanup("call void @__external_runtime____cxa_end_catch()")); cleanups_.back().push_back(Cleanup("eh_end")); lower_stmt(catch_clause.children[0]);
-cleanups_.pop_back(); if (!current_->terminated) { instr("eh_end");
-instr("call void @__external_runtime____cxa_end_catch()"); terminate("jump ^" + try_end); } start_block(catch_cleanup);
-instr("call void @__external_runtime____cxa_end_catch()"); instr("eh_end"); terminate("resume"); start_block(catch_next);
-terminate("resume"); start_block(try_end); } void FunctionLowerer::lower_switch_items(const Node& node,
+	} void FunctionLowerer::lower_try(const Node& node) {
+	if (node.children.size() != 2 ||
+	    node.children[0].children.empty() ||
+	    !starts_with(node.children[1].line, "catch-clause") ||
+	    node.children[1].children.empty())
+		throw runtime_error("unsupported try statement");
+	const Node& protected_body = node.children[0].children[0];
+	const Node& catch_clause = node.children[1];
+	TypePtr catch_type = catch_clause.type;
+	bool catch_all = catch_clause.token_text == "catch-all";
+	string rtti;
+	if (!catch_all) {
+		if (catch_type.get() == NULL)
+			throw runtime_error("unsupported catch clause");
+		TypePtr catch_object = object_type(catch_type);
+		program_.emit_typeinfo(catch_object);
+		rtti = program_.catch_rtti_symbol(catch_object);
+		if (rtti.empty())
+			throw runtime_error("unsupported catch type");
+	}
+	demand_host_eh_declarations(program_, true);
+	string dispatch = fresh_block("catch_dispatch");
+	string entry = fresh_block("catch_entry");
+	string try_end = fresh_block("try_end");
+	string catch_body;
+	string catch_next;
+	string catch_cleanup;
+	for (size_t i = 0; i < active_catches_.size(); ++i) {
+		int selector = static_cast<int>(active_catches_.size() - i + 1);
+		if (active_catches_[i].selector < selector)
+			active_catches_[i].selector = selector;
+	}
+	ActiveCatchContext ctx;
+	ctx.rtti = rtti;
+	ctx.catch_all = catch_all;
+	ctx.entry = entry;
+	ctx.selector = 1;
+	active_catches_.push_back(ctx);
+	instr("eh_try ^" + dispatch);
+	++eh_try_depth_;
+	cleanups_.push_back(vector<Cleanup>());
+	cleanups_.back().push_back(Cleanup("eh_end"));
+	lower_stmt(protected_body);
+	cleanups_.pop_back();
+	--eh_try_depth_;
+	ctx = active_catches_.back();
+	active_catches_.pop_back();
+	catch_body = fresh_block("catch_body");
+	catch_next = fresh_block("catch_next");
+	catch_cleanup = fresh_block("catch_cleanup");
+	if (!current_->terminated) {
+			bool ended_with_throw = false;
+			for (size_t n = 0; n < current_->instrs.size(); ++n) {
+				const string& inst =
+					current_->instrs[current_->instrs.size() - 1 - n];
+				if (inst.find("@__external_runtime____cxa_throw") !=
+				    string::npos) {
+					ended_with_throw = true;
+					break;
+				}
+				if (inst.find("eh_end") == string::npos)
+					break;
+			}
+			instr("eh_end");
+			if (ended_with_throw) {
+			TypePtr ret = fn_.binding != NULL && fn_.binding->type.get() != NULL
+				? fn_.binding->type->base : pa11::make_fundamental(FT_VOID);
+			if (pa11::is_void_type(ret) ||
+			    pa11::strip_cv(ret)->kind == TypeKind::Record)
+				terminate("return void");
+			else
+				terminate("return " + scalar_lowir_type(ret) + " 0");
+		} else
+			terminate("jump ^" + try_end);
+	}
+	start_block(dispatch);
+	emit_active_catch_clause(ctx);
+	terminate("jump ^" + entry);
+	start_block(entry);
+	string exception = fresh_temp();
+	instr(exception + " = exception ptr");
+	string selector = fresh_temp();
+	instr(selector + " = exception_selector i32");
+	string selected = fresh_temp();
+	instr(selected + " = cmp eq i32 " + selector + ", " +
+	      to_string(ctx.selector));
+	terminate("branch " + selected + ", ^" + catch_body + ", ^" +
+	          catch_next);
+	start_block(catch_body);
+	string caught = fresh_temp();
+	instr(caught + " = call ptr @__external_runtime____cxa_begin_catch(" +
+	      exception + ")");
+	if (catch_clause.binding != NULL) {
+		string catch_slot = fresh_aux_slot("catch", "ptr");
+		instr("store ptr " + caught + ", $" + catch_slot);
+	}
+	instr("eh_cleanup ^" + catch_cleanup);
+	if (catch_clause.binding != NULL) {
+		string local_slot = slot_for(catch_clause.binding);
+		if (is_reference(catch_clause.binding->type))
+			instr("store ptr " + caught + ", $" + local_slot);
+		else {
+			string loaded = fresh_temp();
+			instr(loaded + " = load " +
+			      scalar_lowir_type(catch_clause.binding->type) + " " +
+			      caught);
+			instr("store " + scalar_lowir_type(catch_clause.binding->type) +
+			      " " + loaded + ", $" + local_slot);
+		}
+	}
+	cleanups_.push_back(vector<Cleanup>());
+	cleanups_.back().push_back(
+		Cleanup("call void @__external_runtime____cxa_end_catch()"));
+	cleanups_.back().push_back(Cleanup("eh_end"));
+	lower_stmt(catch_clause.children[0]);
+	cleanups_.pop_back();
+	if (!current_->terminated) {
+		instr("eh_end");
+		instr("call void @__external_runtime____cxa_end_catch()");
+		terminate("jump ^" + try_end);
+	}
+	start_block(catch_cleanup);
+	if (!active_catches_.empty())
+		emit_active_catch_clause(active_catches_.back());
+	instr("call void @__external_runtime____cxa_end_catch()");
+	instr("eh_end");
+	if (!active_catches_.empty()) {
+		instr("eh_end");
+		terminate("jump ^" + active_catches_.back().entry);
+	} else
+		terminate("resume");
+	start_block(catch_next);
+	if (!active_catches_.empty()) {
+		emit_unwind_object_cleanups();
+		terminate("jump ^" + active_catches_.back().entry);
+	} else
+		terminate("resume");
+	start_block(try_end);
+	} void FunctionLowerer::lower_switch_items(const Node& node,
 vector<pair<string, const Node*> >& cases, const Node*& default_node) { if (starts_with(node.line, "switch-statement"))
 return; if (starts_with(node.line, "case-statement")) cases.push_back(make_pair(lowir_literal(node.children[0].type, node.children[0]), &node));
 else if (starts_with(node.line, "default-statement")) default_node = &node; for (size_t i = 0; i < node.children.size(); ++i) lower_switch_items(node.children[i], cases, default_node);

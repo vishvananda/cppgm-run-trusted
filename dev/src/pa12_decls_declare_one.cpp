@@ -264,9 +264,11 @@ Binding* Parser::declare_one(const DeclSpecs& specs,
                              const Expr* init,
                              bool function_definition,
                              Node& out)
-{ Expr lambda_closure_init; if (specs.auto_decl && init != NULL &&
+{ Expr lambda_closure_init; Expr initializer_list_init; if (specs.auto_decl && init != NULL &&
 is_lambda_helper_expr(*init) && ((specs.cv != pa11::CV_NONE) ||
 specs.constexpr_decl || lambda_requires_closure_object_.count(init->binding) != 0)) { lambda_closure_init = lambda_closure_expr(*init); init = &lambda_closure_init; }
+if (specs.auto_decl && init != NULL && init->braced_init_list &&
+    init->type.get() == NULL) { initializer_list_init = make_initializer_list_expr(*init, TypePtr()); init = &initializer_list_init; }
 const QualifiedName& qname = declarator_name(declarator); Scope* target = qname.qualifier != NULL ? qname.qualifier : current_scope(); Scope* friend_class_scope =
 specs.friend_decl && current_scope()->kind == ScopeKind::Class ? current_scope() : NULL; bool hidden_friend = friend_class_scope != NULL && qname.qualifier == NULL;
 if (friend_class_scope != NULL && qname.qualifier == NULL) target = nearest_namespace_scope(friend_class_scope); bool auto_function_declarator = specs.auto_decl && declarator_declares_function_type(declarator);

@@ -65,6 +65,8 @@ TypePtr left = pa11::strip_cv(lhs); TypePtr right = pa11::strip_cv(rhs); if (op 
 if (left->kind == pa11::TypeKind::Pointer) return pa11::is_integral_or_bool_type(right); return type_is_arithmetic(left) && type_is_arithmetic(right); }
 if (op == OP_STARASS || op == OP_DIVASS) return type_is_arithmetic(left) && type_is_arithmetic(right); if (op == OP_MODASS || op == OP_XORASS || op == OP_BANDASS || op == OP_BORASS || op == OP_LSHIFTASS || op == OP_RSHIFTASS)
 return pa11::is_integral_or_bool_type(left) && pa11::is_integral_or_bool_type(right); return false; }
+bool node_line_starts(const Node& node, const string& prefix)
+{ return node.line.size() >= prefix.size() && node.line.compare(0, prefix.size(), prefix) == 0; }
 }  // namespace
 Expr Parser::make_builtin_id_expr(const QualifiedName& name) { if ((name.name == "operatornew" || name.name == "operatornew[]" ||
 name.name == "operatordelete" || name.name == "operatordelete[]") && (!name.qualified || name.qualifier == global_scope())) {
@@ -96,7 +98,14 @@ result = void_ptr; } TypePtr fn = pa11::make_function(result, params, false); bi
 out.type = binding->type; out.category = ValueCategory::LValue; out.overloads.push_back(binding); out.node = Node("id-expression lvalue " +
 pa11::describe_type(out.type) + " " + binding->name); annotate_expr_node(out); return out; }
 return Expr(); } Expr Parser::make_binary_expr(ETokenType op, const string& text,
-Expr lhs, Expr rhs) { Expr pack; if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack; vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs); Expr builtin_converted; bool have_builtin_converted = make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted); TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
+Expr lhs, Expr rhs) { Expr pack; if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack; if ((op == OP_EQ || op == OP_NE) && node_line_starts(lhs.node, "typeid-expression") && node_line_starts(rhs.node, "typeid-expression"))
+{ TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); string opname = operator_function_name(op, text);
+if (left_object->kind != pa11::TypeKind::Record || left_object->scope == NULL || lookup_qualified_set(left_object->scope, opname, pa11::LOOKUP_FUNCTION).empty())
+throw runtime_error("typeid comparison requires declared std::type_info operator");
+Expr out; out.type = pa11::make_fundamental(FT_BOOL); out.category = ValueCategory::PRValue; out.valid = true;
+out.node = Node("binary-expression prvalue bool " + op_leaf(op, text)); add_child(out.node, lhs.node); add_child(out.node, rhs.node);
+out.node.has_op = true; out.node.op = op; out.node.token_text = text; annotate_expr_node(out); return out; }
+vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs); Expr builtin_converted; bool have_builtin_converted = make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted); TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
 bool enum_operand = left_object->kind == pa11::TypeKind::Enum || right_object->kind == pa11::TypeKind::Enum; bool enum_integral_mix = (left_object->kind == pa11::TypeKind::Enum && right_object->kind != pa11::TypeKind::Enum && pa11::is_integral_or_bool_type(right_object)) || (right_object->kind == pa11::TypeKind::Enum && left_object->kind != pa11::TypeKind::Enum && pa11::is_integral_or_bool_type(left_object)); if (have_builtin_converted && left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record) return builtin_converted; if (left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record && (!enum_operand || enum_integral_mix)) candidates.clear(); bool candidate_accepts_operands = false;
 for (size_t i = 0; i < candidates.size(); ++i) if (function_template_placeholders_.find(candidates[i]) != function_template_placeholders_.end() || binary_candidate_accepts_operands(candidates[i], lhs, rhs)) candidate_accepts_operands = true; if (have_builtin_converted && !candidate_accepts_operands) return builtin_converted; if (!candidates.empty()) { Expr callee; callee.valid = true; callee.binding = candidates[0]; callee.type = candidates[0]->type; callee.category = ValueCategory::LValue; callee.overloads = candidates; callee.node = Node("id-expression lvalue " + pa11::describe_type(callee.type) + " " + candidates[0]->name); annotate_expr_node(callee); vector<Expr> args; args.push_back(lhs); args.push_back(rhs); try { return make_call_expr(callee, args); } catch (const runtime_error&) { } }
 TypePtr left_record = pa11::strip_cv(expression_object_type(lhs.type)); if (left_record->kind == pa11::TypeKind::Record && left_record->scope != NULL) { string opname = operator_function_name(op, text); vector<Binding*> members = lookup_qualified_set(left_record->scope, opname, pa11::LOOKUP_FUNCTION); if (!members.empty()) { Expr callee = make_member_expr(lhs, opname, "."); vector<Expr> args; args.push_back(rhs); return make_call_expr(callee, args); } } if (have_builtin_converted) return builtin_converted; if (op == OP_LAND || op == OP_LOR) { ++explicit_conversion_context_; Conversion left_bool; Conversion right_bool; try { left_bool = convert_to(lhs, pa11::make_fundamental(FT_BOOL)); right_bool = convert_to(rhs, pa11::make_fundamental(FT_BOOL)); } catch (...) { --explicit_conversion_context_; throw; } --explicit_conversion_context_; if (!left_bool.viable || !right_bool.viable) throw runtime_error("invalid logical conversion"); lhs = left_bool.expr; rhs = right_bool.expr; } else { static const EFundamentalType targets[] = { FT_INT, FT_UNSIGNED_INT, FT_LONG_INT, FT_UNSIGNED_LONG_INT, FT_LONG_LONG_INT, FT_UNSIGNED_LONG_LONG_INT, FT_SHORT_INT, FT_UNSIGNED_SHORT_INT, FT_CHAR, FT_SIGNED_CHAR, FT_UNSIGNED_CHAR, FT_BOOL, FT_FLOAT, FT_DOUBLE, FT_LONG_DOUBLE }; if (pa11::strip_cv(expression_object_type(lhs.type))->kind == pa11::TypeKind::Record) { for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) { Conversion conv; try { conv = convert_to(lhs, pa11::make_fundamental(targets[i])); } catch (const runtime_error&) { continue; } if (conv.viable) { lhs = conv.expr; break; } } } if (pa11::strip_cv(expression_object_type(rhs.type))->kind == pa11::TypeKind::Record) { for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) { Conversion conv; try { conv = convert_to(rhs, pa11::make_fundamental(targets[i])); } catch (const runtime_error&) { continue; } if (conv.viable) { rhs = conv.expr; break; } } } } TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type); TypePtr type = arithmetic_type;
@@ -201,6 +210,16 @@ if (string(err.what()).compare(0, 28, "cannot resolve call overload") != 0) thro
 vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, opname, pa11::LOOKUP_FUNCTION); if (members.empty()) return Expr();
 Expr callee = make_member_expr(lhs, opname, "."); vector<Expr> args; args.push_back(rhs); return make_call_expr(callee, args);
 } Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare) { bool move_assign = rhs.category != ValueCategory::LValue;
+if (rhs.braced_init_list && rhs.type.get() == NULL) { if (!type_is_template_dependent(lhs_bare)) instantiate_member_function_templates(lhs_bare);
+vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION); vector<Binding*> declared_members; for (size_t i = 0; i < members.size(); ++i)
+if (!members[i]->is_generated_copy_move_assignment) declared_members.push_back(members[i]); if (!declared_members.empty()) {
+Expr callee = make_member_expr(lhs, "operator=", "."); callee.binding = declared_members[0]; callee.type = declared_members[0]->type; callee.overloads = declared_members;
+callee.node.binding = declared_members[0]; callee.node.type = declared_members[0]->type; vector<Expr> args; args.push_back(rhs);
+try { return make_call_expr(callee, args); }
+catch (const runtime_error& err) { if (string(err.what()).compare(0, 28, "cannot resolve call overload") != 0)
+throw; } } rhs.type = lhs_bare; rhs.category = ValueCategory::PRValue; rhs.node.type = lhs_bare;
+rhs.node.category = rhs.category; if (rhs.node.children.empty()) rhs.node.direct_call = ensure_default_constructor(lhs_bare, true); ensure_default_destructor(lhs_bare);
+annotate_expr_node(rhs); }
 TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type)); if (rhs_bare->kind == pa11::TypeKind::Record && pa11::same_type(rhs_bare, lhs_bare)) {
 Binding* op_binding = ensure_copy_move_assignment(lhs_bare, move_assign); if (op_binding == NULL && move_assign) op_binding = ensure_copy_move_assignment(lhs_bare, false); if (op_binding == NULL)
 throw runtime_error("copy assignment is deleted"); if (deleted_functions_.find(op_binding) != deleted_functions_.end()) throw runtime_error("call to deleted function"); Expr callee = make_member_expr(lhs, "operator=", ".");
@@ -218,10 +237,7 @@ if (op_binding == NULL && move_assign) op_binding = ensure_copy_move_assignment(
 Expr callee = make_member_expr(lhs, "operator=", "."); vector<Expr> args; args.push_back(rhs); return make_call_expr(callee, args);
 } Expr Parser::make_assignment_expr(ETokenType op, const string& text, Expr lhs,
 Expr rhs) { TypePtr lhs_type = expression_object_type(lhs.type); TypePtr lhs_bare = pa11::strip_cv(lhs_type);
-if (op == OP_ASS && rhs.braced_init_list && rhs.type.get() == NULL && lhs_bare->kind == pa11::TypeKind::Record)
-{ rhs.type = lhs_type; rhs.category = ValueCategory::PRValue; rhs.node.type = lhs_type;
-rhs.node.category = rhs.category; if (rhs.node.children.empty()) rhs.node.direct_call = ensure_default_constructor(lhs_type, true); ensure_default_destructor(lhs_type);
-annotate_expr_node(rhs); } if (op != OP_ASS) {
+if (op != OP_ASS) {
 Expr overloaded = make_overloaded_compound_assignment_expr(op, text, lhs,
 rhs, lhs_bare); if (overloaded.valid) return overloaded;
 } if (op == OP_ASS && lhs_bare->kind == pa11::TypeKind::Record && lhs_bare->scope != NULL)

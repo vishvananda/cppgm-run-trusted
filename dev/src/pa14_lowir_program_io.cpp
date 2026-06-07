@@ -163,6 +163,79 @@ void write_function_out(ostream& out, const FunctionOut& fn)
 	out << "}";
 }
 
+bool lowir_symbol_char(char ch)
+{
+	return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+}
+
+bool text_references_symbol(const string& text, const string& name)
+{
+	string needle = "@" + name;
+	size_t pos = 0;
+	while ((pos = text.find(needle, pos)) != string::npos)
+	{
+		size_t after = pos + needle.size();
+		if (after == text.size() || !lowir_symbol_char(text[after]))
+			return true;
+		pos = after;
+	}
+	return false;
+}
+
+bool output_references_function(const ProgramLowerer& program,
+                                const string& name,
+                                size_t self_index)
+{
+	for (size_t i = 0; i < program.globals.size(); ++i)
+		if (text_references_symbol(program.globals[i], name))
+			return true;
+	for (size_t i = 0; i < program.functions.size(); ++i)
+	{
+		if (i == self_index)
+			continue;
+		const FunctionOut& fn = program.functions[i];
+		for (size_t b = 0; b < fn.blocks.size(); ++b)
+			for (size_t j = 0; j < fn.blocks[b].instrs.size(); ++j)
+				if (text_references_symbol(fn.blocks[b].instrs[j],
+				                           name))
+					return true;
+	}
+	return false;
+}
+
+bool skip_unreferenced_base_entry(const ProgramLowerer& program,
+                                  size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
+	const FunctionOut& fn = program.functions[function_index];
+	TypePtr record = class_record_for_member(fn.binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	const string& name = fn.name;
+	return name.find("__base_entry") != string::npos &&
+	       fn.binding != NULL &&
+	       (fn.binding->is_generated_default_constructor ||
+	        fn.binding->is_generated_aggregate_constructor) &&
+	       record.get() != NULL &&
+	       record->is_polymorphic &&
+	       !output_references_function(program, name, function_index);
+}
+
+bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
+                                           size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
+	const FunctionOut& fn = program.functions[function_index];
+	TypePtr record = class_record_for_member(fn.binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return fn.binding != NULL &&
+	       fn.binding->is_generated_copy_move_constructor &&
+	       record.get() != NULL &&
+	       record->is_polymorphic &&
+	       !output_references_function(program, fn.name, function_index);
+}
+
 }  // namespace
 
 void ProgramLowerer::demand_function_declaration(const Binding* binding)
@@ -326,15 +399,22 @@ void ProgramLowerer::write(const string& outfile) const
 	for (size_t i = 0; i < globals.size(); ++i)
 		out << globals[i] << "\n\n";
 	vector<size_t> function_order = ordered_function_indices(*this);
+	bool wrote_function = false;
 	for (size_t order_i = 0; order_i < function_order.size(); ++order_i)
 	{
+		if (skip_unreferenced_base_entry(*this, function_order[order_i]))
+			continue;
+		if (skip_unreferenced_generated_copy_move(*this,
+		                                          function_order[order_i]))
+			continue;
+		if (wrote_function)
+			out << "\n\n";
 		const FunctionOut& fn = functions[function_order[order_i]];
 		write_function_out(out, fn);
-		if (order_i + 1 != function_order.size())
-			out << "\n\n";
-		else
-			out << "\n";
+		wrote_function = true;
 	}
+	if (wrote_function)
+		out << "\n";
 	if ((needs_empty_init_function || !init_actions.empty()) &&
 	    defined_functions.find("__cppgm_init") == defined_functions.end())
 	{

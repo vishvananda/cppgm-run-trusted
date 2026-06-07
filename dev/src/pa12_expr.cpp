@@ -433,6 +433,25 @@ Expr Parser::parse_expression()
 
 Expr Parser::parse_assignment_expression()
 {
+	if (consume(KW_THROW))
+	{
+		Expr out;
+		out.type = pa11::make_fundamental(FT_VOID);
+		out.category = ValueCategory::PRValue;
+		out.valid = true;
+		out.node = Node("throw-expression prvalue void");
+		if (!at(OP_SEMICOLON) && !at(OP_RPAREN))
+		{
+			Expr operand = parse_assignment_expression();
+			TypePtr object = pa11::strip_cv(expression_object_type(operand.type));
+			if (object->kind == pa11::TypeKind::Record)
+				ensure_copy_move_constructor(
+					object, operand.category == ValueCategory::XValue);
+			add_child(out.node, operand.node);
+		}
+		annotate_expr_node(out);
+		return out;
+	}
 	Expr lhs = parse_conditional_expression();
 	ETokenType op = OP_ASS;
 	if (is_assignment_operator(op))

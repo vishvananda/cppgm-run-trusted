@@ -107,6 +107,7 @@ TypePtr strip_for_value(TypePtr type);
 bool is_reference(TypePtr type);
 bool is_float_type(TypePtr type);
 bool is_unsigned_type(TypePtr type);
+bool is_initializer_list_type(TypePtr type, TypePtr* element = NULL);
 string scalar_lowir_type(TypePtr type);
 int lowir_arithmetic_rank(TypePtr type);
 TypePtr lowir_integral_promotion(TypePtr type);
@@ -212,9 +213,10 @@ struct ProgramLowerer
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
 	string destructor_symbol_for(const Binding* binding, bool base_entry);
 	string string_symbol(const string& token_text);
-	void demand_vtable(TypePtr record);
+	void demand_vtable(TypePtr record, bool include_bases = true);
 	void emit_rtti(TypePtr record);
 	void emit_typeinfo(TypePtr type);
+	string typeid_rtti_symbol(TypePtr type);
 	string catch_rtti_symbol(TypePtr type);
 	void emit_deleting_destructor_entry(const Binding* dtor);
 	void register_inline_definition(const Node& node);
@@ -306,16 +308,67 @@ struct ProgramLowerer
 	void write(const string& outfile) const;
 };
 
-vector<size_t> ordered_function_indices(const ProgramLowerer& program);
+	vector<size_t> ordered_function_indices(const ProgramLowerer& program);
 
-class FunctionLowerer
-{
+	struct ActiveCatchContext
+	{
+		string rtti;
+		bool catch_all;
+		string entry;
+		int selector;
+		ActiveCatchContext()
+			: catch_all(false), selector(1)
+		{
+		}
+	};
+
+	class FunctionLowerer
+	{
 public:
 	FunctionLowerer(ProgramLowerer& program, const Node& fn);
 
 	FunctionOut lower();
 
 private:
+	struct CallEmissionState
+	{
+		Binding* direct;
+		size_t arg_start;
+		string callee;
+		TypePtr callee_type;
+		bool virtual_call;
+		bool delay_direct_demand;
+		string ret;
+		string preallocated_call_slot;
+		vector<string> args;
+		vector<pair<Value, TypePtr> > temp_cleanups;
+		bool setup_may_create_temp_cleanup;
+		bool protect_setup_only;
+		bool protected_setup;
+		string protected_dispatch;
+		bool protected_define_dispatch;
+		bool temp_cleanup_region_open;
+		string temp_cleanup_dispatch;
+		string temp_cleanup_end;
+		string call_text;
+		string tmp;
+		bool cleanup_temps_in_call;
+
+		CallEmissionState()
+			: direct(NULL),
+			  arg_start(1),
+			  virtual_call(false),
+			  delay_direct_demand(false),
+			  setup_may_create_temp_cleanup(false),
+			  protect_setup_only(false),
+			  protected_setup(false),
+			  protected_define_dispatch(false),
+			  temp_cleanup_region_open(false),
+			  cleanup_temps_in_call(false)
+		{
+		}
+	};
+
 	ProgramLowerer& program_;
 	const Node& fn_;
 	FunctionOut out_;
@@ -346,8 +399,9 @@ private:
 	string record_return_slot_;
 	bool lowering_record_return_object_;
 	bool lowering_array_subobject_init_;
-	bool constructor_destination_before_protected_try_;
-	string active_unwind_dispatch_;
+		bool constructor_destination_before_protected_try_;
+		string active_unwind_dispatch_;
+		vector<ActiveCatchContext> active_catches_;
 
 	void add_slot(const string& name, const string& type);
 	string slot_for(const Binding* binding);
@@ -390,8 +444,10 @@ private:
 	void lower_destructor_for_object(const function<Value()>& addr_for,
 	                                 TypePtr type);
 	bool type_needs_cleanup(TypePtr type) const;
-	void lower_scope_destructor_for_object(const function<Value()>& addr_for,
-	                                       TypePtr type);
+		void lower_scope_destructor_for_object(const function<Value()>& addr_for,
+		                                       TypePtr type);
+		void emit_active_catch_clause(const ActiveCatchContext& ctx);
+		void emit_unwind_object_cleanups();
 	void lower_member_fini(const Node& node);
 	void lower_base_fini(const Node& node);
 	void lower_member_init(const Node& node);
@@ -419,9 +475,27 @@ private:
 		void lower_object_init(const function<Value()>& addr_for,
 		                       TypePtr type,
 		                       const Node& init);
+		void lower_record_object_init(const function<Value()>& addr_for,
+		                              TypePtr type,
+		                              const Node& init);
+		bool lower_record_base_cast_init(const function<Value()>& addr_for,
+		                                 TypePtr type,
+		                                 const Node& init);
+		bool lower_record_conditional_init(const function<Value()>& addr_for,
+		                                   TypePtr type,
+		                                   const Node& init);
+		bool lower_record_same_type_init(const function<Value()>& addr_for,
+		                                 TypePtr type,
+		                                 const Node& init);
+		void lower_scalar_object_init(const function<Value()>& addr_for,
+		                              TypePtr type,
+		                              const Node& init);
 		bool lower_braced_object_init(const function<Value()>& addr_for,
 		                              TypePtr type,
 		                              const Node& init);
+		bool lower_initializer_list_init(const function<Value()>& addr_for,
+		                                 TypePtr type,
+		                                 const Node& init);
 		bool lower_braced_direct_constructor_init(
 			const function<Value()>& addr_for,
 			TypePtr type,
@@ -509,6 +583,23 @@ private:
 	Value emit_unary(const Node& expr);
 	Value emit_postfix(const Node& expr);
 	Value emit_call(const Node& expr);
+	void init_call_target(const Node& expr, CallEmissionState& call);
+	void preallocate_call_result_slot(const Node& expr,
+	                                  CallEmissionState& call);
+	void prepare_call_setup_protection(const Node& expr,
+	                                   CallEmissionState& call);
+	void lower_call_arguments(const Node& expr, CallEmissionState& call);
+	void finish_setup_only_protection(CallEmissionState& call);
+	void resolve_call_callee(const Node& expr, CallEmissionState& call);
+	bool emit_record_return_call(CallEmissionState& call, Value& out);
+	void build_scalar_call(CallEmissionState& call);
+	bool emit_protected_setup_scalar_call(CallEmissionState& call,
+	                                      Value& out);
+	bool emit_temp_cleanup_scalar_call(CallEmissionState& call,
+	                                   Value& out);
+	bool emit_active_cleanup_scalar_call(CallEmissionState& call,
+	                                     Value& out);
+	Value emit_plain_scalar_call(CallEmissionState& call);
 	bool lower_indirect_record_call(const function<Value()>& addr_for,
 	                                const Node& expr);
 	void lower_call_argument(const Node& arg,
@@ -537,6 +628,25 @@ private:
 	                                 vector<string>& args);
 	Value emit_subscript_addr(const Node& expr);
 	Value emit_cast(const Node& expr);
+	Value emit_dynamic_cast(const Node& expr, bool reference_result);
+	Value emit_throw(const Node& expr);
+	void ensure_throw_runtime_declarations();
+	void ensure_rethrow_runtime_declaration();
+	void emit_rethrow();
+	string ensure_exception_object_global(TypePtr object);
+	string emit_exception_allocation(TypePtr object,
+	                                 bool protect_throw,
+	                                 string& throw_dispatch);
+	void lower_throw_operand(Value allocation,
+	                         TypePtr object,
+	                         const Node& operand);
+	string throw_destructor_argument(TypePtr object);
+	void emit_throw_runtime_call(const string& allocation,
+	                             const string& rtti,
+	                             TypePtr object,
+	                             bool protect_throw,
+	                             const string& throw_dispatch);
+	Value emit_typeid_lvalue_addr(const Node& expr);
 	Value emit_conditional(const Node& expr);
 	Value emit_conditional_value(const Node& expr);
 	Value convert_value(Value value,

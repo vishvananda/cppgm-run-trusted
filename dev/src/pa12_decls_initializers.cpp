@@ -21,6 +21,8 @@ if (floating_fundamental(src) && floating_fundamental(dst) && pa11::type_size(ds
 }  // namespace
 void Parser::apply_braced_variable_initializer(Scope* target, Binding* variable, TypePtr type, const Expr& init,
 Node& var) { Node list = init.node; TypePtr record = pa11::strip_cv(type);
+if (init.type.get() == NULL && is_std_initializer_list_type(type, NULL))
+{ Expr converted = make_initializer_list_expr(init, type); if (target->kind == ScopeKind::Class && !variable->is_static_member) default_member_initializers_[variable] = converted.node; add_child(var, converted.node); return; }
 if (record->kind != pa11::TypeKind::Record && record->kind != pa11::TypeKind::Array) { if (type_is_template_dependent(type))
 { list.line += " lvalue " + pa11::describe_type(type); list.type = type; if (target->kind == ScopeKind::Class && !variable->is_static_member)
 default_member_initializers_[variable] = list; add_child(var, list); return; }
@@ -113,12 +115,20 @@ if (pa11::is_reference_type(type)) { if (conv.expr.binding != NULL) return;
 if (try_evaluate_constexpr_expr(conv.expr.node, value) && (value.is_object || value.is_pointer)) return; }
 if (bare->kind == pa11::TypeKind::Pointer && try_evaluate_constexpr_expr(conv.expr.node, value) && value.is_pointer) return;
 throw runtime_error("constexpr initializer is not constant"); } } void Parser::apply_variable_initializer(const DeclSpecs& specs,
-Scope* target, Binding* variable, TypePtr type, const Expr* init,
-Node& var) { if (init != NULL && init->copy_initialization &&
-pa11::strip_cv(type)->kind == pa11::TypeKind::Record) validate_record_copy_initialization(type, *init); if (init != NULL) {
-if (init->braced_init_list) { apply_braced_variable_initializer(target, variable, type, *init, var); return;
-} if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record) { apply_record_variable_initializer(target, variable, type, *init, var);
-return; } if (string_literal_initializes_array(type, *init, NULL)) {
+	Scope* target, Binding* variable, TypePtr type, const Expr* init,
+	Node& var) { TypePtr target_record = pa11::strip_cv(type); bool lambda_closure_conversion = false;
+	if (init != NULL && init->braced_init_list && init->node.token_text == "lambda-closure" &&
+	    target_record->kind == pa11::TypeKind::Record) {
+		TypePtr init_record = init->type.get() != NULL ? pa11::strip_cv(expression_object_type(init->type)) : TypePtr();
+		lambda_closure_conversion = init_record.get() != NULL &&
+			init_record->kind == pa11::TypeKind::Record &&
+			!pa11::same_type(init_record, target_record);
+	}
+	if (init != NULL && init->copy_initialization &&
+	target_record->kind == pa11::TypeKind::Record && !lambda_closure_conversion) validate_record_copy_initialization(type, *init); if (init != NULL) {
+	if (init->braced_init_list && !lambda_closure_conversion) { apply_braced_variable_initializer(target, variable, type, *init, var); return;
+	} if (target_record->kind == pa11::TypeKind::Record) { apply_record_variable_initializer(target, variable, type, *init, var);
+	return; } if (string_literal_initializes_array(type, *init, NULL)) {
 add_child(var, init->node); return; } apply_scalar_variable_initializer(specs, target, variable, type, *init, var);
 } else if (target->kind == ScopeKind::Class && !variable->is_static_member) { return;
 } else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record) { TypePtr record = pa11::strip_cv(type);

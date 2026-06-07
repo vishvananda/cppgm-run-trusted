@@ -1,5 +1,6 @@
 #include "pa14_lowir_internal.h"
 
+#include <cctype>
 #include <sstream>
 
 namespace pa14 {
@@ -41,6 +42,12 @@ string typeinfo_builtin_code(EFundamentalType type)
 		return "x";
 	if (type == FT_UNSIGNED_LONG_LONG_INT)
 		return "y";
+	if (type == FT_FLOAT)
+		return "f";
+	if (type == FT_DOUBLE)
+		return "d";
+	if (type == FT_LONG_DOUBLE)
+		return "e";
 	if (type == FT_WCHAR_T)
 		return "w";
 	if (type == FT_CHAR16_T)
@@ -60,6 +67,42 @@ string typeinfo_builtin_part(TypePtr type)
 }
 
 string typeinfo_component_for_type(TypePtr type);
+
+bool typeinfo_argument_incomplete(
+	const pa11::TemplateInstanceArgument& arg);
+
+bool typeinfo_type_incomplete(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array)
+		return bare->unknown_bound || typeinfo_type_incomplete(bare->base);
+	if (bare->kind == TypeKind::Pointer ||
+	    bare->kind == TypeKind::LValueReference ||
+	    bare->kind == TypeKind::RValueReference)
+		return typeinfo_type_incomplete(bare->base);
+	if (bare->kind == TypeKind::Record)
+	{
+		if (!bare->complete)
+			return true;
+		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+			if (typeinfo_argument_incomplete(bare->template_arguments[i]))
+				return true;
+	}
+	return false;
+}
+
+bool typeinfo_argument_incomplete(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return typeinfo_type_incomplete(arg.type);
+	for (size_t i = 0; i < arg.pack.size(); ++i)
+		if (typeinfo_argument_incomplete(arg.pack[i]))
+			return true;
+	return false;
+}
 
 string template_value_typeinfo_component(TypePtr type, uint64_t value)
 {
@@ -102,9 +145,10 @@ string typeinfo_component_for_argument(
 	}
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Template)
 		return to_string(arg.template_name.size()) + arg.template_name;
-	string out;
+	string out = "J";
 	for (size_t i = 0; i < arg.pack.size(); ++i)
 		out += typeinfo_component_for_argument(arg.pack[i]);
+	out += "E";
 	return out;
 }
 
@@ -239,15 +283,59 @@ string typeinfo_name_spelling(TypePtr record)
 	return out;
 }
 
+bool typeinfo_object_metadata_safe(const string& spelling)
+{
+	if (spelling.empty())
+		return false;
+	for (size_t i = 0; i < spelling.size(); ++i)
+		if (std::isspace(static_cast<unsigned char>(spelling[i])) ||
+		    spelling[i] == ',' ||
+		    spelling[i] == ']')
+			return false;
+	return true;
+}
+
 void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
 {
+	string name = typeinfo_name_spelling(record);
 	ostringstream out;
 	out << "global @" << typeinfo_name_symbol(record)
-	    << " [storage=readonly, binding=weak] = {\n";
-	string name = typeinfo_name_spelling(record);
+	    << " [storage=readonly, binding=weak";
+	if (typeinfo_object_metadata_safe(name))
+		out << ", object=_ZTS" << name;
+	out << "] = {\n";
 	for (size_t i = 0; i < name.size(); ++i)
 		out << "  i8 " << static_cast<unsigned>(
 			static_cast<unsigned char>(name[i])) << "\n";
+	out << "  i8 0\n";
+	out << "}";
+	globals.push_back(out.str());
+}
+
+string typeinfo_name_symbol_for_type(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record)
+		return typeinfo_name_symbol(bare);
+	if (bare->kind == TypeKind::Fundamental)
+		return "__typeinfo_name__" + typeinfo_builtin_part(bare);
+	return "__typeinfo_name_type_" + typeinfo_component_for_type(bare);
+}
+
+void append_typeinfo_name_global_for_type(vector<string>& globals,
+                                          TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	string spelling = typeinfo_component_for_type(bare);
+	ostringstream out;
+	out << "global @" << typeinfo_name_symbol_for_type(bare)
+	    << " [storage=readonly, binding=weak";
+	if (typeinfo_object_metadata_safe(spelling))
+		out << ", object=_ZTS" << spelling;
+	out << "] = {\n";
+	for (size_t i = 0; i < spelling.size(); ++i)
+		out << "  i8 " << static_cast<unsigned>(
+			static_cast<unsigned char>(spelling[i])) << "\n";
 	out << "  i8 0\n";
 	out << "}";
 	globals.push_back(out.str());
@@ -260,28 +348,34 @@ void ProgramLowerer::emit_rtti(TypePtr record)
 	TypePtr bare = pa11::strip_cv(record);
 	if (bare->kind != TypeKind::Record)
 		return;
-	if (emitted_rtti.find(bare.get()) != emitted_rtti.end())
+	string rtti_symbol = rtti_symbol_for_record(bare);
+	if (!defined_globals.insert(rtti_symbol).second)
 		return;
-	emitted_rtti.insert(bare.get());
 	if (declared_globals.insert("__external_rtti_vtable____class_type_info").second)
 		global_declares.push_back(
 			"declare global @__external_rtti_vtable____class_type_info "
-			"[binding=strong]");
+			"[binding=strong, object=_ZTVN10__cxxabiv117__class_type_infoE]");
 	TypePtr direct_base =
 		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
 	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
 	{
-		emit_rtti(direct_base);
 		if (declared_globals.insert(
 			    "__external_rtti_vtable____si_class_type_info").second)
 			global_declares.push_back(
 				"declare global @__external_rtti_vtable____si_class_type_info "
-				"[binding=strong]");
+				"[binding=strong, object=_ZTVN10__cxxabiv120__si_class_type_infoE]");
 	}
-	append_typeinfo_name_global(globals, bare);
+	if (defined_globals.insert(typeinfo_name_symbol(bare)).second)
+		append_typeinfo_name_global(globals, bare);
+	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
+		emit_rtti(direct_base);
 	ostringstream out;
-	out << "global @" << rtti_symbol_for_record(bare)
-	    << " [storage=readonly, binding=weak] = {\n";
+	string spelling = typeinfo_name_spelling(bare);
+	out << "global @" << rtti_symbol
+	    << " [storage=readonly, binding=weak";
+	if (typeinfo_object_metadata_safe(spelling))
+		out << ", object=_ZTI" << spelling;
+	out << "] = {\n";
 	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
 	{
 		out << "  ptr addr @__external_rtti_vtable____si_class_type_info + 16\n";
@@ -305,44 +399,83 @@ void ProgramLowerer::emit_typeinfo(TypePtr type)
 		emit_rtti(bare);
 		return;
 	}
-	if (bare->kind != TypeKind::Fundamental)
+	if (bare->kind == TypeKind::Pointer)
+	{
+		string component = typeinfo_component_for_type(bare);
+		string rtti_symbol = "__rtti_type_" + component;
+		if (!defined_globals.insert(rtti_symbol).second)
+			return;
+		if (declared_globals.insert(
+			    "__external_rtti_vtable____pointer_type_info").second)
+			global_declares.push_back(
+				"declare global @__external_rtti_vtable____pointer_type_info "
+				"[binding=strong, object=_ZTVN10__cxxabiv119__pointer_type_infoE]");
+		string name_symbol = typeinfo_name_symbol_for_type(bare);
+		if (defined_globals.insert(name_symbol).second)
+			append_typeinfo_name_global_for_type(globals, bare);
+		emit_typeinfo(bare->base);
+		ostringstream rtti;
+		rtti << "global @" << rtti_symbol
+		     << " [storage=readonly, binding=weak, object=_ZTI"
+		     << component << "] = {\n";
+		rtti << "  ptr addr @__external_rtti_vtable____pointer_type_info + 16\n";
+		rtti << "  ptr addr @" << name_symbol << "\n";
+		rtti << "  i32 " << (typeinfo_type_incomplete(bare->base) ? 8 : 0)
+		     << "\n";
+		rtti << "  ptr addr @" << typeid_rtti_symbol(bare->base) << "\n";
+		rtti << "}";
+		globals.push_back(rtti.str());
 		return;
-	string code = typeinfo_builtin_code(bare->fundamental);
-	if (code.empty())
-		return;
-	if (emitted_rtti.find(bare.get()) != emitted_rtti.end())
-		return;
-	emitted_rtti.insert(bare.get());
-	string part = typeinfo_builtin_part(bare);
-	string external = "__external_rtti__" + part;
-	if (declared_globals.insert(external).second)
-		global_declares.push_back(
-			"declare global @" + external +
-			" [binding=strong, object=_ZTI" + code + "]");
-	if (declared_globals.insert(
-		    "__external_rtti_vtable____fundamental_type_info").second)
-		global_declares.push_back(
-			"declare global @__external_rtti_vtable____fundamental_type_info "
-			"[binding=strong, "
-			"object=_ZTVN10__cxxabiv123__fundamental_type_infoE]");
-	string name_symbol = "__typeinfo_name__" + part;
-	ostringstream name;
-	name << "global @" << name_symbol
-	     << " [storage=readonly, binding=weak, object=_ZTS" << code
-	     << "] = {\n";
-	for (size_t i = 0; i < code.size(); ++i)
-		name << "  i8 " << static_cast<unsigned>(
-			static_cast<unsigned char>(code[i])) << "\n";
-	name << "  i8 0\n}";
-	globals.push_back(name.str());
-	ostringstream rtti;
-	rtti << "global @__rtti_" << part
-	     << " [storage=readonly, binding=weak, object=_ZTI" << code
-	     << "] = {\n";
-	rtti << "  ptr addr @__external_rtti_vtable____fundamental_type_info + 16\n";
-	rtti << "  ptr addr @" << name_symbol << "\n";
-	rtti << "}";
-	globals.push_back(rtti.str());
+	}
+	if (bare->kind == TypeKind::Fundamental)
+	{
+		string code = typeinfo_builtin_code(bare->fundamental);
+		if (code.empty())
+			return;
+		string part = typeinfo_builtin_part(bare);
+		string rtti_symbol = "__rtti_" + part;
+		if (!defined_globals.insert(rtti_symbol).second)
+			return;
+		if (declared_globals.insert(
+			    "__external_rtti_vtable____fundamental_type_info").second)
+			global_declares.push_back(
+				"declare global @__external_rtti_vtable____fundamental_type_info "
+				"[binding=strong, "
+				"object=_ZTVN10__cxxabiv123__fundamental_type_infoE]");
+		string name_symbol = "__typeinfo_name__" + part;
+		if (defined_globals.insert(name_symbol).second)
+		{
+			ostringstream name;
+			name << "global @" << name_symbol
+			     << " [storage=readonly, binding=weak, object=_ZTS" << code
+			     << "] = {\n";
+			for (size_t i = 0; i < code.size(); ++i)
+				name << "  i8 " << static_cast<unsigned>(
+					static_cast<unsigned char>(code[i])) << "\n";
+			name << "  i8 0\n}";
+			globals.push_back(name.str());
+		}
+		ostringstream rtti;
+		rtti << "global @" << rtti_symbol
+		     << " [storage=readonly, binding=weak, object=_ZTI" << code
+		     << "] = {\n";
+		rtti << "  ptr addr @__external_rtti_vtable____fundamental_type_info + 16\n";
+		rtti << "  ptr addr @" << name_symbol << "\n";
+		rtti << "}";
+		globals.push_back(rtti.str());
+	}
+}
+
+string ProgramLowerer::typeid_rtti_symbol(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record)
+		return rtti_symbol_for_record(bare);
+	if (bare->kind == TypeKind::Fundamental)
+		return "__rtti_" + typeinfo_builtin_part(bare);
+	if (bare->kind == TypeKind::Pointer)
+		return "__rtti_type_" + typeinfo_component_for_type(bare);
+	return "";
 }
 
 string ProgramLowerer::catch_rtti_symbol(TypePtr type)
@@ -351,7 +484,17 @@ string ProgramLowerer::catch_rtti_symbol(TypePtr type)
 	if (bare->kind == TypeKind::Record)
 		return rtti_symbol_for_record(bare);
 	if (bare->kind == TypeKind::Fundamental)
+	{
+		string code = typeinfo_builtin_code(bare->fundamental);
+		if (code.empty())
+			return "";
+		string external = "__external_rtti__" + typeinfo_builtin_part(bare);
+		if (declared_globals.insert(external).second)
+			global_declares.push_back(
+				"declare global @" + external +
+				" [binding=strong, object=_ZTI" + code + "]");
 		return "__external_rtti__" + typeinfo_builtin_part(bare);
+	}
 	return "";
 }
 
@@ -426,7 +569,7 @@ void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
 	functions.push_back(out);
 }
 
-void ProgramLowerer::demand_vtable(TypePtr record)
+void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 {
 	TypePtr bare = pa11::strip_cv(record);
 	if (bare->kind != TypeKind::Record || !bare->is_polymorphic)
@@ -435,7 +578,8 @@ void ProgramLowerer::demand_vtable(TypePtr record)
 		return;
 	TypePtr direct_base =
 		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-	if (direct_base.get() != NULL &&
+	if (include_bases &&
+	    direct_base.get() != NULL &&
 	    direct_base->kind == TypeKind::Record &&
 	    direct_base->is_polymorphic)
 		demand_vtable(direct_base);

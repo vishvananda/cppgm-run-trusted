@@ -80,7 +80,7 @@ Node make_defaulted_storage_copy_constructor_node(const Binding* binding)
 	Node this_param("parameter this");
 	this_param.type = binding->type->parameters[0];
 	fn.children.push_back(this_param);
-	Node other_param("parameter __param1");
+	Node other_param("parameter other");
 	other_param.type = binding->type->parameters[1];
 	fn.children.push_back(other_param);
 	fn.children.push_back(Node("compound-statement"));
@@ -395,12 +395,16 @@ void ProgramLowerer::ensure_eh_declarations()
 	if (needs_eh_declarations)
 		return;
 	needs_eh_declarations = true;
-	if (declared_functions.insert("__cppgm_eh_resume").second)
+	if (declared_functions.insert("__external_runtime___Unwind_Resume").second)
 		declares.push_back(
-			"declare function @__cppgm_eh_resume() -> void [role=eh_resume]");
-	if (declared_functions.insert("__cppgm_eh_personality").second)
+			"declare function @__external_runtime___Unwind_Resume() -> void "
+			"[return=noreturn, role=eh_resume, linkage=c, binding=strong, "
+			"object=_Unwind_Resume]");
+	if (declared_functions.insert("__external_runtime____gxx_personality_v0").second)
 		declares.push_back(
-			"declare function @__cppgm_eh_personality() -> void [role=eh_personality]");
+			"declare function @__external_runtime____gxx_personality_v0() "
+			"-> void [role=eh_personality, linkage=c, binding=strong, "
+			"object=__gxx_personality_v0]");
 }
 
 
