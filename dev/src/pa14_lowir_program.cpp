@@ -101,6 +101,7 @@ FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
                                         const string& name)
 {
 	FunctionOut base_entry = lowered;
+	base_entry.name = name + "__base_entry";
 	string from = "function @" + name + "(";
 	string to = "function @" + name + "__base_entry(";
 	size_t pos = base_entry.header.find(from);
@@ -467,8 +468,10 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
                                                          bool move,
                                                          const string& name)
 {
-	(void)binding;
 	FunctionOut out;
+	out.binding = binding;
+	out.name = name;
+	out.returns_pointer_result = true;
 	ostringstream header;
 	header << "function @" << name
 	       << "(%this : ptr, %other : ptr [pass=reference]) -> ptr";
@@ -684,6 +687,7 @@ void ProgramLowerer::collect_node(const Node& node)
 		{
 			FunctionOut noop_entry = lowered;
 			string name = symbol_for(node.binding);
+			noop_entry.name = name + "__noop_entry";
 			string from = "function @" + name + "(";
 			string to = "function @" + name + "__noop_entry(";
 			size_t pos = noop_entry.header.find(from);

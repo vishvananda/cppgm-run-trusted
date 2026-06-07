@@ -48,11 +48,19 @@ struct Block
 struct FunctionOut
 {
 	const Binding* binding;
+	string name;
 	string header;
+	bool has_range_for_state;
+	bool strong_binding;
+	bool returns_pointer_result;
 	vector<string> slots;
 	vector<Block> blocks;
 
-	FunctionOut() : binding(NULL) {}
+	FunctionOut()
+		: binding(NULL),
+		  has_range_for_state(false),
+		  strong_binding(false),
+		  returns_pointer_result(false) {}
 };
 FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
                                         const string& name);

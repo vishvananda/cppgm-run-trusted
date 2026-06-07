@@ -56,6 +56,50 @@ The target behavior is the PA24 first-tier language closure:
 7. Run `perl scripts/cppgm_file_audit.pl --stage pa24 --paths dev/src`, commit
    cohesive progress, and return only with a clean `git status --short`.
 
+## Architecture Review
+
+PA24 is implemented as an extension of the existing PA12 semantic pipeline and
+the PA14 LowIR lowering path. `auto` variable and visible-body return deduction
+update ordinary `Binding` and `Type` objects before lowering. Braced
+initialization and aggregate constructor synthesis reuse the existing record,
+initializer, and constructor-action nodes. Lambdas synthesize closure records,
+call operators, and helper functions as ordinary semantic artifacts, and
+range-for parsing builds typed hidden range/begin/end/index variables plus
+`range-for-statement` nodes. PA14 lowers those typed nodes into normal LowIR
+storage, calls, and loops.
+
+The audit found one ownership leak in the output-order layer: LowIR function
+ordering recovered facts from formatted function headers and slot text. Function
+names, strong binding, pointer-result status, and range-for state belong to the
+lowered function model, not to downstream parsing of already-emitted text. The
+cleanup plan is to carry those facts on `FunctionOut` and have
+`pa14_lowir_function_order.cpp` consume typed metadata instead of formatted
+strings.
+
+The remaining PA24-specific ordering work is a one-time deterministic output
+pass over the lowered functions. It is guarded by function count and does not
+run in expression, declaration, overload, or initializer hot paths. No
+interpreter, VM, trampoline, copied runtime, embedded earlier-IR payload, test
+fixture path, reference-binary shellout, or timeout fallback is part of the PA24
+compiler path.
+
+## Final Architecture Review
+
+`FunctionOut` now owns the output facts that were previously recovered from
+emitted text: the symbol name, whether a lowered function has range-for
+begin/end state, whether it is a strong binding, and whether its LowIR result is
+a pointer. The normal `FunctionLowerer` populates those fields while building
+the header and slots, and synthetic functions created by the program/RTTI
+lowering code set the same fields when they create their `FunctionOut` records.
+`pa14_lowir_function_order.cpp` now reads this metadata directly.
+
+The final source review did not find unresolved architecture, performance,
+cheating, or regression blockers. PA24 semantic facts are represented before
+LowIR lowering, generated lambdas/ranges/aggregate constructors are ordinary
+compiler artifacts, and file-audit warnings are dense existing implementation
+lines or historical division/duplication warnings rather than hidden payloads or
+unchecked implementation fragments.
+
 ## Validation
 
 - `make test-report ACTIVE_TEST_REPORT_PAS='pa24'`: passed, 100/100.

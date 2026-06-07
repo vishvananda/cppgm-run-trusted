@@ -52,7 +52,7 @@ fn_(fn), current_(NULL), temp_counter_(0), block_counter_(0),
 aux_slot_counter_(0), eh_try_depth_(0), call_temp_cleanup_defer_depth_(0), logical_call_result_consumed_(false),
 call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
 constructor_destination_before_protected_try_(false) { } void FunctionLowerer::add_slot(const string& name, const string& type)
-{ out_.slots.push_back("  slot $" + name + " : " + type); } string FunctionLowerer::slot_for(const Binding* binding)
+{ if (starts_with(name, "__begin") || starts_with(name, "__end")) out_.has_range_for_state = true; out_.slots.push_back("  slot $" + name + " : " + type); } string FunctionLowerer::slot_for(const Binding* binding)
 { map<const Binding*, string>::const_iterator found = slots_.find(binding); if (found != slots_.end()) return found->second;
 string base = binding != NULL && !binding->name.empty() ? binding->name : "__param" + to_string(slots_.size()); int& count = slot_names_[base]; ++count;
 string name = base; if (count > 1) name += "__shadow" + to_string(count); slots_[binding] = name;
@@ -84,8 +84,9 @@ string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + thi
 if (bare->base.get() != NULL) { Node action("base-fini-action " + pa11::strip_cv(bare->base)->name); action.type = bare->base;
 lower_base_fini(action); emitted = true; } }
 FunctionOut FunctionLowerer::lower() { Binding* binding = fn_.binding; if (binding == NULL)
-throw runtime_error("missing function binding"); out_.binding = binding; string name = program_.symbol_for(binding); TypePtr fn_type = binding->type;
+throw runtime_error("missing function binding"); out_.binding = binding; string name = program_.symbol_for(binding); out_.name = name; TypePtr fn_type = binding->type;
 bool indirect_result = pa11::strip_cv(fn_type->base)->kind == TypeKind::Record && record_return_by_address(fn_type->base); ostringstream header;
+out_.returns_pointer_result = !indirect_result && scalar_lowir_type(fn_type->base) == "ptr";
 header << "function @" << name << "("; if (indirect_result) header << "%ret : ptr [pass=indirect_result]"; for (size_t i = 0; i < fn_type->parameters.size(); ++i)
 { if (i != 0 || indirect_result) header << ", "; string pname = i < fn_.children.size() &&
 starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : ""; size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space);
@@ -94,9 +95,9 @@ if (pname.empty()) pname = "__param" + to_string(i); TypePtr ptype = fn_type->pa
 if (fn_type->variadic) metadata.push_back("arity=variadic"); if (binding->language_linkage == "c") metadata.push_back("linkage=c");
 if (binding->unwind_no) metadata.push_back("unwind=no"); if (binding->name == "__cppgm_init") metadata.push_back("role=init");
 else if (binding->name == "__cppgm_fini") metadata.push_back("role=fini"); else if (binding->name == "main") {
-metadata.push_back("role=entry"); metadata.push_back("binding=strong"); metadata.push_back("keep_alias=yes"); }
+metadata.push_back("role=entry"); metadata.push_back("binding=strong"); out_.strong_binding = true; metadata.push_back("keep_alias=yes"); }
 else if (binding->name.compare(0, 8, "__lambda") == 0) metadata.push_back("binding=internal"); else if (binding->is_inline_definition) metadata.push_back("binding=weak");
-else metadata.push_back("binding=strong"); if (!binding->function_specialization_symbol.empty()) metadata.push_back("object=" + binding->function_specialization_symbol);
+else { metadata.push_back("binding=strong"); out_.strong_binding = true; } if (!binding->function_specialization_symbol.empty()) metadata.push_back("object=" + binding->function_specialization_symbol);
 if (binding->is_object_root) metadata.push_back("object_root=yes"); header << metadata_suffix(metadata); out_.header = header.str();
 if (binding->is_generated_copy_move_assignment && fn_type->parameters.size() == 2 && fn_type->parameters[1]->kind == TypeKind::RValueReference && binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class) { TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() != NULL)

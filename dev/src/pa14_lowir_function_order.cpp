@@ -2,8 +2,7 @@
 #include <algorithm>
 #include <cctype>
 namespace pa14 { namespace internal { namespace { string function_out_name(const FunctionOut& fn)
-{ size_t at = fn.header.find('@'); size_t lp = fn.header.find('(', at); return (at == string::npos || lp == string::npos)
-? string() : fn.header.substr(at + 1, lp - at - 1); } int emitted_function_order_key(const FunctionOut& fn) {
+{ return fn.name; } int emitted_function_order_key(const FunctionOut& fn) {
 string name = function_out_name(fn); if (name == "main") return 0; if (name.find("operator_lb_rb") != string::npos)
 return 30; if (name.find("operator_plus_plus") != string::npos || name.find("operator_minus_minus") != string::npos) return 99;
 if ((name.find("operator_plus") != string::npos || name.find("operator_minus") != string::npos) && name.compare(0, 9, "operator_") != 0) return 40;
@@ -13,7 +12,7 @@ return 70; if (name.find("operator_lp_rp") != string::npos) return 80; if (name.
 return 90; if (name.find("operator_") != string::npos) return name.find("__ov2") != string::npos ? 100 : 99; return 110;
 } bool emitted_function_is_operator(const FunctionOut& fn) { return function_out_name(fn).find("operator") != string::npos;
 } bool emitted_function_is_strong_entry(const FunctionOut& fn) { string name = function_out_name(fn);
-return name == "main" || fn.header.find("binding=strong") != string::npos; } TypePtr output_first_this_record(const Binding* binding)
+return name == "main" || fn.strong_binding; } TypePtr output_first_this_record(const Binding* binding)
 { if (binding == NULL || binding->type.get() == NULL || binding->type->kind != TypeKind::Function ||
 binding->type->parameters.empty()) return TypePtr(); TypePtr first = pa11::strip_cv(binding->type->parameters[0]); if (first->kind != TypeKind::Pointer)
 return TypePtr(); TypePtr record = pa11::strip_cv(first->base); return record->kind == TypeKind::Record ? record : TypePtr(); }
@@ -22,8 +21,8 @@ binding->type->kind != TypeKind::Function) return false; TypePtr result = pa11::
 } bool output_function_returns_pointer(const Binding* binding) { if (binding == NULL ||
 binding->type.get() == NULL || binding->type->kind != TypeKind::Function) return false; TypePtr result = pa11::strip_cv(binding->type->base);
 return result.get() != NULL && result->kind == TypeKind::Pointer; } bool output_function_out_returns_pointer(const FunctionOut& fn) {
-return output_function_returns_pointer(fn.binding) || fn.header.find(") -> ptr") != string::npos; } bool output_function_out_returns_record(const FunctionOut& fn)
-{ return output_function_returns_record(fn.binding) || fn.header.find("[pass=indirect_result]") != string::npos; }
+return fn.returns_pointer_result; } bool output_function_out_returns_record(const FunctionOut& fn)
+{ return output_function_returns_record(fn.binding); }
 bool output_class_owned_pointer_helper(const Binding* binding); TypePtr output_owner_record(const Binding* binding); bool output_same_record(TypePtr left, TypePtr right); bool output_owner_template_specialization(const Binding* binding);
 TypePtr output_function_record_result(const Binding* binding) { if (!output_function_returns_record(binding)) return TypePtr();
 return pa11::strip_cv(binding->type->base); } bool output_function_template_specialization(const Binding* binding) {
@@ -347,8 +346,7 @@ for (size_t j = 0; j < positions.size(); ++j) selected.push_back(order[positions
 int lkey = output_record_result_flow_key( functions[lhs], record); int rkey = output_record_result_flow_key( functions[rhs], record);
 return lkey != rkey ? lkey < rkey : false; }); for (size_t j = 0; j < positions.size(); ++j) order[positions[j]] = selected[j];
 } } void order_operator_functions_by_key(const vector<FunctionOut>& functions, vector<size_t>& order)
-{ bool has_range_for_state = false; for (size_t i = 0; i < functions.size(); ++i) for (size_t j = 0; j < functions[i].slots.size(); ++j)
-if (functions[i].slots[j].find("$__begin") != string::npos || functions[i].slots[j].find("$__end") != string::npos) has_range_for_state = true; vector<size_t> positions;
+{ bool has_range_for_state = false; for (size_t i = 0; i < functions.size(); ++i) if (functions[i].has_range_for_state) has_range_for_state = true; vector<size_t> positions;
 bool needs_sort = false; int last_key = -1; bool has_free_operator = false; Scope* first_member_owner = NULL;
 bool same_member_owner = true; for (size_t i = 0; i < order.size(); ++i) { if (!emitted_function_is_operator(functions[order[i]]))
 continue; string name = function_out_name(functions[order[i]]); bool free_operator = name.compare(0, 8, "operator") == 0; has_free_operator = has_free_operator || free_operator;
@@ -370,8 +368,7 @@ if (name.find("operator_plus_eq") != string::npos || name.find("operator_minus_e
 return 8; if (name.find("operator_minus") != string::npos) return 10; return 11;
 }; int lkey = member_key(lname); int rkey = member_key(rname); return lkey != rkey ? lkey < rkey : false;
 }); for (size_t i = 0; i < positions.size(); ++i) order[positions[i]] = selected[i]; }
-bool output_has_range_for_state(const vector<FunctionOut>& functions) { for (size_t i = 0; i < functions.size(); ++i) for (size_t j = 0; j < functions[i].slots.size(); ++j)
-if (functions[i].slots[j].find("$__begin") != string::npos || functions[i].slots[j].find("$__end") != string::npos) return true; return false;
+bool output_has_range_for_state(const vector<FunctionOut>& functions) { for (size_t i = 0; i < functions.size(); ++i) if (functions[i].has_range_for_state) return true; return false;
 } void order_range_for_operator_functions_by_key( const vector<FunctionOut>& functions, vector<size_t>& order) {
 if (!output_has_range_for_state(functions)) return; vector<size_t> positions; for (size_t i = 0; i < order.size(); ++i)
 if (emitted_function_is_operator(functions[order[i]])) positions.push_back(i); if (positions.size() < 2) return;

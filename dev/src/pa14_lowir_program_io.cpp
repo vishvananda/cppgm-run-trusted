@@ -26,6 +26,7 @@ void emit_empty_this_function(ProgramLowerer& program,
 {
 	FunctionOut fn;
 	fn.binding = binding;
+	fn.name = name;
 	fn.header = "function @" + name + "(%this : ptr) -> void";
 	fn.slots.push_back("  slot $this : ptr");
 	Block entry("entry");

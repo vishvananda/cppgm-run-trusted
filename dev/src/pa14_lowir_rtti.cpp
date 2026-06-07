@@ -380,6 +380,8 @@ void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
 		return;
 	defined_functions.insert(name);
 	FunctionOut out;
+	out.binding = dtor;
+	out.name = name;
 	out.header = "function @" + name + "(%this : ptr) -> void [binding=weak]";
 	out.slots.push_back("  slot $this : ptr");
 	Block block("entry");
