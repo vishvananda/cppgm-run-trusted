@@ -18,6 +18,18 @@ void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 		demand_record_return_calls(program, node.children[i]);
 }
 
+bool trivial_lvalue_projection(const Node& node)
+{
+	if (starts_with(node.line, "id-expression"))
+		return true;
+	if (!starts_with(node.line, "member-expression"))
+		return false;
+	for (size_t i = 0; i < node.children.size(); ++i)
+		if (!trivial_lvalue_projection(node.children[i]))
+			return false;
+	return true;
+}
+
 }  // namespace
 
 void FunctionLowerer::emit_temporary_cleanups(
@@ -295,8 +307,16 @@ void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for,
 		    glvalue_arg)
 		{
 			addr_for();
-			return;
-		}
+				bool reference_parameter_id =
+					starts_with(arg.line, "id-expression") &&
+					arg.binding != NULL &&
+					arg.binding->kind == BindingKind::Parameter &&
+					is_reference(arg.binding->type);
+				if (!reference_parameter_id &&
+				    !trivial_lvalue_projection(arg))
+					ensure_pointer(emit_lvalue_addr(arg));
+				return;
+			}
 	}
 	if (binding_has_template_specialization_context(ctor))
 	{
@@ -395,6 +415,24 @@ bool FunctionLowerer::lower_string_array_init(const function<Value()>& addr_for,
 	uint64_t count = bare->unknown_bound ? info.elements : bare->bound;
 	if (elem_size == 1)
 	{
+		if (!lowering_array_subobject_init_)
+		{
+			Value base = addr_for();
+			for (size_t i = 0; i < count; ++i)
+			{
+				string addr = base.text;
+				if (i != 0)
+				{
+					addr = fresh_temp();
+					instr(addr + " = index i8 " + base.text +
+					      ", " + to_string(i));
+				}
+				uint64_t value = i < info.bytes.size() ? info.bytes[i] : 0;
+				instr("store " + scalar_lowir_type(bare->base) + " " +
+				      to_string(value) + ", " + addr);
+			}
+			return true;
+		}
 		for (size_t i = 0; i < count; ++i)
 		{
 			Value base = addr_for();
@@ -431,125 +469,27 @@ bool FunctionLowerer::lower_string_array_init(const function<Value()>& addr_for,
 }
 
 void FunctionLowerer::lower_base_init(const Node& node)
-{
-	if (node.type.get() == NULL)
-		return;
-	TypePtr source = class_record_for_member(fn_.binding);
-	function<Value()> base_addr = [this, source, &node]() {
-		string this_ptr = fresh_temp();
-		instr(this_ptr + " = load ptr $this");
-			return emit_base_subobject_addr(Value("ptr", this_ptr), source, node.type);
-	};
-	if (node.children.empty())
-	{
-		if (node.direct_call != NULL)
-		{
-				if (no_op_generated_default_constructor(node.direct_call, node.type))
-				return;
-			vector<const Node*> args;
-			lower_constructor_call(base_addr, node.direct_call, args, true);
-			return;
-		}
-		lower_zero_init(base_addr, node.type);
-	}
-	else
-	{
-		const Node& init = node.children[0];
-		Binding* ctor = node.direct_call;
-		if (ctor == NULL)
-			ctor = init.direct_call;
-		if (ctor != NULL &&
-		    ctor->type.get() != NULL &&
-		    ctor->type->kind == TypeKind::Function)
-		{
-			if (no_op_generated_default_constructor(ctor, node.type))
-			{
-				base_addr();
-				return;
-			}
-				const Node& copy_source = starts_with(init.line, "braced-init-list") &&
-					init.children.size() == 1 ? init.children[0] : init;
-			TypePtr src_record = pa11::strip_cv(object_type(copy_source.type));
-			TypePtr dst_record = pa11::strip_cv(node.type);
-			bool structural_copy_move_ctor =
-				ctor->type->parameters.size() == 2 &&
-				is_reference(ctor->type->parameters[1]) &&
-					pa11::same_type(pa11::strip_cv(ctor->type->parameters[1]->base),
-					                dst_record);
-			if (structural_copy_move_ctor &&
-				    !defaulted_copy_move_constructor_needs_helper(ctor, node.type) &&
-			    !record_has_storage_copy(node.type) &&
-			    src_record->kind == TypeKind::Record &&
-			    dst_record->kind == TypeKind::Record &&
-			    (pa11::same_type(src_record, dst_record) ||
-			     record_has_base(src_record, dst_record)) &&
-			    (copy_source.category == ValueCategory::LValue ||
-			     copy_source.category == ValueCategory::XValue))
-			{
-				base_addr();
-				return;
-			}
-			if ((ctor->is_defaulted ||
-			     ctor->is_generated_copy_move_constructor) &&
-			    ctor->is_inline_definition &&
-				    !defaulted_copy_move_constructor_needs_helper(ctor, node.type) &&
-			    record_has_storage_copy(node.type) &&
-			    src_record->kind == TypeKind::Record &&
-			    dst_record->kind == TypeKind::Record &&
-			    (pa11::same_type(src_record, dst_record) ||
-			     record_has_base(src_record, dst_record)) &&
-			    (copy_source.category == ValueCategory::LValue ||
-			     copy_source.category == ValueCategory::XValue))
-			{
-				Value target = base_addr();
-				Value source = ensure_pointer(emit_lvalue_addr(copy_source));
-					Value converted = convert_value(source,
-					                                pa11::make_pointer(src_record),
-					                                pa11::make_pointer(node.type));
-				instr("copyobj " + to_string(pa11::type_size(node.type)) +
-				      "x" + to_string(pa11::type_align(node.type)) + " " +
-				      converted.text + ", " + target.text);
-				return;
-			}
-			vector<const Node*> args;
-			if (starts_with(init.line, "braced-init-list"))
-				for (size_t i = 0; i < init.children.size(); ++i)
-					args.push_back(&init.children[i]);
-				else
-					args.push_back(&init);
-				TypePtr inherited_base = node.type.get() != NULL
-					? pa11::strip_cv(node.type) : TypePtr();
-			if (node.token_text == "inherited-constructor" &&
-			    inherited_base.get() != NULL &&
-			    record_is_template_specialization(inherited_base))
-				program_.demand_inline_function(ctor);
-			lower_constructor_call(base_addr, ctor, args, true);
-			return;
-		}
-		TypePtr src_record = pa11::strip_cv(object_type(init.type));
-		TypePtr dst_record = pa11::strip_cv(node.type);
-		if (src_record->kind == TypeKind::Record &&
-		    dst_record->kind == TypeKind::Record &&
-		    pa11::same_type(src_record, dst_record) &&
-		    (init.category == ValueCategory::LValue ||
-		     init.category == ValueCategory::XValue))
-		{
-			Binding* copy_move =
-				find_copy_move_constructor(node.type,
-				                           init.category == ValueCategory::XValue);
-			if (copy_move == NULL && init.category == ValueCategory::XValue)
-				copy_move = find_copy_move_constructor(node.type, false);
-			if (copy_move != NULL)
-			{
-				vector<const Node*> args;
-				args.push_back(&init);
-				lower_constructor_call(base_addr, copy_move, args, true);
-				return;
-			}
-		}
-		lower_object_init(base_addr, node.type, node.children[0]);
-	}
-}
+{ if (node.type.get() == NULL) return; TypePtr source = class_record_for_member(fn_.binding); function<Value()> base_addr = [this, source, &node]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this");
+return emit_base_subobject_addr(Value("ptr", this_ptr), source, node.type); }; if (node.children.empty()) { if (node.direct_call != NULL) { if (no_op_generated_default_constructor(node.direct_call, node.type)) return;
+vector<const Node*> args; lower_constructor_call(base_addr, node.direct_call, args, true); return; } lower_zero_init(base_addr, node.type); } else { const Node& init = node.children[0]; Binding* ctor = node.direct_call;
+if (ctor == NULL) ctor = init.direct_call; if (ctor != NULL && ctor->type.get() != NULL && ctor->type->kind == TypeKind::Function) { if (no_op_generated_default_constructor(ctor, node.type)) { return; }
+const Node& copy_source = starts_with(init.line, "braced-init-list") && init.children.size() == 1 ? init.children[0] : init; TypePtr src_record = pa11::strip_cv(object_type(copy_source.type));
+TypePtr dst_record = pa11::strip_cv(node.type); bool structural_copy_move_ctor = ctor->type->parameters.size() == 2 && is_reference(ctor->type->parameters[1]) &&
+pa11::same_type(pa11::strip_cv(ctor->type->parameters[1]->base), dst_record); if (structural_copy_move_ctor && !defaulted_copy_move_constructor_needs_helper(ctor, node.type) && !record_has_storage_copy(node.type) &&
+src_record->kind == TypeKind::Record && dst_record->kind == TypeKind::Record && (pa11::same_type(src_record, dst_record) || record_has_base(src_record, dst_record)) && (copy_source.category == ValueCategory::LValue ||
+copy_source.category == ValueCategory::XValue)) { base_addr(); return; } if ((ctor->is_defaulted || ctor->is_generated_copy_move_constructor) && ctor->is_inline_definition &&
+!defaulted_copy_move_constructor_needs_helper(ctor, node.type) && record_has_storage_copy(node.type) && src_record->kind == TypeKind::Record && dst_record->kind == TypeKind::Record &&
+(pa11::same_type(src_record, dst_record) || record_has_base(src_record, dst_record)) && (copy_source.category == ValueCategory::LValue || copy_source.category == ValueCategory::XValue)) { Value target = base_addr();
+Value source = ensure_pointer(emit_lvalue_addr(copy_source)); Value converted = convert_value(source, pa11::make_pointer(src_record), pa11::make_pointer(node.type));
+instr("copyobj " + to_string(pa11::type_size(node.type)) + "x" + to_string(pa11::type_align(node.type)) + " " + converted.text + ", " + target.text); return; } vector<const Node*> args;
+if (starts_with(init.line, "braced-init-list")) for (size_t i = 0; i < init.children.size(); ++i) args.push_back(&init.children[i]); else args.push_back(&init); TypePtr inherited_base = node.type.get() != NULL
+? pa11::strip_cv(node.type) : TypePtr(); bool function_template_ctor = ctor->function_specialization_symbol.size() != 0 || (ctor->aliased_binding != NULL &&
+ctor->aliased_binding->function_specialization_symbol.size() != 0); if (node.token_text == "inherited-constructor" && inherited_base.get() != NULL && record_is_template_specialization(inherited_base) &&
+!function_template_ctor) program_.demand_inline_function(ctor); lower_constructor_call(base_addr, ctor, args, true); return; } TypePtr src_record = pa11::strip_cv(object_type(init.type));
+TypePtr dst_record = pa11::strip_cv(node.type); if (src_record->kind == TypeKind::Record && dst_record->kind == TypeKind::Record && pa11::same_type(src_record, dst_record) && (init.category == ValueCategory::LValue ||
+init.category == ValueCategory::XValue)) { Binding* copy_move = find_copy_move_constructor(node.type, init.category == ValueCategory::XValue); if (copy_move == NULL && init.category == ValueCategory::XValue)
+copy_move = find_copy_move_constructor(node.type, false); if (copy_move != NULL) { vector<const Node*> args; args.push_back(&init); lower_constructor_call(base_addr, copy_move, args, true); return; } }
+lower_object_init(base_addr, node.type, node.children[0]); } }
 
 void FunctionLowerer::lower_delegating_init(const Node& node)
 {
@@ -666,11 +606,20 @@ void FunctionLowerer::lower_member_init(const Node& node)
 	if (pa11::strip_cv(node.binding->type)->kind == TypeKind::Record)
 	{
 		if (!record_has_storage_copy(node.binding->type) &&
-		    node.children.size() == 1 &&
-		    starts_with(node.children[0].line, "member-expression"))
+		    node.children.size() == 1)
 		{
-			member_addr();
-			return;
+			TypePtr src_record =
+				pa11::strip_cv(object_type(node.children[0].type));
+			TypePtr dst_record = pa11::strip_cv(node.binding->type);
+			if (src_record->kind == TypeKind::Record &&
+			    dst_record->kind == TypeKind::Record &&
+			    pa11::same_type(src_record, dst_record) &&
+			    (node.children[0].category == ValueCategory::LValue ||
+			     node.children[0].category == ValueCategory::XValue))
+			{
+				member_addr();
+				return;
+			}
 		}
 		lower_object_init(member_addr, node.binding->type, node.children[0]);
 		return;
@@ -732,7 +681,9 @@ bool FunctionLowerer::lower_direct_member_constructor_init(
 	}
 	if (node.children.size() == 1 &&
 	    node.direct_call->type->parameters.size() == 2 &&
-	    is_reference(node.direct_call->type->parameters[1]) &&
+	    (node.direct_call->is_generated_copy_move_constructor ||
+	     node.direct_call->is_defaulted ||
+	     node.direct_call->is_noop_constructor) &&
 	    !defaulted_copy_move_constructor_needs_helper(node.direct_call,
 	                                                  node.binding->type) &&
 	    !record_has_storage_copy(node.binding->type))
@@ -745,7 +696,10 @@ bool FunctionLowerer::lower_direct_member_constructor_init(
 		    pa11::same_type(src_record, dst_record) &&
 		    (node.children[0].category == ValueCategory::LValue ||
 		     node.children[0].category == ValueCategory::XValue))
+		{
+			member_addr();
 			return true;
+		}
 	}
 	bool needs_common_lowering = false;
 	for (size_t i = 0; i < node.children.size(); ++i)

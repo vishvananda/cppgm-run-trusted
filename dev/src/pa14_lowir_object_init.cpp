@@ -7,9 +7,11 @@ namespace {
 
 void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 {
-	if (starts_with(node.line, "call-expression") &&
-	    node.direct_call != NULL &&
-	    pa11::strip_cv(node.type)->kind == TypeKind::Record)
+	if (node.direct_call != NULL &&
+	    node.direct_call->type.get() != NULL &&
+	    node.direct_call->type->kind == TypeKind::Function &&
+	    pa11::strip_cv(node.direct_call->type->base)->kind ==
+		    TypeKind::Record)
 	{
 		program.demand_function_declaration(node.direct_call);
 		program.demand_inline_function(node.direct_call);
@@ -39,6 +41,85 @@ bool is_no_op_generated_default_prvalue(const Node& node, TypePtr type)
 	       source.get() != NULL &&
 	       pa11::same_type(target, source) &&
 	       no_op_generated_default_constructor(node.direct_call, type);
+}
+
+string template_family_name(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	return bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+}
+
+bool same_template_family(TypePtr left, TypePtr right)
+{
+	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	return l.get() != NULL &&
+	       r.get() != NULL &&
+	       l->kind == TypeKind::Record &&
+	       r->kind == TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
+	       template_family_name(l) == template_family_name(r);
+}
+
+bool function_template_specialization_binding(const Binding* binding)
+{
+	return binding != NULL &&
+	       (!binding->function_specialization_symbol.empty() ||
+	        (binding->aliased_binding != NULL &&
+	         !binding->aliased_binding->function_specialization_symbol.empty()));
+}
+
+Binding* find_existing_template_family_constructor(ProgramLowerer& program,
+                                                   TypePtr target,
+                                                   TypePtr source,
+                                                   bool move)
+{
+	TypePtr target_record = pa11::strip_cv(target);
+	TypePtr source_record = pa11::strip_cv(source);
+	Binding* best = NULL;
+	size_t best_rank = static_cast<size_t>(-1);
+	for (map<const Binding*, const Node*>::const_iterator it =
+		     program.inline_definitions.begin();
+	     it != program.inline_definitions.end();
+	     ++it)
+	{
+		const Binding* binding = it->first;
+		if (!function_template_specialization_binding(binding) ||
+		    binding->kind != BindingKind::Function ||
+		    binding->type.get() == NULL ||
+		    binding->type->kind != TypeKind::Function ||
+		    binding->type->parameters.size() != 2 ||
+		    binding->is_generated_copy_move_constructor)
+			continue;
+		TypePtr param = binding->type->parameters[1];
+		if (move)
+		{
+			if (param->kind != TypeKind::RValueReference)
+				continue;
+		}
+		else if (param->kind != TypeKind::LValueReference)
+			continue;
+		TypePtr param_record = pa11::strip_cv(param->base);
+		TypePtr owner_record = class_record_for_member(binding);
+		if (param_record->kind != TypeKind::Record ||
+		    !pa11::same_type(param_record, source_record) ||
+		    !same_template_family(owner_record, target_record))
+			continue;
+		map<const Binding*, size_t>::const_iterator rank_it =
+			program.inline_definition_ranks.find(binding);
+		size_t rank = rank_it == program.inline_definition_ranks.end()
+			? static_cast<size_t>(-1) : rank_it->second;
+		if (best == NULL || rank < best_rank)
+		{
+			best = const_cast<Binding*>(binding);
+			best_rank = rank;
+		}
+	}
+	return best;
 }
 
 }  // namespace
@@ -110,108 +191,24 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind == TypeKind::Record)
-	{
-		pa11::layout_record_type(bare);
-		if (bare->tag == "union")
-		{
-			if (bare->fields.empty())
-				return;
-			Binding* field = bare->fields[0];
-			function<Value()> field_addr = [this, addr_for, field]() {
-				Value base = addr_for();
-				string addr = fresh_temp();
-				instr(addr + " = index i8 [projection=field] " + base.text +
-				      ", " + to_string(field->member_offset));
-				return Value("ptr", addr);
-			};
-			if (index >= clauses.size())
-				lower_zero_init(field_addr, field->type);
-			else
-				lower_object_init(field_addr, field->type, clauses[index++]);
-			return;
-		}
-		if (bare->base.get() != NULL)
-		{
-			function<Value()> base_addr = [this, addr_for, bare]() {
-				Value base = addr_for();
-				return emit_base_subobject_addr(base, bare, bare->base);
-			};
-			if (index >= clauses.size())
-				lower_base_zero_init(addr_for, bare, bare->base);
-			else
-			{
-				const Node& child = clauses[index];
-				if (same_record_initializer(child, bare->base))
-					lower_object_init(base_addr, bare->base, clauses[index++]);
-				else if (is_brace_elision_aggregate(bare->base) &&
-				    !starts_with(child.line, "braced-init-list"))
-					lower_aggregate_elements(base_addr, bare->base, clauses, index);
-				else
-					lower_object_init(base_addr, bare->base, clauses[index++]);
-			}
-		}
-		for (size_t i = 0; i < bare->fields.size(); ++i)
-		{
-			Binding* field = bare->fields[i];
-			function<Value()> field_addr = [this, addr_for, field]() {
-				Value base = addr_for();
-				string addr = fresh_temp();
-				instr(addr + " = index i8 [projection=field] " + base.text +
-				      ", " + to_string(field->member_offset));
-				return Value("ptr", addr);
-			};
-			if (index >= clauses.size())
-			{
-				lower_zero_init(field_addr, field->type);
-				continue;
-			}
-			const Node& child = clauses[index];
-			if (same_record_initializer(child, field->type))
-			{
-				if (is_no_op_generated_default_prvalue(child, field->type))
-				{
-					++index;
-					continue;
-				}
-				lower_object_init(field_addr, field->type, clauses[index++]);
-			}
-			else if (is_brace_elision_aggregate(field->type) &&
-			    !starts_with(child.line, "braced-init-list"))
-				lower_aggregate_elements(field_addr, field->type, clauses, index);
-			else if (field->is_bit_field)
-			{
-				Value value = convert_value(emit_rvalue(child),
-				                            child.type,
-				                            field->type);
-				string low_type = scalar_lowir_type(field->type);
-				uint64_t mask = field->bit_width >= 64
-					? ~uint64_t(0) : ((uint64_t(1) << field->bit_width) - 1);
-				string masked = fresh_temp();
-				instr(masked + " = binary and " + low_type + " " +
-				      to_string(mask) + ", " + value.text);
-				if (field->bit_offset != 0)
-				{
-					string shifted = fresh_temp();
-					instr(shifted + " = binary shl " + low_type + " " +
-					      masked + ", " + to_string(field->bit_offset));
-					masked = shifted;
-				}
-				Value target = field_addr();
-				instr("store " + low_type + " " + masked + ", " + target.text);
-				++index;
-			}
-			else
-			{
-				if (is_no_op_generated_default_prvalue(child, field->type))
-				{
-					++index;
-					continue;
-				}
-				lower_object_init(field_addr, field->type, clauses[index++]);
-			}
-		}
-		return;
-	}
+{ pa11::layout_record_type(bare); if (bare->tag == "union") { if (bare->fields.empty()) return; Binding* field = bare->fields[0]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
+string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr); }; if (index >= clauses.size())
+lower_zero_init(field_addr, field->type); else { bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
+lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } return; } if (bare->base.get() != NULL) { function<Value()> base_addr = [this, addr_for, bare]() {
+Value base = addr_for(); return emit_base_subobject_addr(base, bare, bare->base); }; if (index >= clauses.size()) lower_base_zero_init(addr_for, bare, bare->base); else { const Node& child = clauses[index];
+if (same_record_initializer(child, bare->base)) lower_object_init(base_addr, bare->base, clauses[index++]); else if (is_brace_elision_aggregate(bare->base) && !starts_with(child.line, "braced-init-list"))
+lower_aggregate_elements(base_addr, bare->base, clauses, index); else lower_object_init(base_addr, bare->base, clauses[index++]); } } for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i];
+function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for(); string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset));
+return Value("ptr", addr); }; if (index >= clauses.size()) { lower_zero_init(field_addr, field->type); continue; } const Node& child = clauses[index]; if (same_record_initializer(child, field->type)) {
+if (is_no_op_generated_default_prvalue(child, field->type)) { ++index; continue; } if (!record_has_storage_copy(field->type) && (child.category == ValueCategory::LValue || child.category == ValueCategory::XValue)) {
+(void)field_addr(); ++index; continue; } lower_object_init(field_addr, field->type, clauses[index++]); } else if (is_brace_elision_aggregate(field->type) && !starts_with(child.line, "braced-init-list")) {
+bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
+lower_aggregate_elements(field_addr, field->type, clauses, index); lowering_array_subobject_init_ = saved_array_subobject; } else if (field->is_bit_field) { Value value = convert_value(emit_rvalue(child), child.type,
+field->type); string low_type = scalar_lowir_type(field->type); uint64_t mask = field->bit_width >= 64 ? ~uint64_t(0) : ((uint64_t(1) << field->bit_width) - 1); string masked = fresh_temp();
+instr(masked + " = binary and " + low_type + " " + to_string(mask) + ", " + value.text); if (field->bit_offset != 0) { string shifted = fresh_temp(); instr(shifted + " = binary shl " + low_type + " " +
+masked + ", " + to_string(field->bit_offset)); masked = shifted; } Value target = field_addr(); instr("store " + low_type + " " + masked + ", " + target.text); ++index; } else {
+if (is_no_op_generated_default_prvalue(child, field->type)) { ++index; continue; } bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array)
+lowering_array_subobject_init_ = true; lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } } return; }
 	if (bare->kind != TypeKind::Array)
 		return;
 	if (index < clauses.size() &&
@@ -269,7 +266,8 @@ bool FunctionLowerer::lower_braced_direct_constructor_init(
 	    init.token_text != "force-constructor" &&
 	    !pa11::type_has_const(type) &&
 	    !type_has_reference_subobject(type) &&
-	    !record_has_user_assignment_operator(type))
+	    !record_has_user_assignment_operator(type) &&
+	    !binding_has_template_specialization_context(init.direct_call))
 	{
 		lower_aggregate_init(addr_for, type, init);
 		return true;
@@ -278,7 +276,8 @@ bool FunctionLowerer::lower_braced_direct_constructor_init(
 		                                                   type,
 		                                                   init))
 		{
-			if (binding_has_template_specialization_context(fn_.binding))
+			if (binding_has_template_specialization_context(fn_.binding) &&
+			    !init.direct_call->is_generated_copy_move_constructor)
 				program_.demand_inline_function(init.direct_call);
 			const Node& source_node = init.children[0];
 			TypePtr source_object = object_type(source_node.type);
@@ -344,7 +343,8 @@ bool FunctionLowerer::lower_braced_record_constructor_init(
 	{
 		if (ctor->is_generated_aggregate_constructor &&
 		    !pa11::type_has_const(type) &&
-		    !type_has_reference_subobject(type) &&
+		    (!lowering_record_return_object_ ||
+		     !type_has_reference_subobject(type)) &&
 		    !record_has_user_assignment_operator(type))
 		{
 			lower_aggregate_init(addr_for, type, init);
@@ -614,14 +614,30 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 				: NULL;
 			if (copy_move == NULL && init.category == ValueCategory::XValue)
 				copy_move = find_copy_move_constructor(type, false);
+			if (copy_move == NULL &&
+			    dst_record->is_template_specialization &&
+			    init.category == ValueCategory::LValue)
+				copy_move =
+					find_existing_template_family_constructor(program_,
+					                                          type,
+					                                          init.type,
+					                                          false);
+			if (copy_move == NULL &&
+			    dst_record->is_template_specialization &&
+			    init.category == ValueCategory::LValue)
+			{
+				Binding* any = find_any_copy_move_constructor(type, false);
+				if (any != NULL && !any->is_defaulted)
+					copy_move = any;
+			}
 			if (copy_move != NULL)
 			{
 				vector<const Node*> args;
 				args.push_back(&init);
 				lower_constructor_call(addr_for, copy_move, args);
 				return;
-			}
-			Value target = addr_for();
+				}
+				Value target = addr_for();
 				string source = (init.category == ValueCategory::LValue ||
 				                 init.category == ValueCategory::XValue)
 					? ensure_pointer(emit_lvalue_addr(init)).text
@@ -630,8 +646,8 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
 					instr("copyobj " + to_string(pa11::type_size(type)) +
 					      "x" + to_string(pa11::type_align(type)) + " " +
 					      source + ", " + target.text);
-			return;
-		}
+				return;
+			}
 		Binding* ctor = find_constructor(type, 1);
 		if (ctor == NULL)
 			throw runtime_error("no matching constructor for " +

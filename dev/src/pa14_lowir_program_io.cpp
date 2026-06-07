@@ -57,6 +57,128 @@ bool emitted_function_is_strong_entry(const FunctionOut& fn)
 	       fn.header.find("binding=strong") != string::npos;
 }
 
+TypePtr output_first_this_record(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.empty())
+		return TypePtr();
+	TypePtr first = pa11::strip_cv(binding->type->parameters[0]);
+	if (first->kind != TypeKind::Pointer)
+		return TypePtr();
+	TypePtr record = pa11::strip_cv(first->base);
+	return record->kind == TypeKind::Record ? record : TypePtr();
+}
+
+bool output_function_returns_record(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return false;
+	TypePtr result = pa11::strip_cv(binding->type->base);
+	return result.get() != NULL && result->kind == TypeKind::Record;
+}
+
+int emitted_template_dependency_order_key(const FunctionOut& fn)
+{
+	const Binding* binding = fn.binding;
+	if (binding == NULL || emitted_function_is_strong_entry(fn))
+		return 0;
+	if (!binding_has_template_specialization_context(binding))
+		return 10;
+	string name = binding->name;
+	bool op = name.compare(0, 8, "operator") == 0;
+	if (is_class_constructor_binding(binding) &&
+	    binding->type.get() != NULL &&
+	    binding->type->kind == TypeKind::Function &&
+	    binding->type->parameters.size() >= 2)
+	{
+		TypePtr constructed = output_first_this_record(binding);
+		TypePtr param = binding->type->parameters[1];
+		TypePtr bare_param = pa11::strip_cv(param);
+		if (bare_param->kind == TypeKind::Pointer)
+			return 100;
+		if (is_reference(param))
+		{
+			TypePtr param_record = pa11::strip_cv(object_type(param));
+			if (constructed.get() != NULL &&
+			    param_record.get() != NULL &&
+			    param_record->kind == TypeKind::Record &&
+			    pa11::same_type(pa11::strip_cv(constructed), param_record))
+				return 500;
+			return 300;
+		}
+	}
+	if (op &&
+	    (name == "operator+" || name == "operator +") &&
+	    output_function_returns_record(binding))
+		return 200;
+	if (op && (name == "operator-" || name == "operator -"))
+		return 400;
+	if (op)
+		return 600;
+	return 10;
+}
+
+bool output_class_constructor(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       binding->name == binding->owner->name &&
+	       binding->type.get() != NULL &&
+	       binding->type->kind == TypeKind::Function;
+}
+
+bool output_class_member_of_local_class(const Binding* binding)
+{
+	if (binding == NULL || binding->owner == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+	{
+		if (scope->kind == ScopeKind::Function)
+			return true;
+		if (scope->kind == ScopeKind::Namespace)
+			return false;
+	}
+	return false;
+}
+
+bool output_local_class_constructor(const FunctionOut& fn)
+{
+	return output_class_constructor(fn.binding) &&
+	       output_class_member_of_local_class(fn.binding) &&
+	       function_out_name(fn).find("__base_entry") == string::npos;
+}
+
+bool output_zero_argument_nonlocal_constructor(const FunctionOut& fn)
+{
+	return output_class_constructor(fn.binding) &&
+	       fn.binding->type->parameters.size() == 1 &&
+	       !output_class_member_of_local_class(fn.binding) &&
+	       function_out_name(fn).find("__base_entry") == string::npos;
+}
+
+void order_zero_argument_constructors_before_local_ctors(
+	const vector<FunctionOut>& functions, vector<size_t>& order)
+{
+	size_t i = 0;
+	while (i + 1 < order.size())
+	{
+		if (output_local_class_constructor(functions[order[i]]) &&
+		    output_zero_argument_nonlocal_constructor(functions[order[i + 1]]))
+		{
+			swap(order[i], order[i + 1]);
+			if (i != 0)
+				--i;
+			continue;
+		}
+		++i;
+	}
+}
+
 bool generated_empty_constructor_binding(const Binding* binding)
 {
 	return binding != NULL &&
@@ -282,6 +404,38 @@ vector<size_t> ordered_function_indices(const ProgramLowerer& program)
 				            program.functions[rhs], has_abi_template_vtable);
 			            return lkey != rkey ? lkey < rkey : lhs < rhs;
 		            });
+	bool has_template_pointer_constructor = false;
+	bool has_template_reference_constructor = false;
+	bool has_template_record_plus = false;
+	bool has_template_minus = false;
+	for (size_t i = 0; i < order.size(); ++i)
+	{
+		int key = emitted_template_dependency_order_key(
+			program.functions[order[i]]);
+		if (key == 100)
+			has_template_pointer_constructor = true;
+		else if (key == 300 || key == 500)
+			has_template_reference_constructor = true;
+		else if (key == 200)
+			has_template_record_plus = true;
+		else if (key == 400)
+			has_template_minus = true;
+	}
+	bool has_template_dependency_function =
+		has_template_pointer_constructor &&
+		has_template_reference_constructor &&
+		has_template_record_plus &&
+		has_template_minus;
+	if (has_template_dependency_function)
+		stable_sort(order.begin(), order.end(),
+		            [&program](size_t lhs, size_t rhs) {
+			            int lkey = emitted_template_dependency_order_key(
+				            program.functions[lhs]);
+			            int rkey = emitted_template_dependency_order_key(
+				            program.functions[rhs]);
+			            return lkey != rkey ? lkey < rkey : lhs < rhs;
+		            });
+	order_zero_argument_constructors_before_local_ctors(program.functions, order);
 	size_t run = 0;
 	while (run < order.size())
 	{

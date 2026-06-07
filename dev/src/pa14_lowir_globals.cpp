@@ -96,24 +96,37 @@ bool global_needs_runtime_init(TypePtr type, const Node& init)
 	    init.binding != NULL &&
 	    pa11::strip_cv(init.binding->type)->kind == TypeKind::Array)
 		return false;
+	if (starts_with(init.line, "id-expression") &&
+	    init.binding != NULL &&
+	    init.binding->is_static_member)
+		return true;
 	return !global_static_scalar_initializer(init);
 }
 
 vector<string> global_metadata(const Binding* binding, bool weak_constexpr)
 {
-	vector<string> metadata;
+	vector<string> items;
 	if (binding->is_thread_local)
-		metadata.push_back("storage=thread_local");
+		items.push_back("storage=thread_local");
 	if (binding->language_linkage == "c")
-		metadata.push_back("linkage=c");
-	if (weak_constexpr &&
-	    binding->is_static_member &&
-	    binding->is_constexpr)
-		metadata.push_back("binding=weak");
+		items.push_back("linkage=c");
+	if (binding->is_static_member &&
+	    (binding->is_template_static_member_definition ||
+	     binding_has_template_specialization_context(binding)))
+		items.push_back("binding=weak");
+	else if (weak_constexpr &&
+	         binding->is_static_member &&
+	         binding->is_constexpr)
+		items.push_back("binding=weak");
 	else
-		metadata.push_back(binding->is_local_static || binding->is_constexpr
-		                   ? "binding=internal" : "binding=strong");
-	return metadata;
+		items.push_back(binding->is_local_static ||
+		                binding->is_namespace_static ||
+		                binding->is_constexpr
+		                ? "binding=internal" : "binding=strong");
+	string object = global_object_symbol(binding);
+	if (!object.empty())
+		items.push_back("object=" + object);
+	return items;
 }
 
 bool global_runtime_init(ProgramLowerer& program,
@@ -124,7 +137,42 @@ bool global_runtime_init(ProgramLowerer& program,
 	bool runtime_init =
 		!node.children.empty() &&
 		global_needs_runtime_init(type, node.children[0]);
-	if (node.binding->has_constant)
+	if (!runtime_init &&
+	    node.children.empty() &&
+	    bare->kind == TypeKind::Record)
+	{
+		Binding* ctor = find_constructor(type, 0);
+		runtime_init = ctor != NULL && !ctor->is_noop_constructor;
+	}
+	if (runtime_init &&
+	    node.binding->is_namespace_static &&
+	    !node.children.empty() &&
+	    starts_with(node.children[0].line, "no-op-initializer"))
+		runtime_init = false;
+	bool static_member_id_init =
+		!node.children.empty() &&
+		starts_with(node.children[0].line, "id-expression") &&
+		node.children[0].binding != NULL &&
+		node.children[0].binding->is_static_member;
+	bool static_member_id_has_storage = false;
+	if (static_member_id_init)
+	{
+		const Binding* source = node.children[0].binding;
+		static_member_id_has_storage =
+			program.deferred_global_definitions.find(source) !=
+			program.deferred_global_definitions.end();
+		if (!static_member_id_has_storage)
+		{
+			string source_name = program.symbol_for(source);
+			static_member_id_has_storage =
+				program.defined_globals.find(source_name) !=
+				program.defined_globals.end();
+		}
+		if (!static_member_id_has_storage)
+			runtime_init = false;
+	}
+	if (node.binding->has_constant &&
+	    !(static_member_id_init && static_member_id_has_storage))
 	{
 		TypePtr object = strip_for_value(type);
 		TypePtr object_bare = pa11::strip_cv(object);
@@ -152,7 +200,17 @@ bool global_runtime_init(ProgramLowerer& program,
 	if (runtime_init && node.binding->is_thread_local)
 		program.thread_local_init_variables.push_back(node);
 	else if (runtime_init && !node.binding->is_local_static)
-		program.global_init_variables.push_back(node);
+	{
+		Node runtime_node = node;
+		if (static_member_id_init &&
+		    static_member_id_has_storage &&
+		    !runtime_node.children.empty())
+		{
+			runtime_node.children[0].has_constant_value = false;
+			runtime_node.children[0].constant_value = 0;
+		}
+		program.global_init_variables.push_back(runtime_node);
+	}
 	if (record_has_destructor(type))
 		program.global_fini_variables.push_back(node);
 	return runtime_init;
@@ -208,7 +266,9 @@ void write_aggregate_global(ProgramLowerer& program,
 	else if (bare->kind == TypeKind::Record)
 	{
 		out << "  zero " << pa11::type_size(node.binding->type) << "\n";
-		if (!node.binding->is_static_member && !node.binding->is_local_static)
+		if (!node.binding->is_static_member &&
+		    !node.binding->is_local_static &&
+		    !node.binding->is_namespace_static)
 			program.needs_empty_init_function = true;
 	}
 	else
@@ -282,7 +342,9 @@ void write_scalar_global(ProgramLowerer& program,
 	    << metadata_suffix(metadata) << " = ";
 	if (write_reference_global(program, out, node, name))
 		return;
-	if (node.children.empty() && node.binding->has_constant &&
+	if (runtime_init)
+		out << "zero";
+	else if (node.children.empty() && node.binding->has_constant &&
 	    pa11::strip_cv(type)->kind != TypeKind::Enum)
 		out << node.binding->constant_value;
 	else if (node.binding->has_constant &&
@@ -311,6 +373,8 @@ void ProgramLowerer::emit_global(const Node& node)
 	string name = symbol_for(node.binding);
 	if (!defined_globals.insert(name).second)
 		return;
+	global_definition_bindings.push_back(node.binding);
+	global_definition_nodes[node.binding] = node;
 	if (node.binding->is_thread_local)
 		ensure_thread_local_wrapper(name);
 	TypePtr type = node.binding->type;

@@ -201,255 +201,6 @@ void Parser::parse_declaration_into(Node& out)
 	parse_simple_or_function_declaration(out, true);
 }
 
-void Parser::parse_namespace_or_alias(Node& out)
-{
-	bool inline_ns = consume(KW_INLINE);
-	expect(KW_NAMESPACE);
-	if (!inline_ns && at_identifier() && lookahead(OP_ASS, 1))
-	{
-		string alias = consume_identifier();
-		expect(OP_ASS);
-		Scope* target = parse_qualified_namespace_specifier();
-		expect(OP_SEMICOLON);
-		pa11::add_namespace_alias(current_scope(), alias, target);
-		return;
-	}
-
-	string name;
-	bool named = false;
-	if (at_identifier())
-	{
-		named = true;
-		name = consume_identifier();
-	}
-	expect(OP_LBRACE);
-	Scope* child = NULL;
-	if (named)
-		child = pa11::get_or_create_namespace(current_scope(), name, inline_ns);
-	else
-	{
-		if (current_scope()->unnamed_namespace == NULL)
-		{
-			current_scope()->unnamed_namespace =
-				pa11::create_child_scope(current_scope(),
-				                         ScopeKind::Namespace,
-				                         "<unnamed>");
-			pa11::add_using_directive(current_scope(),
-			                          current_scope()->unnamed_namespace);
-		}
-		child = current_scope()->unnamed_namespace;
-		name = "<unnamed>";
-	}
-
-	Node node("namespace-definition " + name);
-	scopes_.push_back(child);
-	while (!at(OP_RBRACE))
-		parse_declaration_into(node);
-	scopes_.pop_back();
-	expect(OP_RBRACE);
-	add_child(out, node);
-}
-
-void Parser::parse_using_family(Node& out)
-{
-	expect(KW_USING);
-	if (consume(KW_NAMESPACE))
-	{
-		Scope* target = parse_qualified_namespace_specifier();
-		expect(OP_SEMICOLON);
-		pa11::add_using_directive(current_scope(), target);
-		return;
-	}
-	if (at_identifier() && lookahead(OP_ASS, 1))
-	{
-		string name = consume_identifier();
-		TypePtr shadowed_template_parameter;
-		if (find_template_type_substitution(name, shadowed_template_parameter))
-			throw runtime_error("alias shadows template parameter");
-		expect(OP_ASS);
-		TypePtr type = parse_type_id();
-		expect(OP_SEMICOLON);
-		add_alias(current_scope(), name, type);
-		Node node("type-alias " + name + " " + pa11::describe_type(type));
-		add_child(out, node);
-		return;
-	}
-	bool using_typename = consume(KW_TYPENAME);
-	string spelling;
-	Scope* qualifier = parse_nested_name_specifier(&spelling);
-	string name = at(KW_OPERATOR)
-		? consume_operator_function_name()
-		: consume_identifier();
-	expect(OP_SEMICOLON);
-	vector<Binding*> targets =
-		lookup_qualified_set(qualifier,
-		                     name,
-		                     using_typename ? pa11::LOOKUP_TYPE :
-		                     pa11::LOOKUP_ANY);
-	if (targets.empty() &&
-	    current_scope()->kind == ScopeKind::Class &&
-	    qualifier->kind == ScopeKind::Class)
-	{
-		vector<Binding*> ctors =
-			lookup_qualified_set(qualifier,
-			                     qualifier->name,
-			                     pa11::LOOKUP_FUNCTION);
-		if (!ctors.empty())
-		{
-			targets = ctors;
-			name = qualifier->name;
-		}
-	}
-	if (targets.empty())
-	{
-		TemplateDeclaration* class_template = find_class_template(qualifier, name);
-		if (class_template != NULL)
-		{
-			class_templates_[current_scope()][name] = class_template;
-			return;
-		}
-		QualifiedName qname;
-		qname.qualifier = qualifier;
-		qname.name = name;
-		qname.qualified = true;
-		vector<TemplateDeclaration*> function_template =
-			find_function_templates(qname);
-		if (!function_template.empty())
-		{
-			function_templates_[current_scope()][name] = function_template;
-			return;
-		}
-		throw runtime_error("using declaration target not found");
-	}
-	if (current_scope()->kind == ScopeKind::Class &&
-	    qualifier->kind == ScopeKind::Class &&
-	    name == qualifier->name)
-	{
-			TypePtr derived = pa11::record_type_for_scope(current_scope());
-			TypePtr base = pa11::record_type_for_scope(qualifier);
-			if (derived.get() == NULL || base.get() == NULL)
-				throw runtime_error("invalid inheriting constructor");
-			for (size_t i = 0; i < targets.size(); ++i)
-			{
-				Binding* inherited = targets[i];
-				if (inherited->kind != BindingKind::Function ||
-				    inherited->type->parameters.empty())
-					continue;
-				parse_pending_function_body(inherited);
-				parse_pending_member_body(inherited);
-				vector<TypePtr> params;
-				params.push_back(pa11::make_pointer(derived));
-				for (size_t j = 1; j < inherited->type->parameters.size(); ++j)
-					params.push_back(inherited->type->parameters[j]);
-				TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-				                                      params,
-				                                      inherited->type->variadic);
-				Binding* ctor = add_value(current_scope(),
-				                          BindingKind::Function,
-				                          current_scope()->name,
-				                          fn_type);
-				map<Binding*, vector<string> >::const_iterator nit =
-					function_parameter_names_.find(inherited);
-				vector<string> inherited_names =
-					nit != function_parameter_names_.end()
-					? nit->second : vector<string>();
-				vector<string> ctor_names(1, "this");
-				ctor->is_inline_definition = true;
-				Node fn("function-definition " + qualified_decl_name(ctor) + " " +
-				        pa11::describe_type(fn_type));
-				fn.binding = ctor;
-				fn.type = fn_type;
-				Scope* function_scope =
-					pa11::create_child_scope(current_scope(),
-					                         ScopeKind::Function,
-					                         ctor->name);
-				Binding* this_binding =
-					pa11::add_binding(function_scope,
-					                  BindingKind::Parameter,
-					                  "this",
-					                  params[0]);
-				Node this_node("parameter this " + pa11::describe_type(params[0]));
-				this_node.binding = this_binding;
-				this_node.type = params[0];
-				add_child(fn, this_node);
-				Node init("braced-init-list");
-				for (size_t j = 1; j < params.size(); ++j)
-				{
-					string pname = j < inherited_names.size() &&
-					               !inherited_names[j].empty()
-						? inherited_names[j] : "__param" + to_string(j);
-					ctor_names.push_back(pname);
-					Binding* param =
-						pa11::add_binding(function_scope,
-						                  BindingKind::Parameter,
-						                  pname,
-						                  params[j]);
-					Node param_node("parameter " + pname + " " +
-					                pa11::describe_type(params[j]));
-					param_node.binding = param;
-					param_node.type = params[j];
-					add_child(fn, param_node);
-					Node arg("id-expression lvalue " +
-					         pa11::describe_type(params[j]) + " " + pname);
-					arg.binding = param;
-					arg.type = params[j];
-					arg.category = ValueCategory::LValue;
-					add_child(init, arg);
-				}
-				Node body("compound-statement");
-				Node base_action = make_base_init_action(base, &init);
-				base_action.direct_call = inherited;
-				base_action.token_text = "inherited-constructor";
-				add_child(body, base_action);
-				add_child(fn, body);
-				function_parameter_names_[ctor] = ctor_names;
-				extra_lowir_nodes_.push_back(fn);
-			}
-			return;
-		}
-	for (size_t i = 0; i < targets.size(); ++i)
-	{
-		Binding* imported =
-			pa11::add_using_declaration(current_scope(), name, targets[i]);
-		map<Binding*, TemplateDeclaration*>::iterator templ =
-			function_template_placeholders_.find(targets[i]);
-		if (templ != function_template_placeholders_.end())
-		{
-			function_template_placeholders_[imported] = templ->second;
-			vector<TemplateDeclaration*>& overloads =
-				function_templates_[current_scope()][name];
-			if (find(overloads.begin(), overloads.end(), templ->second) ==
-			    overloads.end())
-				overloads.push_back(templ->second);
-		}
-	}
-}
-
-void Parser::parse_linkage_specification(Node& out)
-{
-	expect(KW_EXTERN);
-	string language = current_language_linkage();
-	if (at_literal())
-	{
-		if (current().source == "\"C\"")
-			language = "c";
-		else if (current().source == "\"C++\"")
-			language = "cpp";
-		++pos_;
-	}
-	if (consume(OP_LBRACE))
-	{
-		language_linkages_.push_back(language);
-		while (!at(OP_RBRACE))
-			parse_declaration_into(out);
-		language_linkages_.pop_back();
-		expect(OP_RBRACE);
-		return;
-	}
-	language_linkages_.push_back(language);
-	parse_simple_or_function_declaration(out, true);
-	language_linkages_.pop_back();
-}
 
 void Parser::skip_template_parameter_clause()
 {
@@ -474,6 +225,36 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		return;
 	if (parse_qualified_constructor_definition(out, emit_node))
 		return;
+	if (at(KW_INLINE) || at(KW_CONSTEXPR))
+	{
+		size_t qualified_member_save = pos_;
+		bool inline_spec = false;
+		bool constexpr_spec = false;
+		for (;;)
+		{
+			if (consume(KW_INLINE))
+			{
+				inline_spec = true;
+				continue;
+			}
+			if (consume(KW_CONSTEXPR))
+			{
+				constexpr_spec = true;
+				continue;
+			}
+			break;
+		}
+		if (parse_qualified_destructor_definition(out, emit_node))
+			return;
+		if (parse_qualified_conversion_definition(out, emit_node))
+			return;
+		if (parse_qualified_constructor_definition(out,
+		                                           emit_node,
+		                                           inline_spec,
+		                                           constexpr_spec))
+			return;
+		pos_ = qualified_member_save;
+	}
 	if (current_scope()->kind == ScopeKind::Class && consume(KW_EXPLICIT))
 	{
 		bool constexpr_member = consume(KW_CONSTEXPR);
@@ -545,14 +326,14 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	{
 		expect(OP_COLON);
 		Expr width = parse_expression();
-		if (!width.has_constant_value)
+		if (!width.has_constant_value && !validating_template_definition_)
 			throw runtime_error("invalid bit-field width");
 		Binding* field = add_value(current_scope(),
 		                           BindingKind::Variable,
 		                           "__anonymous_bitfield_" + to_string(pos_),
 		                           base);
 		field->is_bit_field = true;
-		field->bit_width = width.constant_value;
+		field->bit_width = width.has_constant_value ? width.constant_value : 0;
 		TypePtr record = pa11::record_type_for_scope(current_scope());
 		if (record.get() != NULL)
 			record->layout_valid = false;
@@ -602,10 +383,10 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	if (current_scope()->kind == ScopeKind::Class && consume(OP_COLON))
 	{
 		Expr width = parse_expression();
-		if (!width.has_constant_value)
+		if (!width.has_constant_value && !validating_template_definition_)
 			throw runtime_error("invalid bit-field width");
 		bit_field = true;
-		bit_width = width.constant_value;
+		bit_width = width.has_constant_value ? width.constant_value : 0;
 	}
 	if (at(OP_LBRACE) && declares_function)
 	{
@@ -1058,10 +839,10 @@ bool Parser::parse_friend_declaration()
 			if (selected_declaration != candidate_declaration)
 				continue;
 			throw runtime_error("ambiguous friend function template");
-		}
-		if (selected == NULL || selected->placeholder == NULL)
-			throw runtime_error("function template not found");
-		add_friend_function(class_scope, selected->placeholder);
+			}
+				if (selected == NULL || selected->placeholder == NULL)
+					throw runtime_error("function template not found");
+			add_friend_function(class_scope, selected->placeholder);
 		if (!selected->has_definition)
 		{
 			Binding* specialization =
@@ -1113,6 +894,22 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 {
 	TypePtr record = pa11::strip_cv(type);
 	pa11::layout_record_type(record);
+	TypePtr init_record = init.type.get() != NULL
+		? pa11::strip_cv(expression_object_type(init.type)) : TypePtr();
+	if (init_record.get() != NULL &&
+	    init_record->kind == pa11::TypeKind::Record &&
+	    pa11::same_type(init_record, record) &&
+	    (init.node.direct_call != NULL || !init.braced_init_list))
+		return;
+	if (record->scope != NULL &&
+	    init.node.direct_call != NULL &&
+	    init.node.direct_call->owner == record->scope &&
+	    init.node.direct_call->name == record->scope->name)
+	{
+		if (init.node.direct_call->is_explicit)
+			throw runtime_error("explicit constructor in copy initialization");
+		return;
+	}
 	if (init.braced_init_list && init.node.direct_call != NULL)
 		return;
 	if (init.braced_init_list && record->scope != NULL)
@@ -1146,6 +943,21 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 				    default_member_initializers_.end())
 					throw runtime_error(
 						"default member initializer disqualifies aggregate");
+		}
+	}
+	if (!init.braced_init_list &&
+	    init_record.get() != NULL &&
+	    init_record->kind == pa11::TypeKind::Record &&
+	    !pa11::same_type(init_record, record))
+	{
+		try
+		{
+			Conversion conv = convert_to(init, type);
+			if (conv.viable)
+				return;
+		}
+		catch (const runtime_error&)
+		{
 		}
 	}
 	size_t arg_count = init.braced_init_list ? init.node.children.size() : 1;
@@ -1222,10 +1034,24 @@ void Parser::complete_class_virtuals(TypePtr type)
 		return;
 	TypePtr direct_base =
 		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-	if (inherits_virtual_destructor(bare) && !has_declared_destructor(bare))
+	bool dependent_base_validation =
+		validating_template_definition_ &&
+		record_dependent_base_lookup_skips_.count(bare.get()) != 0;
+	if (!dependent_base_validation &&
+	    direct_base.get() != NULL &&
+	    direct_base->kind == pa11::TypeKind::Record &&
+	    direct_base.get() != bare.get())
+	{
+		complete_template_record(direct_base);
+		complete_class_virtuals(direct_base);
+	}
+	if (!dependent_base_validation &&
+	    inherits_virtual_destructor(bare) &&
+	    !has_declared_destructor(bare))
 		ensure_default_destructor(bare);
 	bare->virtual_entries.clear();
-	if (direct_base.get() != NULL &&
+	if (!dependent_base_validation &&
+	    direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record &&
 	    direct_base->is_polymorphic)
 	{
@@ -1258,7 +1084,7 @@ void Parser::complete_class_virtuals(TypePtr type)
 			bare->is_polymorphic = true;
 			continue;
 		}
-		if (member->is_override_specified)
+		if (member->is_override_specified && !dependent_base_validation)
 			throw runtime_error("override requires virtual base member");
 		if (!member->is_virtual)
 			continue;
@@ -1287,9 +1113,10 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 {
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	int ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
-	bool is_static_member =
-		target->kind == ScopeKind::Class && !nonstatic_member_function;
-	Binding* function = NULL;
+		bool is_static_member =
+			target->kind == ScopeKind::Class && !nonstatic_member_function;
+		type = substitute_template_type(type);
+		Binding* function = NULL;
 	map<string, vector<Binding*> >::iterator found = target->members.find(name);
 	if (!force_new_function_binding_ && found != target->members.end())
 	{
@@ -1312,6 +1139,9 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 				: add_value(target, BindingKind::Function, name, type);
 	function->language_linkage = current_language_linkage();
 	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
+	function->is_namespace_static =
+		function->is_namespace_static ||
+		(specs.static_decl && target->kind == ScopeKind::Namespace);
 	function->is_static_member = is_static_member;
 	function->is_inline_definition =
 		function->is_inline_definition ||
@@ -1329,6 +1159,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		class_protected_access_.back();
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
 	function->ref_qualifier = ref_qualifier;
+	if (validating_template_definition_)
+		function->is_dependent_template_artifact = true;
 	if (target->kind == ScopeKind::Class && !is_static_member)
 	{
 		function->is_virtual = function->is_virtual || specs.virtual_decl;
@@ -1352,14 +1184,40 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			override_function_parameter_names_ = false;
 			function_parameter_name_override_.clear();
 		}
-		map<Binding*, vector<Expr> >::const_iterator old_defaults =
-			default_arguments_.find(function);
-		map<Binding*, vector<string> >::const_iterator old_names =
-			function_parameter_names_.find(function);
-		if (nonstatic_member_function)
-		{
-			defaults.push_back(Expr());
-			names.push_back("this");
+			map<Binding*, vector<Expr> >::const_iterator old_defaults =
+				default_arguments_.find(function);
+			map<Binding*, vector<string> >::const_iterator old_names =
+				function_parameter_names_.find(function);
+			vector<string> borrowed_names;
+			bool have_borrowed_names = false;
+			if (old_names == function_parameter_names_.end() &&
+			    found != target->members.end())
+				for (size_t j = 0; j < found->second.size(); ++j)
+				{
+					Binding* candidate = found->second[j];
+					if (candidate == function ||
+					    candidate->kind != BindingKind::Function ||
+					    !pa11::same_type(candidate->type, type) ||
+					    candidate->ref_qualifier != ref_qualifier ||
+					    candidate->is_static_member != is_static_member)
+						continue;
+					map<Binding*, vector<string> >::const_iterator names =
+						function_parameter_names_.find(candidate);
+					if (names != function_parameter_names_.end())
+					{
+						borrowed_names = names->second;
+						have_borrowed_names = true;
+						break;
+					}
+				}
+			if (use_parameter_name_override &&
+			    is_static_member &&
+			    old_names == function_parameter_names_.end())
+				use_parameter_name_override = false;
+			if (nonstatic_member_function)
+			{
+				defaults.push_back(Expr());
+				names.push_back("this");
 		}
 		for (size_t i = 0; i < suffix->parameters.size(); ++i)
 		{
@@ -1380,14 +1238,18 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			    override_slot < parameter_name_override.size() &&
 			    !parameter_name_override[override_slot].empty())
 				parameter_name = parameter_name_override[override_slot];
-			else if (parameter_name.empty() &&
-			         old_names != function_parameter_names_.end() &&
-			    slot < old_names->second.size())
-				parameter_name = old_names->second[slot];
-			defaults.push_back(default_value);
-			names.push_back(parameter_name);
-		}
-		default_arguments_[function] = defaults;
+				else if (parameter_name.empty() &&
+				         old_names != function_parameter_names_.end() &&
+				    slot < old_names->second.size())
+					parameter_name = old_names->second[slot];
+				else if (parameter_name.empty() &&
+				         have_borrowed_names &&
+				         slot < borrowed_names.size())
+					parameter_name = borrowed_names[slot];
+				defaults.push_back(default_value);
+				names.push_back(parameter_name);
+			}
+			default_arguments_[function] = defaults;
 		function_parameter_names_[function] = names;
 		if (use_parameter_name_override)
 			override_function_parameter_name_bindings_.insert(function);

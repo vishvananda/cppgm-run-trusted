@@ -206,12 +206,12 @@ int cy86_width_bits(const Type& type)
 	return type.bits;
 }
 
-string metadata_value(const Metadata& metadata, const string& key)
+string metadata_value(const Metadata& items, const string& key)
 {
-	for (size_t i = 0; i < metadata.size(); ++i)
+	for (size_t i = 0; i < items.size(); ++i)
 	{
-		if (metadata[i].key == key)
-			return metadata[i].value;
+		if (items[i].key == key)
+			return items[i].value;
 	}
 	return "";
 }

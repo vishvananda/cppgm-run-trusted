@@ -12,6 +12,14 @@ void collect_direct_calls(const Node& node, set<const Binding*>& out)
 		collect_direct_calls(node.children[i], out);
 }
 
+void collect_base_constructor_calls(const Node& node, set<const Binding*>& out)
+{
+	if (node.direct_call != NULL && starts_with(node.line, "base-init-action"))
+		out.insert(node.direct_call);
+	for (size_t i = 0; i < node.children.size(); ++i)
+		collect_base_constructor_calls(node.children[i], out);
+}
+
 bool contains_call_expression(const Node& node)
 {
 	if (starts_with(node.line, "call-expression") ||
@@ -50,6 +58,16 @@ bool generated_copy_move_constructor_node(const Node& node)
 	}
 	if (!template_context)
 		return false;
+	if (node.binding->is_defaulted && !contains_call_expression(node))
+	{
+		TypePtr record = pa11::record_type_for_scope(node.binding->owner);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL &&
+		    !defaulted_copy_move_constructor_needs_helper(
+			    node.binding,
+			    record))
+			return false;
+	}
 	if (node.binding->is_defaulted &&
 	    node.binding->owner != NULL &&
 	    node.binding->owner->kind == ScopeKind::Class)
@@ -154,7 +172,9 @@ void demand_object_roots(ProgramLowerer& program, const vector<Node>& extra)
 {
 	for (size_t i = 0; i < extra.size(); ++i)
 	{
-		if (extra[i].binding == NULL || !extra[i].binding->is_object_root)
+		if (extra[i].binding == NULL ||
+		    (!extra[i].binding->is_object_root &&
+		     extra[i].token_text != "inline-object-root"))
 			continue;
 		program.demand_inline_function(extra[i].binding);
 		program.emit_pending_inline_definitions();
@@ -190,6 +210,74 @@ void demand_generated_copy_move_dependencies(ProgramLowerer& program,
 	}
 }
 
+const Node* extra_node_for_binding(const vector<Node>& extra,
+                                   const Binding* binding)
+{
+	for (size_t i = 0; i < extra.size(); ++i)
+		if (extra[i].binding == binding)
+			return &extra[i];
+	return NULL;
+}
+
+void demand_noop_generated_default_dependencies(
+	ProgramLowerer& program,
+	const vector<Node>& extra,
+	const Binding* binding,
+	set<const Binding*>& seen)
+{
+	if (binding == NULL || !seen.insert(binding).second)
+		return;
+	Binding* mutable_binding = const_cast<Binding*>(binding);
+	TypePtr owner = class_record_for_member(binding);
+	if (!binding->is_generated_default_constructor ||
+	    owner.get() == NULL ||
+	    !no_op_generated_default_constructor(mutable_binding, owner))
+		return;
+	const Node* node = extra_node_for_binding(extra, binding);
+	if (node == NULL)
+		return;
+	set<const Binding*> generated_calls;
+	collect_direct_calls(*node, generated_calls);
+	set<const Binding*> base_constructor_calls;
+	collect_base_constructor_calls(*node, base_constructor_calls);
+	for (set<const Binding*>::const_iterator it = generated_calls.begin();
+	     it != generated_calls.end();
+	     ++it)
+	{
+		if (*it == NULL)
+			continue;
+		if ((*it)->is_generated_default_constructor)
+		{
+			demand_noop_generated_default_dependencies(program,
+			                                           extra,
+			                                           *it,
+			                                           seen);
+		}
+		else
+		{
+			if (base_constructor_calls.count(*it) != 0 &&
+			    is_class_constructor_binding(*it))
+				program.constructor_symbol_for(*it, true);
+			program.demand_inline_function(*it);
+		}
+	}
+}
+
+void demand_noop_generated_default_dependencies(
+	ProgramLowerer& program,
+	const vector<Node>& extra,
+	const set<const Binding*>& direct_calls)
+{
+	set<const Binding*> seen;
+	for (set<const Binding*>::const_iterator it = direct_calls.begin();
+	     it != direct_calls.end();
+	     ++it)
+		demand_noop_generated_default_dependencies(program,
+		                                           extra,
+		                                           *it,
+		                                           seen);
+}
+
 void collect_parser_output(ProgramLowerer& program,
                            pa12::internal::Parser& parser)
 {
@@ -203,6 +291,7 @@ void collect_parser_output(ProgramLowerer& program,
 	demand_object_roots(program, extra);
 	demand_early_hidden_friends(program, extra, direct_calls);
 	program.collect_translation_unit(parser.root());
+	demand_noop_generated_default_dependencies(program, extra, direct_calls);
 	demand_generated_copy_move_dependencies(program, extra);
 	program.emit_pending_inline_definitions();
 	program.emit_pending_synthetic_assignment_functions();

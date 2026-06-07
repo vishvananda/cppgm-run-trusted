@@ -1,67 +1,33 @@
 #include "pa12_internal.h"
-
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <sstream>
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
 namespace {
-
-enum class EvalFlow
-{
-	Normal,
-	Return,
-	Break,
-	Continue,
-	Invalid
-};
-
-struct EvalState
-{
-	map<Binding*, ConstexprValue> locals;
-
-	EvalState() {}
-};
-
-struct EvalBudget
-{
-	int steps;
-	int depth;
-
-	EvalBudget() : steps(0), depth(0) {}
-};
-
+enum class EvalFlow { Normal, Return, Break, Continue, Invalid };
+struct EvalState { map<Binding*, ConstexprValue> locals; EvalState() {} };
+struct EvalBudget { int steps; int depth; EvalBudget() : steps(0), depth(0) {} };
 EvalBudget* active_budget = NULL;
-
 const int kMaxEvalSteps = 200000;
 const int kMaxEvalDepth = 512;
-
 struct EvalBudgetScope
 {
 	EvalBudget budget;
 	EvalBudget* previous;
-
 	EvalBudgetScope() : previous(active_budget)
 	{
 		if (active_budget == NULL)
 			active_budget = &budget;
 	}
-
-	~EvalBudgetScope()
-	{
-		active_budget = previous;
-	}
+	~EvalBudgetScope() { active_budget = previous; }
 };
-
 struct EvalCallScope
 {
 	bool entered;
 	bool ok_;
-
 	EvalCallScope() : entered(false), ok_(true)
 	{
 		if (active_budget != NULL)
@@ -71,51 +37,95 @@ struct EvalCallScope
 			ok_ = active_budget->depth <= kMaxEvalDepth;
 		}
 	}
-
 	~EvalCallScope()
 	{
 		if (entered && active_budget != NULL)
 			--active_budget->depth;
 	}
-
 	bool ok() const { return ok_; }
 };
-
 bool is_float_type(TypePtr type)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	return bare->kind == pa11::TypeKind::Fundamental &&
-	       (bare->fundamental == FT_FLOAT ||
-	        bare->fundamental == FT_DOUBLE ||
-	        bare->fundamental == FT_LONG_DOUBLE);
-}
-
+{ TypePtr bare = pa11::strip_cv(type); return bare->kind == pa11::TypeKind::Fundamental && (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool starts_with(const string& text, const string& prefix)
-{
-	return text.compare(0, prefix.size(), prefix) == 0;
-}
-
+{ return text.compare(0, prefix.size(), prefix) == 0; }
 bool truthy(const ConstexprValue& value)
-{
-	if (value.is_pointer)
-		return value.pointer_binding != NULL || value.pointer_index != 0;
-	return value.is_float ? value.float_value != 0 : value.int_value != 0;
-}
-
+{ if (value.is_pointer) return value.pointer_binding != NULL || value.pointer_index != 0; return value.is_float ? value.float_value != 0 : value.int_value != 0; }
 uint64_t integer_value(const ConstexprValue& value)
+{ if (value.is_pointer) return static_cast<uint64_t>(value.pointer_index); return value.is_float ? static_cast<uint64_t>(value.float_value) : value.int_value; }
+bool constexpr_integral_or_bool_type(TypePtr type)
+{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); return bare.get() != NULL && (pa11::is_integral_or_bool_type(bare) || bare->kind == pa11::TypeKind::Enum); }
+bool constexpr_integral_unsigned(TypePtr type)
 {
-	if (value.is_pointer)
-		return static_cast<uint64_t>(value.pointer_index);
-	return value.is_float ? static_cast<uint64_t>(value.float_value) :
-		value.int_value;
+	TypePtr bare = type.get() != NULL
+		? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return false;
+	if (bare->kind == pa11::TypeKind::Enum)
+	{
+		switch (bare->enum_underlying)
+		{
+		case FT_UNSIGNED_CHAR:
+		case FT_UNSIGNED_SHORT_INT:
+		case FT_UNSIGNED_INT:
+		case FT_UNSIGNED_LONG_INT:
+		case FT_UNSIGNED_LONG_LONG_INT:
+			return true;
+		default:
+			return false;
+		}
+	}
+	if (bare->kind != pa11::TypeKind::Fundamental)
+		return false;
+	switch (bare->fundamental)
+	{
+	case FT_BOOL:
+	case FT_UNSIGNED_CHAR:
+	case FT_UNSIGNED_SHORT_INT:
+	case FT_UNSIGNED_INT:
+	case FT_UNSIGNED_LONG_INT:
+	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_CHAR16_T:
+	case FT_CHAR32_T:
+		return true;
+	default:
+		return false;
+	}
 }
-
+unsigned constexpr_integral_bits(TypePtr type)
+{ uint64_t bytes = pa11::type_size(pa11::strip_cv(type)); return bytes >= 8 ? 64 : static_cast<unsigned>(bytes * 8); }
+uint64_t constexpr_integral_mask(unsigned bits)
+{ return bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1); }
+uint64_t constexpr_normalize_integral(TypePtr type, uint64_t value)
+{ return value & constexpr_integral_mask(constexpr_integral_bits(type)); }
+int64_t constexpr_signed_integral(TypePtr type, uint64_t value)
+{
+	unsigned bits = constexpr_integral_bits(type);
+	uint64_t normalized = value & constexpr_integral_mask(bits);
+	if (bits >= 64)
+		return static_cast<int64_t>(normalized);
+	uint64_t sign = uint64_t(1) << (bits - 1);
+	if ((normalized & sign) == 0)
+		return static_cast<int64_t>(normalized);
+	return static_cast<int64_t>(normalized | ~constexpr_integral_mask(bits));
+}
+uint64_t constexpr_convert_integral(TypePtr source,
+                                    TypePtr target,
+                                    uint64_t value)
+{
+	if (source.get() != NULL &&
+	    target.get() != NULL &&
+	    constexpr_integral_or_bool_type(source) &&
+	    constexpr_integral_or_bool_type(target) &&
+	    !constexpr_integral_unsigned(source) &&
+	    constexpr_integral_bits(target) > constexpr_integral_bits(source))
+		return constexpr_normalize_integral(
+			target,
+			static_cast<uint64_t>(
+				constexpr_signed_integral(source, value)));
+	return constexpr_normalize_integral(target, value);
+}
 long double float_value(const ConstexprValue& value)
-{
-	return value.is_float ? value.float_value :
-		static_cast<long double>(value.int_value);
-}
-
+{ return value.is_float ? value.float_value : static_cast<long double>(value.int_value); }
 string trim_float_suffix(string text)
 {
 	if (!text.empty())
@@ -126,33 +136,16 @@ string trim_float_suffix(string text)
 	}
 	return text;
 }
-
 string format_float(long double value)
-{
-	ostringstream out;
-	out << setprecision(numeric_limits<long double>::digits10) << value;
-	return out.str();
-}
-
+{ ostringstream out; out << setprecision(numeric_limits<long double>::digits10) << value; return out.str(); }
 bool is_array_type(TypePtr type)
-{
-	return type.get() != NULL &&
-	       pa11::strip_cv(type)->kind == pa11::TypeKind::Array;
-}
-
+{ return type.get() != NULL && pa11::strip_cv(type)->kind == pa11::TypeKind::Array; }
 bool consume_eval_step()
-{
-	if (active_budget == NULL)
-		return true;
-	++active_budget->steps;
-	return active_budget->steps <= kMaxEvalSteps;
-}
-
+{ if (active_budget == NULL) return true; ++active_budget->steps; return active_budget->steps <= kMaxEvalSteps; }
 bool eval_node(Parser& parser,
                const Node& node,
                EvalState& state,
                ConstexprValue& out);
-
 bool eval_lvalue_binding(const Node& node, Binding*& binding)
 {
 	if (node.binding != NULL)
@@ -164,7 +157,6 @@ bool eval_lvalue_binding(const Node& node, Binding*& binding)
 		return eval_lvalue_binding(node.children[0], binding);
 	return false;
 }
-
 bool eval_pointer_deref(Parser& parser,
                         const ConstexprValue& pointer,
                         ConstexprValue& out)
@@ -180,7 +172,6 @@ bool eval_pointer_deref(Parser& parser,
 	out = array.elements[static_cast<size_t>(pointer.pointer_index)];
 	return true;
 }
-
 bool adjust_value(ConstexprValue& value, long long delta)
 {
 	if (value.is_pointer)
@@ -194,7 +185,6 @@ bool adjust_value(ConstexprValue& value, long long delta)
 		value = ConstexprValue::integer(value.int_value + delta);
 	return true;
 }
-
 bool eval_literal(const Node& node, ConstexprValue& out)
 {
 	if (node.token_text == "true")
@@ -245,7 +235,6 @@ bool eval_literal(const Node& node, ConstexprValue& out)
 	}
 	return false;
 }
-
 bool eval_binary_value(ETokenType op,
                        const ConstexprValue& lhs,
                        const ConstexprValue& rhs,
@@ -382,7 +371,6 @@ bool eval_binary_value(ETokenType op,
 		return false;
 	}
 }
-
 bool eval_expr_list(Parser& parser,
                     const vector<Node>& children,
                     size_t begin,
@@ -398,7 +386,6 @@ bool eval_expr_list(Parser& parser,
 	}
 	return true;
 }
-
 bool eval_call(Parser& parser,
                const Node& node,
                EvalState& state,
@@ -419,7 +406,6 @@ bool eval_call(Parser& parser,
 		return false;
 	return parser.try_evaluate_constexpr_call_values(direct, values, out);
 }
-
 bool eval_braced_init_list(Parser& parser,
                            const Node& node,
                            EvalState& state,
@@ -454,6 +440,16 @@ bool eval_braced_init_list(Parser& parser,
 		}
 		return true;
 	}
+	if (type->kind != pa11::TypeKind::Record &&
+	    node.children.size() == 1)
+	{
+		ConstexprValue child;
+		if (!eval_node(parser, node.children[0], state, child) ||
+		    child.is_object)
+			return false;
+		out = child;
+		return true;
+	}
 	if (type->kind != pa11::TypeKind::Record)
 		return false;
 	pa11::layout_record_type(type);
@@ -475,7 +471,6 @@ bool eval_braced_init_list(Parser& parser,
 	}
 	return true;
 }
-
 bool eval_member_field(Parser& parser,
                        const Node& node,
                        EvalState& state,
@@ -496,7 +491,6 @@ bool eval_member_field(Parser& parser,
 	out = found->second;
 	return true;
 }
-
 bool eval_named_node(Parser& parser,
                      const Node& node,
                      EvalState& state,
@@ -524,11 +518,13 @@ bool eval_named_node(Parser& parser,
 		if (parser.try_evaluate_constexpr_binding(node.binding, out))
 			return true;
 	}
+	if (!node.dependent_value_name.empty() &&
+	    parser.try_evaluate_dependent_value_node(node, out))
+		return true;
 	if (!node.children.empty())
 		return eval_node(parser, node.children[0], state, out);
 	return false;
 }
-
 bool eval_cast_node(Parser& parser,
                     const Node& node,
                     EvalState& state,
@@ -554,11 +550,23 @@ bool eval_cast_node(Parser& parser,
 	}
 	if (is_float_type(node.type))
 		out = ConstexprValue::floating(float_value(out));
+	else if (constexpr_integral_or_bool_type(target))
+	{
+		TypePtr source = node.children[0].type;
+		if (source.get() != NULL &&
+		    (source->kind == pa11::TypeKind::LValueReference ||
+		     source->kind == pa11::TypeKind::RValueReference))
+			source = source->base;
+		source = source.get() != NULL ? pa11::strip_cv(source) : TypePtr();
+		out = ConstexprValue::integer(
+			constexpr_convert_integral(source,
+			                           target,
+			                           integer_value(out)));
+	}
 	else
 		out = ConstexprValue::integer(integer_value(out));
 	return true;
 }
-
 bool eval_unary_node(Parser& parser,
                      const Node& node,
                      EvalState& state,
@@ -602,7 +610,6 @@ bool eval_unary_node(Parser& parser,
 		return false;
 	}
 }
-
 bool eval_constructor_action(Parser& parser,
                              const Node& action,
                              TypePtr object_type,
@@ -628,7 +635,6 @@ bool eval_constructor_action(Parser& parser,
 	                                                args,
 	                                                out);
 }
-
 TypePtr constructor_action_object_type(const Node& action)
 {
 	if (action.type.get() != NULL)
@@ -641,7 +647,6 @@ TypePtr constructor_action_object_type(const Node& action)
 		return TypePtr();
 	return call.children[1].children[0].type;
 }
-
 bool eval_variable_initializer(Parser& parser,
                                const Node& var,
                                EvalState& state,
@@ -662,7 +667,6 @@ bool eval_variable_initializer(Parser& parser,
 		return constexpr_zero_value_for_type(var.binding->type, out);
 	return eval_node(parser, init, state, out);
 }
-
 bool eval_binary_node(Parser& parser,
                       const Node& node,
                       EvalState& state,
@@ -719,7 +723,6 @@ bool eval_binary_node(Parser& parser,
 	}
 	return eval_binary_value(node.op, lhs, rhs, out);
 }
-
 bool assignment_base_op(ETokenType op, ETokenType& base)
 {
 	if (op == OP_PLUSASS) base = OP_PLUS;
@@ -735,7 +738,6 @@ bool assignment_base_op(ETokenType op, ETokenType& base)
 	else return false;
 	return true;
 }
-
 bool eval_assignment_node(Parser& parser,
                           const Node& node,
                           EvalState& state,
@@ -764,7 +766,6 @@ bool eval_assignment_node(Parser& parser,
 	out = rhs;
 	return true;
 }
-
 bool eval_postfix_node(Parser& parser,
                        const Node& node,
                        EvalState& state,
@@ -783,7 +784,6 @@ bool eval_postfix_node(Parser& parser,
 	state.locals[target] = updated;
 	return true;
 }
-
 bool eval_subscript_node(Parser& parser,
                          const Node& node,
                          EvalState& state,
@@ -811,7 +811,6 @@ bool eval_subscript_node(Parser& parser,
 	out = base.elements[static_cast<size_t>(offset)];
 	return true;
 }
-
 bool eval_condition_declaration(Parser& parser,
                                 const Node& node,
                                 EvalState& state,
@@ -840,7 +839,6 @@ bool eval_condition_declaration(Parser& parser,
 	}
 	return have_value;
 }
-
 bool eval_node(Parser& parser,
                const Node& node,
                EvalState& state,
@@ -901,12 +899,10 @@ bool eval_node(Parser& parser,
 		return eval_node(parser, node.children[0], state, out);
 	return false;
 }
-
 EvalFlow eval_statement(Parser& parser,
                         const Node& node,
                         EvalState& state,
                         ConstexprValue& out);
-
 EvalFlow eval_compound(Parser& parser,
                        const Node& node,
                        EvalState& state,
@@ -920,7 +916,6 @@ EvalFlow eval_compound(Parser& parser,
 	}
 	return EvalFlow::Normal;
 }
-
 EvalFlow eval_branch_child(Parser& parser,
                            const Node& wrapper,
                            EvalState& state,
@@ -930,7 +925,6 @@ EvalFlow eval_branch_child(Parser& parser,
 		return EvalFlow::Normal;
 	return eval_statement(parser, wrapper.children[0], state, out);
 }
-
 EvalFlow eval_statement(Parser& parser,
                         const Node& node,
                         EvalState& state,
@@ -1205,9 +1199,7 @@ EvalFlow eval_statement(Parser& parser,
 		return EvalFlow::Continue;
 	return EvalFlow::Invalid;
 }
-
 }  // namespace
-
 bool Parser::try_evaluate_constexpr_call(Binding* function,
                                          const vector<Node>& args,
                                          ConstexprValue& out)
@@ -1224,7 +1216,6 @@ bool Parser::try_evaluate_constexpr_call(Binding* function,
 	}
 	return try_evaluate_constexpr_call_values(function, values, out);
 }
-
 bool Parser::try_evaluate_constexpr_call_values(
 	Binding* function,
 	const vector<ConstexprValue>& args,
@@ -1294,7 +1285,6 @@ bool Parser::try_evaluate_constexpr_call_values(
 	out = result;
 	return true;
 }
-
 bool Parser::try_evaluate_constexpr_constructor(
 	Binding* function,
 	TypePtr object_type,
@@ -1400,7 +1390,6 @@ bool Parser::try_evaluate_constexpr_constructor(
 	out = result->second;
 	return true;
 }
-
 bool Parser::try_evaluate_constexpr_binding(Binding* binding,
                                             ConstexprValue& out)
 {
@@ -1442,14 +1431,37 @@ bool Parser::try_evaluate_constexpr_binding(Binding* binding,
 		return false;
 	return out.valid;
 }
-
 bool Parser::try_evaluate_constexpr_expr(const Node& node, ConstexprValue& out)
 {
 	EvalBudgetScope budget;
 	EvalState state;
 	return eval_node(*this, node, state, out);
 }
-
+bool Parser::try_evaluate_dependent_value_node(const Node& node,
+                                               ConstexprValue& out)
+{
+	if (node.dependent_value_name.empty())
+		return false;
+	TemplateArgument arg =
+		TemplateArgument::dependent_value_arg(expression_object_type(node.type));
+	arg.value_name = node.dependent_value_name;
+	arg.value_owner_template_name =
+		node.dependent_value_owner_template_name;
+	arg.value_member_name = node.dependent_value_member_name;
+	arg.value_negated = node.dependent_value_negated;
+	arg.value_owner_template_arguments =
+		node.dependent_value_owner_template_arguments;
+	TemplateArgument resolved;
+	if (!resolve_dependent_value_member_argument(arg, resolved))
+		return false;
+	resolved = substitute_template_argument(resolved);
+	if (resolved.kind != TemplateArgumentKind::Value ||
+	    resolved.dependent ||
+	    resolved.value_binding != NULL)
+		return false;
+	out = ConstexprValue::integer(resolved.value);
+	return true;
+}
 void Parser::apply_constexpr_value(Expr& expr, const ConstexprValue& value)
 {
 	if (!value.valid || value.is_object || value.is_pointer)
@@ -1464,6 +1476,5 @@ void Parser::apply_constexpr_value(Expr& expr, const ConstexprValue& value)
 		? format_float(value.float_value)
 		: to_string(value.int_value);
 }
-
 }  // namespace internal
 }  // namespace pa12

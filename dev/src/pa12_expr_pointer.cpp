@@ -119,17 +119,17 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 					if (fit != sit->second.end())
 						templates = fit->second;
 				}
-				if (templates.empty())
-				{
+					if (templates.empty())
+					{
 						map<pair<TemplateDeclaration*, string>,
 						    vector<TemplateDeclaration*> >::iterator mit =
 							member_function_templates_.find(
 								make_pair(decl_it->second, inner.binding->name));
-					if (mit != member_function_templates_.end())
-						templates = mit->second;
-				}
-				if (templates.empty())
-					throw runtime_error("function template not found");
+						if (mit != member_function_templates_.end())
+							templates = mit->second;
+					}
+							if (templates.empty())
+								throw runtime_error("function template not found");
 				Binding* selected = NULL;
 				for (size_t j = 0; j < templates.size(); ++j)
 				{
@@ -148,8 +148,8 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 					{
 					}
 				}
-				if (selected == NULL)
-					throw runtime_error("function template not found");
+						if (selected == NULL)
+							throw runtime_error("function template not found");
 				Expr elem_inner;
 				elem_inner.valid = true;
 				elem_inner.binding = selected;

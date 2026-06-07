@@ -355,6 +355,7 @@ void MacroProcessor::initialize_predefined_macros(const string& author,
 	define_object_macro("__CPPGM__", TokenizePPString("201303L"));
 	define_object_macro("__cplusplus", TokenizePPString("201103L"));
 	define_object_macro("__STDC_HOSTED__", TokenizePPString("1"));
+	define_object_macro("__SIZE_TYPE__", TokenizePPString("unsigned long int"));
 	define_object_macro("__CPPGM_AUTHOR__",
 	                    TokenizePPString(QuoteStringLiteral(author)));
 	define_object_macro("__DATE__", TokenizePPString(QuoteStringLiteral(build_date_)));

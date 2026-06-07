@@ -17,6 +17,7 @@ Node::Node()
 	  op(KW_ALIGNAS),
 	  has_constant_value(false),
 	  constant_value(0),
+	  dependent_value_negated(false),
 	  suppress_virtual_dispatch(false),
 	  virtual_dispatch(false)
 {
@@ -31,6 +32,7 @@ Node::Node(const string& text)
 	  op(KW_ALIGNAS),
 	  has_constant_value(false),
 	  constant_value(0),
+	  dependent_value_negated(false),
 	  suppress_virtual_dispatch(false),
 	  virtual_dispatch(false)
 {
@@ -47,7 +49,10 @@ TemplateArgument::TemplateArgument()
 	  value_binding(NULL),
 	  value(0),
 	  dependent(false),
-	  pack_expansion(false)
+	  value_negated(false),
+	  pack_expansion(false),
+	  value_expr_begin(0),
+	  value_expr_end(0)
 {
 }
 
@@ -104,9 +109,12 @@ Expr::Expr()
 	  constant_value(0),
 	  builtin_constant_p(false),
 	  braced_init_list(false),
-	  copy_initialization(false)
-{
-}
+		  copy_initialization(false),
+		  dependent_value_negated(false),
+		  source_begin(0),
+		  source_end(0)
+	{
+	}
 
 DeclSpecs::DeclSpecs()
 	: typedef_decl(false),
@@ -143,6 +151,7 @@ Suffix::Suffix(SuffixKind k)
 	: kind(k),
 	  unknown_bound(false),
 	  bound(0),
+	  array_bound_name(),
 	  variadic(false),
 	  function_cv(pa11::CV_NONE),
 	  ref_qualifier(0),
@@ -179,11 +188,14 @@ TemplateDeclaration::TemplateDeclaration()
 	decl_end(0),
 		has_definition(false),
 		  constructor_template(false),
+		  class_template_member(false),
 		  class_specialization(false),
 		  hidden_friend(false),
 		  function_definition_validated(false),
 		  friend_class_scope(NULL),
-		placeholder(NULL)
+		placeholder(NULL),
+		inherited_constructor_base(NULL),
+		inherited_constructor_base_type()
 {
 }
 
@@ -270,6 +282,13 @@ void annotate_expr_node(Expr& expr)
 	expr.node.binding = expr.binding;
 	expr.node.has_constant_value = expr.has_constant_value;
 	expr.node.constant_value = expr.constant_value;
+	expr.node.dependent_value_name = expr.dependent_value_name;
+	expr.node.dependent_value_owner_template_name =
+		expr.dependent_value_owner_template_name;
+	expr.node.dependent_value_member_name = expr.dependent_value_member_name;
+	expr.node.dependent_value_negated = expr.dependent_value_negated;
+	expr.node.dependent_value_owner_template_arguments =
+		expr.dependent_value_owner_template_arguments;
 }
 
 void dump_node(ostream& out, const Node& node, int depth)
@@ -287,16 +306,24 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  local_type_counter_(0),
 	  force_new_function_binding_(false),
 	  defer_function_template_bodies_(false),
+	  suppress_implicit_template_base_init_(false),
+	  parsing_base_specifier_(false),
 	  validating_template_definition_(false),
 	  override_function_parameter_names_(false),
-	  template_argument_expression_depth_(0),
-	  unevaluated_expression_depth_(0)
-{
-	pa10::Options pa10_options;
-	pa10_options.preprocess = options.preprocess;
-	tokens_ = pa10::internal::collect_source_tokens(srcfile, pa10_options);
+	  replaying_dependent_decltype_(false),
+	  parsing_default_template_argument_(false),
+		  defer_class_template_completion_depth_(0),
+		  function_template_candidate_instantiation_depth_(0),
+		  template_argument_expression_depth_(0),
+		  unevaluated_expression_depth_(0),
+		  short_circuit_static_member_demand_depth_(0)
+		{
+		pa10::Options pa10_options;
+		pa10_options.preprocess = options.preprocess;
+		tokens_ = pa10::internal::collect_source_tokens(srcfile, pa10_options);
+		declaration_tokens_ = tokens_;
 
-	tu_.srcfile = srcfile;
+		tu_.srcfile = srcfile;
 	tu_.global_scope.reset(new Scope(ScopeKind::Namespace, "", NULL));
 	scopes_.push_back(tu_.global_scope.get());
 	pa11::add_binding(global_scope(),
@@ -452,9 +479,15 @@ void Parser::parse_translation_unit()
 			specializations.push_back(it->second);
 		for (size_t j = 0; j < specializations.size(); ++j)
 		{
-			TypePtr type = pa11::strip_cv(specializations[j]);
-			map<const void*, vector<TemplateArgument> >::const_iterator args =
-				record_template_arguments_.find(type.get());
+				TypePtr type = pa11::strip_cv(specializations[j]);
+				if (candidate_only_class_template_specializations_.count(
+					    type.get()) != 0)
+					continue;
+				if (demanded_class_template_specializations_.count(
+					    type.get()) == 0)
+					continue;
+				map<const void*, vector<TemplateArgument> >::const_iterator args =
+					record_template_arguments_.find(type.get());
 			if (args == record_template_arguments_.end())
 				continue;
 			bool dependent = false;

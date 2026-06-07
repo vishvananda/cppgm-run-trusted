@@ -47,10 +47,15 @@ struct Block
 
 struct FunctionOut
 {
+	const Binding* binding;
 	string header;
 	vector<string> slots;
 	vector<Block> blocks;
+
+	FunctionOut() : binding(NULL) {}
 };
+FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
+                                        const string& name);
 
 struct InitAction
 {
@@ -105,6 +110,7 @@ string lowir_parameter(TypePtr type);
 string metadata_suffix(const vector<string>& items);
 vector<string> qualified_parts(const Binding* binding);
 string source_symbol_base(const Binding* binding);
+string global_object_symbol(const Binding* binding);
 bool node_contains_call_expression(const Node& node);
 bool record_has_default_constructor_for_array(TypePtr type);
 bool record_has_base_subobject(TypePtr source, TypePtr target);
@@ -112,12 +118,14 @@ uint64_t base_subobject_offset(TypePtr source, TypePtr target);
 Binding* find_constructor(TypePtr type, size_t arg_count);
 const Node* record_prvalue_child_for_xvalue(const Node& arg);
 bool defaulted_copy_move_constructor_needs_helper(Binding* binding, TypePtr type);
+Binding* find_any_copy_move_constructor(TypePtr type, bool move);
 Binding* find_copy_move_constructor(TypePtr type, bool move);
 bool inline_defaulted_copy_move_storage_constructor(Binding* binding,
                                                    TypePtr type,
                                                    const Node& init);
 Binding* find_destructor(TypePtr type);
 bool type_needs_destructor(TypePtr type);
+bool default_init_no_op(TypePtr type);
 bool no_op_generated_default_constructor(Binding* ctor, TypePtr type);
 bool has_inline_constructor(TypePtr type);
 bool is_brace_elision_aggregate(TypePtr type);
@@ -133,6 +141,8 @@ bool is_class_destructor_binding(const Binding* binding);
 TypePtr class_record_for_member(const Binding* binding);
 bool record_is_template_specialization(TypePtr record);
 bool binding_has_template_specialization_context(const Binding* binding);
+bool template_static_member_definition_matches(const Binding* use,
+                                               const Binding* definition);
 string record_lowir_name(TypePtr record);
 bool template_record_uses_abi_global_symbol(TypePtr record);
 string template_record_global_symbol_part(TypePtr record);
@@ -153,11 +163,14 @@ struct ProgramLowerer
 	set<string> declared_functions;
 	set<string> defined_globals;
 	set<string> declared_globals;
+	vector<const Binding*> global_definition_bindings;
+	map<const Binding*, Node> global_definition_nodes;
 	map<string, string> string_literals;
 	map<string, string> string_literal_types;
 		vector<pair<string, vector<uint32_t> > > string_defs;
-		map<const Binding*, const Node*> inline_definitions;
-		map<const Binding*, Node> deferred_global_definitions;
+	map<const Binding*, const Node*> inline_definitions;
+	map<const Binding*, Node> synthetic_inline_definitions;
+	map<const Binding*, Node> deferred_global_definitions;
 		map<const Binding*, size_t> inline_definition_ranks;
 	map<const Binding*, string> function_declarations_by_binding;
 	set<const Binding*> demanded_inline_complete_entries;
@@ -195,6 +208,9 @@ struct ProgramLowerer
 	void register_function_declaration(const Node& node);
 	void demand_function_declaration(const Binding* binding);
 	void demand_global_declaration(const Binding* binding);
+	bool demand_deferred_global_definition(const Binding* binding);
+	bool template_static_member_constant_load_required(
+		const Binding* binding) const;
 	string ensure_local_static_guard(const Binding* binding);
 	void ensure_thread_local_wrapper(const string& global_name);
 	void ensure_eh_declarations();
@@ -213,6 +229,10 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_record_return_before_owner_scalar_member(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_record_return_before_pending_operator(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_constructor_after_pending_record_operator(
+			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_inline_definition(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_destructor_inline_definition(
@@ -221,13 +241,19 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_specialized_conversion_before_base_conversion(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_ranked_template_operator(
+			const Binding* binding, PendingInlineIterator& pos);
 		void place_ranked_owner_member(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_subscript_before_pending_operators(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_before_late_operator_or_generated_assignment(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_before_generated_default_constructor(
+			const Binding* binding, PendingInlineIterator& pos);
 		void place_active_destructor_dependency(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_active_record_return_dependency(
 			const Binding* binding, PendingInlineIterator& pos);
 		void emit_pending_synthetic_assignment_functions();
 	void demand_inline_function(const Binding* binding,
@@ -281,6 +307,8 @@ private:
 	string call_result_store_slot_;
 	TypePtr call_result_store_type_;
 	bool call_result_store_consumed_;
+	bool lowering_record_return_object_;
+	bool lowering_array_subobject_init_;
 	string active_unwind_dispatch_;
 
 	void add_slot(const string& name, const string& type);
@@ -306,6 +334,8 @@ private:
 		                                           const Node& init);
 		bool lower_function_pointer_global_init(const Node& var,
 		                                        const Node& init);
+		bool lower_static_member_storage_global_init(const Node& var,
+		                                             const Node& init);
 		function<Value()> global_storage_addr_for(const Node& var);
 		function<Value()> global_variable_addr_for(const Node& var);
 		void lower_local_static_array_global_init(

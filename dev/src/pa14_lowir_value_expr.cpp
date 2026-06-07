@@ -24,7 +24,9 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 		Value value = emit_call(expr);
 		if (is_reference(expr.type))
 		{
-			TypePtr value_type = strip_for_value(expr.type);
+			TypePtr value_type = object_type(expr.type);
+			while (is_reference(value_type))
+				value_type = object_type(value_type);
 			string tmp = fresh_temp();
 			instr(tmp + " = load " + scalar_lowir_type(value_type) +
 			      " " + value.text);
@@ -524,8 +526,14 @@ Value FunctionLowerer::convert_value(Value value,
 		op = pa11::type_size(to) > pa11::type_size(from) ? "fpext" : "fptrunc";
 	else if (starts_with(dst, "f"))
 	{
+		bool literal_zero =
+			value.text == "0" &&
+			value.text[0] != '%' &&
+			value.text[0] != '$' &&
+			value.text[0] != '@';
 		if (pa11::is_integral_or_bool_type(from) &&
-		    pa11::type_size(from_bare) < 8)
+		    pa11::type_size(from_bare) < 8 &&
+		    !literal_zero)
 		{
 			int shift = (8 - pa11::type_size(from_bare)) * 8;
 			string shifted = fresh_temp();
@@ -541,9 +549,15 @@ Value FunctionLowerer::convert_value(Value value,
 	}
 	else if (starts_with(src, "f"))
 		op = is_unsigned_type(to) ? "fptoui" : "fptosi";
-	else if (pa11::type_size(to) == pa11::type_size(from))
+	else if ((is_reference(from) ? pa11::type_size(strip_for_value(from))
+	                             : pa11::type_size(from)) ==
+	         (is_reference(to) ? pa11::type_size(strip_for_value(to))
+	                           : pa11::type_size(to)))
 		op = "copy";
-	else if (pa11::type_size(to) < pa11::type_size(from))
+	else if ((is_reference(to) ? pa11::type_size(strip_for_value(to))
+	                           : pa11::type_size(to)) <
+	         (is_reference(from) ? pa11::type_size(strip_for_value(from))
+	                             : pa11::type_size(from)))
 		op = "trunc";
 	else
 		op = is_unsigned_type(from) ? "zext" : "sext";

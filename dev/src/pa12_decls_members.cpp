@@ -78,6 +78,7 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 		pos_ = save;
 		return false;
 	}
+	complete_template_record(class_type);
 
 	expect(OP_LPAREN);
 	vector<ParameterInfo> parameters;
@@ -194,15 +195,35 @@ void Parser::parse_constructor_body_from_parameters(
 		pa11::create_child_scope(class_scope, ScopeKind::Function, function->name);
 	Binding* this_binding =
 		pa11::add_binding(function_scope,
-		                  BindingKind::Parameter,
-		                  "this",
-		                  this_type);
+	                  BindingKind::Parameter,
+	                  "this",
+	                  this_type);
 	Node this_node("parameter this " + pa11::describe_type(this_type));
 	this_node.binding = this_binding;
 	this_node.type = this_type;
 	add_child(fn, this_node);
+	map<string, vector<Binding*> > parameter_packs;
 	for (size_t i = 0; i < parameters.size(); ++i)
 	{
+		if (!parameters[i].pack_expression_name.empty() &&
+		    !parameters[i].pack_name.empty())
+		{
+			TemplateArgument subst;
+			if (find_template_value_substitution(parameters[i].pack_name,
+			                                     subst) &&
+			    subst.kind == TemplateArgumentKind::Pack &&
+			    subst.pack.empty())
+			{
+				parameter_packs[parameters[i].pack_expression_name];
+				continue;
+			}
+		}
+		if (parameters[i].type.get() == NULL)
+		{
+			if (!parameters[i].pack_expression_name.empty())
+				parameter_packs[parameters[i].pack_expression_name];
+			continue;
+		}
 		string pname = parameters[i].name;
 		string node_name = pname;
 		map<Binding*, vector<string> >::const_iterator saved_names =
@@ -217,10 +238,15 @@ void Parser::parse_constructor_body_from_parameters(
 			pname = node_name;
 		Binding* param = NULL;
 		if (!pname.empty())
+		{
 			param = pa11::add_binding(function_scope,
 			                          BindingKind::Parameter,
 			                          pname,
 			                          parameters[i].type);
+			if (!parameters[i].pack_expression_name.empty())
+				parameter_packs[parameters[i].pack_expression_name]
+					.push_back(param);
+		}
 		Node param_node("parameter " + node_name + " " +
 		                pa11::describe_type(parameters[i].type));
 		param_node.binding = param;
@@ -231,6 +257,7 @@ void Parser::parse_constructor_body_from_parameters(
 	scopes_.push_back(function_scope);
 	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
 	active_functions_.push_back(function);
+	function_parameter_pack_substitutions_.push_back(parameter_packs);
 	Node body("compound-statement");
 	map<Binding*, Node> explicit_member_initializers;
 	bool explicit_base = false;
@@ -243,10 +270,12 @@ void Parser::parse_constructor_body_from_parameters(
 		for (;;)
 		{
 			string name = consume_identifier();
+			vector<TemplateArgument> init_template_args;
+			bool have_init_template_args = false;
 			if (at(OP_LT))
 			{
-				vector<TemplateArgument> ignored;
-				parse_template_argument_list(ignored);
+				parse_template_argument_list(init_template_args);
+				have_init_template_args = true;
 			}
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        name,
@@ -269,7 +298,9 @@ void Parser::parse_constructor_body_from_parameters(
 					else if (direct_base.get() != NULL &&
 					    initializer_names_direct_base(class_scope,
 					                                  direct_base,
-					                                  name))
+					                                  name,
+					                                  have_init_template_args
+					                                  ? &init_template_args : NULL))
 						init_target = direct_base;
 					else if (field != NULL)
 						init_target = field->type;
@@ -311,7 +342,9 @@ void Parser::parse_constructor_body_from_parameters(
 					else if (direct_base.get() != NULL &&
 					    initializer_names_direct_base(class_scope,
 					                                  direct_base,
-					                                  name))
+					                                  name,
+					                                  have_init_template_args
+					                                  ? &init_template_args : NULL))
 						init_target = direct_base;
 					else if (field != NULL)
 						init_target = field->type;
@@ -333,7 +366,11 @@ void Parser::parse_constructor_body_from_parameters(
 				expect(OP_RPAREN);
 			}
 			if (direct_base.get() != NULL &&
-			    initializer_names_direct_base(class_scope, direct_base, name))
+			    initializer_names_direct_base(class_scope,
+			                                  direct_base,
+			                                  name,
+			                                  have_init_template_args
+			                                  ? &init_template_args : NULL))
 			{
 				explicit_base_action =
 					make_base_init_action(direct_base,
@@ -371,11 +408,18 @@ void Parser::parse_constructor_body_from_parameters(
 	else if (explicit_base)
 		add_child(body, explicit_base_action);
 	else if (direct_base.get() != NULL &&
-	         direct_base->kind == pa11::TypeKind::Record &&
-	         ensure_default_constructor(direct_base) != NULL)
+	         direct_base->kind == pa11::TypeKind::Record)
 	{
-		Node base_action = make_base_init_action(direct_base, NULL);
-		add_child(body, base_action);
+		Binding* base_ctor = ensure_default_constructor(direct_base);
+		if (base_ctor != NULL &&
+		    suppress_implicit_template_base_init_ &&
+		    base_ctor->is_generated_default_constructor)
+			mark_suppressed_generated_constructor_dependencies(base_ctor);
+		else if (base_ctor != NULL)
+		{
+			Node base_action = make_base_init_action(direct_base, NULL);
+			add_child(body, base_action);
+		}
 	}
 	vector<Binding*> fields;
 	try
@@ -423,14 +467,60 @@ void Parser::parse_constructor_body_from_parameters(
 	Node parsed_body = parse_compound_statement();
 	for (size_t i = 0; i < parsed_body.children.size(); ++i)
 		add_child(body, parsed_body.children[i]);
+	function_parameter_pack_substitutions_.pop_back();
 	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
+	function->is_noop_constructor = body.children.empty();
 	add_child(fn, body);
 	remember_function_body(function, fn);
 }
 
-bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
+void Parser::mark_suppressed_generated_constructor_dependencies(Binding* ctor)
+{
+	if (ctor == NULL || !ctor->is_generated_default_constructor)
+		return;
+	map<Binding*, Node>::const_iterator found = function_bodies_.find(ctor);
+	if (found == function_bodies_.end())
+		return;
+	vector<const Node*> pending;
+	pending.push_back(&found->second);
+	set<Binding*> seen;
+	while (!pending.empty())
+	{
+		const Node* node = pending.back();
+		pending.pop_back();
+		if (node->direct_call != NULL &&
+		    seen.insert(node->direct_call).second)
+		{
+			if (node->direct_call->is_generated_default_constructor)
+				mark_suppressed_generated_constructor_dependencies(
+					node->direct_call);
+			else
+			{
+				parse_pending_function_body(node->direct_call);
+				parse_pending_member_body(node->direct_call);
+				bool marked = false;
+				for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+					if (extra_lowir_nodes_[i].binding == node->direct_call)
+					{
+						extra_lowir_nodes_[i].token_text =
+							"inline-object-root";
+						marked = true;
+					}
+				if (!marked)
+					node->direct_call->is_object_root = true;
+			}
+		}
+		for (size_t i = 0; i < node->children.size(); ++i)
+			pending.push_back(&node->children[i]);
+	}
+}
+
+bool Parser::parse_qualified_constructor_definition(Node& out,
+                                                    bool emit_node,
+                                                    bool inline_spec,
+                                                    bool constexpr_spec)
 {
 	if (current_scope()->kind == ScopeKind::Class ||
 	    !(at(OP_COLON2) || at_identifier()))
@@ -448,7 +538,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	}
 	if (name.qualifier == NULL ||
 	    name.qualifier->kind != ScopeKind::Class ||
-	    name.name != name.qualifier->name ||
+	    !constructor_name_matches_scope(name.qualifier, name.name) ||
 	    !at(OP_LPAREN))
 	{
 		pos_ = save;
@@ -492,6 +582,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      fn_params,
 	                                      variadic);
+	fn_type = substitute_template_type(fn_type);
+	for (size_t i = 0;
+	     i < parameters.size() && i + 1 < fn_type->parameters.size();
+	     ++i)
+		parameters[i].type = fn_type->parameters[i + 1];
 	Binding* existing_ctor = NULL;
 	map<string, vector<Binding*> >::iterator existing_it =
 		class_scope->members.find(class_scope->name);
@@ -509,8 +604,17 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	if (existing_ctor != NULL &&
 	    existing_ctor->unwind_no != suffix.noexcept_decl)
 		throw runtime_error("exception specification mismatch");
-	Binding* ctor =
-		add_function_binding(class_scope, class_scope->name, fn_type, false);
+	Binding* ctor = existing_ctor != NULL
+		? existing_ctor
+		: add_function_binding(class_scope, class_scope->name, fn_type, false);
+	ctor->is_constexpr = ctor->is_constexpr || constexpr_spec;
+	ctor->is_inline_definition =
+		ctor->is_inline_definition || inline_spec || constexpr_spec;
+	TypePtr bare_class_type = pa11::strip_cv(class_type);
+	bool qualified_inline_object_root =
+		ctor->is_inline_definition &&
+		bare_class_type->is_template_specialization &&
+		!active_class_instantiation_dependent();
 	ctor->unwind_no = suffix.noexcept_decl;
 	if (defaulted)
 	{
@@ -520,23 +624,33 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = ctor;
-		fn.type = fn_type;
-		if (ctor->is_inline_definition)
+	if (qualified_inline_object_root)
+		fn.token_text = "inline-object-root";
+	fn.type = fn_type;
+	bool dependent_template_member_definition =
+		!defaulted &&
+		(type_is_template_dependent(class_type) ||
+		 !template_type_substitutions_.empty() ||
+		 !template_value_substitutions_.empty());
+	if (dependent_template_member_definition)
+		ctor->is_inline_definition = true;
+	if (ctor->is_inline_definition)
+	{
+		if ((force_new_function_binding_ ||
+		     qualified_inline_object_root) &&
+		    active_class_instantiations_.empty())
 		{
-			if (force_new_function_binding_ &&
-			    active_class_instantiations_.empty())
-			{
-				Node holder("constructor-definition-holder");
-				add_child(holder, fn);
-				parse_constructor_body_from_parameters(ctor,
-				                                       class_type,
-				                                       parameters,
-				                                       holder);
-				extra_lowir_nodes_.push_back(holder.children.back());
-				return true;
-			}
-			PendingFunctionBody pending;
-			pending.function = ctor;
+			Node holder("constructor-definition-holder");
+			add_child(holder, fn);
+			parse_constructor_body_from_parameters(ctor,
+			                                       class_type,
+			                                       parameters,
+			                                       holder);
+			extra_lowir_nodes_.push_back(holder.children.back());
+			return true;
+		}
+		PendingFunctionBody pending;
+		pending.function = ctor;
 		pending.node = fn;
 		pending.parameters = parameters;
 		pending.body_pos = pos_;
@@ -604,10 +718,12 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		for (;;)
 		{
 			string init_name = consume_identifier();
+			vector<TemplateArgument> init_template_args;
+			bool have_init_template_args = false;
 			if (at(OP_LT))
 			{
-				vector<TemplateArgument> ignored;
-				parse_template_argument_list(ignored);
+				parse_template_argument_list(init_template_args);
+				have_init_template_args = true;
 			}
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        init_name,
@@ -630,7 +746,9 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 					else if (direct_base.get() != NULL &&
 					    initializer_names_direct_base(class_scope,
 					                                  direct_base,
-					                                  init_name))
+					                                  init_name,
+					                                  have_init_template_args
+					                                  ? &init_template_args : NULL))
 						init_target = direct_base;
 					else if (field != NULL)
 						init_target = field->type;
@@ -672,7 +790,9 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 					else if (direct_base.get() != NULL &&
 					    initializer_names_direct_base(class_scope,
 					                                  direct_base,
-					                                  init_name))
+					                                  init_name,
+					                                  have_init_template_args
+					                                  ? &init_template_args : NULL))
 						init_target = direct_base;
 					else if (field != NULL)
 						init_target = field->type;
@@ -694,7 +814,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 				expect(OP_RPAREN);
 			}
 			if (direct_base.get() != NULL &&
-			    initializer_names_direct_base(class_scope, direct_base, init_name))
+			    initializer_names_direct_base(class_scope,
+			                                  direct_base,
+			                                  init_name,
+			                                  have_init_template_args
+			                                  ? &init_template_args : NULL))
 			{
 				explicit_base_action =
 					make_base_init_action(direct_base,
@@ -730,11 +854,18 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 	else if (explicit_base)
 		add_child(body, explicit_base_action);
 	else if (direct_base.get() != NULL &&
-	         direct_base->kind == pa11::TypeKind::Record &&
-	         ensure_default_constructor(direct_base) != NULL)
+	         direct_base->kind == pa11::TypeKind::Record)
 	{
-		Node base_action = make_base_init_action(direct_base, NULL);
-		add_child(body, base_action);
+		Binding* base_ctor = ensure_default_constructor(direct_base);
+		if (base_ctor != NULL &&
+		    suppress_implicit_template_base_init_ &&
+		    base_ctor->is_generated_default_constructor)
+			mark_suppressed_generated_constructor_dependencies(base_ctor);
+		else if (base_ctor != NULL)
+		{
+			Node base_action = make_base_init_action(direct_base, NULL);
+			add_child(body, base_action);
+		}
 	}
 	vector<Binding*> fields;
 	try
@@ -788,6 +919,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 		function_returns_.pop_back();
 		scopes_.pop_back();
 	}
+	ctor->is_noop_constructor = body.children.empty();
 	add_child(fn, body);
 	remember_function_body(ctor, fn);
 	if (emit_node)
@@ -800,7 +932,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out, bool emit_node)
 bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node)
 {
 	if (current_scope()->kind == ScopeKind::Class ||
-	    !(at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1))))
+	    !(at(OP_COLON2) || at_identifier()))
 		return false;
 	size_t save = pos_;
 	Scope* class_scope = NULL;
@@ -823,10 +955,14 @@ bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node)
 	TypePtr result;
 	try
 	{
+		scopes_.push_back(class_scope);
 		result = parse_conversion_type_id();
+		scopes_.pop_back();
 	}
 	catch (const exception&)
 	{
+		if (!scopes_.empty() && scopes_.back() == class_scope)
+			scopes_.pop_back();
 		pos_ = save;
 		return false;
 	}
@@ -846,11 +982,34 @@ bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node)
 		1,
 		pa11::make_pointer(pa11::make_cv(class_type, suffix.function_cv)));
 	TypePtr fn_type = pa11::make_function(result, params, false);
-	Binding* function =
-		add_function_binding(class_scope,
-		                     conversion_operator_name(result),
-		                     fn_type,
-		                     false);
+	fn_type = substitute_template_type(fn_type);
+	result = fn_type->base;
+	string function_name = conversion_operator_name(result);
+	Binding* existing_function = NULL;
+	map<string, vector<Binding*> >::iterator existing_it =
+		class_scope->members.find(function_name);
+	if (existing_it != class_scope->members.end())
+		for (size_t i = 0; i < existing_it->second.size(); ++i)
+		{
+			Binding* candidate = existing_it->second[i];
+			if (candidate->kind == BindingKind::Function &&
+			    pa11::same_type(candidate->type, fn_type))
+			{
+				existing_function = candidate;
+				break;
+			}
+		}
+	Binding* function = force_new_function_binding_
+		? add_value(class_scope,
+		            BindingKind::Function,
+		            function_name,
+		            fn_type)
+		: (existing_function != NULL
+		   ? existing_function
+		   : add_function_binding(class_scope,
+		                          function_name,
+		                          fn_type,
+		                          false));
 	function->unwind_no = suffix.noexcept_decl;
 	function->ref_qualifier = suffix.ref_qualifier;
 	function_parameter_names_[function] = vector<string>(1, "this");
@@ -946,14 +1105,14 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 {
 	if (current_scope()->kind != ScopeKind::Class || !at_identifier())
 		return false;
-	if (current().source != current_scope()->name)
-		return false;
-	if (!lookahead(OP_LPAREN, 1))
-		return false;
 	Scope* class_scope = current_scope();
 	TypePtr class_type = pa11::record_type_for_scope(class_scope);
 	if (class_type.get() == NULL)
 		throw runtime_error("constructor without class type");
+	if (!constructor_name_matches_scope(class_scope, current().source))
+		return false;
+	if (!lookahead(OP_LPAREN, 1))
+		return false;
 	consume_identifier();
 	expect(OP_LPAREN);
 	vector<ParameterInfo> parameters;
@@ -971,6 +1130,11 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      fn_params,
 	                                      variadic);
+	fn_type = substitute_template_type(fn_type);
+	for (size_t i = 0;
+	     i < parameters.size() && i + 1 < fn_type->parameters.size();
+	     ++i)
+		parameters[i].type = fn_type->parameters[i + 1];
 	Binding* ctor = add_value(class_scope,
 	                          BindingKind::Function,
 	                          class_scope->name,

@@ -1,0 +1,338 @@
+#include "pa12_internal.h"
+
+#include <stdexcept>
+
+using namespace std;
+
+namespace pa12 {
+namespace internal {
+bool typename_starts_qualified_type(const vector<Token>& tokens, size_t pos)
+{
+	if (pos >= tokens.size() ||
+	    tokens[pos].kind != posttoken::TokenKind::Simple ||
+	    tokens[pos].type != KW_TYPENAME)
+		return false;
+	++pos;
+	if (pos >= tokens.size() ||
+	    tokens[pos].kind != posttoken::TokenKind::Identifier)
+		return false;
+	++pos;
+	if (pos < tokens.size() &&
+	    tokens[pos].kind == posttoken::TokenKind::Simple &&
+	    tokens[pos].type == OP_LT)
+	{
+		int depth = 0;
+		while (pos < tokens.size())
+		{
+			if (tokens[pos].kind == posttoken::TokenKind::Simple &&
+			    tokens[pos].type == OP_LT)
+				++depth;
+			else if (tokens[pos].kind == posttoken::TokenKind::Simple &&
+			         tokens[pos].type == OP_GT)
+			{
+				--depth;
+				++pos;
+				if (depth == 0)
+					break;
+				continue;
+			}
+			++pos;
+		}
+	}
+	return pos < tokens.size() &&
+	       tokens[pos].kind == posttoken::TokenKind::Simple &&
+	       tokens[pos].type == OP_COLON2;
+}
+
+
+vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
+{
+	vector<TemplateParameterInfo> parameters;
+	expect(OP_LT);
+	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
+	vector<set<string> > save_pack_subst = template_type_parameter_packs_;
+	template_type_substitutions_.push_back(map<string, TypePtr>());
+	template_value_substitutions_.push_back(map<string, TemplateArgument>());
+	template_type_parameter_packs_.push_back(set<string>());
+	if (consume(OP_GT))
+	{
+		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
+		template_type_parameter_packs_ = save_pack_subst;
+		return parameters;
+	}
+	for (;;)
+	{
+		TemplateParameterInfo parameter = parse_template_parameter_info();
+		parameters.push_back(parameter);
+		if (!parameter.name.empty() &&
+		    parameter.kind == TemplateParameterKind::Type)
+		{
+			template_type_substitutions_.back()[parameter.name] =
+				pa11::make_template_parameter_type(parameter.name);
+			if (parameter.is_pack)
+				template_type_parameter_packs_.back().insert(
+					parameter.name);
+		}
+		else if (!parameter.name.empty() &&
+		         parameter.kind == TemplateParameterKind::NonType)
+		{
+			TemplateArgument arg =
+				TemplateArgument::dependent_value_arg(
+					parameter.type.get() != NULL
+					? parameter.type
+					: pa11::make_fundamental(FT_INT));
+			arg.value_name = parameter.name;
+			if (parameter.is_pack)
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(arg);
+				template_value_substitutions_.back()[parameter.name] =
+					TemplateArgument::pack_arg(pack);
+			}
+			else
+				template_value_substitutions_.back()[parameter.name] = arg;
+		}
+		else if (!parameter.name.empty() &&
+		         parameter.kind == TemplateParameterKind::TemplateTemplate)
+		{
+			TemplateArgument arg = TemplateArgument::template_arg(NULL);
+			arg.value_name = parameter.name;
+			template_value_substitutions_.back()[parameter.name] = arg;
+		}
+		if (!consume(OP_COMMA))
+			break;
+	}
+	expect(OP_GT);
+	template_type_substitutions_ = save_subst;
+	template_value_substitutions_ = save_value_subst;
+	template_type_parameter_packs_ = save_pack_subst;
+	return parameters;
+}
+
+bool Parser::active_type_parameter_pack(const string& name) const
+{
+	for (size_t i = template_type_parameter_packs_.size(); i > 0; --i)
+		if (template_type_parameter_packs_[i - 1].count(name) != 0)
+			return true;
+	return false;
+}
+
+bool Parser::type_substitution_hides_value_substitution(
+	const string& name) const
+{
+	size_t depth = max(template_type_substitutions_.size(),
+	                   template_value_substitutions_.size());
+	for (size_t offset = 0; offset < depth; ++offset)
+	{
+		bool have_type = false;
+		if (offset < template_type_substitutions_.size())
+		{
+			size_t index = template_type_substitutions_.size() - 1 - offset;
+			have_type =
+				template_type_substitutions_[index].find(name) !=
+				template_type_substitutions_[index].end();
+		}
+		bool have_value = false;
+		if (offset < template_value_substitutions_.size())
+		{
+			size_t index = template_value_substitutions_.size() - 1 - offset;
+			have_value =
+				template_value_substitutions_[index].find(name) !=
+				template_value_substitutions_[index].end();
+		}
+		if (have_type)
+			return true;
+		if (have_value)
+			return false;
+	}
+	return false;
+}
+
+bool Parser::parameter_pack_expansion_name(const string& name) const
+{
+	if (active_type_parameter_pack(name))
+		return true;
+	TemplateArgument subst;
+	return find_template_value_substitution(name, subst) &&
+	       subst.kind == TemplateArgumentKind::Pack;
+}
+
+TemplateParameterInfo Parser::parse_template_parameter_info()
+{
+	TemplateParameterInfo parameter;
+	if (consume(KW_TEMPLATE))
+	{
+		parameter.kind = TemplateParameterKind::TemplateTemplate;
+		parameter.template_parameters = parse_template_parameter_clause();
+		if (!consume(KW_CLASS) && !consume(KW_TYPENAME))
+			throw runtime_error("unsupported template template parameter");
+		parameter.is_pack = consume(OP_DOTS);
+		if (at_identifier())
+			parameter.name = consume_identifier();
+		if (consume(OP_ASS))
+			skip_template_parameter_default(parameter);
+		return parameter;
+	}
+	bool typename_qualified_type =
+		typename_starts_qualified_type(tokens_, pos_);
+	if (!typename_qualified_type &&
+	    (consume(KW_CLASS) || consume(KW_TYPENAME)))
+	{
+		parameter.kind = TemplateParameterKind::Type;
+		parameter.is_pack = consume(OP_DOTS);
+		if (at_identifier())
+			parameter.name = consume_identifier();
+		if (parameter.name.empty())
+			parameter.name = "__template_param" +
+			                 to_string(template_declarations_.size()) + "_" +
+			                 to_string(pos_);
+		if (consume(OP_ASS))
+			skip_template_parameter_default(parameter);
+		return parameter;
+	}
+
+	parameter.kind = TemplateParameterKind::NonType;
+	DeclSpecs specs = parse_decl_specifier_seq(false);
+	TypePtr base = type_from_decl_specs(specs);
+	parameter.is_pack = consume(OP_DOTS);
+	if (!at(OP_COMMA) && !at(OP_GT) && !at(OP_ASS))
+	{
+		size_t declarator_save = pos_;
+		Declarator declarator;
+		try
+		{
+			declarator = parse_declarator(false);
+		}
+		catch (const exception&)
+		{
+			pos_ = declarator_save;
+			declarator = parse_abstract_declarator();
+		}
+		parameter.type = apply_declarator(declarator, base);
+		parameter.is_pack = parameter.is_pack || consume(OP_DOTS);
+		if (declarator_has_name(declarator))
+			parameter.name = declarator_name(declarator).name;
+	}
+	else
+	{
+		parameter.type = base;
+	}
+	if (consume(OP_ASS))
+	{
+		skip_template_parameter_default(parameter);
+		return parameter;
+	}
+	return parameter;
+}
+
+void Parser::skip_template_parameter_default(TemplateParameterInfo& parameter)
+{
+	parameter.has_default = true;
+	parameter.default_begin = pos_;
+	int angle = 0;
+	int paren = 0;
+	int square = 0;
+	int brace = 0;
+	while (!at_eof())
+	{
+		if (angle == 0 && paren == 0 && square == 0 && brace == 0 &&
+		    (at(OP_COMMA) || at(OP_GT)))
+			break;
+		if (at(OP_LT))
+			++angle;
+		else if (at(OP_GT))
+		{
+			if (angle == 0)
+				break;
+			--angle;
+		}
+		else if (at(OP_LPAREN))
+			++paren;
+		else if (at(OP_RPAREN))
+			--paren;
+		else if (at(OP_LSQUARE))
+			++square;
+		else if (at(OP_RSQUARE))
+			--square;
+		else if (at(OP_LBRACE))
+			++brace;
+		else if (at(OP_RBRACE))
+			--brace;
+		++pos_;
+	}
+	parameter.default_end = pos_;
+}
+
+size_t Parser::skip_template_declaration_body(size_t begin) const
+{
+	int paren = 0;
+	int square = 0;
+	for (size_t p = begin; p < tokens_.size(); ++p)
+	{
+		const Token& tok = tokens_[p];
+		if (tok.kind != posttoken::TokenKind::Simple)
+			continue;
+		if (tok.type == OP_LPAREN)
+			++paren;
+		else if (tok.type == OP_RPAREN)
+			--paren;
+		else if (tok.type == OP_LSQUARE)
+			++square;
+		else if (tok.type == OP_RSQUARE)
+			--square;
+		else if (tok.type == OP_LBRACE && paren == 0 && square == 0)
+		{
+			size_t q = p + 1;
+			int brace = 1;
+			while (q < tokens_.size() && brace > 0)
+			{
+				if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+				    tokens_[q].type == OP_LBRACE)
+					++brace;
+				else if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+				         tokens_[q].type == OP_RBRACE)
+					--brace;
+				++q;
+			}
+			if (q < tokens_.size() &&
+			    tokens_[q].kind == posttoken::TokenKind::Simple &&
+			    tokens_[q].type == OP_SEMICOLON)
+				++q;
+				else if (q < tokens_.size() &&
+				         tokens_[q].kind == posttoken::TokenKind::Simple &&
+				         (tokens_[q].type == OP_COMMA ||
+				          tokens_[q].type == OP_GT ||
+				          tokens_[q].type == OP_LBRACE))
+				{
+					p = q - 1;
+					continue;
+			}
+			return q;
+		}
+		else if (tok.type == OP_SEMICOLON && paren == 0 && square == 0)
+			return p + 1;
+	}
+	return tokens_.size();
+}
+
+void Parser::parse_template_declaration()
+{
+	expect(KW_TEMPLATE);
+	if (!at(OP_LT))
+	{
+		--pos_;
+		parse_explicit_template_instantiation(false);
+		return;
+	}
+	vector<TemplateParameterInfo> parameters = parse_template_parameter_clause();
+	size_t decl_begin = pos_;
+	size_t decl_end = skip_template_declaration_body(decl_begin);
+	register_template_declaration(parameters, decl_begin, decl_end);
+	pos_ = decl_end;
+}
+
+}  // namespace internal
+}  // namespace pa12

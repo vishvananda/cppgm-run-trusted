@@ -35,8 +35,23 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		    TypeKind::Record &&
 	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
 		    TypeKind::Array)
-		return Value(scalar_lowir_type(expr.binding->type),
-		             to_string(expr.binding->constant_value));
+	{
+		bool specialized_body =
+			fn_.binding != NULL &&
+			(binding_has_template_specialization_context(fn_.binding) ||
+			 !fn_.binding->function_specialization_symbol.empty() ||
+			 (fn_.binding->aliased_binding != NULL &&
+			  !fn_.binding->aliased_binding
+				   ->function_specialization_symbol.empty()));
+		if (!program_.template_static_member_constant_load_required(
+			    expr.binding) ||
+		    specialized_body)
+		{
+			program_.demand_deferred_global_definition(expr.binding);
+			return Value(scalar_lowir_type(expr.binding->type),
+			             to_string(expr.binding->constant_value));
+		}
+	}
 	if (expr.binding->kind == BindingKind::Function)
 	{
 		if (expr.binding->is_inline_definition)

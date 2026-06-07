@@ -185,7 +185,9 @@ FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn)
 	  eh_try_depth_(0),
 	  call_temp_cleanup_defer_depth_(0),
 	  logical_call_result_consumed_(false),
-	  call_result_store_consumed_(false)
+	  call_result_store_consumed_(false),
+	  lowering_record_return_object_(false),
+	  lowering_array_subobject_init_(false)
 {
 }
 
@@ -331,6 +333,7 @@ FunctionOut FunctionLowerer::lower()
 	Binding* binding = fn_.binding;
 	if (binding == NULL)
 		throw runtime_error("missing function binding");
+	out_.binding = binding;
 	string name = program_.symbol_for(binding);
 	TypePtr fn_type = binding->type;
 	bool indirect_result =
@@ -625,7 +628,12 @@ void FunctionLowerer::lower_compound(const Node& node)
 		TypePtr direct_base =
 			bare.get() != NULL && bare->kind == TypeKind::Record
 			? bare->base : TypePtr();
+		bool has_base_init_action = false;
+		for (size_t i = 0; i < node.children.size(); ++i)
+			if (starts_with(node.children[i].line, "base-init-action"))
+				has_base_init_action = true;
 		if (direct_base.get() != NULL &&
+		    !has_base_init_action &&
 		    !record_has_storage_copy(direct_base) &&
 		    fn_.binding->type->parameters.size() == 2)
 		{
@@ -879,7 +887,12 @@ void FunctionLowerer::lower_return(const Node& node)
 			function<Value()> addr_for = [ret_addr]() {
 				return ret_addr;
 			};
+			bool saved_lowering_record_return_object =
+				lowering_record_return_object_;
+			lowering_record_return_object_ = true;
 			lower_object_init(addr_for, ret, node.children[0]);
+			lowering_record_return_object_ =
+				saved_lowering_record_return_object;
 			emit_pending_temp_cleanups();
 			emit_all_cleanups();
 			terminate("return void");
@@ -892,7 +905,12 @@ void FunctionLowerer::lower_return(const Node& node)
 		function<Value()> addr_for = [ret_addr]() {
 			return ret_addr;
 		};
+		bool saved_lowering_record_return_object =
+			lowering_record_return_object_;
+		lowering_record_return_object_ = true;
 		lower_object_init(addr_for, ret, node.children[0]);
+		lowering_record_return_object_ =
+			saved_lowering_record_return_object;
 		emit_pending_temp_cleanups();
 		emit_all_cleanups();
 		terminate("return " + scalar_lowir_type(ret) + " $" + slot);
@@ -980,7 +998,12 @@ void FunctionLowerer::lower_discarded_expr(const Node& expr)
 	}
 	if (starts_with(expr.line, "call-expression") && is_reference(expr.type))
 	{
-		emit_call(expr);
+		TypePtr object = pa11::strip_cv(object_type(expr.type));
+		if (object->kind == TypeKind::Record ||
+		    object->kind == TypeKind::Array)
+			emit_call(expr);
+		else
+			emit_rvalue(expr);
 		return;
 	}
 	if (starts_with(expr.line, "binary-expression") &&

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <iosfwd>
 #include <map>
@@ -58,9 +59,15 @@ struct TemplateInstanceArgument
 	TypePtr type;
 	string template_name;
 	string value_name;
+	string value_owner_template_name;
+	string value_member_name;
+	size_t value_expr_begin;
+	size_t value_expr_end;
 	uint64_t value;
 	bool dependent;
+	bool value_negated;
 	vector<TemplateInstanceArgument> pack;
+	vector<TemplateInstanceArgument> value_owner_template_arguments;
 
 	TemplateInstanceArgument();
 	static TemplateInstanceArgument type_arg(TypePtr type);
@@ -85,6 +92,7 @@ struct Type
 	TypeKind kind;
 	EFundamentalType fundamental;
 	unsigned cv;
+	int ref_qualifier;
 	TypePtr base;
 	TypePtr member_class;
 	bool unknown_bound;
@@ -102,6 +110,8 @@ struct Type
 	bool dependent_typename_decltype;
 	string template_primary_name;
 	vector<TemplateInstanceArgument> template_arguments;
+	vector<vector<TemplateInstanceArgument> >
+		dependent_typename_template_argument_lists;
 	EFundamentalType enum_underlying;
 	Scope* scope;
 	vector<Binding*> fields;
@@ -143,6 +153,7 @@ struct Binding
 	bool is_constexpr;
 	bool is_static_member;
 	bool is_local_static;
+	bool is_namespace_static;
 	string local_static_discriminator;
 	Binding* local_static_function_owner;
 	string function_specialization_symbol;
@@ -162,6 +173,9 @@ struct Binding
 	bool is_thread_local;
 	bool is_object_root;
 	bool is_dependent_template_artifact;
+	bool is_template_static_member_definition;
+	bool is_template_static_member_explicit_definition;
+	bool reserve_primary_function_symbol;
 	bool is_virtual;
 	bool is_override_specified;
 	bool is_final_virtual;
@@ -171,6 +185,7 @@ struct Binding
 	int virtual_slot_width;
 	bool unwind_no;
 	int ref_qualifier;
+	bool is_noop_constructor;
 	bool is_noop_destructor;
 	uint64_t member_offset;
 	bool is_bit_field;

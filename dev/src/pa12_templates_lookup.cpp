@@ -5,6 +5,39 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+namespace {
+
+bool variable_template_visible_in_scope_tree(
+	Scope* scope,
+	const string& name,
+	map<Scope*, map<string, vector<TemplateDeclaration*> > >& variable_templates,
+	set<Scope*>& seen)
+{
+	if (scope == NULL || !seen.insert(scope).second)
+		return false;
+	map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
+		variable_templates.find(scope);
+	if (sit != variable_templates.end())
+	{
+		map<string, vector<TemplateDeclaration*> >::iterator it =
+			sit->second.find(name);
+		if (it != sit->second.end() && !it->second.empty())
+			return true;
+	}
+	TypePtr record = pa11::record_type_for_scope(scope);
+	TypePtr base = record.get() != NULL && record->base.get() != NULL
+		? pa11::strip_cv(record->base) : TypePtr();
+	return base.get() != NULL &&
+	       base->kind == pa11::TypeKind::Record &&
+	       base->scope != NULL &&
+	       variable_template_visible_in_scope_tree(base->scope,
+	                                               name,
+	                                               variable_templates,
+	                                               seen);
+}
+
+}  // namespace
+
 vector<TemplateDeclaration*> Parser::find_function_templates(
 	const QualifiedName& name)
 {
@@ -30,6 +63,20 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 			if (!out.empty())
 				return out;
 		}
+		TypePtr record = pa11::record_type_for_scope(name.qualifier);
+		TypePtr base = record.get() != NULL && record->base.get() != NULL
+			? pa11::strip_cv(record->base) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL &&
+		    !record_skips_dependent_base_unqualified_lookup(record))
+		{
+			QualifiedName nested = name;
+			nested.qualifier = base->scope;
+			out = find_function_templates(nested);
+			if (!out.empty())
+				return out;
+		}
 		return out;
 	}
 	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
@@ -51,6 +98,21 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 			if (!out.empty())
 				return out;
 		}
+		TypePtr record = pa11::record_type_for_scope(cur);
+		TypePtr base = record.get() != NULL && record->base.get() != NULL
+			? pa11::strip_cv(record->base) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL &&
+		    record_dependent_base_lookup_skips_.count(
+			    pa11::strip_cv(record).get()) == 0)
+		{
+			QualifiedName nested = name;
+			nested.qualifier = base->scope;
+			out = find_function_templates(nested);
+			if (!out.empty())
+				return out;
+		}
 	}
 	return out;
 }
@@ -58,6 +120,28 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 bool Parser::visible_function_template_name(const QualifiedName& name)
 {
 	return !find_function_templates(name).empty();
+}
+
+bool Parser::visible_variable_template_name(const QualifiedName& name)
+{
+	if (name.qualifier != NULL)
+	{
+		set<Scope*> seen;
+		return variable_template_visible_in_scope_tree(name.qualifier,
+		                                               name.name,
+		                                               variable_templates_,
+		                                               seen);
+	}
+	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
+	{
+		set<Scope*> seen;
+		if (variable_template_visible_in_scope_tree(cur,
+		                                            name.name,
+		                                            variable_templates_,
+		                                            seen))
+			return true;
+	}
+	return false;
 }
 
 vector<Binding*> Parser::instantiate_explicit_function_templates(

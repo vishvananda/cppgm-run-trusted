@@ -8,6 +8,10 @@ namespace pa12 {
 namespace internal {
 namespace {
 
+bool template_instance_argument_contains_template_parameter_name(
+	const pa11::TemplateInstanceArgument& argument,
+	string& name);
+
 bool type_contains_template_parameter_name(TypePtr type, string& name)
 {
 	if (type.get() == NULL)
@@ -38,6 +42,29 @@ bool type_contains_template_parameter_name(TypePtr type, string& name)
 		return type_contains_template_parameter_name(type->member_class,
 		                                             name) ||
 		       type_contains_template_parameter_name(type->base, name);
+	if (type->is_template_specialization)
+		for (size_t i = 0; i < type->template_arguments.size(); ++i)
+			if (template_instance_argument_contains_template_parameter_name(
+				    type->template_arguments[i],
+				    name))
+				return true;
+	return false;
+}
+
+bool template_instance_argument_contains_template_parameter_name(
+	const pa11::TemplateInstanceArgument& argument,
+	string& name)
+{
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return type_contains_template_parameter_name(argument.type, name);
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return type_contains_template_parameter_name(argument.type, name);
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			if (template_instance_argument_contains_template_parameter_name(
+				    argument.pack[i],
+				    name))
+				return true;
 	return false;
 }
 
@@ -81,6 +108,29 @@ bool Parser::make_binary_pack_expr(ETokenType op,
 	out.pack_expansion = true;
 	out.type = op == OP_COMMA ? rhs.type : lhs.type;
 	out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue;
+	const Expr* dependent_operand = NULL;
+	if (!lhs.dependent_value_name.empty() &&
+	    parameter_pack_expansion_name(lhs.dependent_value_name))
+		dependent_operand = &lhs;
+	else if (!rhs.dependent_value_name.empty() &&
+	         parameter_pack_expansion_name(rhs.dependent_value_name))
+		dependent_operand = &rhs;
+	else if (!lhs.dependent_value_name.empty())
+		dependent_operand = &lhs;
+	else if (!rhs.dependent_value_name.empty())
+		dependent_operand = &rhs;
+	if (dependent_operand != NULL)
+	{
+		out.dependent_value_name = dependent_operand->dependent_value_name;
+		out.dependent_value_owner_template_name =
+			dependent_operand->dependent_value_owner_template_name;
+		out.dependent_value_member_name =
+			dependent_operand->dependent_value_member_name;
+		out.dependent_value_owner_template_arguments =
+			dependent_operand->dependent_value_owner_template_arguments;
+		out.dependent_value_negated =
+			dependent_operand->dependent_value_negated;
+	}
 	out.node = Node("pack-expression binary");
 	for (size_t i = 0; i < pack_size; ++i)
 	{
@@ -119,7 +169,12 @@ bool Parser::make_cast_pack_expr(TypePtr target,
 	size_t pack_size =
 		inner.pack_expansion ? inner.pack.size() : target_pack.pack.size();
 	if (target_is_pack && target_pack.pack.size() != pack_size)
-		throw runtime_error("cast pack expansion mismatch");
+	{
+		if (replaying_dependent_decltype_ && inner.pack_expansion)
+			target_is_pack = false;
+		else
+			throw runtime_error("cast pack expansion mismatch");
+	}
 	out = Expr();
 	out.valid = true;
 	out.pack_expansion = true;
@@ -245,11 +300,107 @@ bool Parser::make_template_id_callee_pack_expr(const Expr& callee, Expr& out)
 					                                   subst.pack[p].type));
 			}
 			elem.explicit_template_arguments[it->first] = elem_args;
+			if (it->first != NULL && it->first->aliased_binding != NULL)
+				elem.explicit_template_arguments[
+					it->first->aliased_binding] = elem_args;
+			for (size_t oi = 0; oi < elem.overloads.size(); ++oi)
+			{
+				Binding* overload = elem.overloads[oi];
+				elem.explicit_template_arguments[overload] = elem_args;
+				if (overload != NULL && overload->aliased_binding != NULL)
+					elem.explicit_template_arguments[
+						overload->aliased_binding] = elem_args;
+			}
 		}
 		out.pack.push_back(elem);
 		add_child(out.node, elem.node);
 	}
 	annotate_expr_node(out);
+	return true;
+}
+
+bool Parser::try_expand_expression_pack_pattern(size_t begin,
+                                                size_t end,
+                                                vector<Expr>& out)
+{
+	struct NamedPack
+	{
+		string name;
+		TemplateArgument pack;
+	};
+	vector<NamedPack> packs;
+	set<string> seen;
+	for (vector<map<string, TemplateArgument> >::const_reverse_iterator sit =
+		     template_value_substitutions_.rbegin();
+	     sit != template_value_substitutions_.rend();
+	     ++sit)
+		for (map<string, TemplateArgument>::const_iterator it =
+			     sit->begin();
+		     it != sit->end();
+		     ++it)
+			if (it->second.kind == TemplateArgumentKind::Pack &&
+			    seen.insert(it->first).second)
+			{
+				NamedPack named;
+				named.name = it->first;
+				named.pack = it->second;
+				packs.push_back(named);
+			}
+	if (packs.empty())
+		return false;
+	size_t pack_size = packs[0].pack.pack.size();
+	for (size_t i = 1; i < packs.size(); ++i)
+		if (packs[i].pack.pack.size() != pack_size)
+			throw runtime_error("pack expansion size mismatch");
+
+	size_t save_pos = pos_;
+	vector<map<string, TypePtr> > save_type_subst =
+		template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
+	vector<set<string> > save_pack_subst =
+		template_type_parameter_packs_;
+	vector<Expr> expanded;
+	try
+	{
+		for (size_t p = 0; p < pack_size; ++p)
+		{
+			map<string, TypePtr> type_subst;
+			map<string, TemplateArgument> value_subst;
+			for (size_t i = 0; i < packs.size(); ++i)
+			{
+				const TemplateArgument& elem = packs[i].pack.pack[p];
+				if (elem.kind == TemplateArgumentKind::Type)
+					type_subst[packs[i].name] = elem.type;
+				else
+					value_subst[packs[i].name] = elem;
+			}
+			template_type_substitutions_.push_back(type_subst);
+			template_value_substitutions_.push_back(value_subst);
+			template_type_parameter_packs_.push_back(set<string>());
+			pos_ = begin;
+			Expr elem = parse_assignment_expression();
+			if (pos_ != end)
+				throw runtime_error("pack expression replay did not consume pattern");
+			expanded.push_back(elem);
+			template_type_substitutions_.pop_back();
+			template_value_substitutions_.pop_back();
+			template_type_parameter_packs_.pop_back();
+		}
+	}
+	catch (...)
+	{
+		pos_ = save_pos;
+		template_type_substitutions_ = save_type_subst;
+		template_value_substitutions_ = save_value_subst;
+		template_type_parameter_packs_ = save_pack_subst;
+		throw;
+	}
+	pos_ = save_pos;
+	template_type_substitutions_ = save_type_subst;
+	template_value_substitutions_ = save_value_subst;
+	template_type_parameter_packs_ = save_pack_subst;
+	out.swap(expanded);
 	return true;
 }
 
@@ -273,24 +424,45 @@ bool Parser::make_call_pack_expr(const Expr& callee,
 	out.valid = true;
 	out.pack_expansion = true;
 	out.node = Node("pack-expression call");
-	for (size_t i = 0; i < pack_size; ++i)
+	size_t save_pos = pos_;
+	bool hide_current_ellipsis = at(OP_DOTS);
+	if (hide_current_ellipsis)
+		++pos_;
+	try
 	{
-		vector<Expr> element_args;
-		for (size_t j = 0; j < args.size(); ++j)
-			element_args.push_back(expression_pack_element(args[j], i));
-		Expr elem = make_call_expr(expression_pack_element(*effective_callee, i),
-		                           element_args);
-		if (i == 0)
+		for (size_t i = 0; i < pack_size; ++i)
 		{
-			out.type = elem.type;
-			out.category = elem.category;
+			vector<Expr> element_args;
+			for (size_t j = 0; j < args.size(); ++j)
+				element_args.push_back(expression_pack_element(args[j], i));
+			Expr elem =
+				make_call_expr(expression_pack_element(*effective_callee, i),
+				               element_args);
+			if (i == 0)
+			{
+				out.type = elem.type;
+				out.category = elem.category;
+			}
+			out.pack.push_back(elem);
+			add_child(out.node, elem.node);
 		}
-		out.pack.push_back(elem);
-		add_child(out.node, elem.node);
 	}
+	catch (...)
+	{
+		if (hide_current_ellipsis)
+			pos_ = save_pos;
+		throw;
+	}
+	if (hide_current_ellipsis)
+		pos_ = save_pos;
 	if (pack_size == 0)
 	{
-		out.type = effective_callee->type;
+		out.type = replaying_dependent_decltype_
+			? pa11::make_fundamental(FT_INT)
+			: pa11::make_dependent_typename_type("__dependent_call",
+			                                     false,
+			                                     false,
+			                                     false);
 		out.category = ValueCategory::PRValue;
 	}
 	annotate_expr_node(out);

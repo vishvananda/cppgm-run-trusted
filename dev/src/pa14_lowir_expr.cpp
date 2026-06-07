@@ -50,6 +50,19 @@ Value FunctionLowerer::emit_pointer_index_binary(const Node& expr,
 	const bool left_ptr = pa11::strip_cv(lhs_type)->kind == TypeKind::Pointer;
 	Value base = left_ptr ? lhs : rhs;
 	Value offset = left_ptr ? rhs : lhs;
+	TypePtr offset_type = left_ptr ? rhs_type : lhs_type;
+	string offset_low_type = scalar_lowir_type(offset_type);
+	if (offset_low_type != "i64" &&
+	    !offset.text.empty() &&
+	    (offset.text[0] == '%' || offset.text[0] == '$' ||
+	     offset.text[0] == '@'))
+	{
+		string widened = fresh_temp();
+		instr(widened + " = convert " +
+		      string(is_unsigned_type(offset_type) ? "zext" : "sext") +
+		      " i64 " + offset_low_type + " " + offset.text);
+		offset = Value("i64", widened);
+	}
 	TypePtr ptr_type = left_ptr ? lhs_type : rhs_type;
 	uint64_t scale = pa11::type_size(pa11::strip_cv(ptr_type)->base);
 	if (scale != 1)
@@ -90,8 +103,10 @@ Value FunctionLowerer::emit_pointer_difference(const Node& expr,
 	(void)expr;
 	string diff = fresh_temp();
 	instr(diff + " = binary sub ptr " + lhs.text + ", " + rhs.text);
-	string tmp = fresh_temp();
 	uint64_t scale = pa11::type_size(pa11::strip_cv(lhs_type)->base);
+	if (scale == 1)
+		return Value("i64", diff);
+	string tmp = fresh_temp();
 	instr(tmp + " = binary div i64 " + diff + ", " + to_string(scale));
 	return Value("i64", tmp);
 }

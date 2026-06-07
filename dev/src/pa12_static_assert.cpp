@@ -79,6 +79,25 @@ void Parser::parse_static_assert_declaration()
 	}
 	expect(OP_RPAREN);
 	expect(OP_SEMICOLON);
+	if (!condition.dependent_value_name.empty())
+	{
+		TemplateArgument arg =
+			TemplateArgument::dependent_value_arg(condition.type);
+		arg.value_name = condition.dependent_value_name;
+		arg.value_owner_template_name =
+			condition.dependent_value_owner_template_name;
+		arg.value_member_name = condition.dependent_value_member_name;
+		arg.value_negated = condition.dependent_value_negated;
+		arg.value_owner_template_arguments =
+			condition.dependent_value_owner_template_arguments;
+		TemplateArgument resolved = substitute_template_argument(arg);
+		if (resolved.kind == TemplateArgumentKind::Value &&
+		    !resolved.dependent)
+		{
+			condition.has_constant_value = true;
+			condition.constant_value = resolved.value;
+		}
+	}
 	try
 	{
 		Conversion conv = convert_to(condition, pa11::make_fundamental(FT_BOOL));

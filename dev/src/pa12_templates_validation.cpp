@@ -21,12 +21,15 @@ struct TemplateValidationState
 	vector<Node> generated_nodes;
 	vector<map<string, TypePtr> > template_type_substitutions;
 	vector<map<string, TemplateArgument> > template_value_substitutions;
+	vector<set<string> > template_type_parameter_packs;
 	vector<ActiveClassInstantiation> active_class_instantiations;
 	int local_type_counter;
 	bool force_new_function_binding;
 	bool defer_function_template_bodies;
 	bool validating_template_definition;
 	bool override_function_parameter_names;
+	bool parsing_default_template_argument;
+	int function_template_candidate_instantiation_depth;
 	vector<string> function_parameter_name_override;
 	set<const void*> generated_default_ctors;
 	set<pair<const void*, size_t> > generated_aggregate_ctors;
@@ -47,9 +50,10 @@ struct TemplateValidationState
 	map<Binding*, PendingFunctionBody> pending_function_bodies;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes;
 	vector<Binding*> defaulted_move_assignments;
-	int template_argument_expression_depth;
-	int unevaluated_expression_depth;
-	size_t template_declaration_count;
+		int template_argument_expression_depth;
+		int unevaluated_expression_depth;
+		int short_circuit_static_member_demand_depth;
+		size_t template_declaration_count;
 	vector<TemplateDeclaration> template_values;
 	map<Scope*, map<string, TemplateDeclaration*> > class_templates;
 	map<Scope*, map<string, TemplateDeclaration*> > alias_templates;
@@ -61,9 +65,13 @@ struct TemplateValidationState
 	map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> >
 		member_variable_templates;
 	map<Binding*, TemplateDeclaration*> function_template_placeholders;
-	map<const void*, TemplateDeclaration*> record_template_declarations;
-	map<const void*, vector<TemplateArgument> > record_template_arguments;
-	set<TemplateDeclaration*> class_templates_with_dependent_base;
+	map<Binding*, vector<TemplateArgument> >
+		function_template_specialization_arguments;
+		map<const void*, TemplateDeclaration*> record_template_declarations;
+		map<const void*, vector<TemplateArgument> > record_template_arguments;
+		set<const void*> candidate_only_class_template_specializations;
+		set<const void*> demanded_class_template_specializations;
+		set<TemplateDeclaration*> class_templates_with_dependent_base;
 	set<const void*> record_dependent_base_lookup_skips;
 	vector<Node> extra_lowir_nodes;
 	bool validation_found_dependent_base;
@@ -107,6 +115,7 @@ void TemplateValidationState::save_core(Parser& parser,
 	generated_nodes = parser.generated_nodes_;
 	template_type_substitutions = parser.template_type_substitutions_;
 	template_value_substitutions = parser.template_value_substitutions_;
+	template_type_parameter_packs = parser.template_type_parameter_packs_;
 	active_class_instantiations = parser.active_class_instantiations_;
 	local_type_counter = parser.local_type_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
@@ -114,13 +123,19 @@ void TemplateValidationState::save_core(Parser& parser,
 	validating_template_definition = parser.validating_template_definition_;
 	override_function_parameter_names =
 		parser.override_function_parameter_names_;
+	parsing_default_template_argument =
+		parser.parsing_default_template_argument_;
+	function_template_candidate_instantiation_depth =
+		parser.function_template_candidate_instantiation_depth_;
 	function_parameter_name_override =
 		parser.function_parameter_name_override_;
 	template_argument_expression_depth =
 		parser.template_argument_expression_depth_;
-	unevaluated_expression_depth =
-		parser.unevaluated_expression_depth_;
-	extra_lowir_nodes = parser.extra_lowir_nodes_;
+		unevaluated_expression_depth =
+			parser.unevaluated_expression_depth_;
+		short_circuit_static_member_demand_depth =
+			parser.short_circuit_static_member_demand_depth_;
+		extra_lowir_nodes = parser.extra_lowir_nodes_;
 	validation_found_dependent_base =
 		parser.class_templates_with_dependent_base_.count(declaration) != 0;
 }
@@ -166,8 +181,14 @@ void TemplateValidationState::save_template_tables(Parser& parser)
 	member_function_templates = parser.member_function_templates_;
 	member_variable_templates = parser.member_variable_templates_;
 	function_template_placeholders = parser.function_template_placeholders_;
+	function_template_specialization_arguments =
+		parser.function_template_specialization_arguments_;
 	record_template_declarations = parser.record_template_declarations_;
 	record_template_arguments = parser.record_template_arguments_;
+	candidate_only_class_template_specializations =
+		parser.candidate_only_class_template_specializations_;
+	demanded_class_template_specializations =
+		parser.demanded_class_template_specializations_;
 	class_templates_with_dependent_base =
 		parser.class_templates_with_dependent_base_;
 	record_dependent_base_lookup_skips =
@@ -205,14 +226,21 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.validating_template_definition_ = validating_template_definition;
 	parser.override_function_parameter_names_ =
 		override_function_parameter_names;
+	parser.parsing_default_template_argument_ =
+		parsing_default_template_argument;
+	parser.function_template_candidate_instantiation_depth_ =
+		function_template_candidate_instantiation_depth;
 	parser.function_parameter_name_override_ =
 		function_parameter_name_override;
 	parser.template_argument_expression_depth_ =
 		template_argument_expression_depth;
-	parser.unevaluated_expression_depth_ =
-		unevaluated_expression_depth;
-	parser.template_type_substitutions_ = template_type_substitutions;
+		parser.unevaluated_expression_depth_ =
+			unevaluated_expression_depth;
+		parser.short_circuit_static_member_demand_depth_ =
+			short_circuit_static_member_demand_depth;
+		parser.template_type_substitutions_ = template_type_substitutions;
 	parser.template_value_substitutions_ = template_value_substitutions;
+	parser.template_type_parameter_packs_ = template_type_parameter_packs;
 	parser.active_class_instantiations_ = active_class_instantiations;
 }
 
@@ -261,8 +289,14 @@ void TemplateValidationState::restore_template_tables(
 	parser.member_function_templates_ = member_function_templates;
 	parser.member_variable_templates_ = member_variable_templates;
 	parser.function_template_placeholders_ = function_template_placeholders;
+	parser.function_template_specialization_arguments_ =
+		function_template_specialization_arguments;
 	parser.record_template_declarations_ = record_template_declarations;
 	parser.record_template_arguments_ = record_template_arguments;
+	parser.candidate_only_class_template_specializations_ =
+		candidate_only_class_template_specializations;
+	parser.demanded_class_template_specializations_ =
+		demanded_class_template_specializations;
 	parser.class_templates_with_dependent_base_ =
 		class_templates_with_dependent_base;
 	if (keep_dependent_base)
@@ -279,6 +313,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 
 	map<string, TypePtr> subst;
 	map<string, TemplateArgument> value_subst;
+	set<string> pack_subst;
 	vector<TemplateArgument> args;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
@@ -299,6 +334,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 					subst[declaration->parameters[i].name] = param;
 					value_subst[declaration->parameters[i].name] =
 						arg;
+					pack_subst.insert(declaration->parameters[i].name);
 				}
 			}
 			else
@@ -312,6 +348,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		         TemplateParameterKind::TemplateTemplate)
 		{
 			TemplateArgument arg = TemplateArgument::template_arg(NULL);
+			arg.value_name = declaration->parameters[i].name;
 			if (declaration->parameters[i].is_pack)
 			{
 				vector<TemplateArgument> pack;
@@ -329,6 +366,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 				: pa11::make_fundamental(FT_INT);
 			TemplateArgument arg =
 				TemplateArgument::dependent_value_arg(type);
+			arg.value_name = declaration->parameters[i].name;
 			if (declaration->parameters[i].is_pack)
 			{
 				vector<TemplateArgument> pack;
@@ -371,6 +409,7 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	record_template_arguments_[validation_type.get()] = args;
 	template_type_substitutions_.push_back(subst);
 	template_value_substitutions_.push_back(value_subst);
+	template_type_parameter_packs_.push_back(pack_subst);
 	active_class_instantiations_.push_back(
 		ActiveClassInstantiation(declaration,
 		                         template_specialization_name(declaration,
@@ -390,21 +429,32 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	catch (const runtime_error& err)
 	{
 		saved.restore(*this, declaration);
-		if (string(err.what()) == "incomplete object type" ||
-		    string(err.what()) == "incomplete class type" ||
-		    string(err.what()) == "incomplete array type" ||
-		    string(err.what()) == "no matching constructor" ||
-		    string(err.what()) == "invalid initializer conversion" ||
-		    string(err.what()) == "invalid array bound" ||
-		    string(err.what()) == "decltype qualifier is not a scope" ||
-		    string(err.what()) == "qualified lookup root not found" ||
-		    string(err.what()) == "function template not found")
+		string message = err.what();
+		bool dependent_base_lookup_deferred =
+			class_templates_with_dependent_base_.count(declaration) != 0;
+		if (message == "incomplete object type" ||
+		    message == "incomplete class type" ||
+		    message == "incomplete array type" ||
+		    message == "no matching constructor" ||
+		    message == "invalid initializer conversion" ||
+		    message == "invalid array bound" ||
+		    message == "invalid enumerator initializer" ||
+		    message == "expected declaration specifiers" ||
+		    message == "decltype qualifier is not a scope" ||
+		    message == "dependent typename not resolved" ||
+		    message == "qualified lookup root not found" ||
+		    message == "function template not found")
+			return;
+		if (dependent_base_lookup_deferred &&
+		    message.compare(0, 16, "name not found: ") == 0)
 			return;
 		throw;
 	}
-	catch (const exception&)
+	catch (const exception& err)
 	{
 		saved.restore(*this, declaration);
+		if (string(err.what()) == "dependent typename not resolved")
+			return;
 		throw;
 	}
 	saved.restore(*this, declaration);
@@ -422,6 +472,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 
 	map<string, TypePtr> subst;
 	map<string, TemplateArgument> value_subst;
+	set<string> pack_subst;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
 		const TemplateParameterInfo& parameter = declaration->parameters[i];
@@ -440,6 +491,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 				{
 					subst[parameter.name] = param;
 					value_subst[parameter.name] = arg;
+					pack_subst.insert(parameter.name);
 				}
 			}
 			else if (!parameter.name.empty())
@@ -448,6 +500,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
 		{
 			TemplateArgument arg = TemplateArgument::template_arg(NULL);
+			arg.value_name = parameter.name;
 			if (parameter.is_pack)
 			{
 				vector<TemplateArgument> pack;
@@ -462,6 +515,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 			TypePtr type = parameter.type.get() != NULL
 				? parameter.type : pa11::make_fundamental(FT_INT);
 			TemplateArgument arg = TemplateArgument::dependent_value_arg(type);
+			arg.value_name = parameter.name;
 			if (parameter.is_pack)
 			{
 				vector<TemplateArgument> pack;
@@ -483,12 +537,14 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 		declaration->outer_value_substitutions.end());
 	template_type_substitutions_.push_back(subst);
 	template_value_substitutions_.push_back(value_subst);
+	template_type_parameter_packs_.push_back(pack_subst);
 	scopes_.clear();
 	scopes_.push_back(declaration->lexical_scope != NULL
 	                  ? declaration->lexical_scope
 	                  : declaration->owner);
 	pos_ = declaration->decl_begin;
 	force_new_function_binding_ = true;
+	validating_template_definition_ = true;
 
 	Node node;
 	try

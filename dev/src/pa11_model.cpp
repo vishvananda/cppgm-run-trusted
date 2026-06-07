@@ -51,7 +51,8 @@ uint64_t fundamental_size(EFundamentalType type)
 
 bool same_function_type(const TypePtr& left, const TypePtr& right)
 {
-	if (left->variadic != right->variadic ||
+	if (left->ref_qualifier != right->ref_qualifier ||
+	    left->variadic != right->variadic ||
 	    left->parameters.size() != right->parameters.size() ||
 	    !same_type(left->base, right->base))
 		return false;
@@ -130,6 +131,7 @@ Type::Type(TypeKind k)
 	: kind(k),
 	  fundamental(FT_INT),
 	  cv(CV_NONE),
+	  ref_qualifier(0),
 	  member_class(),
 	  unknown_bound(false),
 	  bound(0),
@@ -165,6 +167,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_constexpr(false),
 	  is_static_member(false),
 	  is_local_static(false),
+	  is_namespace_static(false),
 	  local_static_function_owner(NULL),
 	  is_inline_definition(false),
 	  is_generated_default_constructor(false),
@@ -179,10 +182,13 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_mutable_member(false),
 	  is_reference_member(false),
 	  is_hidden_friend(false),
-		  is_thread_local(false),
-		  is_object_root(false),
-		  is_dependent_template_artifact(false),
-		  is_virtual(false),
+	  is_thread_local(false),
+	  is_object_root(false),
+	  is_dependent_template_artifact(false),
+	  is_template_static_member_definition(false),
+	  is_template_static_member_explicit_definition(false),
+	  reserve_primary_function_symbol(false),
+	  is_virtual(false),
 	  is_override_specified(false),
 	  is_final_virtual(false),
 	  is_pure_virtual(false),
@@ -191,6 +197,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  virtual_slot_width(0),
 	  unwind_no(false),
 	  ref_qualifier(0),
+	  is_noop_constructor(false),
 	  is_noop_destructor(false),
 	  member_offset(0),
 	  is_bit_field(false),
@@ -224,8 +231,11 @@ VirtualTableEntry::VirtualTableEntry(Binding* f, bool d)
 
 TemplateInstanceArgument::TemplateInstanceArgument()
 	: kind(TemplateInstanceArgumentKind::Type),
+	  value_expr_begin(0),
+	  value_expr_end(0),
 	  value(0),
-	  dependent(false)
+	  dependent(false),
+	  value_negated(false)
 {
 }
 
@@ -286,7 +296,7 @@ TypePtr make_cv(TypePtr base, unsigned cv)
 {
 	if (cv == CV_NONE)
 		return base;
-	if (is_reference_type(base))
+	if (is_reference_type(base) || base->kind == TypeKind::Function)
 		return base;
 	if (base->kind == TypeKind::Array)
 		return make_array(make_cv(base->base, cv),
@@ -560,6 +570,8 @@ string describe_type(const TypePtr& type)
 		        (type->cv == CV_VOLATILE ? " volatile" :
 		         (type->cv == (CV_CONST | CV_VOLATILE) ?
 		          " const volatile" : ""))) +
+		       (type->ref_qualifier == 1 ? " &" :
+		        (type->ref_qualifier == 2 ? " &&" : "")) +
 		       " returning " + describe_type(type->base);
 	case TypeKind::MemberPointer:
 		return "member-pointer of " + describe_type(type->member_class) +
@@ -874,6 +886,7 @@ Binding* add_using_declaration(Scope* scope,
 	binding->is_constexpr = target->is_constexpr;
 	binding->is_static_member = target->is_static_member;
 	binding->is_local_static = target->is_local_static;
+	binding->is_namespace_static = target->is_namespace_static;
 	binding->local_static_discriminator = target->local_static_discriminator;
 	binding->local_static_function_owner =
 		target->local_static_function_owner;
@@ -896,6 +909,7 @@ Binding* add_using_declaration(Scope* scope,
 	binding->is_dependent_template_artifact =
 		target->is_dependent_template_artifact;
 	binding->ref_qualifier = target->ref_qualifier;
+	binding->is_noop_constructor = target->is_noop_constructor;
 	binding->is_noop_destructor = target->is_noop_destructor;
 	return binding;
 }

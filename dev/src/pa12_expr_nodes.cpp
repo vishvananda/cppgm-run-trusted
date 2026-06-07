@@ -400,126 +400,31 @@ Expr Parser::make_binary_expr(ETokenType op,
                               const string& text,
                               Expr lhs,
                               Expr rhs)
-{
-	Expr pack;
-	if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack;
-	vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs);
-	Expr builtin_converted;
-	bool have_builtin_converted =
-		make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted);
-	TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type));
-	TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
-	bool enum_operand =
-		left_object->kind == pa11::TypeKind::Enum ||
-		right_object->kind == pa11::TypeKind::Enum;
-		bool enum_integral_mix =
-			(left_object->kind == pa11::TypeKind::Enum &&
-			 right_object->kind != pa11::TypeKind::Enum &&
-			 pa11::is_integral_or_bool_type(right_object)) ||
-			(right_object->kind == pa11::TypeKind::Enum &&
-			 left_object->kind != pa11::TypeKind::Enum &&
-			 pa11::is_integral_or_bool_type(left_object));
-	if (have_builtin_converted &&
-	    left_object->kind != pa11::TypeKind::Record &&
-	    right_object->kind != pa11::TypeKind::Record)
-		return builtin_converted;
-	if (left_object->kind != pa11::TypeKind::Record &&
-	    right_object->kind != pa11::TypeKind::Record &&
-	    (!enum_operand || enum_integral_mix))
-		candidates.clear();
-	bool candidate_accepts_operands = false;
-	for (size_t i = 0; i < candidates.size(); ++i)
-		if (function_template_placeholders_.find(candidates[i]) !=
-			    function_template_placeholders_.end() ||
-		    binary_candidate_accepts_operands(candidates[i], lhs, rhs))
-			candidate_accepts_operands = true;
-	if (have_builtin_converted && !candidate_accepts_operands)
-		return builtin_converted;
-	if (!candidates.empty())
-	{
-		Expr callee;
-		callee.valid = true;
-		callee.binding = candidates[0];
-		callee.type = candidates[0]->type;
-		callee.category = ValueCategory::LValue;
-		callee.overloads = candidates;
-		callee.node = Node("id-expression lvalue " +
-		                   pa11::describe_type(callee.type) + " " +
-		                   candidates[0]->name);
-		annotate_expr_node(callee);
-		vector<Expr> args;
-		args.push_back(lhs);
-		args.push_back(rhs);
-		try
-		{
-			return make_call_expr(callee, args);
-		}
-		catch (const runtime_error&)
-		{
-		}
-	}
-	TypePtr left_record = pa11::strip_cv(expression_object_type(lhs.type));
-	if (left_record->kind == pa11::TypeKind::Record &&
-	    left_record->scope != NULL)
-	{
-		string opname = operator_function_name(op, text);
-		vector<Binding*> members =
-			lookup_qualified_set(left_record->scope, opname, pa11::LOOKUP_FUNCTION);
-		if (!members.empty())
-		{
-			Expr callee = make_member_expr(lhs, opname, ".");
-			vector<Expr> args;
-			args.push_back(rhs);
-			return make_call_expr(callee, args);
-		}
-	}
-	if (have_builtin_converted)
-		return builtin_converted;
-	TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type);
-	TypePtr type = arithmetic_type;
-	if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT ||
-	    op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR)
-		type = pa11::make_fundamental(FT_BOOL);
-	else if ((op == OP_PLUS || op == OP_MINUS) && is_pointer_arithmetic(lhs, rhs))
-		type = pointer_arithmetic_type(op, lhs, rhs);
-	else if (op == OP_MINUS && is_pointer_difference(lhs, rhs))
-		type = pa11::make_fundamental(FT_LONG_INT);
-	else if (op == OP_LSHIFT || op == OP_RSHIFT)
-		type = usual_arithmetic_type(lhs.type, lhs.type);
-	else if (op == OP_COMMA)
-		type = rhs.type;
-	Expr out;
-	out.type = type;
-	out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue;
-	out.valid = true;
-	out.constant_expression = lhs.constant_expression && rhs.constant_expression;
-	if (lhs.has_constant_value && rhs.has_constant_value)
-	{
-		uint64_t value = 0;
-		if (constant_binary_value(op,
-		                          arithmetic_type,
-		                          lhs.constant_value,
-		                          arithmetic_type,
-		                          rhs.constant_value,
-		                          type,
-		                          value))
-		{
-			out.has_constant_value = true;
-			out.constant_value = value;
-			out.null_pointer_constant = out.constant_value == 0 &&
-				pa11::is_integral_or_bool_type(out.type);
-		}
-	}
-	out.node = Node("binary-expression prvalue " + pa11::describe_type(type) +
-	                " " + op_leaf(op, text));
-	add_child(out.node, lhs.node);
-	add_child(out.node, rhs.node);
-	out.node.has_op = true;
-	out.node.op = op;
-	out.node.token_text = text;
-	annotate_expr_node(out);
-	return out;
-}
+{ Expr pack; if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack; vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs); Expr builtin_converted; bool have_builtin_converted =
+make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted); TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
+bool enum_operand = left_object->kind == pa11::TypeKind::Enum || right_object->kind == pa11::TypeKind::Enum; bool enum_integral_mix = (left_object->kind == pa11::TypeKind::Enum &&
+right_object->kind != pa11::TypeKind::Enum && pa11::is_integral_or_bool_type(right_object)) || (right_object->kind == pa11::TypeKind::Enum && left_object->kind != pa11::TypeKind::Enum &&
+pa11::is_integral_or_bool_type(left_object)); if (have_builtin_converted && left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record) return builtin_converted;
+if (left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record && (!enum_operand || enum_integral_mix)) candidates.clear(); bool candidate_accepts_operands = false;
+for (size_t i = 0; i < candidates.size(); ++i) if (function_template_placeholders_.find(candidates[i]) != function_template_placeholders_.end() || binary_candidate_accepts_operands(candidates[i], lhs, rhs))
+candidate_accepts_operands = true; if (have_builtin_converted && !candidate_accepts_operands) return builtin_converted; if (!candidates.empty()) { Expr callee; callee.valid = true; callee.binding = candidates[0];
+callee.type = candidates[0]->type; callee.category = ValueCategory::LValue; callee.overloads = candidates; callee.node = Node("id-expression lvalue " + pa11::describe_type(callee.type) + " " + candidates[0]->name);
+annotate_expr_node(callee); vector<Expr> args; args.push_back(lhs); args.push_back(rhs); try { return make_call_expr(callee, args); } catch (const runtime_error&) { } }
+TypePtr left_record = pa11::strip_cv(expression_object_type(lhs.type)); if (left_record->kind == pa11::TypeKind::Record && left_record->scope != NULL) { string opname = operator_function_name(op, text);
+vector<Binding*> members = lookup_qualified_set(left_record->scope, opname, pa11::LOOKUP_FUNCTION); if (!members.empty()) { Expr callee = make_member_expr(lhs, opname, "."); vector<Expr> args; args.push_back(rhs);
+return make_call_expr(callee, args); } } if (have_builtin_converted) return builtin_converted; TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type); TypePtr type = arithmetic_type;
+if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT || op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR) type = pa11::make_fundamental(FT_BOOL);
+else if ((op == OP_PLUS || op == OP_MINUS) && is_pointer_arithmetic(lhs, rhs)) type = pointer_arithmetic_type(op, lhs, rhs); else if (op == OP_MINUS && is_pointer_difference(lhs, rhs))
+type = pa11::make_fundamental(FT_LONG_INT); else if (op == OP_LSHIFT || op == OP_RSHIFT) type = usual_arithmetic_type(lhs.type, lhs.type); else if (op == OP_COMMA) type = rhs.type; Expr out; out.type = type;
+out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue; out.valid = true; out.constant_expression = lhs.constant_expression && rhs.constant_expression; if (lhs.has_constant_value && rhs.has_constant_value)
+{ uint64_t value = 0; if (constant_binary_value(op, arithmetic_type, lhs.constant_value, arithmetic_type, rhs.constant_value, type, value)) { out.has_constant_value = true; out.constant_value = value;
+out.null_pointer_constant = out.constant_value == 0 && pa11::is_integral_or_bool_type(out.type); } } const Expr* dependent_operand = NULL; if (!lhs.dependent_value_name.empty() &&
+parameter_pack_expansion_name(lhs.dependent_value_name)) dependent_operand = &lhs; else if (!rhs.dependent_value_name.empty() && parameter_pack_expansion_name(rhs.dependent_value_name)) dependent_operand = &rhs;
+else if (!lhs.dependent_value_name.empty()) dependent_operand = &lhs; else if (!rhs.dependent_value_name.empty()) dependent_operand = &rhs; if (dependent_operand != NULL) {
+out.dependent_value_name = dependent_operand->dependent_value_name; out.dependent_value_owner_template_name = dependent_operand->dependent_value_owner_template_name; out.dependent_value_member_name =
+dependent_operand->dependent_value_member_name; out.dependent_value_owner_template_arguments = dependent_operand->dependent_value_owner_template_arguments; out.dependent_value_negated =
+dependent_operand->dependent_value_negated; } out.node = Node("binary-expression prvalue " + pa11::describe_type(type) + " " + op_leaf(op, text)); add_child(out.node, lhs.node); add_child(out.node, rhs.node);
+out.node.has_op = true; out.node.op = op; out.node.token_text = text; annotate_expr_node(out); return out; }
 
 bool Parser::binary_candidate_accepts_operands(Binding* fn,
                                                const Expr& lhs,
@@ -758,6 +663,8 @@ void Parser::collect_associated_namespace_functions(TypePtr type,
 	}
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
+	if (!seen.insert(bare->scope).second)
+		return;
 	for (Scope* scope = bare->scope->parent; scope != NULL; scope = scope->parent)
 	{
 		if (scope->kind != ScopeKind::Namespace)
@@ -910,42 +817,65 @@ Expr Parser::make_overloaded_compound_assignment_expr(ETokenType op,
 	return make_call_expr(callee, args);
 }
 
-	Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare)
+Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare)
+{
+	bool move_assign = rhs.category != ValueCategory::LValue;
+	TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type));
+	if (rhs_bare->kind == pa11::TypeKind::Record &&
+	    pa11::same_type(rhs_bare, lhs_bare))
 	{
-		bool move_assign = rhs.category != ValueCategory::LValue;
 		Binding* op_binding = ensure_copy_move_assignment(lhs_bare, move_assign);
 		if (op_binding == NULL && move_assign)
 			op_binding = ensure_copy_move_assignment(lhs_bare, false);
-		TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type));
-		if (rhs_bare->kind == pa11::TypeKind::Record &&
-		    pa11::same_type(rhs_bare, lhs_bare))
-		{
-			if (op_binding == NULL)
-				throw runtime_error("copy assignment is deleted");
-			if (deleted_functions_.find(op_binding) != deleted_functions_.end())
-				throw runtime_error("call to deleted function");
-			Expr callee = make_member_expr(lhs, "operator=", ".");
-			callee.binding = op_binding;
-			callee.type = op_binding->type;
-			callee.overloads.clear();
-			callee.overloads.push_back(op_binding);
-			callee.node.binding = op_binding;
-			callee.node.type = op_binding->type;
-			vector<Expr> args;
-			args.push_back(rhs);
-			return make_call_expr(callee, args);
-		}
-		vector<Binding*> members =
-			lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION);
-		if (!members.empty())
-	{
+		if (op_binding == NULL)
+			throw runtime_error("copy assignment is deleted");
+		if (deleted_functions_.find(op_binding) != deleted_functions_.end())
+			throw runtime_error("call to deleted function");
 		Expr callee = make_member_expr(lhs, "operator=", ".");
+		callee.binding = op_binding;
+		callee.type = op_binding->type;
+		callee.overloads.clear();
+		callee.overloads.push_back(op_binding);
+		callee.node.binding = op_binding;
+		callee.node.type = op_binding->type;
 		vector<Expr> args;
 		args.push_back(rhs);
 		return make_call_expr(callee, args);
 	}
-		if (op_binding == NULL)
-			throw runtime_error("copy assignment is deleted");
+	if (!type_is_template_dependent(lhs_bare))
+		instantiate_member_function_templates(lhs_bare);
+	vector<Binding*> members =
+		lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION);
+	vector<Binding*> declared_members;
+	for (size_t i = 0; i < members.size(); ++i)
+		if (!members[i]->is_generated_copy_move_assignment)
+			declared_members.push_back(members[i]);
+	if (!declared_members.empty())
+	{
+		Expr callee = make_member_expr(lhs, "operator=", ".");
+		callee.binding = declared_members[0];
+		callee.type = declared_members[0]->type;
+		callee.overloads = declared_members;
+		callee.node.binding = declared_members[0];
+		callee.node.type = declared_members[0]->type;
+		vector<Expr> args;
+		args.push_back(rhs);
+		try
+		{
+			return make_call_expr(callee, args);
+		}
+		catch (const runtime_error& err)
+		{
+			if (string(err.what()).compare(0, 28,
+			                               "cannot resolve call overload") != 0)
+				throw;
+		}
+	}
+	Binding* op_binding = ensure_copy_move_assignment(lhs_bare, move_assign);
+	if (op_binding == NULL && move_assign)
+		op_binding = ensure_copy_move_assignment(lhs_bare, false);
+	if (op_binding == NULL)
+		throw runtime_error("copy assignment is deleted");
 	Expr callee = make_member_expr(lhs, "operator=", ".");
 	vector<Expr> args;
 	args.push_back(rhs);
@@ -961,6 +891,7 @@ Expr Parser::make_assignment_expr(ETokenType op,
 	TypePtr lhs_bare = pa11::strip_cv(lhs_type);
 	if (op == OP_ASS &&
 	    rhs.braced_init_list &&
+	    rhs.type.get() == NULL &&
 	    lhs_bare->kind == pa11::TypeKind::Record)
 	{
 		rhs.type = lhs_type;
@@ -1098,6 +1029,21 @@ Expr Parser::make_unary_expr(ETokenType op, const string& text, Expr inner)
 	out.node.has_op = true;
 	out.node.op = op;
 	out.node.token_text = text;
+	if ((op == OP_LNOT || op == OP_PLUS || op == OP_MINUS || op == OP_COMPL) &&
+	    !inner.dependent_value_name.empty())
+	{
+		out.dependent_value_name = inner.dependent_value_name;
+		out.dependent_value_owner_template_name =
+			inner.dependent_value_owner_template_name;
+		out.dependent_value_member_name =
+			inner.dependent_value_member_name;
+		out.dependent_value_owner_template_arguments =
+			inner.dependent_value_owner_template_arguments;
+		out.dependent_value_negated =
+			(op == OP_MINUS || op == OP_LNOT)
+			? !inner.dependent_value_negated
+			: inner.dependent_value_negated;
+	}
 	annotate_expr_node(out);
 	return out;
 }
@@ -1257,6 +1203,8 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 		return make_dependent_member_expr(object, name, op);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		throw runtime_error("member access on non-record");
+	if (bare->is_template_specialization && !type_is_template_dependent(bare))
+		complete_template_record(bare);
 	if (bare->is_template_specialization)
 		instantiate_member_function_templates(bare);
 	vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
@@ -1392,10 +1340,21 @@ Expr Parser::make_member_expr(Expr object, const string& name, const string& op)
 				signed_integral_value(source_object_for_constant,
 				                      inner.constant_value)));
 	else
-		out.constant_value = normalize_integral_value(target,
-		                                              inner.constant_value);
+	out.constant_value = normalize_integral_value(target,
+	                                              inner.constant_value);
 	out.null_pointer_constant = inner.null_pointer_constant &&
 	                            !type_is_pointer(target);
+	if (!inner.dependent_value_name.empty())
+	{
+		out.dependent_value_name = inner.dependent_value_name;
+		out.dependent_value_owner_template_name =
+			inner.dependent_value_owner_template_name;
+		out.dependent_value_member_name =
+			inner.dependent_value_member_name;
+		out.dependent_value_owner_template_arguments =
+			inner.dependent_value_owner_template_arguments;
+		out.dependent_value_negated = inner.dependent_value_negated;
+	}
 	if (target->kind == pa11::TypeKind::RValueReference &&
 	    inner.binding != NULL &&
 	    inner.node.line.compare(0, 13, "id-expression") == 0)
@@ -1462,6 +1421,40 @@ Expr Parser::make_sizeof_expr(uint64_t value)
 	out.null_pointer_constant = value == 0;
 	out.node = Node("sizeof-expression prvalue unsigned long int");
 	out.node.token_text = to_string(value);
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr Parser::make_dependent_sizeof_expr(ETokenType keyword, TypePtr operand)
+{
+	Expr out;
+	out.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
+	out.category = ValueCategory::PRValue;
+	out.valid = true;
+	out.constant_expression = true;
+	out.has_constant_value = false;
+	out.dependent_value_name =
+		(keyword == KW_SIZEOF ? "sizeof " : "alignof ") +
+		pa11::describe_type(operand);
+	out.node = Node((keyword == KW_SIZEOF ? "sizeof-expression" :
+	                 "alignof-expression") +
+	                string(" prvalue unsigned long int"));
+	out.node.token_text = out.dependent_value_name;
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr Parser::make_dependent_sizeof_pack_expr(const string& name)
+{
+	Expr out;
+	out.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
+	out.category = ValueCategory::PRValue;
+	out.valid = true;
+	out.constant_expression = true;
+	out.has_constant_value = false;
+	out.dependent_value_name = "sizeof...(" + name + ")";
+	out.node = Node("sizeof-expression prvalue unsigned long int");
+	out.node.token_text = out.dependent_value_name;
 	annotate_expr_node(out);
 	return out;
 }

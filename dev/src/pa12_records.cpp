@@ -1,17 +1,11 @@
 #include "pa12_internal.h"
-
 #include <stdexcept>
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
 namespace {
-
 bool record_has_reference_field(TypePtr type);
-
 }  // namespace
-
 TypePtr Parser::make_member_function_type(Scope* class_scope, TypePtr type)
 {
 	TypePtr class_type = pa11::record_type_for_scope(class_scope);
@@ -28,7 +22,6 @@ TypePtr Parser::make_member_function_type(Scope* class_scope, TypePtr type)
 		params.push_back(type->parameters[i]);
 	return pa11::make_function(type->base, params, type->variadic);
 }
-
 Binding* Parser::find_default_constructor(TypePtr type) const
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -62,12 +55,12 @@ Binding* Parser::find_default_constructor(TypePtr type) const
 	}
 	return NULL;
 }
-
 Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
 		return NULL;
+	complete_template_record(bare);
 	bool reemit_stale_generated_default = false;
 	Binding* existing = find_default_constructor(bare);
 	if (existing != NULL)
@@ -174,7 +167,6 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	{
 		return NULL;
 	}
-
 	const void* key = bare.get();
 	if (generated_default_ctors_.find(key) != generated_default_ctors_.end())
 	{
@@ -186,7 +178,6 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 		existing = generated;
 	}
 	generated_default_ctors_.insert(key);
-
 	TypePtr this_type = pa11::make_pointer(bare);
 	vector<TypePtr> params;
 	params.push_back(this_type);
@@ -202,6 +193,7 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	if (reemit_stale_generated_default)
 		ctor->is_inline_definition = false;
 	ctor->is_generated_default_constructor = true;
+	ctor->is_noop_constructor = init_actions.empty();
 	ctor->unwind_no = init_actions.empty();
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
@@ -219,7 +211,6 @@ Binding* Parser::ensure_default_constructor(TypePtr type, bool force_trivial)
 	extra_lowir_nodes_.push_back(fn);
 	return ctor;
 }
-
 Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -315,9 +306,7 @@ Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count)
 		extra_lowir_nodes_.push_back(fn);
 		return ctor;
 	}
-
 namespace {
-
 bool constructor_trailing_parameters_have_defaults(
 	Binding* binding,
 	const map<Binding*, vector<Expr> >* default_arguments)
@@ -335,7 +324,6 @@ bool constructor_trailing_parameters_have_defaults(
 			return false;
 	return true;
 }
-
 Binding* find_copy_move_constructor_binding(
 	TypePtr type,
 	bool move,
@@ -369,21 +357,19 @@ Binding* find_copy_move_constructor_binding(
 	}
 	return NULL;
 }
-
 bool is_copy_move_assignment_for_record(Binding* binding, TypePtr record)
 {
 	if (binding->kind != BindingKind::Function ||
 	    binding->name != "operator=" ||
 	    !binding->function_specialization_symbol.empty() ||
 	    binding->type->kind != pa11::TypeKind::Function ||
-	    binding->type->parameters.size() != 2 ||
-	    !pa11::is_reference_type(binding->type->parameters[1]))
+	    binding->type->parameters.size() != 2)
 		return false;
 	TypePtr param = binding->type->parameters[1];
-	return pa11::same_type(pa11::strip_cv(param->base),
+	TypePtr param_object = pa11::is_reference_type(param) ? param->base : param;
+	return pa11::same_type(pa11::strip_cv(param_object),
 	                       pa11::strip_cv(record));
 }
-
 Binding* find_copy_move_assignment_binding(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -401,12 +387,11 @@ Binding* find_copy_move_assignment_binding(TypePtr type, bool move)
 		TypePtr param = binding->type->parameters[1];
 		if (move && param->kind == pa11::TypeKind::RValueReference)
 			return binding;
-		if (!move && param->kind == pa11::TypeKind::LValueReference)
+		if (!move && param->kind != pa11::TypeKind::RValueReference)
 			return binding;
 	}
 	return NULL;
 }
-
 bool suppresses_implicit_move(
 	TypePtr type,
 	const map<Binding*, vector<Expr> >* default_arguments)
@@ -442,19 +427,16 @@ bool suppresses_implicit_move(
 				return true;
 	return false;
 }
-
 bool type_needs_copy_move_helper(
 	TypePtr type,
 	bool move,
 	const map<Binding*, vector<Expr> >* default_arguments);
-
 bool constructor_binding_needs_helper(Binding* binding)
 {
 	return binding != NULL &&
 	       binding->is_inline_definition &&
 	       !binding->is_defaulted;
 }
-
 bool record_needs_copy_move_helper(
 	TypePtr type,
 	bool move,
@@ -484,7 +466,6 @@ bool record_needs_copy_move_helper(
 	}
 	return false;
 }
-
 bool type_needs_copy_move_helper(
 	TypePtr type,
 	bool move,
@@ -498,14 +479,11 @@ bool type_needs_copy_move_helper(
 		return false;
 	return record_needs_copy_move_helper(bare, move, default_arguments);
 }
-
 bool type_needs_copy_move_assignment_helper(TypePtr type, bool move);
-
 bool assignment_binding_needs_helper(Binding* binding)
 {
 	return binding != NULL && binding->is_inline_definition;
 }
-
 bool record_needs_copy_move_assignment_helper(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -529,7 +507,6 @@ bool record_needs_copy_move_assignment_helper(TypePtr type, bool move)
 	}
 	return false;
 }
-
 bool type_needs_copy_move_assignment_helper(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -539,7 +516,6 @@ bool type_needs_copy_move_assignment_helper(TypePtr type, bool move)
 		return false;
 	return record_needs_copy_move_assignment_helper(bare, move);
 }
-
 Node make_parameter_lvalue(Binding* binding, TypePtr expr_type)
 {
 	Node node("id-expression lvalue " + pa11::describe_type(expr_type) +
@@ -549,7 +525,6 @@ Node make_parameter_lvalue(Binding* binding, TypePtr expr_type)
 	node.category = ValueCategory::LValue;
 	return node;
 }
-
 Node make_this_pointer_node(Binding* binding, TypePtr type)
 {
 	Node node("id-expression prvalue " + pa11::describe_type(type) +
@@ -559,7 +534,6 @@ Node make_this_pointer_node(Binding* binding, TypePtr type)
 	node.category = ValueCategory::PRValue;
 	return node;
 }
-
 Node make_deref_node(TypePtr type, const Node& inner)
 {
 	Node node("unary-expression lvalue " + pa11::describe_type(type) +
@@ -572,7 +546,6 @@ Node make_deref_node(TypePtr type, const Node& inner)
 	add_child(node, inner);
 	return node;
 }
-
 Expr expr_from_node(const Node& node)
 {
 	Expr expr;
@@ -583,7 +556,6 @@ Expr expr_from_node(const Node& node)
 	expr.binding = node.binding;
 	return expr;
 }
-
 Expr target_field_expr(Binding* field, const Node& object)
 {
 	Node member("member-expression lvalue " +
@@ -594,7 +566,6 @@ Expr target_field_expr(Binding* field, const Node& object)
 	add_child(member, object);
 	return expr_from_node(member);
 }
-
 Expr target_base_expr(TypePtr base, const Node& object)
 {
 	TypePtr bare = pa11::strip_cv(base);
@@ -605,7 +576,6 @@ Expr target_base_expr(TypePtr base, const Node& object)
 	add_child(node, object);
 	return expr_from_node(node);
 }
-
 Node make_move_cast(TypePtr type, const Node& inner)
 {
 	Node node("cast-expression xvalue " + pa11::describe_type(type));
@@ -614,7 +584,6 @@ Node make_move_cast(TypePtr type, const Node& inner)
 	add_child(node, inner);
 	return node;
 }
-
 Node source_field_expr(Binding* field, const Node& object, bool move)
 {
 	Node member("member-expression lvalue " +
@@ -630,7 +599,6 @@ Node source_field_expr(Binding* field, const Node& object, bool move)
 		return make_move_cast(field->type, member);
 	return member;
 }
-
 Node source_base_expr(TypePtr base, const Node& object, bool move)
 {
 	TypePtr bare = pa11::strip_cv(base);
@@ -643,9 +611,7 @@ Node source_base_expr(TypePtr base, const Node& object, bool move)
 		return make_move_cast(bare, node);
 	return node;
 }
-
 }  // namespace
-
 bool Parser::copy_move_constructor_available(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -677,7 +643,6 @@ bool Parser::copy_move_constructor_available(TypePtr type, bool move)
 	return generated != NULL &&
 	       deleted_functions_.find(generated) == deleted_functions_.end();
 }
-
 Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -856,7 +821,6 @@ Binding* Parser::ensure_copy_move_constructor(TypePtr type, bool move)
 	extra_lowir_nodes_.push_back(fn);
 	return ctor;
 }
-
 bool Parser::copy_move_assignment_available(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -879,7 +843,6 @@ bool Parser::copy_move_assignment_available(TypePtr type, bool move)
 	return generated != NULL &&
 	       deleted_functions_.find(generated) == deleted_functions_.end();
 }
-
 Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -896,7 +859,6 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	if (generated.find(key) != generated.end())
 		return find_copy_move_assignment_binding(bare, move);
 	generated.insert(key);
-
 	pa11::layout_record_type(bare);
 	TypePtr source_record = move ? bare : pa11::make_cv(bare, pa11::CV_CONST);
 	TypePtr source_ref = move
@@ -923,7 +885,6 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	if (has_bitfield)
 		return op;
 	op->is_inline_definition = true;
-
 	Scope* function_scope =
 		pa11::create_child_scope(bare->scope, ScopeKind::Function, op->name);
 	Binding* this_binding =
@@ -940,7 +901,6 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	Node this_object = make_deref_node(bare, this_ptr);
 	Node other = make_parameter_lvalue(other_binding, source_record);
 	bool deleted = false;
-
 	Node fn("function-definition " + qualified_decl_name(op) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = op;
@@ -954,7 +914,6 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	other_node.type = source_ref;
 	add_child(fn, other_node);
 	Node body("compound-statement");
-
 	TypePtr direct_base = bare->base.get() != NULL
 		? pa11::strip_cv(bare->base) : TypePtr();
 	bool base_needs_helper =
@@ -980,7 +939,6 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 			add_child(body, stmt);
 		}
 	}
-
 	uint64_t copied_prefix = pa11::type_size(bare);
 	if (base_needs_helper)
 		copied_prefix = 0;
@@ -1044,9 +1002,7 @@ Binding* Parser::ensure_copy_move_assignment(TypePtr type, bool move)
 	extra_lowir_nodes_.push_back(fn);
 	return op;
 }
-
 namespace {
-
 Binding* find_destructor_binding(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -1062,7 +1018,6 @@ Binding* find_destructor_binding(TypePtr type)
 			return found->second[i];
 	return NULL;
 }
-
 bool destructor_needs_call(Binding* dtor)
 {
 	return dtor != NULL &&
@@ -1071,9 +1026,7 @@ bool destructor_needs_call(Binding* dtor)
 	        (!dtor->is_generated_default_destructor &&
 	         (dtor->is_private || dtor->is_protected_member))));
 }
-
 }  // namespace
-
 Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -1174,9 +1127,7 @@ Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial)
 	extra_lowir_nodes_.push_back(fn);
 	return dtor;
 }
-
 namespace {
-
 bool record_has_ordinary_member_function(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -1196,7 +1147,6 @@ bool record_has_ordinary_member_function(TypePtr type)
 	}
 	return false;
 }
-
 bool record_has_reference_field(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -1212,9 +1162,7 @@ bool record_has_reference_field(TypePtr type)
 	}
 	return false;
 }
-
 }  // namespace
-
 void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& init)
 {
 	if (init.line.compare(0, 16, "braced-init-list") != 0)
@@ -1274,7 +1222,6 @@ void Parser::ensure_aggregate_constructors_for_init(TypePtr type, const Node& in
 		ensure_aggregate_constructors_for_init(bare->fields[i]->type,
 		                                       init.children[i]);
 }
-
 Node Parser::make_member_init_action(Binding* field, const Node* init)
 {
 	Node action("member-init-action " + field->name);
@@ -1306,7 +1253,6 @@ Node Parser::make_member_init_action(Binding* field, const Node* init)
 	}
 	return action;
 }
-
 Node Parser::make_member_fini_action(Binding* field)
 {
 	Node action("member-fini-action " + field->name);
@@ -1314,7 +1260,6 @@ Node Parser::make_member_fini_action(Binding* field)
 	action.type = field->type;
 	return action;
 }
-
 Node Parser::make_base_init_action(TypePtr base, const Node* init)
 {
 	TypePtr bare = pa11::strip_cv(base);
@@ -1340,7 +1285,6 @@ Node Parser::make_base_init_action(TypePtr base, const Node* init)
 	}
 	return action;
 }
-
 Node Parser::make_base_fini_action(TypePtr base)
 {
 	TypePtr bare = pa11::strip_cv(base);
@@ -1348,24 +1292,47 @@ Node Parser::make_base_fini_action(TypePtr base)
 	action.type = bare;
 	return action;
 }
-
 bool Parser::initializer_names_direct_base(Scope* class_scope,
                                            TypePtr direct_base,
-                                           const string& name)
+                                           const string& name,
+                                           const vector<TemplateArgument>* template_arguments)
 {
 	TypePtr bare = pa11::strip_cv(direct_base);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return false;
 	if (name == bare->scope->name)
 		return true;
+	TypePtr substituted;
+	if (find_template_type_substitution(name, substituted) &&
+	    pa11::same_type(pa11::strip_cv(substituted), bare))
+		return true;
 	vector<Binding*> types =
 		lookup_unqualified_set(class_scope, name, pa11::LOOKUP_TYPE);
 	for (size_t i = 0; i < types.size(); ++i)
-		if (pa11::same_type(pa11::strip_cv(types[i]->type), bare))
+	{
+		TypePtr named = substitute_template_type(types[i]->type);
+		if (pa11::same_type(pa11::strip_cv(named), bare))
 			return true;
+	}
+	if (template_arguments != NULL)
+	{
+		TemplateDeclaration* alias = find_alias_template(NULL, name);
+		if (alias != NULL)
+		{
+			try
+			{
+				TypePtr named =
+					instantiate_alias_template(alias, *template_arguments);
+				if (pa11::same_type(pa11::strip_cv(named), bare))
+					return true;
+			}
+			catch (const runtime_error&)
+			{
+			}
+		}
+	}
 	return false;
 }
-
 Node Parser::default_constructor_action(Binding* variable, bool force_trivial)
 {
 	TypePtr bare = pa11::strip_cv(variable->type);
@@ -1375,8 +1342,9 @@ Node Parser::default_constructor_action(Binding* variable, bool force_trivial)
 	Binding* ctor = ensure_default_constructor(bare, force_trivial);
 	if (ctor == NULL)
 		throw runtime_error("missing default constructor");
-
 	Node action("constructor-action " + ctor_name);
+	if (force_trivial)
+		action.token_text = "force-trivial";
 	Node call("call-expression prvalue void");
 	call.direct_call = ctor;
 	call.type = ctor->type->base;
@@ -1406,7 +1374,6 @@ Node Parser::default_constructor_action(Binding* variable, bool force_trivial)
 	add_child(action, call);
 	return action;
 }
-
 void Parser::resolve_pending_member_initializers(Scope* class_scope, Node& node)
 {
 	if (node.line.compare(0, 18, "member-init-action") == 0 &&
@@ -1451,7 +1418,6 @@ void Parser::resolve_pending_member_initializers(Scope* class_scope, Node& node)
 	for (size_t i = 0; i < node.children.size(); ++i)
 		resolve_pending_member_initializers(class_scope, node.children[i]);
 }
-
 void Parser::inject_anonymous_union_members(Scope* class_scope, Binding* storage)
 {
 	for (size_t i = 0; i < class_scope->binding_order.size(); ++i)
@@ -1467,6 +1433,5 @@ void Parser::inject_anonymous_union_members(Scope* class_scope, Binding* storage
 		injected->aliased_binding = storage;
 	}
 }
-
 }  // namespace internal
 }  // namespace pa12

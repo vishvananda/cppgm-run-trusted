@@ -7,9 +7,11 @@ namespace {
 
 void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 {
-	if (starts_with(node.line, "call-expression") &&
-	    node.direct_call != NULL &&
-	    pa11::strip_cv(node.type)->kind == TypeKind::Record)
+	if (node.direct_call != NULL &&
+	    node.direct_call->type.get() != NULL &&
+	    node.direct_call->type->kind == TypeKind::Function &&
+	    pa11::strip_cv(node.direct_call->type->base)->kind ==
+		    TypeKind::Record)
 	{
 		program.demand_function_declaration(node.direct_call);
 		program.demand_inline_function(node.direct_call);
@@ -269,12 +271,8 @@ void FunctionLowerer::lower_value_call_argument(const Node& arg,
 		}
 		Value raw = emit_rvalue(arg);
 		Value converted = convert_binary_value(raw, arg.type, param);
-		TypePtr param_bare = pa11::strip_cv(param);
-		bool pointer_to_void =
-			param_bare->kind == TypeKind::Pointer &&
-			pa11::is_void_type(pa11::strip_cv(param_bare->base));
 		if (converted.type == "ptr" && converted.text == "0" &&
-		    (arg.token_text == "nullptr" || pointer_to_void))
+		    arg.token_text == "nullptr")
 			converted.text = "nullptr";
 		args.push_back(converted.text);
 	}
@@ -544,18 +542,28 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			start_block(end);
 		}
 	}
-		if (direct != NULL && delay_direct_demand)
+	if (direct != NULL && delay_direct_demand)
 		{
+			bool function_template_assignment =
+				!direct->function_specialization_symbol.empty() ||
+				(direct->aliased_binding != NULL &&
+				 !direct->aliased_binding->function_specialization_symbol.empty());
 			if (direct->name == "operator=" &&
 			    !direct->is_defaulted &&
 			    !direct->is_inline_definition &&
+			    !function_template_assignment &&
 			    direct->owner != NULL &&
 			    direct->owner->kind == ScopeKind::Class)
 		{
 			TypePtr record = pa11::record_type_for_scope(direct->owner);
 			if (record.get() != NULL)
 			{
-				direct = program_.demand_implicit_copy_assignment(record, false);
+				bool move =
+					direct->type.get() != NULL &&
+					direct->type->kind == TypeKind::Function &&
+					direct->type->parameters.size() > 1 &&
+					direct->type->parameters[1]->kind == TypeKind::RValueReference;
+				direct = program_.demand_implicit_copy_assignment(record, move);
 				callee_type = direct->type;
 			}
 		}

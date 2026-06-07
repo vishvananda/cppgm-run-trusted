@@ -201,15 +201,127 @@ bool cv_contains(unsigned target, unsigned source)
 	return (target & source) == source;
 }
 
-bool same_template_specialization_record(TypePtr left, TypePtr right)
+bool same_template_instance_type(TypePtr left, TypePtr right);
+bool same_template_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right);
+
+void append_normalized_template_instance_arguments(
+	vector<pa11::TemplateInstanceArgument>& out,
+	const vector<pa11::TemplateInstanceArgument>& arguments)
 {
+	for (size_t i = 0; i < arguments.size(); ++i)
+	{
+		if (arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack)
+		{
+			append_normalized_template_instance_arguments(out,
+			                                             arguments[i].pack);
+			continue;
+		}
+		out.push_back(arguments[i]);
+	}
+}
+
+bool same_template_instance_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return same_template_instance_type(left.type, right.type);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return left.dependent == right.dependent &&
+		       left.value_negated == right.value_negated &&
+		       left.value == right.value &&
+		       left.value_name == right.value_name &&
+		       left.value_owner_template_name ==
+			       right.value_owner_template_name &&
+		       left.value_member_name == right.value_member_name &&
+		       same_template_instance_type(left.type, right.type) &&
+		       same_template_instance_arguments(
+			       left.value_owner_template_arguments,
+			       right.value_owner_template_arguments);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!same_template_instance_argument(left.pack[i], right.pack[i]))
+			return false;
+	return true;
+}
+
+bool same_template_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	vector<pa11::TemplateInstanceArgument> flat_left;
+	vector<pa11::TemplateInstanceArgument> flat_right;
+	append_normalized_template_instance_arguments(flat_left, left);
+	append_normalized_template_instance_arguments(flat_right, right);
+	if (flat_left.size() != flat_right.size())
+		return false;
+	for (size_t i = 0; i < flat_left.size(); ++i)
+		if (!same_template_instance_argument(flat_left[i], flat_right[i]))
+			return false;
+	return true;
+}
+
+bool same_template_instance_type(TypePtr left, TypePtr right)
+{
+	if (pa11::same_type(left, right))
+		return true;
 	TypePtr l = pa11::strip_cv(left);
 	TypePtr r = pa11::strip_cv(right);
 	return l->kind == pa11::TypeKind::Record &&
 	       r->kind == pa11::TypeKind::Record &&
 	       l->is_template_specialization &&
 	       r->is_template_specialization &&
+	       !l->template_primary_name.empty() &&
+	       l->template_primary_name == r->template_primary_name &&
+	       same_template_instance_arguments(l->template_arguments,
+	                                        r->template_arguments);
+}
+
+bool same_template_specialization_record(TypePtr left, TypePtr right)
+{
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	if (same_template_instance_type(l, r))
+		return true;
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
 	       l->name == r->name;
+}
+
+bool same_scope_path(Scope* left, Scope* right)
+{
+	if (left == right)
+		return true;
+	vector<pair<ScopeKind, string> > lpath;
+	vector<pair<ScopeKind, string> > rpath;
+	for (Scope* cur = left; cur != NULL; cur = cur->parent)
+		lpath.push_back(make_pair(cur->kind, cur->name));
+	for (Scope* cur = right; cur != NULL; cur = cur->parent)
+		rpath.push_back(make_pair(cur->kind, cur->name));
+	return lpath == rpath;
+}
+
+bool same_named_record_type(TypePtr left, TypePtr right)
+{
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       !l->is_template_specialization &&
+	       !r->is_template_specialization &&
+	       l->name == r->name &&
+	       l->tag == r->tag &&
+	       same_scope_path(l->scope, r->scope);
 }
 
 int record_base_distance_impl(TypePtr source, TypePtr target)
@@ -221,7 +333,8 @@ int record_base_distance_impl(TypePtr source, TypePtr target)
 	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
 	{
 		if (pa11::same_type(s, t) ||
-		    same_template_specialization_record(s, t))
+		    same_template_specialization_record(s, t) ||
+		    same_named_record_type(s, t))
 			return distance;
 		++distance;
 	}
@@ -261,7 +374,8 @@ bool qualification_compatible_impl(TypePtr target,
 		                                     next_intermediate);
 	}
 	if (pa11::same_type(t, s) ||
-	    same_template_specialization_record(t, s))
+	    same_template_specialization_record(t, s) ||
+	    same_named_record_type(t, s))
 		return true;
 	if (t->kind == pa11::TypeKind::Record && s->kind == pa11::TypeKind::Record)
 		return record_base_distance_impl(s, t) < 1000000;
@@ -311,7 +425,10 @@ TypePtr Parser::apply_suffixes(TypePtr type, const vector<Suffix>& suffixes)
 	{
 		const Suffix& suffix = suffixes[i - 1];
 		if (suffix.kind == SuffixKind::Array)
+		{
 			type = pa11::make_array(type, suffix.unknown_bound, suffix.bound);
+			type->name = suffix.array_bound_name;
+		}
 		else
 		{
 			vector<TypePtr> params;
@@ -322,6 +439,7 @@ TypePtr Parser::apply_suffixes(TypePtr type, const vector<Suffix>& suffixes)
 				? suffix.trailing_return : type;
 			type = pa11::make_function(result, params, suffix.variadic);
 			type->cv = suffix.function_cv;
+			type->ref_qualifier = suffix.ref_qualifier;
 		}
 	}
 	return type;
@@ -486,6 +604,58 @@ vector<Binding*> Parser::lookup_qualified_set(Scope* scope,
                                               const string& name,
                                               int mask)
 {
+	TypePtr lookup_record = pa11::record_type_for_scope(scope);
+	if (lookup_record.get() != NULL)
+	{
+		TypePtr bare_lookup = pa11::strip_cv(lookup_record);
+		if (bare_lookup->kind == pa11::TypeKind::Record &&
+		    !type_is_template_dependent(bare_lookup))
+			complete_template_record(bare_lookup);
+	}
+	for (TypePtr cur = lookup_record.get() != NULL
+	     ? pa11::strip_cv(lookup_record) : TypePtr();
+	     cur.get() != NULL &&
+	     cur->kind == pa11::TypeKind::Record &&
+	     cur->base.get() != NULL;)
+	{
+		bool skip_dependent_lookup =
+			record_dependent_base_lookup_skips_.count(cur.get()) != 0;
+		TypePtr raw_base = cur->base.get() != NULL
+			? pa11::strip_cv(cur->base) : TypePtr();
+		for (int resolve_depth = 0;
+		     raw_base.get() != NULL &&
+		     raw_base->is_dependent_typename &&
+		     resolve_depth < 8;
+		     ++resolve_depth)
+		{
+			try
+			{
+				TypePtr resolved = resolve_dependent_typename_type(raw_base);
+				if (resolved.get() == NULL)
+					resolved = substitute_template_type(raw_base);
+				if (resolved.get() == NULL ||
+				    resolved.get() == raw_base.get())
+					break;
+				if (resolved.get() != NULL)
+					cur->base = resolved;
+				raw_base = cur->base.get() != NULL
+					? pa11::strip_cv(cur->base) : TypePtr();
+			}
+			catch (const runtime_error&)
+			{
+				break;
+			}
+		}
+		TypePtr base = pa11::strip_cv(cur->base);
+		if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
+			break;
+		if (skip_dependent_lookup && type_is_template_dependent(base))
+			break;
+		if (!type_is_template_dependent(base))
+			record_dependent_base_lookup_skips_.erase(cur.get());
+		complete_template_record(base);
+		cur = base;
+	}
 	vector<Binding*> out;
 	set<Scope*> seen;
 	collect_in_scope(scope, name, mask, seen, out);
@@ -522,9 +692,9 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 			? pa11::strip_cv(record->base) : TypePtr();
 		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
 		    base->scope != NULL &&
-		    record_dependent_base_lookup_skips_.count(
-			    pa11::strip_cv(record).get()) == 0)
+		    !record_skips_dependent_base_unqualified_lookup(record))
 		{
+			complete_template_record(base);
 			vector<Binding*> base_found;
 			set<Scope*> seen;
 			collect_in_scope(base->scope, name, mask, seen, base_found);
@@ -533,6 +703,40 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 		}
 	}
 	return vector<Binding*>();
+}
+
+bool Parser::record_skips_dependent_base_unqualified_lookup(
+	TypePtr record) const
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
+		return false;
+	if (record_dependent_base_lookup_skips_.count(bare.get()) != 0)
+		return true;
+	map<const void*, TemplateDeclaration*>::const_iterator found =
+		record_template_declarations_.find(bare.get());
+	return found != record_template_declarations_.end() &&
+	       class_templates_with_dependent_base_.count(found->second) != 0;
+}
+
+bool Parser::constructor_name_matches_scope(Scope* class_scope,
+                                            const string& name) const
+{
+	if (class_scope == NULL)
+		return false;
+	if (name == class_scope->name)
+		return true;
+	TypePtr record = pa11::record_type_for_scope(class_scope);
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != pa11::TypeKind::Record ||
+	    !bare->is_template_specialization)
+		return false;
+	map<const void*, TemplateDeclaration*>::const_iterator found =
+		record_template_declarations_.find(bare.get());
+	return found != record_template_declarations_.end() &&
+	       found->second != NULL &&
+	       name == found->second->name;
 }
 
 Scope* Parser::nearest_namespace_scope(Scope* scope) const
@@ -588,12 +792,53 @@ bool Parser::is_zero_literal(const Expr& expr) const
 
 bool Parser::types_reference_compatible(TypePtr target, TypePtr source) const
 {
-	return qualification_compatible(target, source);
+	if (qualification_compatible(target, source))
+		return true;
+	TypePtr t = pa11::strip_cv(target);
+	TypePtr s = pa11::strip_cv(source);
+	if (t->kind != pa11::TypeKind::Record ||
+	    s->kind != pa11::TypeKind::Record ||
+	    !cv_contains(cv_flags(target), cv_flags(source)))
+		return false;
+	return record_base_distance(source, target) < 1000000;
 }
 
 int Parser::record_base_distance(TypePtr source, TypePtr target) const
 {
-	return record_base_distance_impl(source, target);
+	TypePtr t = pa11::strip_cv(target);
+	if (t->kind != pa11::TypeKind::Record)
+		return 1000000;
+	int distance = 0;
+	vector<TypePtr> seen;
+	for (TypePtr s = pa11::strip_cv(source);
+	     s.get() != NULL && s->kind == pa11::TypeKind::Record;
+	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
+	{
+		for (size_t i = 0; i < seen.size(); ++i)
+			if (pa11::same_type(seen[i], s) ||
+			    same_template_specialization_record(seen[i], s) ||
+			    same_named_record_type(seen[i], s))
+				return 1000000;
+		seen.push_back(s);
+		if (pa11::same_type(s, t) ||
+		    same_template_specialization_record(s, t) ||
+		    same_named_record_type(s, t))
+			return distance;
+		try
+		{
+			const_cast<Parser*>(this)->complete_template_record(s);
+		}
+		catch (const exception&)
+		{
+			return 1000000;
+		}
+		if (pa11::same_type(s, t) ||
+		    same_template_specialization_record(s, t) ||
+		    same_named_record_type(s, t))
+			return distance;
+		++distance;
+	}
+	return 1000000;
 }
 
 bool Parser::active_function_matches(Binding* function) const
@@ -821,9 +1066,10 @@ TypePtr Parser::usual_arithmetic_type(TypePtr left, TypePtr right) const
 
 ValueCategory Parser::call_category(TypePtr result) const
 {
-	if (result->kind == pa11::TypeKind::LValueReference)
+	TypePtr bare = pa11::strip_cv(result);
+	if (bare->kind == pa11::TypeKind::LValueReference)
 		return ValueCategory::LValue;
-	if (result->kind == pa11::TypeKind::RValueReference)
+	if (bare->kind == pa11::TypeKind::RValueReference)
 		return ValueCategory::XValue;
 	return ValueCategory::PRValue;
 }
@@ -852,6 +1098,25 @@ string Parser::qualified_decl_name(const Binding* binding) const
 	for (size_t i = parts.size(); i > 0; --i)
 		out << parts[i - 1] << "::";
 	out << binding->name;
+	return out.str();
+}
+
+string qualified_template_declaration_name(
+	const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return "";
+	vector<string> parts;
+	for (Scope* s = declaration->owner; s != NULL; s = s->parent)
+	{
+		if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
+		    !s->name.empty() && s->name != "<unnamed>")
+			parts.push_back(s->name);
+	}
+	ostringstream out;
+	for (size_t i = parts.size(); i > 0; --i)
+		out << parts[i - 1] << "::";
+	out << declaration->name;
 	return out.str();
 }
 
