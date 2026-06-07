@@ -150,6 +150,20 @@ bool Parser::deduce_function_template_arguments(
 		return true;
 	}
 	size_t arg_index = 0;
+	if (declaration->placeholder != NULL &&
+	    declaration->placeholder->owner != NULL &&
+	    declaration->placeholder->owner->kind == ScopeKind::Class &&
+	    !declaration->placeholder->is_static_member)
+	{
+		TypePtr placeholder_type = declaration->placeholder->type;
+		bool generic_omits_object_parameter =
+			placeholder_type.get() != NULL &&
+			placeholder_type->kind == pa11::TypeKind::Function &&
+			placeholder_type->parameters.size() ==
+				fn->parameters.size() + 1;
+		if (generic_omits_object_parameter && !args.empty())
+			arg_index = 1;
+	}
 	for (size_t i = 0; i < fn->parameters.size(); ++i)
 	{
 		TypePtr pattern = fn->parameters[i];

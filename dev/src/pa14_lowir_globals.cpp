@@ -50,6 +50,10 @@ bool global_static_scalar_initializer(const Node& init)
 {
 	if (starts_with(init.line, "literal"))
 		return true;
+	if (starts_with(init.line, "id-expression") &&
+	    init.binding != NULL &&
+	    init.binding->kind == BindingKind::Function)
+		return true;
 	if (starts_with(init.line, "unary-expression") && init.has_op &&
 	    init.op == OP_PLUS && !init.children.empty())
 		return global_static_scalar_initializer(init.children[0]);

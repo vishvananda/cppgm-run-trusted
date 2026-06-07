@@ -408,8 +408,6 @@ Binding* ProgramLowerer::demand_implicit_copy_assignment(TypePtr type, bool move
 	TypePtr record = pa11::strip_cv(type);
 	if (record->kind != TypeKind::Record || record->scope == NULL)
 		throw runtime_error("assignment target is not record");
-	if (move)
-		demand_implicit_copy_assignment(type, false);
 	const void* key = record.get();
 	map<const void*, Binding*>& cache =
 		move ? implicit_move_assignments : implicit_copy_assignments;
@@ -417,7 +415,29 @@ Binding* ProgramLowerer::demand_implicit_copy_assignment(TypePtr type, bool move
 		cache.find(key);
 	if (found != cache.end())
 		return found->second;
-
+	Binding* declared = find_assignment_binding(record, move);
+	if (declared != NULL)
+	{
+		cache[key] = declared;
+		if (!declared->is_generated_copy_move_assignment)
+		{
+			demand_function_declaration(declared);
+			return declared;
+		}
+		if (declared->is_inline_definition &&
+		    inline_definitions.find(declared) != inline_definitions.end())
+		{
+			demand_inline_function(declared);
+			return declared;
+		}
+		string name = symbol_for(declared);
+		if (defined_functions.find(name) == defined_functions.end())
+		{
+			defined_functions.insert(name);
+			queue_synthetic_assignment_function(declared, record, move, name);
+		}
+		return declared;
+	}
 	vector<TypePtr> params;
 	params.push_back(pa11::make_pointer(record));
 	params.push_back(move
@@ -509,7 +529,9 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
 			Binding* op = find_assignment_binding(record->fields[i]->type, move);
 			if (op == NULL && move)
 				op = find_assignment_binding(record->fields[i]->type, false);
-			if (op == NULL || !op->is_inline_definition)
+			if (op == NULL ||
+			    (op->is_generated_copy_move_assignment &&
+			     !op->is_inline_definition))
 				continue;
 			if (field_ops.empty())
 				prefix_size = record->fields[i]->member_offset;
@@ -530,14 +552,19 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
 			Binding* field = field_ops[i].first;
 			Binding* op = field_ops[i].second;
 			demand_function_declaration(op);
-			demand_inline_function(op);
+			if (op->is_inline_definition)
+				demand_inline_function(op);
+			string self_base = "%t" + to_string(temp++);
+			block.instrs.push_back("    " + self_base + " = load ptr $this");
 			string self_field = "%t" + to_string(temp++);
-			string other_field = "%t" + to_string(temp++);
 			block.instrs.push_back("    " + self_field +
-			                       " = index i8 " + self + ", " +
+			                       " = index i8 " + self_base + ", " +
 			                       to_string(field->member_offset));
+			string other_base = "%t" + to_string(temp++);
+			block.instrs.push_back("    " + other_base + " = load ptr $other");
+			string other_field = "%t" + to_string(temp++);
 			block.instrs.push_back("    " + other_field +
-			                       " = index i8 " + other + ", " +
+			                       " = index i8 " + other_base + ", " +
 			                       to_string(field->member_offset));
 			string ignored = "%t" + to_string(temp++);
 			block.instrs.push_back("    " + ignored + " = call ptr @" +
@@ -555,6 +582,9 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
 
 void ProgramLowerer::emit_pending_synthetic_assignment_functions()
 {
+	if (pending_synthetic_assignment_functions.empty())
+		return;
+	emit_pending_generated_aggregate_constructors();
 	if (pending_synthetic_assignment_functions.empty())
 		return;
 	functions.insert(functions.end(),

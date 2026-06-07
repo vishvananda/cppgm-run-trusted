@@ -203,11 +203,20 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 				declaration->has_definition &&
 					(!declaration->outer_type_substitutions.empty() ||
 					 !declaration->outer_value_substitutions.empty());
+			bool dependent_qualified_member_definition =
+				declaration->has_definition &&
+				declaration->class_template_member &&
+				declaration->generic_function_type.get() != NULL &&
+				declaration->generic_function_type->kind ==
+					pa11::TypeKind::Function &&
+				declaration->generic_function_type->parameters.empty();
 				bool out_of_class_member_template =
 					(!declaration->outer_type_substitutions.empty() ||
-					 !declaration->outer_value_substitutions.empty()) &&
+					 !declaration->outer_value_substitutions.empty() ||
+					 dependent_qualified_member_definition) &&
 					(declaration->lexical_scope != declaration->owner ||
-					 dependent_qualified_conversion_definition);
+					 dependent_qualified_conversion_definition ||
+					 dependent_qualified_member_definition);
 					if (out_of_class_member_template &&
 					    declaration->has_definition &&
 					    bare->scope != NULL &&
@@ -281,8 +290,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 										owner_arguments[k];
 							}
 							TypePtr matched_type;
-							bool conversion_definition_placeholder =
-								declaration->name == "operator " &&
+							bool dependent_definition_placeholder =
+								declaration->has_definition &&
 								declaration->generic_function_type.get() != NULL &&
 								declaration->generic_function_type->kind ==
 									pa11::TypeKind::Function &&
@@ -291,7 +300,7 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 								existing->second->generic_function_type->kind ==
 									pa11::TypeKind::Function;
 							TypePtr generic_for_match =
-								conversion_definition_placeholder
+								dependent_definition_placeholder
 								? existing->second->generic_function_type
 								: declaration->generic_function_type;
 							vector<map<string, TypePtr> > save_subst =
@@ -322,13 +331,14 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							template_type_parameter_packs_ = save_pack_subst;
 							map<string, TemplateArgument> signature_deduced;
 							TemplateMatchParserScope match_scope(this);
-							if (matched_type.get() == NULL ||
-							    placeholder->type.get() == NULL ||
-							    !match_template_type_pattern(
-								    matched_type,
-								    placeholder->type,
-								    signature_deduced,
-								    record_template_arguments_))
+							if (!dependent_definition_placeholder &&
+							    (matched_type.get() == NULL ||
+							     placeholder->type.get() == NULL ||
+							     !match_template_type_pattern(
+								     matched_type,
+								     placeholder->type,
+								     signature_deduced,
+								     record_template_arguments_)))
 								continue;
 						TemplateDeclaration* previous_placeholder_declaration =
 							existing->second;
@@ -362,7 +372,7 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 								previous_placeholder_declaration->parameters);
 						clone->owner = bare->scope;
 						clone->placeholder = placeholder;
-						if (conversion_definition_placeholder)
+						if (dependent_definition_placeholder)
 						{
 							clone->name = placeholder->name;
 							clone->generic_function_type = generic_for_match;

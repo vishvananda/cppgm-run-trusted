@@ -21,6 +21,43 @@ bool is_class_constructor(const Binding* binding)
 	       binding->name == binding->owner->name;
 }
 
+bool is_lambda_related_function(const Binding* binding)
+{
+	if (binding == NULL)
+		return false;
+	if (binding->name.compare(0, 8, "__lambda") == 0)
+		return true;
+	return binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       binding->owner->name.compare(0, 8, "__lambda") == 0;
+}
+
+bool is_captureless_lambda_helper_function(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->name.compare(0, 8, "__lambda") == 0;
+}
+
+bool is_lambda_call_operator_function(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       binding->owner->name.compare(0, 8, "__lambda") == 0;
+}
+
+bool constructor_has_reference_parameter(const Binding* binding)
+{
+	if (!is_class_constructor(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return false;
+	for (size_t i = 1; i < binding->type->parameters.size(); ++i)
+		if (is_reference(binding->type->parameters[i]))
+			return true;
+	return false;
+}
+
 TypePtr function_record_result(const Binding* binding)
 {
 	if (binding == NULL ||
@@ -36,6 +73,43 @@ TypePtr function_record_result(const Binding* binding)
 bool function_returns_record(const Binding* binding)
 {
 	return function_record_result(binding).get() != NULL;
+}
+
+bool function_template_specialization_binding(const Binding* binding)
+{
+	return binding != NULL &&
+	       (!binding->function_specialization_symbol.empty() ||
+	        (binding->aliased_binding != NULL &&
+	         !binding->aliased_binding->function_specialization_symbol.empty()));
+}
+
+bool template_argument_mentions_type(const pa11::TemplateInstanceArgument& argument,
+                                     TypePtr type)
+{
+	type = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (type.get() == NULL)
+		return false;
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type)
+	{
+		TypePtr argument_type = argument.type.get() != NULL
+			? pa11::strip_cv(argument.type) : TypePtr();
+		return argument_type.get() != NULL &&
+		       pa11::same_type(argument_type, type);
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			if (template_argument_mentions_type(argument.pack[i], type))
+				return true;
+	return false;
+}
+
+bool template_arguments_mention_type(
+	const vector<pa11::TemplateInstanceArgument>& arguments, TypePtr type)
+{
+	for (size_t i = 0; i < arguments.size(); ++i)
+		if (template_argument_mentions_type(arguments[i], type))
+			return true;
+	return false;
 }
 
 const Binding* first_base_default_constructor(const Binding* binding)
@@ -95,6 +169,54 @@ bool constructor_has_record_parameter(TypePtr record, const Binding* binding)
 			return true;
 	}
 	return false;
+}
+
+bool constructor_parameter_wraps_pending_parameter(TypePtr candidate,
+                                                   TypePtr pending)
+{
+	candidate = pa11::strip_cv(object_type(candidate));
+	pending = pa11::strip_cv(object_type(pending));
+	if (candidate.get() == NULL ||
+	    pending.get() == NULL ||
+	    candidate->kind != TypeKind::Record ||
+	    !candidate->is_template_specialization ||
+	    pa11::same_type(candidate, pending))
+		return false;
+	return template_arguments_mention_type(candidate->template_arguments,
+	                                       pending);
+}
+
+bool constructor_specialization_more_specific_than_pending(
+	const Binding* binding, const Binding* pending)
+{
+	if (!is_class_constructor(binding) ||
+	    !is_class_constructor(pending) ||
+	    binding->owner != pending->owner ||
+	    !function_template_specialization_binding(binding) ||
+	    !function_template_specialization_binding(pending) ||
+	    binding->type.get() == NULL ||
+	    pending->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    pending->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != pending->type->parameters.size())
+		return false;
+	bool more_specific = false;
+	for (size_t i = 1; i < binding->type->parameters.size(); ++i)
+	{
+		TypePtr candidate = pa11::strip_cv(
+			object_type(binding->type->parameters[i]));
+		TypePtr pending_param = pa11::strip_cv(
+			object_type(pending->type->parameters[i]));
+		if (candidate.get() != NULL &&
+		    pending_param.get() != NULL &&
+		    pa11::same_type(candidate, pending_param))
+			continue;
+		if (!constructor_parameter_wraps_pending_parameter(
+			    binding->type->parameters[i], pending->type->parameters[i]))
+			return false;
+		more_specific = true;
+	}
+	return more_specific;
 }
 
 bool function_has_by_value_record_parameter(const Binding* binding,
@@ -198,6 +320,33 @@ bool same_this_record(const Binding* left, const Binding* right)
 	       pa11::same_type(left_record, right_record);
 }
 
+bool class_static_member_function_like(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->kind == BindingKind::Function &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Class &&
+	       !is_class_constructor(binding) &&
+	       !is_class_destructor_binding(binding) &&
+	       (binding->is_static_member || first_this_record(binding).get() == NULL);
+}
+
+size_t binding_order_index(const Binding* binding)
+{
+	if (binding == NULL || binding->owner == NULL)
+		return static_cast<size_t>(-1);
+	const vector<Binding*>& order = binding->owner->binding_order;
+	for (size_t i = 0; i < order.size(); ++i)
+	{
+		const Binding* current = order[i];
+		if (current == binding ||
+		    current->aliased_binding == binding ||
+		    binding->aliased_binding == current)
+			return i;
+	}
+	return static_cast<size_t>(-1);
+}
+
 bool class_member_of_local_class(const Binding* binding)
 {
 	if (binding == NULL || binding->owner == NULL)
@@ -298,7 +447,8 @@ void ProgramLowerer::place_user_assignment_before_owner_members(
 {
 	if (binding->name != "operator=" ||
 	    binding->is_generated_copy_move_assignment ||
-	    binding->owner == NULL)
+	    binding->owner == NULL ||
+	    function_template_specialization_binding(binding))
 		return;
 	for (PendingInlineIterator it = pending_inline_definitions.begin();
 	     it != pending_inline_definitions.end(); ++it)
@@ -430,21 +580,51 @@ void ProgramLowerer::place_constructor_after_pending_record_operator(
 	}
 }
 
+void ProgramLowerer::place_local_constructor_after_shorter_overload(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (!is_class_constructor(binding) ||
+	    !class_member_of_local_class(binding) ||
+	    binding->owner == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return;
+	size_t arity = binding->type->parameters.size();
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if ((*it)->owner != binding->owner ||
+		    !is_class_constructor(*it) ||
+		    (*it)->type.get() == NULL ||
+		    (*it)->type->kind != TypeKind::Function ||
+		    (*it)->type->parameters.size() >= arity)
+			continue;
+		PendingInlineIterator after = it + 1;
+		if (pos == pending_inline_definitions.end() || pos < after)
+			pos = after;
+	}
+}
+
 void ProgramLowerer::place_constructor_inline_definition(
 	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
 { if (binding->owner == NULL || binding->name != binding->owner->name) return; if (!binding->is_generated_default_constructor) for (PendingInlineIterator it = pending_inline_definitions.begin();
 it != pending_inline_definitions.end(); ++it) { bool pending_ctor = (*it)->owner != NULL && (*it)->owner->kind == ScopeKind::Class && (*it)->name == (*it)->owner->name; if (pending_ctor && binding->type.get() != NULL &&
 (*it)->type.get() != NULL && binding->type->kind == TypeKind::Function && (*it)->type->kind == TypeKind::Function && binding->type->parameters.size() < (*it)->type->parameters.size()) { pos = it; break; } }
 if (pos == pending_inline_definitions.end()) { TypePtr constructed_record = first_this_record(binding); for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) {
-TypePtr pending_record = first_this_record(*it); if (is_class_destructor_binding(*it) && constructed_record.get() != NULL && pending_record.get() != NULL && pa11::same_type(constructed_record, pending_record)) {
-pos = it; break; } } } if (pos == pending_inline_definitions.end() && binding->is_generated_default_constructor) { for (PendingInlineIterator it = pending_inline_definitions.begin();
-it != pending_inline_definitions.end(); ++it) if (!is_class_constructor(*it) && same_this_record(binding, *it)) { pos = it + 1; } } if (pos == pending_inline_definitions.end() &&
-binding_has_template_specialization_context(binding)) { for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { const Binding* pending = *it;
+TypePtr pending_record = first_this_record(*it); bool same_owner_destructor = is_class_destructor_binding(*it) && (*it)->owner == binding->owner;
+if (is_class_destructor_binding(*it) && (same_owner_destructor || (constructed_record.get() != NULL && pending_record.get() != NULL && pa11::same_type(constructed_record, pending_record)))) {
+	pos = it; break; } } } if (pos == pending_inline_definitions.end() && binding->is_generated_default_constructor) { for (PendingInlineIterator it = pending_inline_definitions.begin();
+	it != pending_inline_definitions.end(); ++it) if (!is_class_constructor(*it) && same_this_record(binding, *it)) { pos = it + 1; } } if (pos == pending_inline_definitions.end()) { for (PendingInlineIterator it = pending_inline_definitions.begin();
+	it != pending_inline_definitions.end(); ++it) if (constructor_specialization_more_specific_than_pending(binding, *it)) { pos = it; break; } } if (pos == pending_inline_definitions.end() &&
+	binding_has_template_specialization_context(binding)) { for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { const Binding* pending = *it;
 bool pending_operator = pending->name.compare(0, 8, "operator") == 0 || pending->name.compare(0, 9, "operator ") == 0; if (pending->owner == binding->owner && !is_class_constructor(pending) && !pending_operator) {
 pos = it; break; } } } if (pos == pending_inline_definitions.end() && constructor_has_no_explicit_parameters(binding)) { TypePtr record = first_this_record(binding);
 for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) if (function_returns_record(*it) && function_has_by_value_record_parameter(*it, record)) { pos = it;
 break; } } if (pos == pending_inline_definitions.end()) { for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { TypePtr result = function_record_result(*it);
-if (constructor_has_record_parameter(result, binding)) { pos = it + 1; break; } } } if (pos == pending_inline_definitions.end() && !binding->is_generated_default_constructor &&
+if (constructor_has_record_parameter(result, binding)) { pos = it + 1; break; } } } if (!binding->is_generated_default_constructor &&
+binding->type.get() != NULL && binding->type->kind == TypeKind::Function && !function_template_specialization_binding(binding)) { bool has_reference_parameter = false; for (size_t i = 1; i < binding->type->parameters.size(); ++i)
+if (is_reference(binding->type->parameters[i])) has_reference_parameter = true; if (has_reference_parameter) for (PendingInlineIterator it = pending_inline_definitions.begin();
+it != pending_inline_definitions.end(); ++it) if (!is_class_constructor(*it)) { if (pos == pending_inline_definitions.end() || it < pos) pos = it; break; } } if (pos == pending_inline_definitions.end() && !binding->is_generated_default_constructor &&
 !binding_has_template_specialization_context(binding) && !pending_record_return_feeds_constructor( binding, pending_inline_definitions)) for (PendingInlineIterator it = pending_inline_definitions.begin();
 it != pending_inline_definitions.end(); ++it) if ((*it)->owner != NULL && (*it)->owner->kind == ScopeKind::Namespace) { pos = it; break; } bool zero_argument_ctor_before_local =
 constructor_has_no_explicit_parameters(binding) && !class_member_of_local_class(binding) && pending_local_class_constructor(pending_inline_definitions); if (!binding->is_generated_default_constructor &&
@@ -471,9 +651,10 @@ void ProgramLowerer::place_destructor_inline_definition(
 		bool pending_destroyed_record_ctor =
 			binding_has_template_specialization_context(binding) &&
 			is_class_constructor(*it) &&
-			pending_this.get() != NULL &&
-			destroyed_record.get() != NULL &&
-			pa11::same_type(pending_this, destroyed_record);
+			((*it)->owner == binding->owner ||
+			 (pending_this.get() != NULL &&
+			  destroyed_record.get() != NULL &&
+			  pa11::same_type(pending_this, destroyed_record)));
 		if (((*it)->owner == binding->owner &&
 		     (*it)->name != binding->owner->name) ||
 		    (!pending_destroyed_record_ctor &&
@@ -807,6 +988,7 @@ void ProgramLowerer::place_active_record_return_dependency(
 {
 	if (active_inline_definition == NULL ||
 	    binding == active_inline_definition ||
+	    is_lambda_related_function(active_inline_definition) ||
 	    !function_returns_record(active_inline_definition) ||
 	    !is_class_constructor(binding))
 		return;
@@ -835,6 +1017,220 @@ void ProgramLowerer::place_active_record_return_dependency(
 	++active_inline_dependency_insert_count;
 }
 
+void ProgramLowerer::place_before_pending_captureless_lambda_helper(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (is_captureless_lambda_helper_function(binding))
+		return;
+	if (!is_lambda_call_operator_function(binding) &&
+	    is_lambda_related_function(binding))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (!is_captureless_lambda_helper_function(*it))
+			continue;
+		if (pos == pending_inline_definitions.end() || it < pos)
+			pos = it;
+		break;
+	}
+}
+
+void ProgramLowerer::place_after_pending_reference_constructor(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (is_class_constructor(binding))
+		return;
+	if (function_returns_record(binding) &&
+	    (binding->owner == NULL || binding->owner->kind != ScopeKind::Class))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (!constructor_has_reference_parameter(*it))
+			continue;
+		if (pos != pending_inline_definitions.end() && !(it < pos))
+			continue;
+		pos = it + 1;
+		break;
+	}
+}
+
+void ProgramLowerer::place_scalar_helper_after_record_returns(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (is_class_constructor(binding) || function_returns_record(binding))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (!function_returns_record(*it))
+			continue;
+		PendingInlineIterator after = it + 1;
+		if (pos == pending_inline_definitions.end() || !(pos > it))
+			pos = after;
+	}
+}
+
+void ProgramLowerer::place_value_constructor_after_scalar_helpers(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (!is_class_constructor(binding) ||
+	    constructor_has_reference_parameter(binding) ||
+	    binding->is_generated_default_constructor)
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (is_class_constructor(*it) || function_returns_record(*it))
+			continue;
+		if (pos == pending_inline_definitions.end() || !(pos > it))
+			pos = it + 1;
+	}
+}
+
+void ProgramLowerer::place_scalar_helper_before_value_constructor(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (is_class_constructor(binding) || function_returns_record(binding))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (!is_class_constructor(*it) ||
+		    constructor_has_reference_parameter(*it))
+			continue;
+		if (pos == pending_inline_definitions.end() || it < pos)
+			pos = it;
+		break;
+	}
+}
+
+void ProgramLowerer::place_static_template_member_after_pending_scalar_templates(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (active_inline_definition == NULL ||
+	    binding == active_inline_definition ||
+	    !class_static_member_function_like(binding) ||
+	    function_returns_record(binding) ||
+	    !binding_has_template_specialization_context(binding) ||
+	    is_class_constructor(active_inline_definition) ||
+	    function_returns_record(active_inline_definition) ||
+	    !function_template_specialization_binding(active_inline_definition))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (is_class_constructor(*it) ||
+		    function_returns_record(*it) ||
+		    !function_template_specialization_binding(*it) ||
+		    ((*it)->owner != NULL && (*it)->owner->kind == ScopeKind::Class))
+			continue;
+		PendingInlineIterator after = it + 1;
+		if (pos == pending_inline_definitions.end() || after > pos)
+			pos = after;
+	}
+}
+
+void ProgramLowerer::place_static_member_before_later_owner_static_member(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (!class_static_member_function_like(binding))
+		return;
+	size_t binding_index = binding_order_index(binding);
+	if (binding_index == static_cast<size_t>(-1))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if ((*it)->owner != binding->owner ||
+		    !class_static_member_function_like(*it))
+			continue;
+		size_t pending_index = binding_order_index(*it);
+		if (pending_index == static_cast<size_t>(-1) ||
+		    !(binding_index < pending_index))
+			continue;
+		if (pos == pending_inline_definitions.end() || it < pos)
+			pos = it;
+		break;
+	}
+}
+
+void ProgramLowerer::place_constructor_destructor_pair(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (is_class_constructor(binding))
+	{
+		for (PendingInlineIterator it = pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end(); ++it)
+		{
+			if (!is_class_destructor_binding(*it))
+				continue;
+			bool same_owner =
+				binding->owner != NULL && (*it)->owner == binding->owner;
+			if (!same_owner && !same_this_record(binding, *it))
+				continue;
+			if (pos == pending_inline_definitions.end() || it < pos)
+				pos = it;
+			break;
+		}
+		return;
+	}
+	if (!is_class_destructor_binding(binding))
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end(); ++it)
+	{
+		if (!is_class_constructor(*it))
+			continue;
+		bool same_owner =
+			binding->owner != NULL && (*it)->owner == binding->owner;
+		if (!same_owner && !same_this_record(binding, *it))
+			continue;
+		PendingInlineIterator after = it + 1;
+		if (pos == pending_inline_definitions.end() || pos < after)
+			pos = after;
+		break;
+	}
+}
+
+void ProgramLowerer::place_constructor_after_record_return_dependency(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (!is_class_constructor(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() < 2)
+		return;
+	TypePtr constructed = first_this_record(binding);
+	for (size_t i = 1; i < binding->type->parameters.size(); ++i)
+	{
+		bool reference_param = is_reference(binding->type->parameters[i]);
+		if (reference_param &&
+		    !same_record_or_template_family(
+			    object_type(binding->type->parameters[i]), constructed))
+			continue;
+		TypePtr param = pa11::strip_cv(object_type(binding->type->parameters[i]));
+		if (param.get() == NULL || param->kind != TypeKind::Record)
+			continue;
+		for (PendingInlineIterator it = pending_inline_definitions.begin();
+		     it != pending_inline_definitions.end(); ++it)
+		{
+			if (reference_param &&
+			    (*it)->owner != NULL &&
+			    (*it)->owner->kind == ScopeKind::Class)
+				continue;
+			TypePtr result = function_record_result(*it);
+			if (result.get() == NULL ||
+			    !pa11::same_type(pa11::strip_cv(result), param))
+				continue;
+			PendingInlineIterator after = it + 1;
+			if (pos == pending_inline_definitions.end() || pos < after)
+				pos = after;
+		}
+	}
+}
+
 void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 {
 	PendingInlineIterator pos = pending_inline_definitions.end();
@@ -844,6 +1240,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 	place_record_return_before_owner_scalar_member(binding, pos);
 	place_record_return_before_pending_operator(binding, pos);
 	place_constructor_after_pending_record_operator(binding, pos);
+	place_local_constructor_after_shorter_overload(binding, pos);
 	place_constructor_inline_definition(binding, pos);
 	place_destructor_inline_definition(binding, pos);
 	place_const_conversion_before_mutable_conversion(binding, pos);
@@ -855,7 +1252,38 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 	place_before_generated_default_constructor(binding, pos);
 	place_active_destructor_dependency(binding, pos);
 	place_active_record_return_dependency(binding, pos);
+	place_before_pending_captureless_lambda_helper(binding, pos);
+	place_scalar_helper_after_record_returns(binding, pos);
+	place_after_pending_reference_constructor(binding, pos);
+	place_value_constructor_after_scalar_helpers(binding, pos);
+	place_scalar_helper_before_value_constructor(binding, pos);
+	place_static_template_member_after_pending_scalar_templates(binding, pos);
+	place_static_member_before_later_owner_static_member(binding, pos);
+	place_constructor_destructor_pair(binding, pos);
+	place_constructor_after_record_return_dependency(binding, pos);
 	pending_inline_definitions.insert(pos, binding);
+}
+
+void ProgramLowerer::emit_pending_generated_aggregate_constructors()
+{
+	if (pending_inline_definitions.empty())
+		return;
+	vector<const Binding*> selected;
+	vector<const Binding*> rest;
+	for (size_t i = 0; i < pending_inline_definitions.size(); ++i)
+	{
+		const Binding* binding = pending_inline_definitions[i];
+		if (binding != NULL && binding->is_generated_aggregate_constructor)
+			selected.push_back(binding);
+		else
+			rest.push_back(binding);
+	}
+	if (selected.empty())
+		return;
+	pending_inline_definitions.swap(selected);
+	emit_pending_inline_definitions();
+	pending_inline_definitions.insert(pending_inline_definitions.end(),
+	                                  rest.begin(), rest.end());
 }
 
 void ProgramLowerer::emit_pending_inline_definitions()
@@ -881,7 +1309,8 @@ defined_functions.insert(name); if (need_base) defined_functions.insert(name + "
 active_inline_dependency_insert_count; active_inline_definition = binding; active_inline_dependency_insert_count = 0; FunctionLowerer lowerer(*this, *found->second); if (binding->is_generated_copy_move_assignment)
 ++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; active_inline_definition = saved_active;
 active_inline_dependency_insert_count = saved_dependency_insert_count; if (!binding->name.empty() && binding->name[0] == '~' && !binding_has_template_specialization_context(binding)) emit_pending_inline_definitions();
-if (need_base) functions.push_back(make_constructor_base_entry(lowered, name)); if (need_complete) functions.push_back(lowered); emit_pending_synthetic_assignment_functions(); } }
+if (class_ctor && need_complete) { TypePtr active_record = first_this_record(binding); bool emit_member_ctor_dependencies = false; for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { if (!is_class_constructor(*it)) continue; TypePtr pending_record = first_this_record(*it); if (active_record.get() != NULL && pending_record.get() != NULL && record_has_base(active_record, pending_record)) continue; emit_member_ctor_dependencies = true; break; } if (emit_member_ctor_dependencies) emit_pending_inline_definitions(); }
+if (need_base) functions.push_back(make_constructor_base_entry(lowered, name)); if (need_complete) { bool inserted = false; if (class_ctor && constructor_has_no_explicit_parameters(binding) && class_member_of_local_class(binding)) { for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending != NULL && pending->owner == binding->owner && is_class_constructor(pending) && pending->type.get() != NULL && pending->type->kind == TypeKind::Function && pending->type->parameters.size() > binding->type->parameters.size()) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted) functions.push_back(lowered); } emit_pending_synthetic_assignment_functions(); } }
 
 }  // namespace internal
 

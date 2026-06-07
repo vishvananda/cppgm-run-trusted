@@ -302,8 +302,10 @@ void dump_node(ostream& out, const Node& node, int depth)
 
 Parser::Parser(const string& srcfile, const Options& options)
 	: pos_(0),
+	  explicit_conversion_context_(0),
 	  root_("translation-unit"),
 	  local_type_counter_(0),
+	  range_for_counter_(0),
 	  force_new_function_binding_(false),
 	  defer_function_template_bodies_(false),
 	  suppress_implicit_template_base_init_(false),

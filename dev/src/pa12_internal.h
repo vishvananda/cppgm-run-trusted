@@ -378,6 +378,10 @@ public:
 	vector<Scope*> scopes_;
 	vector<TypePtr> function_returns_;
 	vector<Binding*> active_functions_;
+	set<Binding*> auto_return_functions_;
+	map<Binding*, TypePtr> auto_return_patterns_;
+	map<Binding*, TypePtr> auto_return_deduced_;
+	int explicit_conversion_context_;
 	vector<Scope*> active_friend_class_scopes_;
 	vector<string> language_linkages_;
 	vector<bool> class_private_access_;
@@ -386,6 +390,7 @@ public:
 	vector<Node> generated_nodes_;
 	vector<Node> extra_lowir_nodes_;
 	int local_type_counter_;
+	int range_for_counter_;
 	bool force_new_function_binding_;
 	bool defer_function_template_bodies_;
 	bool suppress_implicit_template_base_init_;
@@ -430,6 +435,12 @@ public:
 		map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> > member_variable_templates_;
 	map<Binding*, TemplateDeclaration*> function_template_placeholders_;
 	map<Binding*, vector<TemplateArgument> > function_template_specialization_arguments_;
+	map<Binding*, TypePtr> lambda_closure_types_;
+	map<Binding*, Binding*> lambda_call_operators_;
+	map<Binding*, size_t> lambda_ordinals_;
+	map<Binding*, size_t> lambda_counts_;
+	set<Binding*> lambda_requires_closure_object_;
+	map<Binding*, vector<Node> > lambda_capture_initializers_;
 	map<const void*, TemplateDeclaration*> record_template_declarations_;
 	map<const void*, vector<TemplateArgument> > record_template_arguments_;
 		map<TemplateDeclaration*, map<string, Binding*> > variable_template_specializations_;
@@ -618,6 +629,8 @@ public:
 	Node parse_while_statement();
 		Node parse_do_statement();
 		Node parse_for_statement();
+		Node parse_range_for_statement();
+		Node parse_try_statement();
 		Node parse_jump_statement();
 		Expr convert_return_expression(Expr expr, TypePtr result);
 			Expr convert_aggregate_return_expression(Expr expr, TypePtr result, TypePtr result_record);
@@ -638,6 +651,13 @@ public:
 	Expr parse_postfix_expression();
 	Expr parse_postfix_suffixes(Expr expr);
 	Expr parse_primary_expression();
+	Expr parse_lambda_expression();
+		bool is_lambda_helper_expr(const Expr& expr) const;
+		Expr lambda_closure_expr(const Expr& expr);
+		bool call_has_function_template_candidate(const Expr& callee) const;
+		void materialize_template_lambda_arguments(
+			const Expr& callee,
+			vector<Expr>& args);
 	Expr parse_new_expression();
 	Expr parse_delete_expression();
 	Expr parse_literal_expression();
@@ -661,6 +681,7 @@ public:
 				bool record_copy_move_initializer_blocked(TypePtr dst_record, ValueCategory init_category) const;
 				void apply_scalar_variable_initializer(const DeclSpecs& specs, Scope* target, Binding* variable, TypePtr type, const Expr& init, Node& var);
 			void validate_record_copy_initialization(TypePtr type, const Expr& init);
+			void validate_aggregate_braced_initialization(TypePtr record);
 		bool parse_qualified_destructor_definition(Node& out, bool emit_node);
 		Binding* add_alias(Scope* scope, const string& name, TypePtr type);
 		Binding* add_function_binding(Scope* scope, const string& name, TypePtr type, bool hidden_friend);
@@ -670,9 +691,12 @@ public:
 	TypePtr add_record(Scope* scope, const string& name, const string& tag, bool complete, Scope* class_scope);
 	TypePtr add_enum(Scope* scope, const string& name, bool scoped, EFundamentalType underlying, bool complete, bool create_scope);
 	void inject_anonymous_union_members(Scope* class_scope, Binding* storage);
-	Binding* ensure_default_constructor(TypePtr type, bool force_trivial = false);
-	Binding* ensure_aggregate_constructor(TypePtr type, size_t arg_count);
-	void ensure_aggregate_constructors_for_init(TypePtr type, const Node& init);
+		Binding* ensure_default_constructor(TypePtr type, bool force_trivial = false);
+		bool aggregate_omitted_field_requires_argument(TypePtr type);
+		void complete_aggregate_constructor_args(TypePtr type,
+		                                         vector<Expr>& args);
+		Binding* ensure_aggregate_constructor(TypePtr type, size_t arg_count);
+		void ensure_aggregate_constructors_for_init(TypePtr type, const Node& init);
 	Binding* ensure_copy_move_constructor(TypePtr type, bool move);
 	bool copy_move_constructor_available(TypePtr type, bool move);
 	Binding* ensure_copy_move_assignment(TypePtr type, bool move);
@@ -785,6 +809,7 @@ public:
 	TypePtr pointee_type_for_member(TypePtr type) const;
 	TypePtr expression_object_type(TypePtr type) const;
 	TypePtr lvalue_to_rvalue_type(TypePtr type) const;
+	TypePtr deduce_auto_return_type(Binding* function, const Expr& expr);
 	TypePtr usual_arithmetic_type(TypePtr left, TypePtr right) const;
 	ValueCategory call_category(TypePtr result) const;
 

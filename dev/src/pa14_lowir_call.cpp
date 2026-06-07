@@ -59,10 +59,25 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 			return temp_addr;
 		};
 		lower_temporary_init_with_unwind(addr_for, object, *materialized);
+		addr_for();
 		if (temp_cleanups != NULL && type_needs_cleanup(object))
 			temp_cleanups->push_back(make_pair(temp_addr, object));
 		args.push_back(convert_value(temp_addr,
 		                             pa11::make_pointer(object),
+		                             pa11::make_pointer(param->base)).text);
+		return;
+	}
+	if (arg.category == ValueCategory::PRValue &&
+	    starts_with(arg.line, "braced-init-list") &&
+	    pa11::strip_cv(param->base)->kind == TypeKind::Array)
+	{
+		string slot = fresh_aux_slot("argarr", slot_lowir_type(param->base));
+		string addr_name = fresh_temp();
+		instr(addr_name + " = addr $" + slot);
+		Value temp_addr("ptr", addr_name);
+		lower_direct_array_init(temp_addr, param->base, arg);
+		args.push_back(convert_value(temp_addr,
+		                             pa11::make_pointer(param->base),
 		                             pa11::make_pointer(param->base)).text);
 		return;
 	}
@@ -94,6 +109,7 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 			return temp_addr;
 		};
 		lower_temporary_init_with_unwind(addr_for, object, arg);
+		addr_for();
 		if (temp_cleanups != NULL && type_needs_cleanup(object))
 			temp_cleanups->push_back(make_pair(temp_addr, object));
 		args.push_back(convert_value(temp_addr,
@@ -101,10 +117,14 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 		                             pa11::make_pointer(param->base)).text);
 		return;
 	}
-		string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
-		Value value = convert_value(emit_rvalue(arg), arg.type, param->base);
-		instr("store " + scalar_lowir_type(param->base) + " " +
-		      value.text + ", $" + slot);
+	string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
+	Value raw =
+		arg.binding != NULL && arg.binding->kind == BindingKind::Function
+		? ensure_pointer(emit_lvalue_addr(arg))
+		: emit_rvalue(arg);
+	Value value = convert_value(raw, arg.type, param->base);
+	instr("store " + scalar_lowir_type(param->base) + " " +
+	      value.text + ", $" + slot);
 	string addr = fresh_temp();
 	instr(addr + " = addr $" + slot);
 	args.push_back(addr);
@@ -137,6 +157,7 @@ bool FunctionLowerer::lower_temporary_record_pointer_argument(const Node& arg,
 		return temp_addr;
 	};
 	lower_temporary_init_with_unwind(addr_for, object, arg.children[0]);
+	addr_for();
 	if (temp_cleanups != NULL && object->is_polymorphic &&
 	    type_needs_cleanup(object))
 		temp_cleanups->push_back(make_pair(temp_addr, object));
@@ -432,7 +453,8 @@ Value FunctionLowerer::emit_call(const Node& expr)
 			}
 			if (cleanup_arg)
 			{
-				preallocated_call_slot = fresh_aux_slot("call", ret);
+				if (preallocated_call_slot.empty())
+					preallocated_call_slot = fresh_aux_slot("call", ret);
 				break;
 			}
 		}
@@ -440,7 +462,8 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	vector<string> args;
 	vector<pair<Value, TypePtr> > temp_cleanups;
 	bool setup_may_create_temp_cleanup = false;
-	if (call_binding_has_template_cleanup_context(direct))
+	if (call_binding_has_template_cleanup_context(direct) ||
+	    (direct != NULL && direct->name == "operator="))
 		for (size_t i = arg_start; i < expr.children.size(); ++i)
 		{
 			bool variadic_extra =
@@ -549,11 +572,28 @@ Value FunctionLowerer::emit_call(const Node& expr)
 				(direct->aliased_binding != NULL &&
 				 !direct->aliased_binding->function_specialization_symbol.empty());
 			if (direct->name == "operator=" &&
-			    !direct->is_defaulted &&
-			    !direct->is_inline_definition &&
-			    !function_template_assignment &&
+			    direct->is_generated_copy_move_assignment &&
 			    direct->owner != NULL &&
 			    direct->owner->kind == ScopeKind::Class)
+		{
+			TypePtr record = pa11::record_type_for_scope(direct->owner);
+			if (record.get() != NULL)
+			{
+				bool move =
+					direct->type.get() != NULL &&
+					direct->type->kind == TypeKind::Function &&
+					direct->type->parameters.size() > 1 &&
+					direct->type->parameters[1]->kind == TypeKind::RValueReference;
+				direct = program_.demand_implicit_copy_assignment(record, move);
+				callee_type = direct->type;
+			}
+		}
+			else if (direct->name == "operator=" &&
+			         !direct->is_defaulted &&
+			         !direct->is_inline_definition &&
+			         !function_template_assignment &&
+			         direct->owner != NULL &&
+			         direct->owner->kind == ScopeKind::Class)
 		{
 			TypePtr record = pa11::record_type_for_scope(direct->owner);
 			if (record.get() != NULL)
@@ -674,7 +714,8 @@ Value FunctionLowerer::emit_call(const Node& expr)
 		call << ") -> " << ret;
 	}
 	bool cleanup_temps_in_call =
-		call_binding_has_template_cleanup_context(direct);
+		call_binding_has_template_cleanup_context(direct) ||
+		(direct != NULL && direct->name == "operator=");
 	if (protected_setup)
 	{
 		bool spill_result = ret != "void" &&

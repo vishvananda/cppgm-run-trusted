@@ -117,6 +117,11 @@ Binding* Parser::resolve_constructor_candidate(TypePtr type,
 			}
 	}
 	ensure_copy_move_constructor_for_single_arg(record, args);
+	if (!args.empty() && !record_has_aggregate_blocking_constructor(record))
+	{
+		validate_aggregate_braced_initialization(record);
+		ensure_aggregate_constructor(record, args.size());
+	}
 	map<string, vector<Binding*> >::const_iterator found =
 		record->scope->members.find(record->scope->name);
 	if (found == record->scope->members.end() && args.empty())
@@ -661,9 +666,18 @@ Expr Parser::make_constructor_init_expr(TypePtr type,
                                         const vector<Expr>& args,
                                         bool copy_initialization)
 {
+	vector<Expr> constructor_args = args;
+	TypePtr record = pa11::strip_cv(type);
+	if (record->kind == pa11::TypeKind::Record &&
+	    !constructor_args.empty() &&
+	    !record_has_aggregate_blocking_constructor(record))
+		complete_aggregate_constructor_args(record, constructor_args);
 	vector<Expr> converted;
 	Binding* ctor =
-		resolve_constructor_candidate(type, args, copy_initialization, converted);
+		resolve_constructor_candidate(type,
+		                              constructor_args,
+		                              copy_initialization,
+		                              converted);
 	Expr out;
 	out.valid = true;
 	out.type = type;
@@ -674,6 +688,8 @@ Expr Parser::make_constructor_init_expr(TypePtr type,
 	out.node.type = type;
 	out.node.category = out.category;
 	out.node.direct_call = ctor;
+	if (ctor != NULL && ctor->is_generated_aggregate_constructor)
+		out.node.token_text = "force-constructor";
 	if (unevaluated_expression_depth_ == 0)
 	{
 		parse_pending_member_body(ctor);
@@ -794,6 +810,7 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	     ++it)
 		if (template_arguments_dependent(it->second))
 			dependent_template_call = true;
+	materialize_template_lambda_arguments(callee, args);
 	if (dependent_template_call && !callee.overloads.empty())
 		return make_dependent_call_expr(callee, args);
 	vector<Expr> converted;
@@ -804,7 +821,8 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		                                callee.explicit_template_arguments,
 		                                converted);
 	else if (callee.binding != NULL &&
-	         callee.binding->kind == BindingKind::Function)
+	         callee.binding->kind == BindingKind::Function &&
+	         !is_lambda_helper_expr(callee))
 	{
 		direct = callee.binding;
 		converted = args;

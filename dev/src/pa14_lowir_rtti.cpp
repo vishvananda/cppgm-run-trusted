@@ -50,6 +50,15 @@ string typeinfo_builtin_code(EFundamentalType type)
 	return "";
 }
 
+string typeinfo_builtin_part(TypePtr type)
+{
+	string part = pa11::describe_type(pa11::strip_cv(type));
+	for (size_t i = 0; i < part.size(); ++i)
+		if (part[i] == ' ')
+			part[i] = '_';
+	return part;
+}
+
 string typeinfo_component_for_type(TypePtr type);
 
 string template_value_typeinfo_component(TypePtr type, uint64_t value)
@@ -151,9 +160,56 @@ string typeinfo_component_for_type(TypePtr type)
 	return to_string(name.size()) + name;
 }
 
+string lambda_typeinfo_name_spelling(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    bare->scope == NULL ||
+	    bare->scope->name.compare(0, 8, "__lambda") != 0)
+		return "";
+	map<string, vector<Binding*> >::const_iterator found =
+		bare->scope->members.find("operator()");
+	if (found == bare->scope->members.end())
+		return "";
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* op = found->second[i];
+		if (op == NULL ||
+		    op->function_specialization_symbol.compare(0, 3, "_ZZ") != 0)
+			continue;
+		string symbol = op->function_specialization_symbol;
+		size_t call = symbol.rfind("_clE");
+		if (call == string::npos)
+			continue;
+		string prefix = symbol.substr(3, call - 3);
+		size_t lambda = prefix.rfind("Ul");
+		if (lambda == string::npos)
+			continue;
+		string context;
+		if (lambda >= 3 &&
+		    prefix.compare(lambda - 3, 3, "ENK") == 0)
+			context = prefix.substr(0, lambda - 2);
+		else if (lambda >= 2 &&
+		         prefix.compare(lambda - 2, 2, "EN") == 0)
+			context = prefix.substr(0, lambda - 1);
+		else
+			continue;
+		string lambda_component = prefix.substr(lambda);
+		if (lambda_component.empty() ||
+		    lambda_component[lambda_component.size() - 1] != '_')
+			lambda_component += "_";
+		return "Z" + context + lambda_component;
+	}
+	return "";
+}
+
 string typeinfo_name_spelling(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
+	string lambda_name = lambda_typeinfo_name_spelling(bare);
+	if (!lambda_name.empty())
+		return lambda_name;
 	vector<string> parts;
 	for (Scope* s = bare->scope; s != NULL; s = s->parent)
 	{
@@ -239,6 +295,64 @@ void ProgramLowerer::emit_rtti(TypePtr record)
 	}
 	out << "}";
 	globals.push_back(out.str());
+}
+
+void ProgramLowerer::emit_typeinfo(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record)
+	{
+		emit_rtti(bare);
+		return;
+	}
+	if (bare->kind != TypeKind::Fundamental)
+		return;
+	string code = typeinfo_builtin_code(bare->fundamental);
+	if (code.empty())
+		return;
+	if (emitted_rtti.find(bare.get()) != emitted_rtti.end())
+		return;
+	emitted_rtti.insert(bare.get());
+	string part = typeinfo_builtin_part(bare);
+	string external = "__external_rtti__" + part;
+	if (declared_globals.insert(external).second)
+		global_declares.push_back(
+			"declare global @" + external +
+			" [binding=strong, object=_ZTI" + code + "]");
+	if (declared_globals.insert(
+		    "__external_rtti_vtable____fundamental_type_info").second)
+		global_declares.push_back(
+			"declare global @__external_rtti_vtable____fundamental_type_info "
+			"[binding=strong, "
+			"object=_ZTVN10__cxxabiv123__fundamental_type_infoE]");
+	string name_symbol = "__typeinfo_name__" + part;
+	ostringstream name;
+	name << "global @" << name_symbol
+	     << " [storage=readonly, binding=weak, object=_ZTS" << code
+	     << "] = {\n";
+	for (size_t i = 0; i < code.size(); ++i)
+		name << "  i8 " << static_cast<unsigned>(
+			static_cast<unsigned char>(code[i])) << "\n";
+	name << "  i8 0\n}";
+	globals.push_back(name.str());
+	ostringstream rtti;
+	rtti << "global @__rtti_" << part
+	     << " [storage=readonly, binding=weak, object=_ZTI" << code
+	     << "] = {\n";
+	rtti << "  ptr addr @__external_rtti_vtable____fundamental_type_info + 16\n";
+	rtti << "  ptr addr @" << name_symbol << "\n";
+	rtti << "}";
+	globals.push_back(rtti.str());
+}
+
+string ProgramLowerer::catch_rtti_symbol(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record)
+		return rtti_symbol_for_record(bare);
+	if (bare->kind == TypeKind::Fundamental)
+		return "__external_rtti__" + typeinfo_builtin_part(bare);
+	return "";
 }
 
 void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)

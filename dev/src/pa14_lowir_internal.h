@@ -73,6 +73,7 @@ struct Cleanup
 	Binding* binding;
 	TypePtr type;
 	string addr;
+	string instruction;
 	bool force_destructor_call;
 
 	Cleanup() : binding(NULL), force_destructor_call(false) {}
@@ -80,6 +81,8 @@ struct Cleanup
 		: binding(b), type(t), force_destructor_call(force) {}
 	Cleanup(const string& a, TypePtr t, bool force = false)
 		: binding(NULL), type(t), addr(a), force_destructor_call(force) {}
+	explicit Cleanup(const string& instr)
+		: binding(NULL), instruction(instr), force_destructor_call(false) {}
 };
 
 struct PendingConstructorConversion
@@ -203,6 +206,8 @@ struct ProgramLowerer
 	string string_symbol(const string& token_text);
 	void demand_vtable(TypePtr record);
 	void emit_rtti(TypePtr record);
+	void emit_typeinfo(TypePtr type);
+	string catch_rtti_symbol(TypePtr type);
 	void emit_deleting_destructor_entry(const Binding* dtor);
 	void register_inline_definition(const Node& node);
 	void register_function_declaration(const Node& node);
@@ -219,6 +224,7 @@ struct ProgramLowerer
 	                                         TypePtr record,
 	                                         bool move,
 	                                         const string& name);
+	void emit_pending_generated_aggregate_constructors();
 		void demand_move_assignment_copy_dependency(const Binding* binding);
 		void insert_pending_inline_definition(const Binding* binding);
 		void place_lvalue_assignment_before_rvalue_assignment(
@@ -232,6 +238,8 @@ struct ProgramLowerer
 		void place_record_return_before_pending_operator(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_after_pending_record_operator(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_local_constructor_after_shorter_overload(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_inline_definition(
 			const Binding* binding, PendingInlineIterator& pos);
@@ -255,6 +263,24 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_active_record_return_dependency(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_before_pending_captureless_lambda_helper(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_after_pending_reference_constructor(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_scalar_helper_after_record_returns(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_value_constructor_after_scalar_helpers(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_scalar_helper_before_value_constructor(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_static_template_member_after_pending_scalar_templates(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_static_member_before_later_owner_static_member(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_constructor_destructor_pair(
+			const Binding* binding, PendingInlineIterator& pos);
+		void place_constructor_after_record_return_dependency(
+			const Binding* binding, PendingInlineIterator& pos);
 		void emit_pending_synthetic_assignment_functions();
 	void demand_inline_function(const Binding* binding,
 	                            bool complete_entry = true);
@@ -271,6 +297,8 @@ struct ProgramLowerer
 	void write_global_zero_items(ostringstream& out, TypePtr elem);
 	void write(const string& outfile) const;
 };
+
+vector<size_t> ordered_function_indices(const ProgramLowerer& program);
 
 class FunctionLowerer
 {
@@ -307,8 +335,10 @@ private:
 	string call_result_store_slot_;
 	TypePtr call_result_store_type_;
 	bool call_result_store_consumed_;
+	string record_return_slot_;
 	bool lowering_record_return_object_;
 	bool lowering_array_subobject_init_;
+	bool constructor_destination_before_protected_try_;
 	string active_unwind_dispatch_;
 
 	void add_slot(const string& name, const string& type);
@@ -426,6 +456,8 @@ private:
 	void lower_while(const Node& node);
 	void lower_do(const Node& node);
 	void lower_for(const Node& node);
+	void lower_range_for(const Node& node);
+	void lower_try(const Node& node);
 	void lower_return(const Node& node);
 	void register_cleanup(Binding* binding, TypePtr type);
 	void emit_scope_cleanups(vector<Cleanup>& scope);

@@ -1,183 +1,13 @@
 #include "pa14_lowir_internal.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 
 namespace pa14 {
 namespace internal {
 
 namespace {
-
-string function_out_name(const FunctionOut& fn)
-{
-	size_t at = fn.header.find('@');
-	size_t lp = fn.header.find('(', at);
-	return (at == string::npos || lp == string::npos)
-		? string() : fn.header.substr(at + 1, lp - at - 1);
-}
-
-int emitted_function_order_key(const FunctionOut& fn)
-{
-	string name = function_out_name(fn);
-	if (name == "main")
-		return 0;
-	if (name.find("operator_lb_rb") != string::npos)
-		return 30;
-	if ((name.find("operator_plus") != string::npos ||
-	     name.find("operator_minus") != string::npos) &&
-	    name.compare(0, 9, "operator_") != 0)
-		return 40;
-	if (name.find("operator_lt_lt") != string::npos)
-		return 50;
-	if (name == "operator_plus" || name == "operator_minus")
-		return 60;
-	if (name.find("operator_lt") != string::npos ||
-	    name.find("operator_gt") != string::npos ||
-	    name.find("operator_eq_eq") != string::npos ||
-	    name.find("operator_bang_eq") != string::npos)
-		return 70;
-	if (name.find("operator_lp_rp") != string::npos)
-		return 80;
-	if (name.find("operator_star") != string::npos)
-		return 90;
-	if (name.find("operator_") != string::npos)
-		return name.find("__ov2") != string::npos ? 100 : 99;
-	return 110;
-}
-
-bool emitted_function_is_operator(const FunctionOut& fn)
-{
-	return function_out_name(fn).find("operator") != string::npos;
-}
-
-bool emitted_function_is_strong_entry(const FunctionOut& fn)
-{
-	string name = function_out_name(fn);
-	return name == "main" ||
-	       fn.header.find("binding=strong") != string::npos;
-}
-
-TypePtr output_first_this_record(const Binding* binding)
-{
-	if (binding == NULL ||
-	    binding->type.get() == NULL ||
-	    binding->type->kind != TypeKind::Function ||
-	    binding->type->parameters.empty())
-		return TypePtr();
-	TypePtr first = pa11::strip_cv(binding->type->parameters[0]);
-	if (first->kind != TypeKind::Pointer)
-		return TypePtr();
-	TypePtr record = pa11::strip_cv(first->base);
-	return record->kind == TypeKind::Record ? record : TypePtr();
-}
-
-bool output_function_returns_record(const Binding* binding)
-{
-	if (binding == NULL ||
-	    binding->type.get() == NULL ||
-	    binding->type->kind != TypeKind::Function)
-		return false;
-	TypePtr result = pa11::strip_cv(binding->type->base);
-	return result.get() != NULL && result->kind == TypeKind::Record;
-}
-
-int emitted_template_dependency_order_key(const FunctionOut& fn)
-{
-	const Binding* binding = fn.binding;
-	if (binding == NULL || emitted_function_is_strong_entry(fn))
-		return 0;
-	if (!binding_has_template_specialization_context(binding))
-		return 10;
-	string name = binding->name;
-	bool op = name.compare(0, 8, "operator") == 0;
-	if (is_class_constructor_binding(binding) &&
-	    binding->type.get() != NULL &&
-	    binding->type->kind == TypeKind::Function &&
-	    binding->type->parameters.size() >= 2)
-	{
-		TypePtr constructed = output_first_this_record(binding);
-		TypePtr param = binding->type->parameters[1];
-		TypePtr bare_param = pa11::strip_cv(param);
-		if (bare_param->kind == TypeKind::Pointer)
-			return 100;
-		if (is_reference(param))
-		{
-			TypePtr param_record = pa11::strip_cv(object_type(param));
-			if (constructed.get() != NULL &&
-			    param_record.get() != NULL &&
-			    param_record->kind == TypeKind::Record &&
-			    pa11::same_type(pa11::strip_cv(constructed), param_record))
-				return 500;
-			return 300;
-		}
-	}
-	if (op &&
-	    (name == "operator+" || name == "operator +") &&
-	    output_function_returns_record(binding))
-		return 200;
-	if (op && (name == "operator-" || name == "operator -"))
-		return 400;
-	if (op)
-		return 600;
-	return 10;
-}
-
-bool output_class_constructor(const Binding* binding)
-{
-	return binding != NULL &&
-	       binding->owner != NULL &&
-	       binding->owner->kind == ScopeKind::Class &&
-	       binding->name == binding->owner->name &&
-	       binding->type.get() != NULL &&
-	       binding->type->kind == TypeKind::Function;
-}
-
-bool output_class_member_of_local_class(const Binding* binding)
-{
-	if (binding == NULL || binding->owner == NULL)
-		return false;
-	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
-	{
-		if (scope->kind == ScopeKind::Function)
-			return true;
-		if (scope->kind == ScopeKind::Namespace)
-			return false;
-	}
-	return false;
-}
-
-bool output_local_class_constructor(const FunctionOut& fn)
-{
-	return output_class_constructor(fn.binding) &&
-	       output_class_member_of_local_class(fn.binding) &&
-	       function_out_name(fn).find("__base_entry") == string::npos;
-}
-
-bool output_zero_argument_nonlocal_constructor(const FunctionOut& fn)
-{
-	return output_class_constructor(fn.binding) &&
-	       fn.binding->type->parameters.size() == 1 &&
-	       !output_class_member_of_local_class(fn.binding) &&
-	       function_out_name(fn).find("__base_entry") == string::npos;
-}
-
-void order_zero_argument_constructors_before_local_ctors(
-	const vector<FunctionOut>& functions, vector<size_t>& order)
-{
-	size_t i = 0;
-	while (i + 1 < order.size())
-	{
-		if (output_local_class_constructor(functions[order[i]]) &&
-		    output_zero_argument_nonlocal_constructor(functions[order[i + 1]]))
-		{
-			swap(order[i], order[i + 1]);
-			if (i != 0)
-				--i;
-			continue;
-		}
-		++i;
-	}
-}
 
 bool generated_empty_constructor_binding(const Binding* binding)
 {
@@ -190,9 +20,12 @@ bool generated_empty_constructor_binding(const Binding* binding)
 	       binding->type->parameters.size() == 1;
 }
 
-void emit_empty_this_function(ProgramLowerer& program, const string& name)
+void emit_empty_this_function(ProgramLowerer& program,
+                              const string& name,
+                              const Binding* binding)
 {
 	FunctionOut fn;
+	fn.binding = binding;
 	fn.header = "function @" + name + "(%this : ptr) -> void";
 	fn.slots.push_back("  slot $this : ptr");
 	Block entry("entry");
@@ -277,7 +110,7 @@ bool demand_generated_empty_constructor(ProgramLowerer& program,
 		return true;
 	}
 	if (program.defined_functions.insert(name).second)
-		emit_empty_this_function(program, name);
+		emit_empty_this_function(program, name, binding);
 	return true;
 }
 
@@ -309,167 +142,6 @@ string ordinary_function_declaration(const Binding* binding, const string& name)
 	metadata.push_back("binding=strong");
 	out << metadata_suffix(metadata);
 	return out.str();
-}
-
-bool emitted_function_is_readable_template_record_member(const string& name)
-{
-	return name.find("_impl_") != string::npos;
-}
-
-bool emitted_function_is_free_operator(const string& name)
-{
-	return name.compare(0, 9, "operator_") == 0;
-}
-
-int emitted_template_member_order_key(const FunctionOut& fn,
-                                      bool abi_template_vtable)
-{
-	if (emitted_function_is_strong_entry(fn))
-		return 0;
-	string name = function_out_name(fn);
-	bool template_record =
-		name.compare(0, 5, "type_") == 0 ||
-		(abi_template_vtable &&
-		 emitted_function_is_readable_template_record_member(name));
-	if (template_record && name.find("operator_lp_rp") != string::npos)
-		return 10;
-	if (template_record && name.find("__deleting_entry") != string::npos)
-		return 20;
-	if (template_record && name.find("____") != string::npos)
-		return 30;
-	if (emitted_function_is_free_operator(name))
-		return 40;
-	if (name.find("__print_helper_t_") == string::npos &&
-	    name.find("__print_helper") != string::npos)
-		return 45;
-	if (name.find("__operator_lt_lt") != string::npos)
-		return 50;
-	if (name.find("__operator_lp_rp") != string::npos)
-		return 60;
-	if (name.find("___") != string::npos &&
-	    name.find("__base_entry") != string::npos)
-		return 70;
-	if (name.find("___") != string::npos &&
-	    name.find("__deleting_entry") != string::npos)
-		return 80;
-	if (name.find("___") != string::npos)
-		return 90;
-	if (template_record)
-		return 100;
-	if (name.find("__print_helper_t_") != string::npos)
-		return 110;
-	return 1000;
-}
-
-bool emitted_operator_run_needs_sort(const vector<FunctionOut>& functions,
-                                     const vector<size_t>& order,
-                                     size_t begin,
-                                     size_t end)
-{
-	bool subscript_only = end > begin + 1;
-	for (size_t i = begin; i < end; ++i)
-	{
-		string name = function_out_name(functions[order[i]]);
-		if (name.find("___operator") != string::npos)
-			return true;
-		if (name.find("operator_lb_rb") == string::npos)
-			subscript_only = false;
-	}
-	return subscript_only;
-}
-
-vector<size_t> ordered_function_indices(const ProgramLowerer& program)
-{
-	vector<size_t> order;
-	bool has_template_record_function = false;
-	bool has_abi_template_vtable = false;
-	for (size_t i = 0; i < program.globals.size(); ++i)
-		if (program.globals[i].find("global @__vtable_type_") != string::npos)
-			has_abi_template_vtable = true;
-	for (size_t i = 0; i < program.functions.size(); ++i)
-	{
-		order.push_back(i);
-		string name = function_out_name(program.functions[i]);
-		if (name.compare(0, 5, "type_") == 0 ||
-		    (has_abi_template_vtable &&
-		     emitted_function_is_readable_template_record_member(name)))
-			has_template_record_function = true;
-	}
-	if (has_template_record_function)
-		stable_sort(order.begin(), order.end(),
-		            [&program, has_abi_template_vtable](size_t lhs, size_t rhs) {
-			            int lkey = emitted_template_member_order_key(
-				            program.functions[lhs], has_abi_template_vtable);
-			            int rkey = emitted_template_member_order_key(
-				            program.functions[rhs], has_abi_template_vtable);
-			            return lkey != rkey ? lkey < rkey : lhs < rhs;
-		            });
-	bool has_template_pointer_constructor = false;
-	bool has_template_reference_constructor = false;
-	bool has_template_record_plus = false;
-	bool has_template_minus = false;
-	for (size_t i = 0; i < order.size(); ++i)
-	{
-		int key = emitted_template_dependency_order_key(
-			program.functions[order[i]]);
-		if (key == 100)
-			has_template_pointer_constructor = true;
-		else if (key == 300 || key == 500)
-			has_template_reference_constructor = true;
-		else if (key == 200)
-			has_template_record_plus = true;
-		else if (key == 400)
-			has_template_minus = true;
-	}
-	bool has_template_dependency_function =
-		has_template_pointer_constructor &&
-		has_template_reference_constructor &&
-		has_template_record_plus &&
-		has_template_minus;
-	if (has_template_dependency_function)
-		stable_sort(order.begin(), order.end(),
-		            [&program](size_t lhs, size_t rhs) {
-			            int lkey = emitted_template_dependency_order_key(
-				            program.functions[lhs]);
-			            int rkey = emitted_template_dependency_order_key(
-				            program.functions[rhs]);
-			            return lkey != rkey ? lkey < rkey : lhs < rhs;
-		            });
-	order_zero_argument_constructors_before_local_ctors(program.functions, order);
-	size_t run = 0;
-	while (run < order.size())
-	{
-		if (!emitted_function_is_operator(program.functions[order[run]]))
-		{
-			++run;
-			continue;
-		}
-		size_t end = run + 1;
-		while (end < order.size() &&
-		       emitted_function_is_operator(program.functions[order[end]]))
-			++end;
-		if (emitted_operator_run_needs_sort(program.functions, order, run, end))
-		{
-			bool subscript_only = true;
-			for (size_t i = run; i < end; ++i)
-				if (function_out_name(program.functions[order[i]])
-				    .find("operator_lb_rb") == string::npos)
-					subscript_only = false;
-			stable_sort(order.begin() + run, order.begin() + end,
-			            [&program, subscript_only](size_t lhs, size_t rhs) {
-				            int lkey = emitted_function_order_key(program.functions[lhs]);
-				            int rkey = emitted_function_order_key(program.functions[rhs]);
-				            if (lkey != rkey)
-					            return lkey < rkey;
-				            return subscript_only
-					            ? function_out_name(program.functions[lhs]) <
-					              function_out_name(program.functions[rhs])
-					            : lhs < rhs;
-			            });
-		}
-		run = end;
-	}
-	return order;
 }
 
 void write_function_out(ostream& out, const FunctionOut& fn)

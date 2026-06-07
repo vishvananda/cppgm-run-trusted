@@ -455,7 +455,18 @@ Expr Parser::parse_conditional_expression()
 	if (pa11::strip_cv(expression_object_type(cond.type))->kind ==
 	    pa11::TypeKind::Record)
 	{
-		Conversion conv = convert_to(cond, pa11::make_fundamental(FT_BOOL));
+		++explicit_conversion_context_;
+		Conversion conv;
+		try
+		{
+			conv = convert_to(cond, pa11::make_fundamental(FT_BOOL));
+		}
+		catch (...)
+		{
+			--explicit_conversion_context_;
+			throw;
+		}
+		--explicit_conversion_context_;
 		if (conv.viable)
 			cond = conv.expr;
 	}
@@ -676,6 +687,37 @@ Expr Parser::parse_unary_expression()
 					TypePtr target_record = pa11::strip_cv(target);
 					if (target_record->kind == pa11::TypeKind::Record)
 						complete_template_record(target_record);
+					if (!init.node.children.empty())
+					{
+						vector<Expr> args;
+						for (size_t i = 0; i < init.node.children.size(); ++i)
+						{
+							const Node& child = init.node.children[i];
+							Expr arg;
+							arg.valid = true;
+							arg.node = child;
+							arg.type = child.type;
+							arg.category = child.category;
+							arg.binding = child.binding;
+							arg.braced_init_list =
+								child.line.compare(0, 16,
+								                   "braced-init-list") == 0;
+							arg.has_constant_value = child.has_constant_value;
+							arg.constant_value = child.constant_value;
+							arg.null_pointer_constant =
+								arg.has_constant_value &&
+								arg.constant_value == 0 &&
+								arg.type.get() != NULL &&
+								pa11::is_integral_or_bool_type(arg.type);
+							args.push_back(arg);
+						}
+						Expr constructed =
+							make_constructor_init_expr(target, args, false);
+						bool force_dtor =
+							pa11::strip_cv(target)->base.get() != NULL;
+						ensure_default_destructor(target, force_dtor);
+						return parse_postfix_suffixes(constructed);
+					}
 					ensure_aggregate_constructors_for_init(target,
 					                                       init.node);
 					if (!init.node.children.empty() &&
@@ -692,6 +734,49 @@ Expr Parser::parse_unary_expression()
 						pa11::strip_cv(target)->base.get() != NULL;
 					ensure_default_destructor(target, force_dtor);
 				}
+			}
+			else if (pa11::strip_cv(target)->kind != pa11::TypeKind::Array &&
+			         !type_is_template_dependent(target))
+			{
+				if (init.node.children.empty())
+				{
+					Expr zero;
+					zero.type = target;
+					zero.valid = true;
+					zero.category = ValueCategory::PRValue;
+					zero.constant_expression = true;
+					if (pa11::is_integral_or_bool_type(target))
+					{
+						zero.has_constant_value = true;
+						zero.constant_value = 0;
+					}
+					zero.node = Node("literal prvalue " +
+					                 pa11::describe_type(target) + " 0");
+					zero.node.token_text = type_is_pointer(target)
+						? "nullptr" : "0";
+					annotate_expr_node(zero);
+					return parse_postfix_suffixes(zero);
+				}
+				if (init.node.children.size() != 1)
+					throw runtime_error("invalid braced initializer");
+				const Node& child_node = init.node.children[0];
+				Expr child;
+				child.valid = true;
+				child.node = child_node;
+				child.type = child_node.type;
+				child.category = child_node.category;
+				child.binding = child_node.binding;
+				child.has_constant_value = child_node.has_constant_value;
+				child.constant_value = child_node.constant_value;
+				child.null_pointer_constant =
+					child.has_constant_value &&
+					child.constant_value == 0 &&
+					child.type.get() != NULL &&
+					pa11::is_integral_or_bool_type(child.type);
+				Conversion conv = convert_to(child, target);
+				if (!conv.viable)
+					throw runtime_error("invalid braced initializer");
+				return parse_postfix_suffixes(conv.expr);
 			}
 			annotate_expr_node(init);
 			return parse_postfix_suffixes(init);
@@ -1027,6 +1112,18 @@ Expr Parser::parse_postfix_expression()
 				return parse_postfix_suffixes(
 					make_dependent_call_expr(callee, args));
 			}
+			if (!name.qualified)
+			{
+				try
+				{
+					callee = make_missing_id_expr(name);
+				}
+				catch (const runtime_error&)
+				{
+				}
+			}
+			if (callee.valid)
+				return parse_postfix_suffixes(make_call_expr(callee, args));
 			throw runtime_error("name not found: " + name.spelling);
 		}
 		return parse_postfix_suffixes(make_call_expr(callee, args));
@@ -1216,10 +1313,12 @@ Expr Parser::parse_postfix_suffixes(Expr expr)
 					    placeholder != overload)
 						templ = function_template_placeholders_.find(
 							placeholder);
-					if (templ != function_template_placeholders_.end())
-						expr.explicit_template_arguments[overload] =
-							member_name.template_arguments;
-				}
+						if (templ != function_template_placeholders_.end() ||
+						    function_template_specialization_arguments_.find(overload) !=
+						    function_template_specialization_arguments_.end())
+							expr.explicit_template_arguments[overload] =
+								member_name.template_arguments;
+					}
 		}
 		else if (at(OP_INC) || at(OP_DEC))
 		{

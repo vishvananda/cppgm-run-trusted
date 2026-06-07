@@ -131,6 +131,25 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 
 Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 {
+	if (starts_with(expr.line, "typeid-expression"))
+	{
+		if (expr.children.empty())
+			throw runtime_error("typeid expression missing operand");
+		TypePtr target = object_type(expr.children[0].type);
+		program_.emit_typeinfo(target);
+		string symbol = program_.catch_rtti_symbol(target);
+		if (symbol.empty())
+		{
+			TypePtr bare = pa11::strip_cv(target);
+			if (bare.get() != NULL && bare->kind == TypeKind::Record)
+				symbol = rtti_symbol_for_record(bare);
+		}
+		if (symbol.empty())
+			throw runtime_error("unsupported typeid operand");
+		string tmp = fresh_temp();
+		instr(tmp + " = addr @" + symbol);
+		return Value("ptr", tmp);
+	}
 	if (starts_with(expr.line, "id-expression") && expr.binding != NULL)
 	{
 		if (expr.binding->kind == BindingKind::Function)

@@ -375,7 +375,10 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	}
 		if (declarator_scope != NULL)
 			scopes_ = saved_declarator_scopes;
-		TypePtr declared_type = apply_declarator(declarator, base);
+		TypePtr probe_base = specs.auto_decl
+			? pa11::make_cv(pa11::make_fundamental(FT_INT), specs.cv)
+			: base;
+		TypePtr declared_type = apply_declarator(declarator, probe_base);
 		bool declares_function =
 			declared_type->kind == pa11::TypeKind::Function;
 		bool bit_field = false;
@@ -932,18 +935,7 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 	}
 	if (init.braced_init_list)
 	{
-		bool aggregate_candidate =
-			!record_has_aggregate_blocking_constructor(record);
-		if (aggregate_candidate)
-		{
-			if (record_has_nonpublic_field(record))
-				throw runtime_error("non-public member disqualifies aggregate");
-			for (size_t i = 0; i < record->fields.size(); ++i)
-				if (default_member_initializers_.find(record->fields[i]) !=
-				    default_member_initializers_.end())
-					throw runtime_error(
-						"default member initializer disqualifies aggregate");
-		}
+		validate_aggregate_braced_initialization(record);
 	}
 	if (!init.braced_init_list &&
 	    init_record.get() != NULL &&
@@ -1005,6 +997,23 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 		if (viable)
 			throw runtime_error("explicit constructor in copy initialization");
 	}
+}
+
+void Parser::validate_aggregate_braced_initialization(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return;
+	pa11::layout_record_type(bare);
+	if (record_has_aggregate_blocking_constructor(bare))
+		return;
+	if (record_has_nonpublic_field(bare))
+		throw runtime_error("non-public member disqualifies aggregate");
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (default_member_initializers_.find(bare->fields[i]) !=
+		    default_member_initializers_.end())
+			throw runtime_error(
+				"default member initializer disqualifies aggregate");
 }
 
 Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) const
@@ -1159,6 +1168,11 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		class_protected_access_.back();
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
 	function->ref_qualifier = ref_qualifier;
+	if (specs.auto_decl)
+	{
+		auto_return_functions_.insert(function);
+		auto_return_patterns_[function] = type->base;
+	}
 	if (validating_template_definition_)
 		function->is_dependent_template_artifact = true;
 	if (target->kind == ScopeKind::Class && !is_static_member)

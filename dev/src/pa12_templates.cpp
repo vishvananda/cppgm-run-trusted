@@ -827,7 +827,7 @@ const QualifiedName& qname = declarator_name(declarator); if (qname.qualifier !=
 pa11::record_type_for_scope(qname.qualifier); owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); map<const void*, TemplateDeclaration*>::iterator outer = owner_record.get() != NULL
 ? record_template_declarations_.find( owner_record.get()) : record_template_declarations_.end(); TemplateDeclaration* owner_template = outer != record_template_declarations_.end() ? outer->second
 : find_class_template(qname.qualifier->parent, qname.qualifier->name); if (owner_template != NULL) { declaration->kind = TemplateDeclarationKind::Function; declaration->owner = qname.qualifier;
-declaration->name = qname.name; declaration->class_template_member = template_parameter_lists_match( declaration->parameters, owner_template->parameters); declaration->generic_function_type = pa11::make_function(
+declaration->name = qname.name; declaration->class_template_member = template_parameter_lists_match( declaration->parameters, owner_template->parameters) || !declaration->outer_type_substitutions.empty(); declaration->generic_function_type = pa11::make_function(
 pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false); declaration->has_definition = true; vector<TemplateDeclaration*>& members = member_function_templates_[make_pair( owner_template, qname.name)];
 if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos; return; } } Scope* target = qname.qualifier != NULL ? qname.qualifier : declaration->owner; declaration->owner = target; declaration->name = qname.name;
@@ -878,7 +878,7 @@ previous_declaration->parameters); function_template_placeholders_[placeholder] 
 vector<TemplateDeclaration*>& overloads = function_templates_[target][qname.name]; if (find(overloads.begin(), overloads.end(), declaration) == overloads.end()) overloads.push_back(declaration);
 TypePtr owner_record = pa11::record_type_for_scope(target); if (owner_record.get() != NULL) { map<const void*, TemplateDeclaration*>::iterator outer =
 record_template_declarations_.find(pa11::strip_cv(owner_record).get()); TemplateDeclaration* owner_template = outer != record_template_declarations_.end() ? outer->second
-: find_class_template(target->parent, target->name); if (qname.qualifier != NULL && owner_template != NULL && template_parameter_lists_match(declaration->parameters, owner_template->parameters))
+: find_class_template(target->parent, target->name); if (qname.qualifier != NULL && owner_template != NULL && (template_parameter_lists_match(declaration->parameters, owner_template->parameters) || !declaration->outer_type_substitutions.empty()))
 declaration->class_template_member = true; if (owner_template != NULL) { vector<TemplateDeclaration*>& members = member_function_templates_[make_pair(owner_template, qname.name)];
 if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); } } } catch (const exception& err) { string message = err.what(); bool hard_registration_error =
 hard_template_registration_error(message); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos;
@@ -913,7 +913,7 @@ i < owner_template->parameters.size(); ++i) { const TemplateParameterInfo& param
 owner_pattern_args[i].kind != TemplateArgumentKind::Type) continue; TypePtr arg_type = pa11::strip_cv(owner_pattern_args[i].type); if (arg_type.get() != NULL && arg_type->kind == pa11::TypeKind::TemplateParameter &&
 arg_type->name != parameter.name) owner_name_subst[arg_type->name] = pa11::make_template_parameter_type(parameter.name); } if (!owner_name_subst.empty()) declaration->outer_type_substitutions.push_back(
 owner_name_subst); } declaration->kind = TemplateDeclarationKind::Function; declaration->owner = owner_template->owner; declaration->name = tokens_[member_name_pos].source; declaration->class_template_member =
-template_parameter_lists_match(declaration->parameters, owner_template->parameters); declaration->generic_function_type = pa11::make_function(pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false);
+template_parameter_lists_match(declaration->parameters, owner_template->parameters) || owner_template_args_pos != declaration->decl_end || !declaration->outer_type_substitutions.empty(); declaration->generic_function_type = pa11::make_function(pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false);
 declaration->has_definition = true; vector<TemplateDeclaration*>& members = member_function_templates_[make_pair(owner_template, declaration->name)];
 if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); return true; }
 
@@ -971,7 +971,8 @@ bool Parser::register_dependent_qualified_conversion_function_template(
 	declaration->name = "operator ";
 	declaration->class_template_member =
 		template_parameter_lists_match(declaration->parameters,
-		                               owner_template->parameters);
+		                               owner_template->parameters) ||
+		!declaration->outer_type_substitutions.empty();
 	declaration->generic_function_type =
 		pa11::make_function(pa11::make_fundamental(FT_VOID),
 		                    vector<TypePtr>(),

@@ -24,6 +24,7 @@ struct TemplateValidationState
 	vector<set<string> > template_type_parameter_packs;
 	vector<ActiveClassInstantiation> active_class_instantiations;
 	int local_type_counter;
+	int range_for_counter;
 	bool force_new_function_binding;
 	bool defer_function_template_bodies;
 	bool validating_template_definition;
@@ -118,6 +119,7 @@ void TemplateValidationState::save_core(Parser& parser,
 	template_type_parameter_packs = parser.template_type_parameter_packs_;
 	active_class_instantiations = parser.active_class_instantiations_;
 	local_type_counter = parser.local_type_counter_;
+	range_for_counter = parser.range_for_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
 	defer_function_template_bodies = parser.defer_function_template_bodies_;
 	validating_template_definition = parser.validating_template_definition_;
@@ -221,6 +223,7 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.generated_nodes_ = generated_nodes;
 	parser.extra_lowir_nodes_ = extra_lowir_nodes;
 	parser.local_type_counter_ = local_type_counter;
+	parser.range_for_counter_ = range_for_counter;
 	parser.force_new_function_binding_ = force_new_function_binding;
 	parser.defer_function_template_bodies_ = defer_function_template_bodies;
 	parser.validating_template_definition_ = validating_template_definition;

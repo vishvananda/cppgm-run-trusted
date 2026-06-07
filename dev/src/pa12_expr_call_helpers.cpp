@@ -385,10 +385,13 @@ void Parser::ensure_copy_move_constructor_for_single_arg(
 {
 	if (args.size() != 1)
 		return;
+	if (args[0].type.get() == NULL)
+		return;
 	TypePtr arg_record = pa11::strip_cv(expression_object_type(args[0].type));
 	if (arg_record->kind != pa11::TypeKind::Record ||
 	    (!pa11::same_type(arg_record, record) &&
-	     !same_template_specialization_record(arg_record, record)))
+	     !same_template_specialization_record(arg_record, record) &&
+	     record_base_distance(arg_record, record) >= 1000000))
 		return;
 	if (args[0].category == ValueCategory::XValue)
 		ensure_copy_move_constructor(record, true);

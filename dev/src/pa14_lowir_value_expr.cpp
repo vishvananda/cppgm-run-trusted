@@ -735,8 +735,6 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 	{
 		TypePtr lhs_type = object_type(expr.children[0].type);
 		bool move_assign = expr.children[1].category != ValueCategory::LValue;
-		Binding* assign =
-			program_.demand_implicit_copy_assignment(lhs_type, move_assign);
 		bool wrap = eh_try_depth_ == 0 && has_active_cleanups();
 		string dispatch;
 		bool define_dispatch = false;
@@ -767,6 +765,8 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 			};
 			lower_object_init(source_addr, object, expr.children[1]);
 		}
+		Binding* assign =
+			program_.demand_implicit_copy_assignment(lhs_type, move_assign);
 		string tmp = fresh_temp();
 		instr(tmp + " = call ptr @" + program_.symbol_for(assign) +
 		      "(" + target.text + ", " + source.text + ")");
@@ -791,6 +791,40 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 	    starts_with(expr.children[0].line, "member-expression"))
 	{
 		TypePtr lhs_type = object_type(expr.children[0].type);
+		bool wrap_lhs_call_store =
+			eh_try_depth_ == 0 &&
+			has_active_cleanups() &&
+			node_contains_call_expression(expr.children[0]);
+		string dispatch;
+		bool define_dispatch = false;
+		if (wrap_lhs_call_store)
+		{
+			dispatch = active_unwind_dispatch_.empty()
+				? fresh_block("call_unwind_dispatch")
+				: active_unwind_dispatch_;
+			define_dispatch = active_unwind_dispatch_.empty();
+			instr("eh_try ^" + dispatch);
+			++eh_try_depth_;
+		}
+		function<void()> finish_lhs_call_store = [this,
+		                                         wrap_lhs_call_store,
+		                                         define_dispatch,
+		                                         dispatch]() {
+			if (!wrap_lhs_call_store)
+				return;
+			--eh_try_depth_;
+			instr("eh_end");
+			if (define_dispatch)
+			{
+				string end = fresh_block("call_unwind_end");
+				terminate("jump ^" + end);
+				active_unwind_dispatch_ = dispatch;
+				start_block(dispatch);
+				emit_unwind_cleanups();
+				terminate("resume");
+				start_block(end);
+			}
+		};
 		Value rhs = emit_rvalue(expr.children[1]);
 		rhs = convert_binary_value(rhs, expr.children[1].type, lhs_type);
 		Value addr = emit_lvalue_addr(expr.children[0]);
@@ -821,10 +855,12 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 			instr(merged + " = binary or " + low_type + " " + cleared +
 			      ", " + shifted);
 			instr("store " + low_type + " " + merged + ", " + addr.text);
+			finish_lhs_call_store();
 			return rhs;
 		}
 		instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text +
 		      ", " + addr.text);
+		finish_lhs_call_store();
 		return rhs;
 	}
 	TypePtr lhs_type = object_type(expr.children[0].type);
@@ -857,7 +893,10 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 			instr("store ptr " + tmp + ", " + addr.text);
 			return Value("ptr", tmp);
 		}
-		rhs = convert_value(rhs, expr.children[1].type, lhs_type);
+		TypePtr arithmetic_type =
+			lowir_common_type(expr.children[0].type, expr.children[1].type);
+		oldv = convert_binary_value(oldv, expr.children[0].type, arithmetic_type);
+		rhs = convert_value(rhs, expr.children[1].type, arithmetic_type);
 		ETokenType op = expr.op == OP_PLUSASS ? OP_PLUS :
 		                expr.op == OP_MINUSASS ? OP_MINUS :
 		                expr.op == OP_STARASS ? OP_STAR :
@@ -865,19 +904,39 @@ Value FunctionLowerer::emit_assignment(const Node& expr)
 		string tmp = fresh_temp();
 		instr(tmp + " = binary " + string(op == OP_MINUS ? "sub" :
 		      op == OP_STAR ? "mul" : op == OP_DIV ? "div" : "add") + " " +
-		      scalar_lowir_type(lhs_type) + " " + oldv.text + ", " + rhs.text);
-		rhs = Value(scalar_lowir_type(lhs_type), tmp);
+		      scalar_lowir_type(arithmetic_type) + " " + oldv.text + ", " +
+		      rhs.text);
+		rhs = convert_value(Value(scalar_lowir_type(arithmetic_type), tmp),
+		                    arithmetic_type,
+		                    lhs_type);
 		Value addr = emit_lvalue_addr(expr.children[0]);
 		instr("store " + scalar_lowir_type(lhs_type) + " " +
 		      rhs.text + ", " + addr.text);
 		return rhs;
 	}
-	Value rhs = emit_rvalue(expr.children[1]);
-	rhs = convert_binary_value(rhs, expr.children[1].type, lhs_type);
-	Value addr = emit_lvalue_addr(expr.children[0]);
-	instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text + ", " + addr.text);
-	return rhs;
-}
+		Binding* lhs_binding = expr.children[0].binding;
+		map<const Binding*, string>::const_iterator slot_it =
+			lhs_binding != NULL ? slots_.find(lhs_binding) : slots_.end();
+		if (starts_with(expr.children[1].line, "call-expression") &&
+		    slot_it != slots_.end())
+		{
+			call_result_store_slot_ = slot_it->second;
+			call_result_store_type_ = lhs_type;
+			call_result_store_consumed_ = false;
+		}
+		Value rhs = emit_rvalue(expr.children[1]);
+		if (!call_result_store_consumed_)
+		{
+			rhs = convert_binary_value(rhs, expr.children[1].type, lhs_type);
+			Value addr = emit_lvalue_addr(expr.children[0]);
+			instr("store " + scalar_lowir_type(lhs_type) + " " +
+			      rhs.text + ", " + addr.text);
+		}
+		call_result_store_slot_.clear();
+		call_result_store_type_.reset();
+		call_result_store_consumed_ = false;
+		return rhs;
+	}
 
 Value FunctionLowerer::emit_unary(const Node& expr)
 {
@@ -967,6 +1026,9 @@ Value FunctionLowerer::emit_unary(const Node& expr)
 Value FunctionLowerer::emit_postfix(const Node& expr)
 {
 	Value addr = emit_lvalue_addr(expr.children[0]);
+	bool refetch_store_addr =
+		starts_with(expr.children[0].line, "call-expression") &&
+		is_reference(expr.children[0].type);
 	TypePtr value_type = strip_for_value(expr.children[0].type);
 	string oldtmp = fresh_temp();
 	instr(oldtmp + " = load " + scalar_lowir_type(value_type) + " " + addr.text);
@@ -1002,7 +1064,8 @@ Value FunctionLowerer::emit_postfix(const Node& expr)
 		instr(tmp + " = binary " + string(expr.op == OP_INC ? "add" : "sub") +
 		      " " + oldv.type + " " + oldv.text + ", 1");
 	}
-	instr("store " + oldv.type + " " + tmp + ", " + addr.text);
+	Value store_addr = refetch_store_addr ? emit_lvalue_addr(expr.children[0]) : addr;
+	instr("store " + oldv.type + " " + tmp + ", " + store_addr.text);
 	return oldv;
 }
 
@@ -1025,6 +1088,17 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 	if (cast_source->kind == TypeKind::Enum &&
 	    cast_source->enum_underlying != FT_INT &&
 	    cast_target->kind == TypeKind::Fundamental &&
+	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
+	{
+		Value raw = emit_rvalue(expr.children[0]);
+		string tmp = fresh_temp();
+		instr(tmp + " = copy " + scalar_lowir_type(expr.type) + " " +
+		      raw.text);
+		return Value(scalar_lowir_type(expr.type), tmp);
+	}
+	if (cast_source->kind == TypeKind::Fundamental &&
+	    cast_target->kind == TypeKind::Enum &&
+	    cast_target->enum_underlying != FT_INT &&
 	    scalar_lowir_type(expr.children[0].type) == scalar_lowir_type(expr.type))
 	{
 		Value raw = emit_rvalue(expr.children[0]);

@@ -779,8 +779,21 @@ bool EncodeStringLiteralBytes(const vector<uint32_t>& code_points,
 {
 	bytes.clear();
 	elements = 0;
-	if (encoding == LiteralEncoding::Ordinary ||
-	    encoding == LiteralEncoding::U8)
+	if (encoding == LiteralEncoding::Ordinary)
+	{
+		type = FT_CHAR;
+		for (size_t i = 0; i < code_points.size(); ++i)
+		{
+			if (code_points[i] <= 0xFF)
+				AppendByte(bytes, code_points[i]);
+			else
+				AppendUtf8CodePoint(bytes, code_points[i]);
+		}
+		AppendByte(bytes, 0);
+		elements = bytes.size();
+		return true;
+	}
+	if (encoding == LiteralEncoding::U8)
 	{
 		type = FT_CHAR;
 		for (size_t i = 0; i < code_points.size(); ++i)
