@@ -153,6 +153,42 @@ directory remains a handout and test surface except for this plan.
 - Tests may be added under `cppgm.tests/course/pa23/` only for focused
   regressions that are not already covered by PA23 handout tests.
 
+## Architecture Review
+
+The PA23 implementation is an integration extension of the PA12 semantic layer
+and the PA14 LowIR lowering path, not a separate template interpreter or LowIR
+generator. The main semantic state is still carried by typed `TemplateArgument`
+and `pa11::TemplateInstanceArgument` values, with dependent owner/member/value
+metadata stored on `TemplateArgument`, `Expr`, and `Node` fields in
+`dev/src/pa12_internal.h`. Class, function, member, alias, and variable
+template work is split across responsibility-named `dev/src/pa12_templates_*`
+files and wired into `dev/frontend_source_sets.mk`.
+
+The implementation represents template instances through typed declaration and
+argument maps: `record_template_declarations_`,
+`record_template_arguments_`, `function_template_placeholders_`,
+`function_template_specialization_arguments_`, and
+`variable_template_specializations_`. Substitution and replay are handled by
+the template substitution, instance lookup, typename resolution, and expression
+replay modules rather than by reparsing emitted LowIR or recovering facts from
+final symbol strings.
+
+Expression and overload integration lives in `dev/src/pa12_expr*.cpp`.
+Dependent calls, dependent `decltype`, member-template lookup, constructor
+template selection, SFINAE candidate filtering, and conversion-function
+templates are resolved into ordinary `Binding` and `TypePtr` objects before
+lowering. PA14 changes are limited to inline ordering, constructor/object
+initialization, globals, and program emission cases that consume the already
+typed PA12 result.
+
+The audit found the architecture generally follows the plan, but PA23 added
+duplicate template-specialization equivalence helpers in initializer and
+overload-helper code. Those local helpers compared template instance argument
+types by pointer and did not carry the full typed value/owner metadata already
+available in the semantic model. That duplication was removed during audit and
+replaced with one shared record-specialization comparison helper used by the
+PA12 semantic call sites.
+
 ## Validation Plan
 
 1. Use single-test PA23 checks to inspect the first failure and any timeout
@@ -164,3 +200,29 @@ directory remains a handout and test surface except for this plan.
 4. Run `perl scripts/cppgm_file_audit.pl --stage pa23 --paths dev/src`.
 5. Commit cohesive progress only after a stable checkpoint, and finish with a
    clean `git status --short`.
+
+## Final Architecture Review
+
+The final audited shape keeps PA23 template composition in the normal compiler
+pipeline. Template arguments, dependent qualified values, function-template
+candidate state, and class/member specialization records remain typed PA12
+state until PA14 consumes ordinary declarations and expression nodes. No
+fallback output path, copied reference output, embedded payload, trampoline,
+template binary, VM, or interpreter substitute is present in `dev/src`.
+
+The shared `same_template_specialization_record` helper now only answers the
+record-template-specialization question it names, while recursively comparing
+typed template instance arguments for type, value, template, and pack cases.
+This preserves the PA23 need to compare rebound specializations by typed
+arguments without weakening PA22 function-template partial ordering for
+cv-distinct signatures. Initializer and overload code no longer own duplicate
+weaker copies of that semantic fact.
+
+The file-audit cleanup split oversized PA23 helper bodies into named
+responsibility-preserving methods:
+`demand_empty_record_conversion_bodies`,
+`record_copy_move_initializer_blocked`,
+`replacement_function_template_definition`, and
+`instantiate_target_overload_candidate`. These remain in the owning PA12
+initializer and call-helper modules, avoid unchecked implementation movement,
+and keep the file audit passing without hiding work.

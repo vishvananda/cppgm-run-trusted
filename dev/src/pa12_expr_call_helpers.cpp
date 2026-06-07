@@ -1,4 +1,4 @@
-#include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -130,73 +130,181 @@ TypePtr member_function_pointer_type(Binding* binding)
 	return pa11::make_member_pointer(class_type, member_fn);
 }
 
-bool same_template_instance_argument(
-	const pa11::TemplateInstanceArgument& left,
-	const pa11::TemplateInstanceArgument& right)
-{
-	if (left.kind != right.kind ||
-	    left.value != right.value ||
-	    left.value_name != right.value_name ||
-	    left.template_name != right.template_name ||
-	    left.dependent != right.dependent ||
-	    left.type.get() != right.type.get() ||
-	    left.pack.size() != right.pack.size())
-		return false;
-	for (size_t i = 0; i < left.pack.size(); ++i)
-		if (!same_template_instance_argument(left.pack[i], right.pack[i]))
-			return false;
-	return true;
-}
-
-bool same_template_specialization_record(TypePtr left, TypePtr right)
-{
-	TypePtr l = pa11::strip_cv(left);
-	TypePtr r = pa11::strip_cv(right);
-	if (l->kind != pa11::TypeKind::Record ||
-	    r->kind != pa11::TypeKind::Record ||
-	    !l->is_template_specialization ||
-	    !r->is_template_specialization)
-		return false;
-	if (l->name == r->name)
-		return true;
-	if (l->template_primary_name.empty() ||
-	    l->template_primary_name != r->template_primary_name ||
-	    l->template_arguments.size() != r->template_arguments.size())
-		return false;
-	for (size_t i = 0; i < l->template_arguments.size(); ++i)
-		if (!same_template_instance_argument(l->template_arguments[i],
-		                                     r->template_arguments[i]))
-			return false;
-	return true;
-}
-
 }  // namespace
 
+TemplateDeclaration* Parser::replacement_function_template_definition(
+	TemplateDeclaration* declaration)
+{
+	if (declaration->has_definition)
+		return declaration;
+	map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
+		function_templates_.find(declaration->owner);
+	if (sit == function_templates_.end())
+		return declaration;
+	map<string, vector<TemplateDeclaration*> >::iterator it =
+		sit->second.find(declaration->name);
+	if (it == sit->second.end())
+		return declaration;
+	for (size_t j = 0; j < it->second.size(); ++j)
+	{
+		TemplateDeclaration* replacement = it->second[j];
+		if (replacement == declaration ||
+		    !replacement->has_definition ||
+		    replacement->generic_function_type.get() == NULL ||
+		    !same_function_template_signature_type(
+			    replacement->generic_function_type,
+			    declaration->generic_function_type) ||
+		    !template_parameter_lists_match_local(replacement->parameters,
+		                                          declaration->parameters))
+			continue;
+		return replacement;
+	}
+	return declaration;
+}
+
+Binding* Parser::instantiate_target_overload_candidate(
+	Binding* candidate,
+	TypePtr wanted,
+	const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments)
+{
+	map<Binding*, TemplateDeclaration*>::iterator template_it =
+		function_template_placeholders_.find(candidate);
+	Binding* placeholder = candidate->aliased_binding != NULL
+		? candidate->aliased_binding : candidate;
+	if (template_it == function_template_placeholders_.end() ||
+	    template_it->second->placeholder != placeholder)
+		return candidate;
+
+	TemplateDeclaration* declaration =
+		replacement_function_template_definition(template_it->second);
+	vector<TemplateArgument> explicit_args;
+	map<Binding*, vector<TemplateArgument> >::const_iterator eit =
+		explicit_template_arguments.find(candidate);
+	if (eit != explicit_template_arguments.end())
+		explicit_args = eit->second;
+	vector<TemplateArgument> deduced;
+	if (!deduce_function_template_target_type(declaration,
+	                                          wanted,
+	                                          explicit_args,
+	                                          deduced))
+		return NULL;
+	return instantiate_function_template(declaration, deduced);
+}
+
 Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
-{ if (expr.overloads.empty()) return expr; TypePtr target_object = target; if (target_object->kind == pa11::TypeKind::LValueReference || target_object->kind == pa11::TypeKind::RValueReference)
-target_object = target_object->base; TypePtr wanted = target_object; bool target_member_function_pointer = false; if (is_function_pointer(target_object)) wanted = pa11::strip_cv(target_object)->base;
-else if (is_function_reference(target)) wanted = pa11::strip_cv(target->base); else if (is_member_function_pointer(target_object)) target_member_function_pointer = true; else
-throw runtime_error("overloaded function id needs target"); Binding* found = NULL; vector<Binding*> considered; for (size_t i = 0; i < expr.overloads.size(); ++i) { Binding* candidate = expr.overloads[i];
-map<Binding*, TemplateDeclaration*>::iterator template_it = function_template_placeholders_.find(candidate); Binding* placeholder = candidate->aliased_binding != NULL ? candidate->aliased_binding : candidate;
-if (template_it != function_template_placeholders_.end() && template_it->second->placeholder == placeholder) { TemplateDeclaration* declaration = template_it->second; if (!declaration->has_definition) {
-map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit = function_templates_.find(declaration->owner); if (sit != function_templates_.end()) { map<string, vector<TemplateDeclaration*> >::iterator it =
-sit->second.find(declaration->name); if (it != sit->second.end()) for (size_t j = 0; j < it->second.size(); ++j) { TemplateDeclaration* candidate = it->second[j]; if (candidate == declaration ||
-!candidate->has_definition || candidate->generic_function_type.get() == NULL || !same_function_template_signature_type( candidate->generic_function_type, declaration->generic_function_type) ||
-!template_parameter_lists_match_local( candidate->parameters, declaration->parameters)) continue; declaration = candidate; break; } } } vector<TemplateArgument> explicit_args;
-map<Binding*, vector<TemplateArgument> >::const_iterator eit = expr.explicit_template_arguments.find(candidate); if (eit != expr.explicit_template_arguments.end()) explicit_args = eit->second;
-vector<TemplateArgument> deduced; if (!deduce_function_template_target_type(declaration, wanted, explicit_args, deduced)) continue; candidate = instantiate_function_template(declaration, deduced); }
-Binding* duplicate = NULL; for (size_t j = 0; j < considered.size(); ++j) if (pa11::same_type(considered[j]->type, candidate->type) && considered[j]->is_static_member == candidate->is_static_member) {
-duplicate = considered[j]; break; } if (duplicate != NULL) { if (!(candidate->is_inline_definition && !duplicate->is_inline_definition)) continue; vector<Binding*>::iterator pos =
-find(considered.begin(), considered.end(), duplicate); if (pos != considered.end()) *pos = candidate; if (found == duplicate) found = NULL; } else considered.push_back(candidate);
-TypePtr candidate_member_pointer = target_member_function_pointer ? member_function_pointer_type(candidate) : TypePtr(); bool matches = target_member_function_pointer ? (candidate_member_pointer.get() != NULL &&
-pa11::same_type(candidate_member_pointer, target_object)) : pa11::same_type(candidate->type, wanted); if (matches) { if (found != NULL) throw runtime_error("ambiguous overloaded function id"); found = candidate; } }
-if (found == NULL) throw runtime_error("no overloaded function id target"); if (unevaluated_expression_depth_ == 0) { parse_pending_function_body(found); parse_pending_member_body(found); } Expr out = expr;
-out.overloads.clear(); out.binding = found; bool address_expr = expr.node.line.compare(0, 16, "unary-expression") == 0 && expr.node.has_op && expr.node.op == OP_AMP && !expr.node.children.empty(); Expr selected_id;
-selected_id.valid = true; selected_id.binding = found; selected_id.type = found->type; selected_id.category = ValueCategory::LValue; selected_id.node = Node("id-expression lvalue " +
-pa11::describe_type(found->type) + " " + qualified_decl_name(found)); selected_id.node.binding = found; annotate_expr_node(selected_id); if (address_expr) { out.type = target_member_function_pointer
-? member_function_pointer_type(found) : pa11::make_pointer(found->type); out.category = ValueCategory::PRValue; out.node = Node("unary-expression prvalue " + pa11::describe_type(out.type) + " OP_AMP:&");
-add_child(out.node, selected_id.node); out.node.has_op = true; out.node.op = OP_AMP; out.node.token_text = "&"; } else { out.type = found->type; out.category = ValueCategory::LValue; out.node = selected_id.node; }
-annotate_expr_node(out); return out; }
+{
+	if (expr.overloads.empty())
+		return expr;
+	TypePtr target_object = target;
+	if (target_object->kind == pa11::TypeKind::LValueReference ||
+	    target_object->kind == pa11::TypeKind::RValueReference)
+		target_object = target_object->base;
+	TypePtr wanted = target_object;
+	bool target_member_function_pointer = false;
+	if (is_function_pointer(target_object))
+		wanted = pa11::strip_cv(target_object)->base;
+	else if (is_function_reference(target))
+		wanted = pa11::strip_cv(target->base);
+	else if (is_member_function_pointer(target_object))
+		target_member_function_pointer = true;
+	else
+		throw runtime_error("overloaded function id needs target");
+
+	Binding* found = NULL;
+	vector<Binding*> considered;
+	for (size_t i = 0; i < expr.overloads.size(); ++i)
+	{
+		Binding* candidate = instantiate_target_overload_candidate(
+			expr.overloads[i],
+			wanted,
+			expr.explicit_template_arguments);
+		if (candidate == NULL)
+			continue;
+
+		Binding* duplicate = NULL;
+		for (size_t j = 0; j < considered.size(); ++j)
+			if (pa11::same_type(considered[j]->type, candidate->type) &&
+			    considered[j]->is_static_member == candidate->is_static_member)
+			{
+				duplicate = considered[j];
+				break;
+			}
+		if (duplicate != NULL)
+		{
+			if (!(candidate->is_inline_definition &&
+			      !duplicate->is_inline_definition))
+				continue;
+			vector<Binding*>::iterator pos =
+				find(considered.begin(), considered.end(), duplicate);
+			if (pos != considered.end())
+				*pos = candidate;
+			if (found == duplicate)
+				found = NULL;
+		}
+		else
+			considered.push_back(candidate);
+
+		TypePtr candidate_member_pointer = target_member_function_pointer
+			? member_function_pointer_type(candidate) : TypePtr();
+		bool matches = target_member_function_pointer
+			? (candidate_member_pointer.get() != NULL &&
+			   pa11::same_type(candidate_member_pointer, target_object))
+			: pa11::same_type(candidate->type, wanted);
+		if (matches)
+		{
+			if (found != NULL)
+				throw runtime_error("ambiguous overloaded function id");
+			found = candidate;
+		}
+	}
+	if (found == NULL)
+		throw runtime_error("no overloaded function id target");
+	if (unevaluated_expression_depth_ == 0)
+	{
+		parse_pending_function_body(found);
+		parse_pending_member_body(found);
+	}
+
+	Expr out = expr;
+	out.overloads.clear();
+	out.binding = found;
+	bool address_expr =
+		expr.node.line.compare(0, 16, "unary-expression") == 0 &&
+		expr.node.has_op &&
+		expr.node.op == OP_AMP &&
+		!expr.node.children.empty();
+	Expr selected_id;
+	selected_id.valid = true;
+	selected_id.binding = found;
+	selected_id.type = found->type;
+	selected_id.category = ValueCategory::LValue;
+	selected_id.node = Node("id-expression lvalue " +
+	                        pa11::describe_type(found->type) + " " +
+	                        qualified_decl_name(found));
+	selected_id.node.binding = found;
+	annotate_expr_node(selected_id);
+	if (address_expr)
+	{
+		out.type = target_member_function_pointer
+			? member_function_pointer_type(found)
+			: pa11::make_pointer(found->type);
+		out.category = ValueCategory::PRValue;
+		out.node = Node("unary-expression prvalue " +
+		                pa11::describe_type(out.type) + " OP_AMP:&");
+		add_child(out.node, selected_id.node);
+		out.node.has_op = true;
+		out.node.op = OP_AMP;
+		out.node.token_text = "&";
+	}
+	else
+	{
+		out.type = found->type;
+		out.category = ValueCategory::LValue;
+		out.node = selected_id.node;
+	}
+	annotate_expr_node(out);
+	return out;
+}
 
 Expr Parser::make_dependent_call_expr(const Expr& callee,
                                       const vector<Expr>& args)

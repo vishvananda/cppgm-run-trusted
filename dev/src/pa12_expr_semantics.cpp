@@ -14,6 +14,96 @@ bool is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+namespace {
+
+bool same_template_specialization_type(TypePtr left, TypePtr right);
+
+void append_normalized_specialization_arguments(
+	vector<pa11::TemplateInstanceArgument>& out,
+	const vector<pa11::TemplateInstanceArgument>& arguments)
+{
+	for (size_t i = 0; i < arguments.size(); ++i)
+	{
+		if (arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack)
+		{
+			append_normalized_specialization_arguments(out, arguments[i].pack);
+			continue;
+		}
+		out.push_back(arguments[i]);
+	}
+}
+
+bool same_template_specialization_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right);
+
+bool same_template_specialization_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return same_template_specialization_type(left.type, right.type);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return left.dependent == right.dependent &&
+		       left.value_negated == right.value_negated &&
+		       left.value == right.value &&
+		       left.value_name == right.value_name &&
+		       left.value_owner_template_name ==
+			       right.value_owner_template_name &&
+		       left.value_member_name == right.value_member_name &&
+		       same_template_specialization_type(left.type, right.type) &&
+		       same_template_specialization_arguments(
+			       left.value_owner_template_arguments,
+			       right.value_owner_template_arguments);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!same_template_specialization_argument(left.pack[i], right.pack[i]))
+			return false;
+	return true;
+}
+
+bool same_template_specialization_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	vector<pa11::TemplateInstanceArgument> flat_left;
+	vector<pa11::TemplateInstanceArgument> flat_right;
+	append_normalized_specialization_arguments(flat_left, left);
+	append_normalized_specialization_arguments(flat_right, right);
+	if (flat_left.size() != flat_right.size())
+		return false;
+	for (size_t i = 0; i < flat_left.size(); ++i)
+		if (!same_template_specialization_argument(flat_left[i], flat_right[i]))
+			return false;
+	return true;
+}
+
+bool same_template_specialization_type(TypePtr left, TypePtr right)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (pa11::same_type(left, right))
+		return true;
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
+	       !l->template_primary_name.empty() &&
+	       l->template_primary_name == r->template_primary_name &&
+	       same_template_specialization_arguments(l->template_arguments,
+	                                              r->template_arguments);
+}
+
+}  // namespace
+
 bool template_declaration_has_body(const vector<Token>& tokens,
                                    const TemplateDeclaration* declaration)
 {
@@ -30,13 +120,16 @@ bool template_declaration_has_body(const vector<Token>& tokens,
 
 bool same_template_specialization_record(TypePtr left, TypePtr right)
 {
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
 	TypePtr l = pa11::strip_cv(left);
 	TypePtr r = pa11::strip_cv(right);
-	return l->kind == pa11::TypeKind::Record &&
-	       r->kind == pa11::TypeKind::Record &&
-	       l->is_template_specialization &&
-	       r->is_template_specialization &&
-	       l->name == r->name;
+	if (l->kind != pa11::TypeKind::Record ||
+	    r->kind != pa11::TypeKind::Record ||
+	    !l->is_template_specialization ||
+	    !r->is_template_specialization)
+		return false;
+	return same_template_specialization_type(l, r) || l->name == r->name;
 }
 
 bool record_has_base_type(TypePtr source, TypePtr target)

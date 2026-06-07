@@ -12,6 +12,7 @@ namespace internal {
 bool template_declaration_has_body(const std::vector<Token>& tokens,
                                    const TemplateDeclaration* declaration);
 bool record_has_base_type(TypePtr source, TypePtr target);
+bool same_template_specialization_record(TypePtr left, TypePtr right);
 bool same_template_specialization_family(TypePtr left, TypePtr right);
 bool same_template_signature_type(
 	TypePtr left,
