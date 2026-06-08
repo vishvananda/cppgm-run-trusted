@@ -185,7 +185,7 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 
 Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 {
-	if (starts_with(expr.line, "typeid-expression"))
+	if (expr.is_typeid_expression)
 		return emit_typeid_lvalue_addr(expr);
 	if (starts_with(expr.line, "id-expression") && expr.binding != NULL)
 	{
@@ -338,7 +338,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	if (starts_with(expr.line, "cast-expression") &&
 	    is_reference(expr.type) && !expr.children.empty())
 	{
-		if (expr.token_text.find("dynamic_cast") != string::npos)
+		if (expr.is_dynamic_cast_expression)
 			return emit_dynamic_cast(expr, true);
 		TypePtr target = pa11::strip_cv(expr.type->base);
 		TypePtr source = pa11::strip_cv(object_type(expr.children[0].type));

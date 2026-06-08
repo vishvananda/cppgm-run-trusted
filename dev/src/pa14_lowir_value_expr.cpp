@@ -660,8 +660,8 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 	}
 	if (expr.has_op && (expr.op == OP_EQ || expr.op == OP_NE) &&
 	    expr.children.size() == 2 &&
-	    starts_with(expr.children[0].line, "typeid-expression") &&
-	    starts_with(expr.children[1].line, "typeid-expression"))
+	    expr.children[0].is_typeid_expression &&
+	    expr.children[1].is_typeid_expression)
 	{
 		Value lhs = emit_lvalue_addr(expr.children[0]);
 		Value rhs = emit_lvalue_addr(expr.children[1]);
@@ -1085,7 +1085,7 @@ Value FunctionLowerer::emit_postfix(const Node& expr)
 
 Value FunctionLowerer::emit_cast(const Node& expr)
 {
-	if (expr.token_text.find("dynamic_cast") != string::npos)
+	if (expr.is_dynamic_cast_expression)
 		return emit_dynamic_cast(expr, is_reference(expr.type));
 	if (pa11::is_void_type(expr.type))
 	{

@@ -65,8 +65,6 @@ TypePtr left = pa11::strip_cv(lhs); TypePtr right = pa11::strip_cv(rhs); if (op 
 if (left->kind == pa11::TypeKind::Pointer) return pa11::is_integral_or_bool_type(right); return type_is_arithmetic(left) && type_is_arithmetic(right); }
 if (op == OP_STARASS || op == OP_DIVASS) return type_is_arithmetic(left) && type_is_arithmetic(right); if (op == OP_MODASS || op == OP_XORASS || op == OP_BANDASS || op == OP_BORASS || op == OP_LSHIFTASS || op == OP_RSHIFTASS)
 return pa11::is_integral_or_bool_type(left) && pa11::is_integral_or_bool_type(right); return false; }
-bool node_line_starts(const Node& node, const string& prefix)
-{ return node.line.size() >= prefix.size() && node.line.compare(0, prefix.size(), prefix) == 0; }
 }  // namespace
 Expr Parser::make_builtin_id_expr(const QualifiedName& name) { if ((name.name == "operatornew" || name.name == "operatornew[]" ||
 name.name == "operatordelete" || name.name == "operatordelete[]") && (!name.qualified || name.qualifier == global_scope())) {
@@ -98,7 +96,7 @@ result = void_ptr; } TypePtr fn = pa11::make_function(result, params, false); bi
 out.type = binding->type; out.category = ValueCategory::LValue; out.overloads.push_back(binding); out.node = Node("id-expression lvalue " +
 pa11::describe_type(out.type) + " " + binding->name); annotate_expr_node(out); return out; }
 return Expr(); } Expr Parser::make_binary_expr(ETokenType op, const string& text,
-Expr lhs, Expr rhs) { Expr pack; if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack; if ((op == OP_EQ || op == OP_NE) && node_line_starts(lhs.node, "typeid-expression") && node_line_starts(rhs.node, "typeid-expression"))
+Expr lhs, Expr rhs) { Expr pack; if (make_binary_pack_expr(op, text, lhs, rhs, pack)) return pack; if ((op == OP_EQ || op == OP_NE) && lhs.node.is_typeid_expression && rhs.node.is_typeid_expression)
 { TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); string opname = operator_function_name(op, text);
 if (left_object->kind != pa11::TypeKind::Record || left_object->scope == NULL || lookup_qualified_set(left_object->scope, opname, pa11::LOOKUP_FUNCTION).empty())
 throw runtime_error("typeid comparison requires declared std::type_info operator");
@@ -380,9 +378,11 @@ if (source_object->kind == pa11::TypeKind::Record && target->kind != pa11::TypeK
 try { conv = convert_to(inner, target); }
 catch (...) { --explicit_conversion_context_; throw;
 } --explicit_conversion_context_; if (conv.viable) inner = conv.expr;
-} string line = "cast-expression prvalue " + pa11::describe_type(target); if (!op_text.empty()) line += " " + op_text;
-out.node = Node(line); add_child(out.node, inner.node); out.node.token_text = op_text; annotate_expr_node(out);
-return out; } Expr Parser::make_sizeof_expr(uint64_t value) {
+	} string line = "cast-expression prvalue " + pa11::describe_type(target); if (!op_text.empty()) line += " " + op_text;
+	out.node = Node(line); add_child(out.node, inner.node); out.node.token_text = op_text;
+	out.node.is_dynamic_cast_expression = op_text.find("dynamic_cast") != string::npos;
+	annotate_expr_node(out);
+	return out; } Expr Parser::make_sizeof_expr(uint64_t value) {
 Expr out; out.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT); out.category = ValueCategory::PRValue; out.valid = true;
 out.constant_expression = true; out.has_constant_value = true; out.constant_value = value; out.null_pointer_constant = value == 0;
 out.node = Node("sizeof-expression prvalue unsigned long int"); out.node.token_text = to_string(value); annotate_expr_node(out); return out;

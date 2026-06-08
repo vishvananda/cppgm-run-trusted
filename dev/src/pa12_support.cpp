@@ -19,7 +19,9 @@ Node::Node()
 	  constant_value(0),
 	  dependent_value_negated(false),
 	  suppress_virtual_dispatch(false),
-	  virtual_dispatch(false)
+	  virtual_dispatch(false),
+	  is_typeid_expression(false),
+	  is_dynamic_cast_expression(false)
 {
 }
 
@@ -34,7 +36,9 @@ Node::Node(const string& text)
 	  constant_value(0),
 	  dependent_value_negated(false),
 	  suppress_virtual_dispatch(false),
-	  virtual_dispatch(false)
+	  virtual_dispatch(false),
+	  is_typeid_expression(false),
+	  is_dynamic_cast_expression(false)
 {
 }
 

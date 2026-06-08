@@ -89,10 +89,11 @@ Expr operand = parse_expression(); expect(OP_RPAREN); operand_type = expression_
 "std", pa11::LOOKUP_NAMESPACE); Scope* std_scope = std_binding != NULL ? std_binding->target_scope : NULL;
 Binding* type_info = std_scope != NULL ? pa11::lookup_qualified(std_scope, "type_info",
 pa11::LOOKUP_TYPE) : NULL; if (type_info != NULL && type_info->type.get() != NULL) type_info_type = pa11::make_cv(type_info->type, pa11::CV_CONST);
-else throw runtime_error("typeid requires declared std::type_info"); Expr out;
-out.valid = true; out.type = type_info_type; out.category = ValueCategory::LValue; out.node = Node("typeid-expression lvalue " +
-pa11::describe_type(out.type)); out.node.type = out.type; out.node.category = out.category; out.node.token_text = pa11::describe_type(operand_type);
-add_child(out.node, operand_node); annotate_expr_node(out); return out; }
+	else throw runtime_error("typeid requires declared std::type_info"); Expr out;
+	out.valid = true; out.type = type_info_type; out.category = ValueCategory::LValue; out.node = Node("typeid-expression lvalue " +
+	pa11::describe_type(out.type)); out.node.type = out.type; out.node.category = out.category; out.node.token_text = pa11::describe_type(operand_type);
+	out.node.is_typeid_expression = true;
+	add_child(out.node, operand_node); annotate_expr_node(out); return out; }
 if (consume(KW_THIS)) { Binding* binding = find_enclosing_nonlambda_this(current_scope()); if (binding == NULL)
 binding = pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER);
 if (binding == NULL) throw runtime_error("this outside member function"); Expr out; out.binding = binding;

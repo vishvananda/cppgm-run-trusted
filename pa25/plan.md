@@ -59,6 +59,38 @@ outside PA25.
 - Call and object initialization lowering were split into focused helpers so
   the PA25 implementation stays inside the file-audit ownership limits.
 
+## Architecture Review
+
+The implemented PA25 architecture matches the staged PA24 compiler rather than
+adding a replacement pipeline. Parsing and semantic ownership remain in the
+`pa12_*` frontend files, with PA25 facts attached to typed `Type`, `Binding`,
+`Expr`, and `Node` state. Lowering remains in the `pa14_lowir_*` family and
+continues to emit ordinary LowIR text.
+
+Feature ownership is split along existing boundaries:
+
+- Capturing lambdas are built in `pa12_expr_primary.cpp` as generated closure
+  records with capture fields and rewritten `operator()` bodies. LowIR object
+  initialization then treats closure storage as normal record storage.
+- `std::initializer_list<T>` recognition and conversion live in
+  `pa12_expr_semantics.cpp`, declaration/range-for integration lives in the
+  PA12 declaration and statement paths, and LowIR materialization lives in
+  `pa14_lowir_object_init.cpp` / `pa14_lowir_init.cpp`.
+- RTTI/typeinfo naming and deterministic global emission live in
+  `pa14_lowir_rtti.cpp`; `typeid` lowering uses those globals through ordinary
+  address/load/control-flow operations.
+- `dynamic_cast` lowering is handled by `pa14_lowir_value_expr.cpp` and
+  `pa14_lowir_value_addr.cpp`, using the ABI runtime declaration and ordinary
+  LowIR branches for pointer null propagation and reference bad-cast handling.
+- Source throw/catch lowering is isolated in `pa14_lowir_throw.cpp`, which is
+  included in `dev/frontend_source_sets.mk`.
+
+Audit review found one architecture issue: PA25 expression-kind checks for
+`typeid` comparison and `dynamic_cast` dispatch were recovered from formatted
+AST text/token strings. That has been replaced with typed `Node` flags so the
+semantic and lowering paths no longer depend on presentation strings for those
+PA25 facts.
+
 ## Completed Implementation Pass
 
 This pass fixed an older-stage regression that blocked PA25 completion:
@@ -80,6 +112,25 @@ perl scripts/cppgm_file_audit.pl --stage pa25 --paths dev/src
 
 The required through report passed `2345 / 2345`; the file audit passed with
 warnings only.
+
+## Final Architecture Review
+
+The post-audit implementation has no discovered PA25 substitutes or bypasses:
+no reference binaries, host compilers, interpreters, VMs, trampolines,
+template-binary payloads, embedded earlier-IR payloads, fixture gates, or
+timeout workarounds are used to produce compiler output.
+
+The remaining string inspection in LowIR output ordering/pruning is presentation
+reachability over already emitted LowIR symbols, not source semantic recovery.
+The PA25 source semantic facts audited in this pass are represented explicitly:
+initializer-list type recognition is typed, closure captures are represented as
+generated fields, RTTI/typeinfo is emitted from `Type`/`Binding` structure, and
+`typeid`/`dynamic_cast` expression identity is carried by `Node` metadata.
+
+The PA25 file audit still reports warnings for legacy large/catch-all files and
+known duplicate blocks, but it passes. The warnings were inspected as audit
+signals; the PA25 cleanup did not move implementation into unchecked paths, and
+the new throw lowering source remains in the frontend source set.
 
 ## Validation
 

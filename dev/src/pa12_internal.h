@@ -63,6 +63,8 @@ struct Node
 	vector<pa11::TemplateInstanceArgument> dependent_value_owner_template_arguments;
 	bool suppress_virtual_dispatch;
 	bool virtual_dispatch;
+	bool is_typeid_expression;
+	bool is_dynamic_cast_expression;
 
 	Node();
 	explicit Node(const string& text);
