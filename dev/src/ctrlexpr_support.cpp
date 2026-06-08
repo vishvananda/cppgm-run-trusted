@@ -716,8 +716,7 @@ public:
 	void emit_eof()
 	{
 		finish_line();
-		output_ += "eof\n";
-		out_ << output_;
+		out_ << "eof\n";
 	}
 
 private:
@@ -729,7 +728,7 @@ private:
 		if (EvaluateTokens(line_, is_defined_, value))
 			write_value(value);
 		else
-			output_ += "error\n";
+			out_ << "error\n";
 		line_.clear();
 	}
 
@@ -737,20 +736,17 @@ private:
 	{
 		if (value.is_unsigned)
 		{
-			output_ += to_string(value.bits);
-			output_ += "u\n";
+			out_ << value.bits << "u\n";
 		}
 		else
 		{
-			output_ += to_string(ToSigned(value.bits));
-			output_ += '\n';
+			out_ << ToSigned(value.bits) << '\n';
 		}
 	}
 
 	ostream& out_;
 	ctrlexpr::DefinedPredicate is_defined_;
 	vector<Token> line_;
-	string output_;
 };
 
 void AppendPPTokenAsCtrlExprToken(const PPToken& token, vector<Token>& out)

@@ -203,34 +203,51 @@ TextChar make_text_char(const SourceChar & source, int cp)
   return ch;
 }
 
-vector<TextChar> apply_trigraphs(const vector<SourceChar> & source)
+vector<TextChar> apply_trigraphs_and_line_splices(const vector<SourceChar> & source)
 {
   vector<TextChar> out;
+  out.reserve(source.size());
   for(size_t i = 0; i < source.size();) {
+    TextChar ch;
     if(i + 2 < source.size() && source[i].cp == '?' && source[i + 1].cp == '?') {
       const int replacement = trigraph_replacement(source[i + 2].cp);
       if(replacement >= 0) {
-        out.push_back(make_text_char(source[i], replacement));
+        ch = make_text_char(source[i], replacement);
         i += 3;
+      } else {
+        ch = make_text_char(source[i], source[i].cp);
+        ++i;
+      }
+    } else {
+      ch = make_text_char(source[i], source[i].cp);
+      ++i;
+    }
+    if(ch.cp == '\\') {
+      size_t lookahead = i;
+      TextChar next;
+      bool have_next = false;
+      if(lookahead < source.size()) {
+        if(lookahead + 2 < source.size() && source[lookahead].cp == '?' &&
+           source[lookahead + 1].cp == '?') {
+          const int replacement = trigraph_replacement(source[lookahead + 2].cp);
+          if(replacement >= 0) {
+            next = make_text_char(source[lookahead], replacement);
+            lookahead += 3;
+            have_next = true;
+          }
+        }
+        if(!have_next) {
+          next = make_text_char(source[lookahead], source[lookahead].cp);
+          ++lookahead;
+          have_next = true;
+        }
+      }
+      if(have_next && next.cp == '\n') {
+        i = lookahead;
         continue;
       }
     }
-    out.push_back(make_text_char(source[i], source[i].cp));
-    ++i;
-  }
-  return out;
-}
-
-vector<TextChar> apply_line_splices(const vector<TextChar> & input)
-{
-  vector<TextChar> out;
-  for(size_t i = 0; i < input.size();) {
-    if(i + 1 < input.size() && input[i].cp == '\\' && input[i + 1].cp == '\n') {
-      i += 2;
-      continue;
-    }
-    out.push_back(input[i]);
-    ++i;
+    out.push_back(ch);
   }
   return out;
 }
@@ -251,7 +268,7 @@ void append_final_newline(vector<TextChar> & text, const vector<SourceChar> & so
 
 vector<TextChar> translated_text(const vector<SourceChar> & source)
 {
-  vector<TextChar> text = apply_line_splices(apply_trigraphs(source));
+  vector<TextChar> text = apply_trigraphs_and_line_splices(source);
   append_final_newline(text, source);
   return text;
 }

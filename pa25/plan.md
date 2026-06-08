@@ -59,12 +59,21 @@ outside PA25.
 - Call and object initialization lowering were split into focused helpers so
   the PA25 implementation stays inside the file-audit ownership limits.
 
-## Validation Result
+## Completed Implementation Pass
+
+This pass fixed an older-stage regression that blocked PA25 completion:
+`pa3/tests/300-triple.t` timed out while evaluating many controlling
+expressions. The fix keeps the real tokenizer/evaluator path, reduces phase
+1/2 peak memory by combining trigraph replacement with line-splice deletion,
+and streams `ctrlexpr` results per logical line instead of retaining the whole
+test output in memory.
 
 Completed validation:
 
 ```sh
-make test-report ACTIVE_TEST_REPORT_PAS='pa15 pa16 pa17 pa18 pa19 pa22 pa23 pa24 pa25'
+make -C pa3 check TEST=tests/300-triple.t
+make test-pa3
+make test-report ACTIVE_TEST_REPORT_PAS='pa25'
 make test-report-through-pa25
 perl scripts/cppgm_file_audit.pl --stage pa25 --paths dev/src
 ```
