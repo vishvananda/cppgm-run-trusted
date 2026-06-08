@@ -95,6 +95,53 @@ bool is_class_constructor(const Binding* binding)
 	       binding->name == binding->owner->name;
 }
 
+bool record_vector_contains(const vector<TypePtr>& records, TypePtr record)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < records.size(); ++i)
+		if (pa11::same_type(records[i], record))
+			return true;
+	return false;
+}
+
+void collect_template_specialization_records(TypePtr type,
+                                             vector<TypePtr>& out)
+{
+	if (type.get() == NULL)
+		return;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+	{
+		if (!record_vector_contains(out, bare))
+			out.push_back(bare);
+		return;
+	}
+	if (bare->kind == TypeKind::Pointer ||
+	    bare->kind == TypeKind::LValueReference ||
+	    bare->kind == TypeKind::RValueReference ||
+	    bare->kind == TypeKind::Array)
+	{
+		collect_template_specialization_records(bare->base, out);
+		return;
+	}
+	if (bare->kind == TypeKind::MemberPointer)
+	{
+		collect_template_specialization_records(bare->member_class, out);
+		collect_template_specialization_records(bare->base, out);
+		return;
+	}
+	if (bare->kind == TypeKind::Function)
+	{
+		collect_template_specialization_records(bare->base, out);
+		for (size_t i = 0; i < bare->parameters.size(); ++i)
+			collect_template_specialization_records(bare->parameters[i],
+			                                        out);
+	}
+}
+
 }  // namespace
 
 FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
@@ -380,6 +427,45 @@ bool ProgramLowerer::template_static_member_constant_load_required(
 	return binding->is_template_static_member_explicit_definition;
 }
 
+void ProgramLowerer::demand_template_static_member_definitions_for_function(
+	const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function)
+		return;
+	vector<TypePtr> associated_records;
+	TypePtr owner_record = class_record_for_member(binding);
+	if (owner_record.get() != NULL &&
+	    record_is_template_specialization(owner_record) &&
+	    !is_class_constructor(binding) &&
+	    !is_class_destructor_binding(binding) &&
+	    !record_vector_contains(associated_records, owner_record))
+		associated_records.push_back(pa11::strip_cv(owner_record));
+	if (binding->is_hidden_friend && binding->type.get() != NULL)
+		collect_template_specialization_records(binding->type,
+		                                        associated_records);
+	if (associated_records.empty())
+		return;
+	vector<const Binding*> demands;
+	for (map<const Binding*, Node>::const_iterator it =
+		     deferred_global_definitions.begin();
+	     it != deferred_global_definitions.end();
+	     ++it)
+	{
+		const Binding* member = it->first;
+		if (member == NULL ||
+		    !member->is_static_member ||
+		    !member->is_template_static_member_definition ||
+		    !member->is_template_static_member_explicit_definition)
+			continue;
+		TypePtr owner = class_record_for_member(member);
+		if (record_vector_contains(associated_records, owner))
+			demands.push_back(member);
+	}
+	for (size_t i = 0; i < demands.size(); ++i)
+		demand_deferred_global_definition(demands[i]);
+}
+
 void ProgramLowerer::ensure_thread_local_wrapper(const string& global_name)
 {
 	string name = global_name + "__tls_wrapper";
@@ -637,15 +723,6 @@ void ProgramLowerer::collect_node(const Node& node)
 					emit_global(node);
 					return;
 				}
-				if (node.token_text ==
-				        "template-static-member-definition" &&
-				    binding_has_template_specialization_context(node.binding) &&
-				    node.binding
-					    ->is_template_static_member_explicit_definition)
-				{
-					emit_global(node);
-					return;
-				}
 				deferred_global_definitions[node.binding] = node;
 				return;
 			}
@@ -789,7 +866,10 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 	demand_move_assignment_copy_dependency(binding);
 	string name = symbol_for(binding);
 	if (complete_entry && defined_functions.find(name) != defined_functions.end())
+	{
+		demand_template_static_member_definitions_for_function(binding);
 		return;
+	}
 	if (!complete_entry &&
 	    defined_functions.find(name + "__base_entry") != defined_functions.end())
 		return;
@@ -808,7 +888,10 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 		found = inline_definitions.find(binding);
 	}
 	if (found != inline_definitions.end())
+	{
+		demand_template_static_member_definitions_for_function(binding);
 		insert_pending_inline_definition(binding);
+	}
 }
 
 

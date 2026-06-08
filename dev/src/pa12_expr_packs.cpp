@@ -156,6 +156,8 @@ bool Parser::make_cast_pack_expr(TypePtr target,
                                  bool suppress_target_pack,
                                  Expr& out)
 {
+	if (!at(OP_DOTS))
+		return false;
 	string target_pack_name;
 	TemplateArgument target_pack;
 	bool target_is_pack =
@@ -328,7 +330,13 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		string name;
 		TemplateArgument pack;
 	};
+	struct NamedFunctionPack
+	{
+		string name;
+		vector<Binding*> bindings;
+	};
 	vector<NamedPack> packs;
+	vector<NamedFunctionPack> function_packs;
 	set<string> seen;
 	for (vector<map<string, TemplateArgument> >::const_reverse_iterator sit =
 		     template_value_substitutions_.rbegin();
@@ -346,11 +354,26 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 				named.pack = it->second;
 				packs.push_back(named);
 			}
-	if (packs.empty())
+	if (!function_parameter_pack_substitutions_.empty())
+		for (map<string, vector<Binding*> >::const_iterator it =
+			     function_parameter_pack_substitutions_.back().begin();
+		     it != function_parameter_pack_substitutions_.back().end();
+		     ++it)
+		{
+			NamedFunctionPack named;
+			named.name = it->first;
+			named.bindings = it->second;
+			function_packs.push_back(named);
+		}
+	if (packs.empty() && function_packs.empty())
 		return false;
-	size_t pack_size = packs[0].pack.pack.size();
-	for (size_t i = 1; i < packs.size(); ++i)
+	size_t pack_size = !packs.empty()
+		? packs[0].pack.pack.size() : function_packs[0].bindings.size();
+	for (size_t i = 0; i < packs.size(); ++i)
 		if (packs[i].pack.pack.size() != pack_size)
+			throw runtime_error("pack expansion size mismatch");
+	for (size_t i = 0; i < function_packs.size(); ++i)
+		if (function_packs[i].bindings.size() != pack_size)
 			throw runtime_error("pack expansion size mismatch");
 
 	size_t save_pos = pos_;
@@ -360,6 +383,8 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		template_value_substitutions_;
 	vector<set<string> > save_pack_subst =
 		template_type_parameter_packs_;
+	vector<map<string, vector<Binding*> > > save_function_pack_subst =
+		function_parameter_pack_substitutions_;
 	vector<Expr> expanded;
 	try
 	{
@@ -367,6 +392,7 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		{
 			map<string, TypePtr> type_subst;
 			map<string, TemplateArgument> value_subst;
+			map<string, vector<Binding*> > function_subst;
 			for (size_t i = 0; i < packs.size(); ++i)
 			{
 				const TemplateArgument& elem = packs[i].pack.pack[p];
@@ -375,14 +401,20 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 				else
 					value_subst[packs[i].name] = elem;
 			}
+			for (size_t i = 0; i < function_packs.size(); ++i)
+				if (p < function_packs[i].bindings.size())
+					function_subst[function_packs[i].name]
+						.push_back(function_packs[i].bindings[p]);
 			template_type_substitutions_.push_back(type_subst);
 			template_value_substitutions_.push_back(value_subst);
 			template_type_parameter_packs_.push_back(set<string>());
+			function_parameter_pack_substitutions_.push_back(function_subst);
 			pos_ = begin;
 			Expr elem = parse_assignment_expression();
 			if (pos_ != end)
 				throw runtime_error("pack expression replay did not consume pattern");
 			expanded.push_back(elem);
+			function_parameter_pack_substitutions_.pop_back();
 			template_type_substitutions_.pop_back();
 			template_value_substitutions_.pop_back();
 			template_type_parameter_packs_.pop_back();
@@ -394,12 +426,14 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		template_type_substitutions_ = save_type_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
+		function_parameter_pack_substitutions_ = save_function_pack_subst;
 		throw;
 	}
 	pos_ = save_pos;
 	template_type_substitutions_ = save_type_subst;
 	template_value_substitutions_ = save_value_subst;
 	template_type_parameter_packs_ = save_pack_subst;
+	function_parameter_pack_substitutions_ = save_function_pack_subst;
 	out.swap(expanded);
 	return true;
 }

@@ -185,12 +185,39 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 	out.category = ValueCategory::PRValue;
 	out.overloads = inner.overloads;
 	out.explicit_template_arguments = inner.explicit_template_arguments;
+	bool bound_member_access =
+		inner.node.has_op &&
+		(inner.node.op == OP_DOT || inner.node.op == OP_ARROW) &&
+		!inner.node.suppress_virtual_dispatch;
+	bool class_scope_member_id =
+		inner.node.line.compare(0, 13, "id-expression") == 0 &&
+		inner.binding != NULL &&
+		inner.binding->owner != NULL &&
+		inner.binding->owner->kind == ScopeKind::Class &&
+		inner.binding->kind == BindingKind::Variable &&
+		!inner.binding->is_static_member &&
+		inner.node.token_text == inner.binding->name &&
+		(current_scope() == inner.binding->owner ||
+		 unevaluated_expression_depth_ > 0);
+	if (inner.binding == NULL)
+	{
+		out.dependent_value_name = inner.dependent_value_name;
+		out.dependent_value_owner_template_name =
+			inner.dependent_value_owner_template_name;
+		out.dependent_value_member_name =
+			inner.dependent_value_member_name;
+		out.dependent_value_negated = inner.dependent_value_negated;
+		out.dependent_value_owner_template_arguments =
+			inner.dependent_value_owner_template_arguments;
+	}
 	if (inner.binding != NULL &&
 	    inner.binding->owner != NULL &&
 	    inner.binding->owner->kind == ScopeKind::Class &&
 	    !inner.binding->is_static_member &&
 	    inner.binding->type->kind == pa11::TypeKind::Function)
 	{
+		if (bound_member_access)
+			throw runtime_error("address of bound member function");
 		TypePtr fn = inner.binding->type;
 		TypePtr this_type = fn->parameters.empty() ? TypePtr() : fn->parameters[0];
 		TypePtr class_type = this_type.get() == NULL ? TypePtr() :
@@ -205,6 +232,29 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 				pa11::TypeKind::Cv ? this_type->base->cv : pa11::CV_NONE;
 		out.type = pa11::make_member_pointer(class_type, member_fn);
 	}
+	else if (inner.binding != NULL &&
+	         inner.binding->owner != NULL &&
+	     inner.binding->owner->kind == ScopeKind::Class &&
+	     !inner.binding->is_static_member &&
+	     inner.binding->kind == BindingKind::Variable &&
+	     !bound_member_access &&
+	     !class_scope_member_id)
+	{
+		if (inner.binding->is_bit_field)
+			throw runtime_error("address of bit-field");
+		TypePtr class_type = pa11::record_type_for_scope(inner.binding->owner);
+		out.type = pa11::make_member_pointer(
+			class_type,
+			expression_object_type(inner.binding->type));
+		out.binding = inner.binding;
+	}
+	else if (inner.binding != NULL &&
+	         inner.binding->owner != NULL &&
+	         inner.binding->owner->kind == ScopeKind::Class &&
+	         !inner.binding->is_static_member &&
+	         inner.binding->kind == BindingKind::Variable &&
+	         inner.binding->is_bit_field)
+		throw runtime_error("address of bit-field");
 	else if (inner.type->kind == pa11::TypeKind::Function)
 	{
 		out.type = pa11::make_pointer(inner.type);

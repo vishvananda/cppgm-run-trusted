@@ -113,14 +113,18 @@ Binding* lookup_in_scope(Scope* scope,
 			return found;
 	}
 	TypePtr record = record_type_for_scope(scope);
-	TypePtr base = record.get() != NULL && record->base.get() != NULL
-		? strip_cv(record->base) : TypePtr();
-	if (base.get() != NULL && base->kind == TypeKind::Record &&
-	    base->scope != NULL)
+	vector<TypePtr> bases = record.get() != NULL
+		? record_direct_bases(record) : vector<TypePtr>();
+	for (size_t i = 0; i < bases.size(); ++i)
 	{
-		Binding* found = lookup_in_scope(base->scope, name, mask, seen);
-		if (found != NULL)
-			return found;
+		TypePtr base = bases[i].get() != NULL ? strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL && base->kind == TypeKind::Record &&
+		    base->scope != NULL)
+		{
+			Binding* found = lookup_in_scope(base->scope, name, mask, seen);
+			if (found != NULL)
+				return found;
+		}
 	}
 	return NULL;
 }
@@ -199,6 +203,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  ref_qualifier(0),
 	  is_noop_constructor(false),
 	  is_noop_destructor(false),
+	  is_cleanup_only_destructor(false),
 	  member_offset(0),
 	  is_bit_field(false),
 	  bit_width(0),
@@ -372,7 +377,9 @@ TypePtr make_function(TypePtr result,
 TypePtr make_member_pointer(TypePtr class_type, TypePtr member_type)
 {
 	TypePtr bare = strip_cv(class_type);
-	if (bare->kind != TypeKind::Record)
+	if (bare->kind != TypeKind::Record &&
+	    bare->kind != TypeKind::TemplateParameter &&
+	    !bare->is_dependent_typename)
 		throw runtime_error("member pointer class type is not a record");
 	TypePtr type = new_type(TypeKind::MemberPointer);
 	type->member_class = bare;
@@ -594,9 +601,10 @@ uint64_t type_size(const TypePtr& type)
 	TypePtr bare = strip_cv(type);
 	if (bare->kind == TypeKind::Fundamental)
 		return fundamental_size(bare->fundamental);
-	if (bare->kind == TypeKind::Pointer || is_reference_type(bare) ||
-	    bare->kind == TypeKind::MemberPointer)
+	if (bare->kind == TypeKind::Pointer || is_reference_type(bare))
 		return 8;
+	if (bare->kind == TypeKind::MemberPointer)
+		return strip_cv(bare->base)->kind == TypeKind::Function ? 16 : 8;
 	if (bare->kind == TypeKind::Array)
 	{
 		if (bare->unknown_bound)
@@ -629,6 +637,8 @@ uint64_t type_align(const TypePtr& type)
 			layout_record_type(bare);
 		return bare->record_align;
 	}
+	if (bare->kind == TypeKind::MemberPointer)
+		return 8;
 	return type_size(bare);
 }
 
@@ -643,8 +653,12 @@ bool record_uses_object_storage(TypePtr type)
 		return true;
 	if (!bare->fields.empty())
 		return true;
-	if (bare->base.get() != NULL)
-		return record_uses_object_storage(bare->base);
+	vector<TypePtr> bases = bare->direct_bases;
+	if (bases.empty() && bare->base.get() != NULL)
+		bases.push_back(bare->base);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (bases[i].get() != NULL && record_uses_object_storage(bases[i]))
+			return true;
 	return false;
 }
 
@@ -661,32 +675,56 @@ void layout_record_type(TypePtr type)
 		return;
 	bare->fields.clear();
 	bare->direct_base_offset = 0;
+	bare->direct_base_offsets.clear();
 	uint64_t offset = 0;
 	uint64_t align = max<uint64_t>(1, bare->record_forced_align);
-	TypePtr direct_base = bare->base.get() != NULL ? strip_cv(bare->base) : TypePtr();
+	vector<TypePtr> direct_bases = bare->direct_bases;
+	if (direct_bases.empty() && bare->base.get() != NULL)
+		direct_bases.push_back(bare->base);
+	TypePtr direct_base =
+		!direct_bases.empty() && direct_bases[0].get() != NULL
+		? strip_cv(direct_bases[0]) : TypePtr();
 	bool base_polymorphic =
 		direct_base.get() != NULL &&
 		direct_base->kind == TypeKind::Record &&
 		direct_base->is_polymorphic;
 	bool introduces_vptr = bare->is_polymorphic && !base_polymorphic;
-	if (direct_base.get() != NULL && direct_base->kind == TypeKind::Record)
+	for (size_t b = 0; b < direct_bases.size(); ++b)
 	{
+		direct_base = direct_bases[b].get() != NULL
+			? strip_cv(direct_bases[b]) : TypePtr();
+		if (direct_base.get() == NULL || direct_base->kind != TypeKind::Record)
+		{
+			bare->direct_base_offsets.push_back(0);
+			continue;
+		}
 		layout_record_type(direct_base);
 		uint64_t base_align = type_align(direct_base);
 		align = max<uint64_t>(align, base_align);
-		if (introduces_vptr && record_uses_object_storage(direct_base))
+		uint64_t base_offset = 0;
+		if (b == 0 && introduces_vptr && record_uses_object_storage(direct_base))
 		{
 			offset = 8;
 			uint64_t padding = offset % base_align;
 			if (padding != 0)
 				offset += base_align - padding;
-			bare->direct_base_offset = offset;
+			base_offset = offset;
 			offset += type_size(direct_base);
 		}
 		else if (!record_uses_object_storage(direct_base))
-			offset = 0;
+			base_offset = 0;
 		else
+		{
+			uint64_t padding = offset % base_align;
+			if (padding != 0)
+				offset += base_align - padding;
+			base_offset = offset;
 			offset = type_size(direct_base);
+			offset += base_offset;
+		}
+		bare->direct_base_offsets.push_back(base_offset);
+		if (b == 0)
+			bare->direct_base_offset = base_offset;
 	}
 	if (introduces_vptr)
 	{
@@ -784,6 +822,41 @@ void layout_record_type(TypePtr type)
 	bare->record_size = offset;
 	bare->record_align = align;
 	bare->layout_valid = true;
+}
+
+vector<TypePtr> record_direct_bases(TypePtr type)
+{
+	vector<TypePtr> out;
+	if (type.get() == NULL)
+		return out;
+	TypePtr bare = strip_cv(type);
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return out;
+	out = bare->direct_bases;
+	if (out.empty() && bare->base.get() != NULL)
+		out.push_back(bare->base);
+	return out;
+}
+
+uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base)
+{
+	if (record.get() == NULL || direct_base.get() == NULL)
+		return 0;
+	TypePtr bare = strip_cv(record);
+	TypePtr wanted = strip_cv(direct_base);
+	if (bare.get() == NULL || wanted.get() == NULL ||
+	    bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return 0;
+	layout_record_type(bare);
+	vector<TypePtr> bases = record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = strip_cv(bases[i]);
+		if (base.get() != NULL && same_type(base, wanted))
+			return i < bare->direct_base_offsets.size()
+				? bare->direct_base_offsets[i] : 0;
+	}
+	return 0;
 }
 
 TypePtr record_type_for_scope(Scope* scope)
@@ -911,6 +984,8 @@ Binding* add_using_declaration(Scope* scope,
 	binding->ref_qualifier = target->ref_qualifier;
 	binding->is_noop_constructor = target->is_noop_constructor;
 	binding->is_noop_destructor = target->is_noop_destructor;
+	binding->is_cleanup_only_destructor =
+		target->is_cleanup_only_destructor;
 	return binding;
 }
 

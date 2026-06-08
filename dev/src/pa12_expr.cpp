@@ -471,6 +471,7 @@ Expr Parser::parse_conditional_expression()
 	Expr cond = parse_binary_expression(1);
 	if (!consume(OP_QMARK))
 		return cond;
+	bool fold_selected_conditional = false;
 	if (pa11::strip_cv(expression_object_type(cond.type))->kind ==
 	    pa11::TypeKind::Record)
 	{
@@ -487,7 +488,16 @@ Expr Parser::parse_conditional_expression()
 		}
 		--explicit_conversion_context_;
 		if (conv.viable)
+		{
 			cond = conv.expr;
+			if (!cond.has_constant_value)
+			{
+				ConstexprValue value;
+				if (try_evaluate_constexpr_expr(cond.node, value))
+					apply_constexpr_value(cond, value);
+			}
+			fold_selected_conditional = cond.has_constant_value;
+		}
 	}
 	Expr yes = parse_expression();
 	expect(OP_COLON);
@@ -539,6 +549,21 @@ Expr Parser::parse_conditional_expression()
 		result_type = lvalue_to_rvalue_type(no.type);
 	else if (type_is_pointer(yes.type) && no.null_pointer_constant)
 		result_type = lvalue_to_rvalue_type(yes.type);
+	if (fold_selected_conditional)
+	{
+		Expr selected = cond.constant_value != 0 ? yes : no;
+		if (category == ValueCategory::PRValue &&
+		    !pa11::same_type(selected.type, result_type))
+		{
+			Conversion conv = convert_to(selected, result_type);
+			if (conv.viable)
+				selected = conv.expr;
+		}
+		selected.type = result_type;
+		selected.category = category;
+		annotate_expr_node(selected);
+		return selected;
+	}
 
 	Expr out;
 	out.type = result_type;

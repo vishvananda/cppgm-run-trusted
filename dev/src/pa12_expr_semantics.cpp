@@ -160,8 +160,8 @@ if (tokens[i].kind == posttoken::TokenKind::Simple && tokens[i].type == OP_LBRAC
 return left.get() == right.get(); TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right); if (l->kind != pa11::TypeKind::Record ||
 r->kind != pa11::TypeKind::Record || !l->is_template_specialization || !r->is_template_specialization) return false;
 return same_template_specialization_type(l, r) || l->name == r->name; } bool record_has_base_type(TypePtr source, TypePtr target) {
-TypePtr wanted = pa11::strip_cv(target); for (TypePtr cur = pa11::strip_cv(source); cur.get() != NULL && cur->kind == pa11::TypeKind::Record; cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
-{ if (cur != pa11::strip_cv(source) && pa11::same_type(cur, wanted)) return true; }
+if (source.get() == NULL || target.get() == NULL) return false; TypePtr wanted = pa11::strip_cv(target); TypePtr root = pa11::strip_cv(source); vector<TypePtr> pending = pa11::record_direct_bases(root); vector<TypePtr> seen;
+while (!pending.empty()) { TypePtr cur = pending.back().get() != NULL ? pa11::strip_cv(pending.back()) : TypePtr(); pending.pop_back(); if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i], cur)) already = true; if (already) continue; seen.push_back(cur); if (pa11::same_type(cur, wanted)) return true; vector<TypePtr> bases = pa11::record_direct_bases(cur); pending.insert(pending.end(), bases.begin(), bases.end()); }
 return false; } bool same_template_specialization_family(TypePtr left, TypePtr right) {
 TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right); return l->kind == pa11::TypeKind::Record && r->kind == pa11::TypeKind::Record &&
 l->is_template_specialization && r->is_template_specialization && (l->name == r->name || (!l->template_primary_name.empty() &&
@@ -299,7 +299,8 @@ void collect_conversion_functions(TypePtr record, set<Scope*>& seen, vector<Bind
 TypePtr bare = pa11::strip_cv(record); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL || !seen.insert(bare->scope).second)
 return; for (map<string, vector<Binding*> >::const_iterator it = bare->scope->members.begin(); it != bare->scope->members.end();
 ++it) { if (it->first.compare(0, 9, "operator ") != 0) continue;
-out.insert(out.end(), it->second.begin(), it->second.end()); } if (bare->base.get() != NULL) collect_conversion_functions(bare->base, seen, out);
+out.insert(out.end(), it->second.begin(), it->second.end()); } vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
+for (size_t b = 0; b < direct_bases.size(); ++b) collect_conversion_functions(direct_bases[b], seen, out);
 } Expr make_builtin_constant_call(const vector<Expr>& args) { if (args.size() != 1)
 throw runtime_error("wrong argument count"); Expr out; out.type = pa11::make_fundamental(FT_INT); out.category = ValueCategory::PRValue;
 out.valid = true; const bool constant = args[0].constant_expression; out.node = Node(string("literal prvalue int ") + (constant ? "1" : "0")); out.constant_expression = true;
@@ -318,12 +319,14 @@ TypePtr target_object = pa11::strip_cv(target->base); if (target_object->kind ==
 if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion(); vector<Expr> args;
 for (size_t i = 0; i < expr.node.children.size(); ++i) { Expr child; child.valid = true;
 child.node = expr.node.children[i]; child.type = child.node.type; child.category = child.node.category; child.binding = child.node.binding;
+child.overloads = child.node.overloads; child.explicit_template_arguments = child.node.explicit_template_arguments;
 child.has_constant_value = child.node.has_constant_value; child.constant_value = child.node.constant_value; child.braced_init_list = child.node.line.compare(0, 16,
 "braced-init-list") == 0; args.push_back(child); } Expr temporary =
 make_constructor_init_expr(target->base, args, false); return Conversion(true, 1, temporary); } if (target_object->kind == pa11::TypeKind::Array)
 { function<Expr(const Node&)> expr_from_node = [&](const Node& node) { Expr out;
 out.valid = true; out.node = node; out.type = node.type; out.category = node.category;
 out.binding = node.binding; out.has_constant_value = node.has_constant_value; out.constant_value = node.constant_value; out.dependent_value_name = node.dependent_value_name;
+out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_template_arguments;
 out.dependent_value_owner_template_name = node.dependent_value_owner_template_name; out.dependent_value_member_name = node.dependent_value_member_name;
 out.dependent_value_negated = node.dependent_value_negated; out.dependent_value_owner_template_arguments = node.dependent_value_owner_template_arguments; out.braced_init_list =
 node.line.compare(0, 16, "braced-init-list") == 0; return out; }; function<Conversion(const Expr&, TypePtr)> convert_array_list =
@@ -439,10 +442,13 @@ add_child(converted.node, selected.node); annotate_expr_node(converted); return 
 } if (selected.null_pointer_constant && is_pointer(dst)) { selected.type = dst;
 selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " 0"); selected.constant_expression = true; selected.has_constant_value = false; selected.node.token_text = "0";
 annotate_expr_node(selected); return Conversion(true, 2, selected); } if (selected.null_pointer_constant &&
+dst_bare->kind == pa11::TypeKind::MemberPointer) { selected.type = dst;
+selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " 0"); selected.constant_expression = true; selected.has_constant_value = false; selected.node.token_text = "0";
+annotate_expr_node(selected); return Conversion(true, 2, selected); } if (selected.null_pointer_constant &&
 pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(dst)->fundamental == FT_NULLPTR_T) { selected.type = dst;
 selected.node = Node("literal prvalue nullptr_t 0"); selected.constant_expression = true; selected.has_constant_value = true; selected.constant_value = 0;
 selected.node.token_text = "0"; annotate_expr_node(selected); return Conversion(true, 2, selected); }
-if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(src)->fundamental == FT_NULLPTR_T && is_pointer(dst)) return Conversion(true, 2, selected); int rank = scalar_conversion_rank(selected.type, dst);
+if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(src)->fundamental == FT_NULLPTR_T && is_pointer(dst)) return Conversion(true, 2, selected); if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(src)->fundamental == FT_NULLPTR_T && dst_bare->kind == pa11::TypeKind::MemberPointer) { selected.type = dst; selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " nullptr"); selected.node.token_text = "nullptr"; annotate_expr_node(selected); return Conversion(true, 2, selected); } int rank = scalar_conversion_rank(selected.type, dst);
 if (rank < 1000000) { if (selected.has_constant_value) {
 selected.constant_value = convert_scalar_constant_value(src, dst, selected.constant_value);
 selected.node.has_constant_value = true; selected.node.constant_value = selected.constant_value; selected.node.token_text = to_string(selected.constant_value); }

@@ -341,6 +341,34 @@ void append_typeinfo_name_global_for_type(vector<string>& globals,
 	globals.push_back(out.str());
 }
 
+void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != TypeKind::Record)
+		return;
+	string rtti_symbol = rtti_symbol_for_record(bare);
+	if (!program.defined_globals.insert(rtti_symbol).second)
+		return;
+	if (program.declared_globals.insert(
+		    "__external_rtti_vtable____class_type_info").second)
+		program.global_declares.push_back(
+			"declare global @__external_rtti_vtable____class_type_info "
+			"[binding=strong, object=_ZTVN10__cxxabiv117__class_type_infoE]");
+	if (program.defined_globals.insert(typeinfo_name_symbol(bare)).second)
+		append_typeinfo_name_global(program.globals, bare);
+	ostringstream out;
+	string spelling = typeinfo_name_spelling(bare);
+	out << "global @" << rtti_symbol
+	    << " [storage=readonly, binding=weak";
+	if (typeinfo_object_metadata_safe(spelling))
+		out << ", object=_ZTI" << spelling;
+	out << "] = {\n";
+	out << "  ptr addr @__external_rtti_vtable____class_type_info + 16\n";
+	out << "  ptr addr @" << typeinfo_name_symbol(bare) << "\n";
+	out << "}";
+	program.globals.push_back(out.str());
+}
+
 }  // namespace
 
 void ProgramLowerer::emit_rtti(TypePtr record)
@@ -413,15 +441,20 @@ void ProgramLowerer::emit_typeinfo(TypePtr type)
 		string name_symbol = typeinfo_name_symbol_for_type(bare);
 		if (defined_globals.insert(name_symbol).second)
 			append_typeinfo_name_global_for_type(globals, bare);
-		emit_typeinfo(bare->base);
+		bool incomplete_pointee = typeinfo_type_incomplete(bare->base);
+		TypePtr pointee = pa11::strip_cv(bare->base);
+		if (incomplete_pointee &&
+		    pointee->kind == TypeKind::Record)
+			emit_incomplete_record_typeinfo(*this, pointee);
+		else
+			emit_typeinfo(bare->base);
 		ostringstream rtti;
 		rtti << "global @" << rtti_symbol
 		     << " [storage=readonly, binding=weak, object=_ZTI"
 		     << component << "] = {\n";
 		rtti << "  ptr addr @__external_rtti_vtable____pointer_type_info + 16\n";
 		rtti << "  ptr addr @" << name_symbol << "\n";
-		rtti << "  i32 " << (typeinfo_type_incomplete(bare->base) ? 8 : 0)
-		     << "\n";
+		rtti << "  i32 " << (incomplete_pointee ? 8 : 0) << "\n";
 		rtti << "  ptr addr @" << typeid_rtti_symbol(bare->base) << "\n";
 		rtti << "}";
 		globals.push_back(rtti.str());
@@ -525,7 +558,19 @@ void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
 	FunctionOut out;
 	out.binding = dtor;
 	out.name = name;
-	out.header = "function @" + name + "(%this : ptr) -> void [binding=weak]";
+	string object = !dtor->function_specialization_symbol.empty()
+		? dtor->function_specialization_symbol : global_object_symbol(dtor);
+	if (object.empty() &&
+	    dtor->aliased_binding != NULL &&
+	    !dtor->aliased_binding->function_specialization_symbol.empty())
+		object = dtor->aliased_binding->function_specialization_symbol;
+	size_t dtor_entry = object.rfind("D1E");
+	if (dtor_entry != string::npos)
+		object.replace(dtor_entry, 3, "D0E");
+	out.header = "function @" + name + "(%this : ptr) -> void [binding=weak";
+	if (!object.empty())
+		out.header += ", object=" + object;
+	out.header += "]";
 	out.slots.push_back("  slot $this : ptr");
 	Block block("entry");
 	int temp = 1;

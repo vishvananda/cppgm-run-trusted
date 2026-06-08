@@ -470,9 +470,17 @@ out.push_back(elem); return true; } if (active_class_instantiation_dependent())
 lookup_qualified_set(record->scope, member_name, pa11::LOOKUP_VALUE); if (found.empty()) throw runtime_error("pack expansion member not found"); out.push_back(make_static_member_pack_element(found[0]));
 } return true; } vector<Expr> Parser::parse_argument_list()
 { vector<Expr> args; for (;;) {
-vector<Expr> expanded; if (try_parse_static_member_pack_expansion(expanded)) { args.insert(args.end(), expanded.begin(), expanded.end());
+vector<Scope*> saved_arg_scopes = scopes_;
+vector<Expr> expanded; bool expanded_member_pack = false; try {
+expanded_member_pack = try_parse_static_member_pack_expansion(expanded);
+} catch (...) { scopes_ = saved_arg_scopes; throw; }
+scopes_ = saved_arg_scopes; if (expanded_member_pack) { args.insert(args.end(), expanded.begin(), expanded.end());
 if (!consume(OP_COMMA)) break; continue; }
-size_t arg_begin = pos_; Expr arg = at(OP_LBRACE) ? parse_braced_init_list() : parse_assignment_expression();
+saved_arg_scopes = scopes_;
+size_t arg_begin = pos_; Expr arg; try {
+arg = at(OP_LBRACE) ? parse_braced_init_list() : parse_assignment_expression();
+} catch (...) { scopes_ = saved_arg_scopes; throw; }
+scopes_ = saved_arg_scopes;
 size_t arg_end = pos_; if (consume(OP_DOTS)) { if (arg.pack_expansion)
 args.insert(args.end(), arg.pack.begin(), arg.pack.end()); else { vector<Expr> pattern_expansion;
 if (try_expand_expression_pack_pattern(arg_begin, arg_end, pattern_expansion)) {

@@ -161,6 +161,20 @@ bool Parser::deduce_template_type(TypePtr pattern,
 				return false;
 		return true;
 	}
+	if (pattern->kind == pa11::TypeKind::MemberPointer)
+	{
+		if (!deduce_template_type(pattern->member_class,
+		                          argument->member_class,
+		                          deduced,
+		                          fixed,
+		                          deduced_arguments))
+			return false;
+		return deduce_template_type(pattern->base,
+		                            argument->base,
+		                            deduced,
+		                            fixed,
+		                            deduced_arguments);
+	}
 	if (pattern->kind == pa11::TypeKind::Record)
 	{
 		auto merge_type_deductions =

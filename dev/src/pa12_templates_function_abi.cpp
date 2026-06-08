@@ -23,6 +23,8 @@ string abi_source_name(const string& name)
 		return "aN";
 	if (unqualified == "operator()")
 		return "cl";
+	if (unqualified == "operator," || unqualified == "operator ,")
+		return "cm";
 	return to_string(unqualified.size()) + unqualified;
 }
 
@@ -120,6 +122,41 @@ string abi_binding_symbol(const Binding* binding,
 	if (binding->kind == BindingKind::Function &&
 	    !binding->function_specialization_symbol.empty())
 		return binding->function_specialization_symbol;
+	if (binding->kind == BindingKind::Function &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    binding->type.get() != NULL &&
+	    binding->type->kind == pa11::TypeKind::Function)
+	{
+		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
+		owner_record = owner_record.get() != NULL
+			? pa11::strip_cv(owner_record) : TypePtr();
+		bool constructor =
+			binding->name == binding->owner->name ||
+			(owner_record.get() != NULL &&
+			 owner_record->is_template_specialization &&
+			 !owner_record->template_primary_name.empty() &&
+			 binding->name == owner_record->template_primary_name);
+		bool destructor =
+			!binding->name.empty() && binding->name[0] == '~';
+		if (owner_record.get() != NULL &&
+		    (constructor || destructor))
+		{
+			string encoded_name = "N" +
+				abi_record_type(owner_record,
+				                template_parameters,
+				                NULL,
+				                false) +
+				(constructor ? "C1" : "D1") + "E";
+			string bare;
+			for (size_t i = 1; i < binding->type->parameters.size(); ++i)
+				bare += abi_type(binding->type->parameters[i],
+				                 template_parameters);
+			if (binding->type->parameters.size() == 1)
+				bare += "v";
+			return "_Z" + encoded_name + bare;
+		}
+	}
 	string encoded_name =
 		abi_encode_binding_name(binding, template_parameters);
 	if (binding->kind != BindingKind::Function ||
@@ -206,6 +243,16 @@ vector<string> abi_split_qualified_name(const string& name)
 		begin = pos + 2;
 	}
 	return parts;
+}
+
+string abi_template_name(const string& name)
+{
+	vector<string> parts = abi_split_qualified_name(name);
+	if (parts.empty())
+		return abi_source_name("v");
+	string leaf = parts.back();
+	parts.pop_back();
+	return abi_encode_name_path(parts, leaf);
 }
 
 string abi_unresolved_name_path(const string& name)
@@ -757,7 +804,7 @@ string abi_template_instance_argument(
 		out += "E";
 		return out;
 	}
-	return abi_source_name(arg.template_name);
+	return abi_template_name(arg.template_name);
 }
 
 string abi_dependent_typename_type(
@@ -883,8 +930,12 @@ string abi_template_argument(const TemplateArgument& arg,
 		out += "E";
 		return out;
 	}
-	return arg.template_declaration != NULL
-		? abi_source_name(arg.template_declaration->name) : string("v");
+	string name = arg.template_declaration != NULL
+		? qualified_template_declaration_name(arg.template_declaration)
+		: !arg.value_name.empty()
+		  ? arg.value_name
+		  : string("v");
+	return abi_template_name(name);
 }
 
 bool abi_type_is_dependent_parameter(TypePtr type)
@@ -1103,9 +1154,14 @@ string abi_type(TypePtr type,
 		                expression_tokens);
 	if (type->kind == pa11::TypeKind::Function)
 	{
-		string out = "F" + abi_type(type->base,
-		                            template_parameters,
-		                            expression_tokens);
+		string out;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			out += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			out += "V";
+		out += "F" + abi_type(type->base,
+		                       template_parameters,
+		                       expression_tokens);
 		for (size_t i = 0; i < type->parameters.size(); ++i)
 			out += abi_type(type->parameters[i],
 			                template_parameters,

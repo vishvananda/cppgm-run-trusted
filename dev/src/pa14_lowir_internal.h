@@ -226,6 +226,8 @@ struct ProgramLowerer
 	bool demand_deferred_global_definition(const Binding* binding);
 	bool template_static_member_constant_load_required(
 		const Binding* binding) const;
+	void demand_template_static_member_definitions_for_function(
+		const Binding* binding);
 	string ensure_local_static_guard(const Binding* binding);
 	void ensure_thread_local_wrapper(const string& global_name);
 	void ensure_eh_declarations();
@@ -605,7 +607,8 @@ private:
 	void lower_call_argument(const Node& arg,
 	                         TypePtr param,
 	                         vector<string>& args,
-	                         vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
+	                         vector<pair<Value, TypePtr> >* temp_cleanups = NULL,
+	                         bool preserve_no_storage_lvalue = false);
 	void lower_reference_call_argument(const Node& arg,
 	                                   TypePtr param,
 	                                   vector<string>& args,
@@ -613,7 +616,8 @@ private:
 	void lower_value_call_argument(const Node& arg,
 	                               TypePtr param,
 	                               vector<string>& args,
-	                               vector<pair<Value, TypePtr> >* temp_cleanups = NULL);
+	                               vector<pair<Value, TypePtr> >* temp_cleanups = NULL,
+	                               bool preserve_no_storage_lvalue = false);
 	bool lower_temporary_record_pointer_argument(const Node& arg,
 	                                             TypePtr param,
 	                                             vector<string>& args,
@@ -625,7 +629,8 @@ private:
 	                                 size_t arg_start) const;
 	void lower_record_value_argument(const Node& arg,
 	                                 TypePtr param,
-	                                 vector<string>& args);
+	                                 vector<string>& args,
+	                                 bool preserve_no_storage_lvalue = false);
 	Value emit_subscript_addr(const Node& expr);
 	Value emit_cast(const Node& expr);
 	Value emit_dynamic_cast(const Node& expr, bool reference_result);

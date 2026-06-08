@@ -185,6 +185,7 @@ TypePtr Parser::parse_class_specifier()
 			           NULL);
 	}
 	TypePtr direct_base;
+	vector<TypePtr> direct_bases;
 	if (consume(OP_COLON))
 	{
 		do
@@ -213,32 +214,82 @@ TypePtr Parser::parse_class_specifier()
 			parsing_base_specifier_ = save_parsing_base;
 			if (!parsed_base)
 				throw runtime_error("invalid base class");
-			if (consume(OP_DOTS))
-				parsed_direct_base.reset();
+			bool pack_expansion_base = consume(OP_DOTS);
 			if (parsed_direct_base.get() != NULL)
-				direct_base = parsed_direct_base;
+			{
+				if (pack_expansion_base)
+				{
+					TemplateArgument base_arg =
+						TemplateArgument::type_arg(parsed_direct_base);
+					base_arg.pack_expansion = true;
+					vector<TemplateArgument> expanded_bases =
+						expand_template_argument_pack(base_arg);
+					for (size_t e = 0; e < expanded_bases.size(); ++e)
+					{
+						if (expanded_bases[e].kind !=
+						    TemplateArgumentKind::Type)
+							continue;
+						TypePtr expanded_base = expanded_bases[e].type;
+						if (expanded_bases[e].pack_expansion &&
+						    type_is_template_dependent(expanded_base))
+							expanded_base.reset();
+						if (expanded_base.get() != NULL &&
+						    (!template_type_substitutions_.empty() ||
+						     !template_value_substitutions_.empty()))
+						{
+							try
+							{
+								expanded_base =
+									substitute_template_type(expanded_base);
+							}
+							catch (const runtime_error&)
+							{
+							}
+						}
+						direct_bases.push_back(expanded_base);
+						if (direct_base.get() == NULL &&
+						    expanded_base.get() != NULL)
+							direct_base = expanded_base;
+					}
+				}
+				else
+				{
+					direct_bases.push_back(parsed_direct_base);
+					if (direct_base.get() == NULL)
+						direct_base = parsed_direct_base;
+				}
+			}
 		}
 		while (consume(OP_COMMA));
-		if (direct_base.get() != NULL &&
-		    (direct_base->is_dependent_typename ||
-		     type_is_template_dependent(direct_base)) &&
-		    (!template_type_substitutions_.empty() ||
-		     !template_value_substitutions_.empty()))
+		for (size_t i = 0; i < direct_bases.size(); ++i)
 		{
-			try
+			TypePtr& candidate = direct_bases[i];
+			if (candidate.get() != NULL &&
+			    (candidate->is_dependent_typename ||
+			     type_is_template_dependent(candidate)) &&
+			    (!template_type_substitutions_.empty() ||
+			     !template_value_substitutions_.empty()))
 			{
-				direct_base = substitute_template_type(direct_base);
+				try
+				{
+					candidate = substitute_template_type(candidate);
+				}
+				catch (const runtime_error&)
+				{
+				}
 			}
-			catch (const runtime_error&)
-			{
-			}
+			if (i == 0)
+				direct_base = candidate;
 		}
-		TypePtr base_bare = direct_base.get() != NULL
-			? pa11::strip_cv(direct_base) : TypePtr();
-		if (base_bare.get() != NULL &&
-		    base_bare->kind != pa11::TypeKind::Record &&
-		    base_bare->kind != pa11::TypeKind::TemplateParameter)
-			throw runtime_error("invalid base class");
+		for (size_t i = 0; i < direct_bases.size(); ++i)
+		{
+			TypePtr base_bare = direct_bases[i].get() != NULL
+				? pa11::strip_cv(direct_bases[i]) : TypePtr();
+			if (base_bare.get() != NULL &&
+			    base_bare->kind != pa11::TypeKind::Record &&
+			    base_bare->kind != pa11::TypeKind::TemplateParameter)
+				throw runtime_error("invalid base class");
+		}
 	}
 	Scope* class_scope = NULL;
 	TypePtr type;
@@ -246,6 +297,26 @@ TypePtr Parser::parse_class_specifier()
 	{
 		type = active_class_instantiations_.back().type;
 		class_scope = type->scope;
+		if (class_scope == NULL)
+		{
+			Scope* owner = qualified_owner != NULL
+				? qualified_owner : current_scope();
+			class_scope =
+				pa11::create_child_scope(owner, ScopeKind::Class, name);
+			type->scope = class_scope;
+			bool have_type_binding = false;
+			for (size_t i = 0; i < owner->binding_order.size(); ++i)
+				if ((owner->binding_order[i]->kind == BindingKind::Type ||
+				     owner->binding_order[i]->kind == BindingKind::TypeAlias) &&
+				    owner->binding_order[i]->type.get() == type.get())
+					have_type_binding = true;
+			if (!have_type_binding)
+			{
+				Binding* binding =
+					pa11::add_binding(owner, BindingKind::Type, name, type);
+				binding->target_scope = class_scope;
+			}
+		}
 		type->complete = true;
 		type->tag = class_tag(key);
 	}
@@ -291,30 +362,41 @@ TypePtr Parser::parse_class_specifier()
 			type->scope = class_scope;
 		}
 	}
-		type->base = direct_base;
-		TypePtr concrete_base = direct_base.get() != NULL
-		? pa11::strip_cv(direct_base) : TypePtr();
-	if (concrete_base.get() != NULL &&
-	    concrete_base->kind == pa11::TypeKind::Record &&
-	    concrete_base.get() != type.get() &&
-	    !type_is_template_dependent(concrete_base))
+		type->direct_bases = direct_bases;
+		type->base = direct_bases.empty() ? TypePtr() : direct_bases[0];
+	for (size_t i = 0; i < direct_bases.size(); ++i)
 	{
-		complete_template_record(concrete_base);
+		TypePtr concrete_base = direct_bases[i].get() != NULL
+			? pa11::strip_cv(direct_bases[i]) : TypePtr();
+		if (concrete_base.get() != NULL &&
+		    concrete_base->kind == pa11::TypeKind::Record &&
+		    concrete_base.get() != type.get() &&
+		    !type_is_template_dependent(concrete_base))
+		{
+			complete_template_record(concrete_base);
+		}
 	}
 	bool defer_dependent_base_layout = false;
-			if (active_template_class && direct_base.get() != NULL)
+			if (active_template_class && !direct_bases.empty())
 			{
 				TemplateDeclaration* declaration =
 					active_class_instantiations_.back().declaration;
-				bool dependent_base = type_is_template_dependent(direct_base);
-				if (!dependent_base && direct_base.get() == type.get())
-					dependent_base = true;
+				bool dependent_base = false;
+				for (size_t i = 0; i < direct_bases.size(); ++i)
+				{
+					if (type_is_template_dependent(direct_bases[i]) ||
+					    direct_bases[i].get() == type.get())
+						dependent_base = true;
+				}
 				if (dependent_base)
 				{
 				defer_dependent_base_layout = true;
 				class_templates_with_dependent_base_.insert(declaration);
 				record_dependent_base_lookup_skips_.insert(type.get());
-				if (direct_base.get() == type.get())
+				for (size_t i = 0; i < type->direct_bases.size(); ++i)
+					if (type->direct_bases[i].get() == type.get())
+						type->direct_bases[i].reset();
+				if (type->base.get() == type.get())
 					type->base.reset();
 			}
 			else
@@ -354,13 +436,17 @@ TypePtr Parser::parse_class_specifier()
 		    extra_lowir_nodes_[i].binding->owner == class_scope)
 			resolve_pending_member_initializers(class_scope,
 			                                    extra_lowir_nodes_[i]);
-	TypePtr direct_base_bare =
-		direct_base.get() != NULL ? pa11::strip_cv(direct_base) : TypePtr();
-	if (direct_base_bare.get() != NULL &&
-	    direct_base_bare->kind == pa11::TypeKind::Record &&
-	    direct_base_bare.get() != type.get() &&
-	    !type_is_template_dependent(direct_base_bare))
-		complete_template_record(direct_base_bare);
+	for (size_t i = 0; i < type->direct_bases.size(); ++i)
+	{
+		TypePtr direct_base_bare =
+			type->direct_bases[i].get() != NULL
+			? pa11::strip_cv(type->direct_bases[i]) : TypePtr();
+		if (direct_base_bare.get() != NULL &&
+		    direct_base_bare->kind == pa11::TypeKind::Record &&
+		    direct_base_bare.get() != type.get() &&
+		    !type_is_template_dependent(direct_base_bare))
+			complete_template_record(direct_base_bare);
+	}
 	try
 	{
 		if (!defer_dependent_base_layout)
@@ -467,6 +553,8 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 				if (!layout_ok)
 					break;
 				Binding* function = defaulted_move_assignments_[i];
+			if (function == NULL || function->type.get() == NULL)
+				continue;
 			if (function->owner != class_scope)
 				continue;
 			for (size_t j = 0; j < class_type->fields.size(); ++j)
@@ -478,7 +566,9 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		for (size_t i = 0; i < members.size(); ++i)
 		{
 			Binding* function = members[i];
-			if (function->kind != BindingKind::Function ||
+			if (function == NULL ||
+			    function->kind != BindingKind::Function ||
+			    function->type.get() == NULL ||
 			    !function->is_defaulted ||
 			    function->name != class_scope->name ||
 			    function->type->kind != pa11::TypeKind::Function ||

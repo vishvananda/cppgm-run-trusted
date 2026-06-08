@@ -118,9 +118,8 @@ case 2: return "i16"; case 4: return "i32"; case 8: return "i64"; default: retur
 } } bool same_record_initializer(const Node& init, TypePtr type) {
 if (init.type.get() == NULL || type.get() == NULL) return false; TypePtr dst = pa11::strip_cv(type); TypePtr src = pa11::strip_cv(object_type(init.type));
 return dst->kind == TypeKind::Record && src->kind == TypeKind::Record && pa11::same_type(src, dst); }
-bool record_has_base(TypePtr source, TypePtr target) { TypePtr dst = pa11::strip_cv(target); for (TypePtr cur = pa11::strip_cv(source);
-cur.get() != NULL && cur->kind == TypeKind::Record; cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr()) { if (pa11::same_type(cur, dst))
-return true; } return false; }
+bool record_has_base(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL) return false; TypePtr dst = pa11::strip_cv(target); TypePtr root = pa11::strip_cv(source); if (root->kind != TypeKind::Record || dst->kind != TypeKind::Record) return false; vector<TypePtr> pending; pending.push_back(root); vector<TypePtr> seen;
+while (!pending.empty()) { TypePtr cur = pending.back().get() != NULL ? pa11::strip_cv(pending.back()) : TypePtr(); pending.pop_back(); if (cur.get() == NULL || cur->kind != TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i], cur)) already = true; if (already) continue; seen.push_back(cur); if (pa11::same_type(cur, dst)) return true; vector<TypePtr> bases = pa11::record_direct_bases(cur); pending.insert(pending.end(), bases.begin(), bases.end()); } return false; }
 bool FunctionLowerer::lower_braced_variable_init(const Node& var, TypePtr type) { TypePtr bare = pa11::strip_cv(type); Value direct_base;
 if (bare->kind == TypeKind::Array) direct_base = ensure_pointer(emit_lvalue_addr(var)); shared_ptr<Value> cached_base(new Value(direct_base)); function<Value()> addr_for = [this, &var, cached_base]() {
 if (cached_base->text.empty()) *cached_base = ensure_pointer(emit_lvalue_addr(var)); return *cached_base; };

@@ -162,6 +162,84 @@ TemplateDeclaration* Parser::replacement_function_template_definition(
 	return declaration;
 }
 
+void collect_owner_template_context(
+	Binding* candidate,
+	const map<const void*, TemplateDeclaration*>& record_template_declarations,
+	const map<const void*, vector<TemplateArgument> >& record_template_arguments,
+	map<string, TypePtr>& owner_subst,
+	map<string, TemplateArgument>& owner_value_subst,
+	set<string>& owner_pack_subst)
+{
+	TypePtr owner_record = candidate->owner != NULL &&
+	                       candidate->owner->kind == ScopeKind::Class
+		? pa11::record_type_for_scope(candidate->owner)
+		: TypePtr();
+	owner_record = owner_record.get() != NULL
+		? pa11::strip_cv(owner_record) : TypePtr();
+	map<const void*, TemplateDeclaration*>::const_iterator owner_decl =
+		owner_record.get() != NULL
+		? record_template_declarations.find(owner_record.get())
+		: record_template_declarations.end();
+	map<const void*, vector<TemplateArgument> >::const_iterator owner_args =
+		owner_record.get() != NULL
+		? record_template_arguments.find(owner_record.get())
+		: record_template_arguments.end();
+	if (owner_decl == record_template_declarations.end() ||
+	    owner_args == record_template_arguments.end())
+		return;
+	for (size_t i = 0;
+	     i < owner_decl->second->parameters.size() &&
+	     i < owner_args->second.size();
+	     ++i)
+	{
+		const TemplateParameterInfo& parameter =
+			owner_decl->second->parameters[i];
+		if (parameter.name.empty())
+			continue;
+		const TemplateArgument& owner_arg = owner_args->second[i];
+		if (parameter.kind == TemplateParameterKind::Type)
+		{
+			if (parameter.is_pack)
+			{
+				owner_subst[parameter.name] =
+					pa11::make_template_parameter_type(parameter.name);
+				owner_value_subst[parameter.name] = owner_arg;
+				owner_pack_subst.insert(parameter.name);
+			}
+			else if (owner_arg.kind == TemplateArgumentKind::Type)
+				owner_subst[parameter.name] = owner_arg.type;
+		}
+		else
+			owner_value_subst[parameter.name] = owner_arg;
+	}
+}
+
+void validate_member_function_pointer_overload_owner(const Expr& expr)
+{
+	Scope* member_owner = NULL;
+	for (size_t i = 0; i < expr.overloads.size(); ++i)
+	{
+		Binding* candidate = expr.overloads[i];
+		if (candidate == NULL ||
+		    candidate->owner == NULL ||
+		    candidate->owner->kind != ScopeKind::Class ||
+		    candidate->is_static_member)
+			continue;
+		if (member_owner == NULL)
+			member_owner = candidate->owner;
+		else if (member_owner != candidate->owner)
+			throw runtime_error("ambiguous overloaded member id");
+	}
+}
+
+bool overload_expr_is_address(const Expr& expr)
+{
+	return expr.node.line.compare(0, 16, "unary-expression") == 0 &&
+	       expr.node.has_op &&
+	       expr.node.op == OP_AMP &&
+	       !expr.node.children.empty();
+}
+
 Binding* Parser::instantiate_target_overload_candidate(
 	Binding* candidate,
 	TypePtr wanted,
@@ -182,13 +260,81 @@ Binding* Parser::instantiate_target_overload_candidate(
 		explicit_template_arguments.find(candidate);
 	if (eit != explicit_template_arguments.end())
 		explicit_args = eit->second;
+	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
+	vector<map<string, TemplateArgument> > save_value_subst =
+		template_value_substitutions_;
+	vector<set<string> > save_pack_subst = template_type_parameter_packs_;
+	map<string, TypePtr> owner_subst;
+	map<string, TemplateArgument> owner_value_subst;
+	set<string> owner_pack_subst;
+	collect_owner_template_context(candidate,
+	                               record_template_declarations_,
+	                               record_template_arguments_,
+	                               owner_subst,
+	                               owner_value_subst,
+	                               owner_pack_subst);
+	if (!owner_subst.empty() ||
+	    !owner_value_subst.empty() ||
+	    !owner_pack_subst.empty())
+	{
+		template_type_substitutions_.push_back(owner_subst);
+		template_value_substitutions_.push_back(owner_value_subst);
+		template_type_parameter_packs_.push_back(owner_pack_subst);
+	}
+	TypePtr deduce_wanted = wanted;
+	TypePtr wanted_function = wanted.get() != NULL
+		? pa11::strip_cv(wanted) : TypePtr();
+	if (candidate->owner != NULL &&
+	    candidate->owner->kind == ScopeKind::Class &&
+	    !candidate->is_static_member &&
+	    wanted_function.get() != NULL &&
+	    wanted_function->kind == pa11::TypeKind::Function)
+	{
+		TypePtr class_type = pa11::record_type_for_scope(candidate->owner);
+		class_type = class_type.get() != NULL
+			? pa11::strip_cv(class_type) : TypePtr();
+		if (class_type.get() != NULL)
+		{
+			if (wanted_function->cv != pa11::CV_NONE)
+				class_type = pa11::make_cv(class_type,
+				                           wanted_function->cv);
+			vector<TypePtr> params;
+			params.push_back(pa11::make_pointer(class_type));
+			params.insert(params.end(),
+			              wanted_function->parameters.begin(),
+			              wanted_function->parameters.end());
+			deduce_wanted = pa11::make_function(wanted_function->base,
+			                                    params,
+			                                    wanted_function->variadic);
+		}
+	}
 	vector<TemplateArgument> deduced;
 	if (!deduce_function_template_target_type(declaration,
-	                                          wanted,
+	                                          deduce_wanted,
 	                                          explicit_args,
 	                                          deduced))
+	{
+		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
+		template_type_parameter_packs_ = save_pack_subst;
 		return NULL;
-	return instantiate_function_template(declaration, deduced);
+	}
+	Binding* instantiated = NULL;
+	try
+	{
+		instantiated = instantiate_function_template(declaration, deduced);
+	}
+	catch (...)
+	{
+		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
+		template_type_parameter_packs_ = save_pack_subst;
+		throw;
+	}
+	template_type_substitutions_ = save_subst;
+	template_value_substitutions_ = save_value_subst;
+	template_type_parameter_packs_ = save_pack_subst;
+	return instantiated;
 }
 
 Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
@@ -209,17 +355,26 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 		target_member_function_pointer = true;
 	else
 		throw runtime_error("overloaded function id needs target");
+	if (target_member_function_pointer)
+		validate_member_function_pointer_overload_owner(expr);
 
 	Binding* found = NULL;
 	vector<Binding*> considered;
 	for (size_t i = 0; i < expr.overloads.size(); ++i)
 	{
+		TypePtr candidate_wanted = target_member_function_pointer
+			? pa11::strip_cv(target_object)->base
+			: wanted;
+		if (i != 0 && expr.overloads[i] != NULL)
+			expr.overloads[i]->reserve_primary_function_symbol = true;
 		Binding* candidate = instantiate_target_overload_candidate(
 			expr.overloads[i],
-			wanted,
+			candidate_wanted,
 			expr.explicit_template_arguments);
 		if (candidate == NULL)
 			continue;
+		if (i != 0)
+			candidate->reserve_primary_function_symbol = true;
 
 		Binding* duplicate = NULL;
 		for (size_t j = 0; j < considered.size(); ++j)
@@ -268,11 +423,7 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 	Expr out = expr;
 	out.overloads.clear();
 	out.binding = found;
-	bool address_expr =
-		expr.node.line.compare(0, 16, "unary-expression") == 0 &&
-		expr.node.has_op &&
-		expr.node.op == OP_AMP &&
-		!expr.node.children.empty();
+	bool address_expr = overload_expr_is_address(expr);
 	Expr selected_id;
 	selected_id.valid = true;
 	selected_id.binding = found;
@@ -462,8 +613,26 @@ void Parser::prepare_member_call(Expr& callee, vector<Expr>& args)
 	callee.overloads = viable_overloads;
 	if (needs_this)
 	{
-		Expr this_arg = callee.node.has_op && callee.node.op == OP_ARROW
-			? object : make_address_expr("&", object);
+		Expr this_arg;
+		if (callee.node.has_op && callee.node.op == OP_ARROW)
+			this_arg = object;
+		else if (object.node.line.compare(0, 17, "member-expression") == 0)
+		{
+			this_arg.valid = true;
+			this_arg.type = pa11::make_pointer(
+				expression_object_type(object.type));
+			this_arg.category = ValueCategory::PRValue;
+			this_arg.node = Node("unary-expression prvalue " +
+			                     pa11::describe_type(this_arg.type) +
+			                     " OP_AMP:&");
+			add_child(this_arg.node, object.node);
+			this_arg.node.has_op = true;
+			this_arg.node.op = OP_AMP;
+			this_arg.node.token_text = "&";
+			annotate_expr_node(this_arg);
+		}
+		else
+			this_arg = make_address_expr("&", object);
 		args.insert(args.begin(), this_arg);
 	}
 }

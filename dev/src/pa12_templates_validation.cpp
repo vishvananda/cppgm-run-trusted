@@ -45,6 +45,7 @@ struct TemplateValidationState
 	set<Binding*> override_function_parameter_name_bindings;
 	set<Binding*> deleted_functions;
 	map<const void*, Scope*> enum_owner_scopes;
+	map<const void*, Scope*> record_owner_scopes;
 	map<Scope*, vector<Binding*> > class_friend_functions;
 	map<Scope*, vector<TypePtr> > class_friend_classes;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies;
@@ -162,6 +163,7 @@ void TemplateValidationState::save_semantic_tables(Parser& parser)
 		parser.override_function_parameter_name_bindings_;
 	deleted_functions = parser.deleted_functions_;
 	enum_owner_scopes = parser.enum_owner_scopes_;
+	record_owner_scopes = parser.record_owner_scopes_;
 	class_friend_functions = parser.class_friend_functions_;
 	class_friend_classes = parser.class_friend_classes_;
 	pending_member_bodies = parser.pending_member_bodies_;
@@ -267,6 +269,7 @@ void TemplateValidationState::restore_semantic_tables(Parser& parser)
 		override_function_parameter_name_bindings;
 	parser.deleted_functions_ = deleted_functions;
 	parser.enum_owner_scopes_ = enum_owner_scopes;
+	parser.record_owner_scopes_ = record_owner_scopes;
 	parser.class_friend_functions_ = class_friend_functions;
 	parser.class_friend_classes_ = class_friend_classes;
 	parser.pending_member_bodies_ = pending_member_bodies;
@@ -446,7 +449,9 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		    message == "decltype qualifier is not a scope" ||
 		    message == "dependent typename not resolved" ||
 		    message == "qualified lookup root not found" ||
-		    message == "function template not found")
+		    message == "function template not found" ||
+		    message == "too many template arguments" ||
+		    message.compare(0, 17, "unexpected token:") == 0)
 			return;
 		if (dependent_base_lookup_deferred &&
 		    message.compare(0, 16, "name not found: ") == 0)
@@ -456,7 +461,10 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	catch (const exception& err)
 	{
 		saved.restore(*this, declaration);
-		if (string(err.what()) == "dependent typename not resolved")
+		string message = err.what();
+		if (message == "dependent typename not resolved" ||
+		    message == "too many template arguments" ||
+		    message.compare(0, 17, "unexpected token:") == 0)
 			return;
 		throw;
 	}

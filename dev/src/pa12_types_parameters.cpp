@@ -303,8 +303,51 @@ bool Parser::starts_parenthesized_abstract_declarator() const
 {
 	if (!at(OP_LPAREN))
 		return false;
-	return lookahead(OP_STAR, 1) || lookahead(OP_AMP, 1) ||
-	       lookahead(OP_LAND, 1) || lookahead(OP_LPAREN, 1);
+	if (lookahead(OP_STAR, 1) || lookahead(OP_AMP, 1) ||
+	    lookahead(OP_LAND, 1) || lookahead(OP_LPAREN, 1))
+		return true;
+	size_t p = pos_ + 1;
+	if (p < tokens_.size() &&
+	    tokens_[p].kind == posttoken::TokenKind::Simple &&
+	    tokens_[p].type == OP_COLON2)
+		++p;
+	while (p < tokens_.size() &&
+	       tokens_[p].kind == posttoken::TokenKind::Identifier)
+	{
+		++p;
+		if (p < tokens_.size() &&
+		    tokens_[p].kind == posttoken::TokenKind::Simple &&
+		    tokens_[p].type == OP_LT)
+		{
+			int depth = 0;
+			while (p < tokens_.size())
+			{
+				if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+				    tokens_[p].type == OP_LT)
+					++depth;
+				else if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+				         tokens_[p].type == OP_GT)
+				{
+					--depth;
+					if (depth == 0)
+					{
+						++p;
+						break;
+					}
+				}
+				++p;
+			}
+		}
+		if (p + 1 >= tokens_.size() ||
+		    tokens_[p].kind != posttoken::TokenKind::Simple ||
+		    tokens_[p].type != OP_COLON2)
+			return false;
+		++p;
+		if (tokens_[p].kind == posttoken::TokenKind::Simple &&
+		    tokens_[p].type == OP_STAR)
+			return true;
+	}
+	return false;
 }
 
 bool Parser::at_simple_ignored_specifier() const

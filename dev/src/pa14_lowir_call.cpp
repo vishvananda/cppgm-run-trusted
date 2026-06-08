@@ -273,7 +273,8 @@ bool FunctionLowerer::call_setup_can_use_outer_eh(const Node& expr,
 
 void FunctionLowerer::lower_record_value_argument(const Node& arg,
                                                   TypePtr param,
-                                                  vector<string>& args)
+                                                  vector<string>& args,
+                                                  bool preserve_no_storage_lvalue)
 {
 	bool by_address = record_pass_by_address(param);
 	string slot = fresh_aux_slot(by_address ? "arg" : "argobj",
@@ -284,6 +285,11 @@ void FunctionLowerer::lower_record_value_argument(const Node& arg,
 	function<Value()> addr_for = [target_addr]() {
 		return target_addr;
 	};
+	if (preserve_no_storage_lvalue &&
+	    !record_has_storage_copy(param) &&
+	    (arg.category == ValueCategory::LValue ||
+	     arg.category == ValueCategory::XValue))
+		ensure_pointer(emit_lvalue_addr(arg));
 	if (arg.direct_call != NULL &&
 	    arg.children.empty() &&
 	    (arg.direct_call->is_generated_default_constructor ||
@@ -298,13 +304,17 @@ void FunctionLowerer::lower_record_value_argument(const Node& arg,
 void FunctionLowerer::lower_value_call_argument(const Node& arg,
                                                 TypePtr param,
                                                 vector<string>& args,
-                                                vector<pair<Value, TypePtr> >* temp_cleanups)
+                                                vector<pair<Value, TypePtr> >* temp_cleanups,
+                                                bool preserve_no_storage_lvalue)
 {
 	if (lower_temporary_record_pointer_argument(arg, param, args, temp_cleanups))
 		return;
 	if (pa11::strip_cv(param)->kind == TypeKind::Record)
 	{
-		lower_record_value_argument(arg, param, args);
+		lower_record_value_argument(arg,
+		                            param,
+		                            args,
+		                            preserve_no_storage_lvalue);
 		return;
 		}
 		Value raw = emit_rvalue(arg);
@@ -318,12 +328,17 @@ void FunctionLowerer::lower_value_call_argument(const Node& arg,
 void FunctionLowerer::lower_call_argument(const Node& arg,
                                           TypePtr param,
                                           vector<string>& args,
-                                          vector<pair<Value, TypePtr> >* temp_cleanups)
+                                          vector<pair<Value, TypePtr> >* temp_cleanups,
+                                          bool preserve_no_storage_lvalue)
 {
 	if (is_reference(param))
 		lower_reference_call_argument(arg, param, args, temp_cleanups);
 	else
-		lower_value_call_argument(arg, param, args, temp_cleanups);
+		lower_value_call_argument(arg,
+		                          param,
+		                          args,
+		                          temp_cleanups,
+		                          preserve_no_storage_lvalue);
 }
 
 bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_for,
@@ -560,8 +575,22 @@ void FunctionLowerer::lower_call_arguments(const Node& expr,
 			: expr.children[i].type;
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
 			param = pa11::make_fundamental(FT_DOUBLE);
+		TypePtr result = pa11::strip_cv(call.callee_type->base);
+		TypePtr bare_param = pa11::strip_cv(param);
+		bool function_template_callee =
+			call.direct != NULL &&
+			(!call.direct->function_specialization_symbol.empty() ||
+			 (call.direct->aliased_binding != NULL &&
+			  !call.direct->aliased_binding->
+				  function_specialization_symbol.empty()));
+		bool preserve_no_storage_lvalue =
+			!variadic_extra &&
+			function_template_callee &&
+			result->kind == TypeKind::Record &&
+			bare_param->kind == TypeKind::Record;
 		lower_call_argument(expr.children[i], param, call.args,
-		                    &call.temp_cleanups);
+		                    &call.temp_cleanups,
+		                    preserve_no_storage_lvalue);
 		if (!call.temp_cleanup_region_open && !call.temp_cleanups.empty() &&
 		    !call.protected_setup && !call.protect_setup_only &&
 		    call_temp_cleanup_defer_depth_ == 0 && eh_try_depth_ == 0)

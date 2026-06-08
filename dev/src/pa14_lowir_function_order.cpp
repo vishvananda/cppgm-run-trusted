@@ -541,6 +541,26 @@ for (size_t j = i + 1; j < order.size(); ++j) { const Binding* ctor = functions[
 ctor->owner != assignment->owner) continue; TypePtr ctor_param = output_first_by_value_record_parameter(ctor);
 if (!output_same_record(assignment_param, ctor_param)) continue; swap(order[i], order[j]); changed = true;
 break; } if (changed) break;
+} } } bool output_reference_orders_constructor_before_call( const vector<FunctionOut>& functions, const FunctionOut& ctor, const FunctionOut& call)
+{ for (size_t i = 0; i < functions.size(); ++i) { size_t ctor_pos = output_function_reference_position(functions[i], function_out_name(ctor));
+size_t call_pos = output_function_reference_position(functions[i], function_out_name(call)); if (ctor_pos != static_cast<size_t>(-1) &&
+call_pos != static_cast<size_t>(-1) && ctor_pos < call_pos) return true; } return false; }
+void order_same_owner_call_operator_before_unreferenced_zero_constructor( const vector<FunctionOut>& functions, vector<size_t>& order)
+{ bool changed = true; for (size_t guard = 0; changed && guard < order.size() * order.size() + 1;
+++guard) { changed = false; for (size_t i = 0; i < order.size(); ++i)
+{ const Binding* ctor = functions[order[i]].binding; if (!output_constructor_like_binding(ctor) || ctor->type->parameters.size() != 1) continue;
+for (size_t j = i + 1; j < order.size(); ++j) { const Binding* call = functions[order[j]].binding; if (!output_call_operator(call) ||
+call->owner != ctor->owner || !output_function_returns_record(call) || output_reference_orders_constructor_before_call(functions, functions[order[i]], functions[order[j]])) continue; swap(order[i], order[j]); changed = true;
+break; } if (changed) break;
+} } }
+void order_local_constructor_before_same_owner_call_operator( const vector<FunctionOut>& functions, vector<size_t>& order)
+{ bool changed = true; for (size_t guard = 0; changed && guard < order.size() * order.size() + 1;
+++guard) { changed = false; for (size_t i = 0; i < order.size(); ++i)
+{ const Binding* call = functions[order[i]].binding; if (!output_call_operator(call)) continue;
+for (size_t j = i + 1; j < order.size(); ++j) { const Binding* ctor = functions[order[j]].binding; if (!output_constructor_like_binding(ctor) ||
+ctor->owner != call->owner || (ctor->type->parameters.size() == 1 && output_function_returns_record(call)) ||
+!output_reference_orders_constructor_before_call(functions, functions[order[j]], functions[order[i]])) continue; swap(order[i], order[j]); changed = true;
+break; } if (changed) break;
 } } } bool output_same_static_member_overload(const Binding* left,
 const Binding* right) { return left != NULL && right != NULL &&
 left != right && left->is_static_member && right->is_static_member && left->owner != NULL &&
@@ -730,7 +750,8 @@ vector<size_t>& order) { bool changed = true; for (size_t guard = 0; changed && 
 { changed = false; for (size_t i = 0; i < order.size(); ++i) {
 const Binding* left = functions[order[i]].binding; size_t left_arity = output_constructor_arity(functions[order[i]]); if (left_arity == 0) continue;
 for (size_t j = i + 1; j < order.size(); ++j) { const Binding* right = functions[order[j]].binding; size_t right_arity =
-output_constructor_arity(functions[order[j]]); if (right_arity == 0 || !output_constructors_share_owner_family(left, right) || left_arity <= right_arity)
+output_constructor_arity(functions[order[j]]); if (right_arity == 0 || (output_function_template_specialization(left) && output_function_template_specialization(right)) ||
+(output_owner_template_specialization(left) && output_owner_template_specialization(right)) || !output_constructors_share_owner_family(left, right) || left_arity <= right_arity)
 continue; swap(order[i], order[j]); changed = true; break;
 } if (changed) break; }
 } } void order_zero_argument_constructors_before_local_ctors( const vector<FunctionOut>& functions, vector<size_t>& order)
@@ -742,7 +763,7 @@ if (i != 0) --i; continue; }
 { return name.compare(0, 9, "operator_") == 0; } int emitted_template_member_order_key(const FunctionOut& fn,
 bool abi_template_vtable) { if (emitted_function_is_strong_entry(fn)) return 0;
 string name = function_out_name(fn); bool template_record = name.compare(0, 5, "type_") == 0 || (abi_template_vtable &&
-emitted_function_is_readable_template_record_member(name)); if (template_record && name.find("operator_lp_rp") != string::npos) return 10; if (template_record && name.find("__deleting_entry") != string::npos)
+emitted_function_is_readable_template_record_member(name)); if (template_record && (output_call_operator(fn.binding) || name.find("operator_lp_rp") != string::npos)) return 10; if (template_record && name.find("__deleting_entry") != string::npos)
 return 20; if (template_record && name.find("____") != string::npos) return 30; if (emitted_function_is_free_operator(name))
 return 40; if (name.find("__print_helper_t_") == string::npos && name.find("__print_helper") != string::npos) return 45;
 if (name.find("__operator_lt_lt") != string::npos) return 50; if (name.find("__operator_lp_rp") != string::npos) return 60;
@@ -779,13 +800,13 @@ order_same_owner_constructors_by_arity(program.functions, order); order_zero_arg
 order_local_template_call_flow_functions(program.functions, order); order_template_and_lambda_callees_after_callers(program.functions, order); order_pointer_reference_helpers_before_lambda_callers(program.functions, order); order_class_pointer_helpers_before_value_pointer_constructors(program.functions, order);
 order_class_pointer_helpers_by_arity(program.functions, order); order_invoked_functor_after_template_invoke(program.functions, order); order_callable_thunk_flow_functions(program.functions, order); order_template_dependency_flow_functions(program.functions, order);
 order_operator_functions_by_key(program.functions, order); order_static_template_member_depth_functions(program.functions, order); order_assignment_helper_flow_functions(program.functions, order); order_assignment_operator_before_owner_zero_constructor(program.functions, order);
-order_same_owner_constructor_before_assignment_operator(program.functions, order); order_static_member_overload_callees_after_callers(program.functions, order); order_static_template_member_callees_after_callers(program.functions, order); order_static_template_owner_callees_after_callers(program.functions, order);
+order_same_owner_constructor_before_assignment_operator(program.functions, order); order_same_owner_call_operator_before_unreferenced_zero_constructor(program.functions, order); order_local_constructor_before_same_owner_call_operator(program.functions, order); order_static_member_overload_callees_after_callers(program.functions, order); order_static_template_member_callees_after_callers(program.functions, order); order_static_template_owner_callees_after_callers(program.functions, order);
 order_template_owner_constructor_callees_after_callers(program.functions, order); order_same_owner_template_member_callees_after_callers(program.functions, order); order_template_owner_member_callees_after_callers(program.functions, order); order_value_template_callees_after_callers(program.functions, order);
 order_class_pointer_helpers_before_value_pointer_constructors(program.functions, order); order_template_dependency_flow_functions(program.functions, order); order_by_value_record_member_before_zero_constructor(program.functions, order); order_preemitted_referenced_callees_after_callers(program.functions, order);
 order_class_pointer_helpers_before_value_pointer_constructors(program.functions, order); order_class_pointer_helpers_by_arity(program.functions, order); order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_scalar_members_before_assignments(program.functions, order);
 order_conversion_after_compound_assignment(program.functions, order); order_template_owner_call_operator_callees_after_callers(program.functions, order); order_template_reference_constructors_before_foreign_call_operators(program.functions, order); order_lambda_call_operators_by_rank(program, order);
 order_lambda_callees_after_callers(program.functions, order); order_pointer_reference_helpers_before_lambda_callers(program.functions, order); order_range_for_operator_functions_by_key(program.functions, order); order_template_reference_constructors_before_foreign_call_operators(program.functions, order);
-order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_dependency_flow_functions(program.functions, order); order_same_owner_constructor_before_assignment_operator(program.functions, order); if (has_abi_template_vtable && has_template_record_function)
+order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_dependency_flow_functions(program.functions, order); order_same_owner_constructor_before_assignment_operator(program.functions, order); order_same_owner_call_operator_before_unreferenced_zero_constructor(program.functions, order); order_local_constructor_before_same_owner_call_operator(program.functions, order); if (has_abi_template_vtable && has_template_record_function)
 stable_sort(order.begin(), order.end(), [&program, has_abi_template_vtable](size_t lhs, size_t rhs) { int lkey = emitted_template_member_order_key(
 program.functions[lhs], has_abi_template_vtable); int rkey = emitted_template_member_order_key( program.functions[rhs],
 has_abi_template_vtable); return lkey != rkey ? lkey < rkey : lhs < rhs; }); size_t run = 0;

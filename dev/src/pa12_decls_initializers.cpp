@@ -36,6 +36,7 @@ if (target->kind == ScopeKind::Class && !variable->is_static_member) default_mem
 return; } Expr scalar_init = init; if (!init.node.children.empty())
 { if (init.node.children.size() != 1) throw runtime_error("invalid initializer conversion"); scalar_init.valid = true;
 scalar_init.node = init.node.children[0]; scalar_init.type = scalar_init.node.type; scalar_init.category = scalar_init.node.category; scalar_init.binding = scalar_init.node.binding;
+scalar_init.overloads = scalar_init.node.overloads; scalar_init.explicit_template_arguments = scalar_init.node.explicit_template_arguments;
 scalar_init.has_constant_value = scalar_init.node.has_constant_value; scalar_init.constant_value = scalar_init.node.constant_value; }
 if (braced_scalar_narrows(scalar_init.type, type)) { throw runtime_error("narrowing conversion in braced initializer"); }
 Conversion conv = convert_to(scalar_init, type); if (!conv.viable) throw runtime_error("invalid initializer conversion"); if (target->kind == ScopeKind::Class && !variable->is_static_member)
@@ -44,7 +45,7 @@ variable->has_constant = true; variable->constant_value = conv.expr.constant_val
 } if (record->kind == pa11::TypeKind::Record && record_has_aggregate_blocking_constructor(record)) {
 vector<Expr> args; for (size_t i = 0; i < init.node.children.size(); ++i) { Expr arg;
 arg.valid = true; arg.node = init.node.children[i]; arg.type = arg.node.type; arg.category = arg.node.category;
-arg.binding = arg.node.binding; args.push_back(arg); } try
+arg.binding = arg.node.binding; arg.overloads = arg.node.overloads; arg.explicit_template_arguments = arg.node.explicit_template_arguments; args.push_back(arg); } try
 { Expr constructed = make_constructor_init_expr(type, args, init.copy_initialization); list = constructed.node;
 } catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor")
 throw; } } if (record->kind == pa11::TypeKind::Record &&
@@ -52,7 +53,13 @@ init.node.children.empty() && record->base.get() != NULL) { Binding* ctor = ensu
 if (ctor != NULL) { add_child(var, default_constructor_action(variable, true)); return;
 } } if (record->kind == pa11::TypeKind::Record && init.node.children.empty() &&
 record->fields.empty() && record->base.get() == NULL && init.node.token_text != "lambda-closure") {
-add_child(var, Node("no-op-initializer")); return; } ensure_aggregate_constructors_for_init(type, list);
+add_child(var, Node("no-op-initializer")); return; } if (record->kind == pa11::TypeKind::Record && !record_has_aggregate_blocking_constructor(record)) {
+pa11::layout_record_type(record); size_t child_index = 0; for (size_t i = 0; i < record->fields.size() && child_index < list.children.size(); ++i) {
+Binding* field = record->fields[i]; if (field == NULL || field->is_static_member) continue; Node& child = list.children[child_index++];
+if (child.line.compare(0, 16, "braced-init-list") == 0) continue; Expr child_expr; child_expr.valid = true; child_expr.node = child; child_expr.type = child.type;
+child_expr.category = child.category; child_expr.binding = child.binding; child_expr.has_constant_value = child.has_constant_value; child_expr.constant_value = child.constant_value;
+child_expr.overloads = child.overloads; child_expr.explicit_template_arguments = child.explicit_template_arguments;
+try { Conversion field_conv = convert_to(child_expr, field->type); if (field_conv.viable) child = field_conv.expr.node; } catch (const runtime_error&) { } } } ensure_aggregate_constructors_for_init(type, list);
 list.line += " lvalue " + pa11::describe_type(type); list.type = type; if (target->kind == ScopeKind::Class && !variable->is_static_member) default_member_initializers_[variable] = list;
 add_child(var, list); } void Parser::demand_empty_record_conversion_bodies(TypePtr src_record, TypePtr dst_record,
 const Node& conversion_node) { function<void(Binding*)> demand_body = [&](Binding* fn) {

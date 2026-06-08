@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include <utility>
 namespace pa14 { namespace internal { bool node_contains_call_expression(const Node& node) {
 if (starts_with(node.line, "call-expression")) return true; for (size_t i = 0; i < node.children.size(); ++i) if (node_contains_call_expression(node.children[i]))
 return true; return false; } bool node_contains_return_statement(const Node& node)
@@ -24,16 +25,15 @@ return parameter_type_needs_destructor(bare->base); if (bare->kind != TypeKind::
 if (dtor != NULL && (!dtor->is_noop_destructor || !dtor->is_generated_default_destructor)) return true; pa11::layout_record_type(bare);
 if (bare->base.get() != NULL && parameter_type_needs_destructor(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
 if (parameter_type_needs_destructor(bare->fields[i]->type)) return true; return false; }
-bool record_has_base_subobject(TypePtr source, TypePtr target) { TypePtr bare = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
-if (bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return false; for (TypePtr base = bare->base; base.get() != NULL; base = pa11::strip_cv(base)->base)
-{ TypePtr stripped = pa11::strip_cv(base); if (pa11::same_type(stripped, wanted)) return true;
+bool record_has_base_subobject(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL) return false; TypePtr bare = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
+if (bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return false; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+{ TypePtr stripped = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (stripped.get() == NULL) continue; if (pa11::same_type(stripped, wanted)) return true;
 if (record_has_base_subobject(stripped, wanted)) return true; } return false;
 } uint64_t base_subobject_offset(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL)
-return 0; TypePtr cur = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target); uint64_t offset = 0;
-if (cur->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return 0; for (;;) {
-if (cur->base.get() == NULL) return 0; pa11::layout_record_type(cur); TypePtr direct = pa11::strip_cv(cur->base);
-offset += cur->direct_base_offset; if (pa11::same_type(direct, wanted)) return offset; cur = direct;
-if (cur->kind != TypeKind::Record) return 0; } }
+return 0; TypePtr cur = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
+if (cur->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return 0; vector<pair<TypePtr, uint64_t> > pending; pending.push_back(make_pair(cur, 0)); vector<TypePtr> seen;
+while (!pending.empty()) { TypePtr record = pa11::strip_cv(pending.back().first); uint64_t base_offset = pending.back().second; pending.pop_back(); if (record.get() == NULL || record->kind != TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i], record)) already = true; if (already) continue; seen.push_back(record); pa11::layout_record_type(record); vector<TypePtr> bases = pa11::record_direct_bases(record); for (size_t i = 0; i < bases.size(); ++i) { TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record) continue; uint64_t offset = base_offset + pa11::record_direct_base_offset(record, direct); if (pa11::same_type(direct, wanted)) return offset; pending.push_back(make_pair(direct, offset)); } }
+return 0; }
 Binding* find_record_copy_move_constructor(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record || bare->scope == NULL)
 return NULL; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end())
 return NULL; for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];

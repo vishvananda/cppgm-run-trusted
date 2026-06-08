@@ -29,7 +29,8 @@ if (element != NULL) *element = bare->template_arguments[0].type;
 return true;
 } string scalar_lowir_type(TypePtr type) {
 TypePtr bare = pa11::strip_cv(object_type(type)); if (is_reference(type)) return "ptr"; if (bare->kind == TypeKind::Pointer ||
-bare->kind == TypeKind::Function || bare->kind == TypeKind::Array) return "ptr"; if (bare->kind == TypeKind::Record)
+bare->kind == TypeKind::Function || bare->kind == TypeKind::Array) return "ptr"; if (bare->kind == TypeKind::MemberPointer)
+return pa11::strip_cv(bare->base)->kind == TypeKind::Function ? "i128" : "i64"; if (bare->kind == TypeKind::Record)
 { ostringstream out; out << "obj<" << pa11::type_size(bare) << "x" << pa11::type_align(bare) << ">";
 return out.str(); } if (bare->kind == TypeKind::Enum) {
 switch (pa11::type_size(bare)) { case 1: return "i8"; case 2: return "i16";
@@ -69,8 +70,7 @@ return binding->is_inline_definition; TypePtr record = pa11::record_type_for_sco
 TypePtr bare = pa11::strip_cv(record); if (bare->tag == "union") return true; pa11::layout_record_type(bare);
 if (bare->base.get() != NULL && type_has_abi_indirect_special_member(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
 if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
-bool special_member_affects_call_abi(const Binding* binding) { if (!binding->function_specialization_symbol.empty() || (binding->aliased_binding != NULL &&
-!binding->aliased_binding->function_specialization_symbol.empty())) return false; if (binding->is_generated_copy_move_constructor || binding->is_generated_default_destructor)
+bool special_member_affects_call_abi(const Binding* binding) { if (binding->is_generated_copy_move_constructor || binding->is_generated_default_destructor)
 return false; if (!binding->is_defaulted) return true; return defaulted_member_affects_call_abi(binding);
 } bool record_has_user_copy_move_or_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record || bare->scope == NULL) return false; if (bare->tag == "union") return true;
@@ -141,7 +141,7 @@ vector<string> parts; for (Scope* s = binding->owner; s != NULL; s = s->parent) 
 } parts.push_back(part); } }
 vector<string> out; for (size_t i = parts.size(); i > 0; --i) out.push_back(parts[i - 1]); if (binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class && !binding->name.empty() && binding->name[0] == '~') out.push_back("_" + binding->name.substr(1));
-else if (binding->name == "operator[]") out.push_back("operator__"); else if (binding->name == "operator=") out.push_back("operator_");
+else if (binding->name == "operator[]" || binding->name == "operator()" || binding->name == "operator ()") out.push_back("operator__"); else if (binding->name == "operator=" || binding->name == "operator," || binding->name == "operator ,") out.push_back("operator_");
 else if (binding->name == "operator&=") out.push_back("operator__"); else if (binding->name.compare(0, 18, "operator typename ") == 0) out.push_back("operator" + binding->name.substr(18));
 else out.push_back(binding->name); return out; }
 string source_symbol_base(const Binding* binding) { if (binding != NULL && binding->is_local_static) {
@@ -219,6 +219,12 @@ if ((type->cv & pa11::CV_VOLATILE) != 0) prefix += "volatile_"; return prefix + 
 TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() != NULL && bare->kind == TypeKind::Record && record_is_template_specialization(bare))
 return record_lowir_name(bare); if (bare.get() != NULL && (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum)) return template_display_symbol_text(bare->name);
 if (bare.get() != NULL && bare->kind == TypeKind::Function) return template_type_symbol_text(bare->base) + function_type_parameter_symbol_suffix(bare); if (bare.get() != NULL &&
+bare->kind == TypeKind::MemberPointer && pa11::strip_cv(bare->base)->kind == TypeKind::Function) { TypePtr function_type = pa11::strip_cv(bare->base);
+string out = template_type_symbol_text(function_type->base) + "__" + template_type_symbol_text(bare->member_class) + "_____" + function_type_parameter_symbol_suffix(function_type);
+if ((function_type->cv & pa11::CV_CONST) != 0) out += "const";
+if ((function_type->cv & pa11::CV_VOLATILE) != 0) out += "volatile";
+if ((function_type->cv & (pa11::CV_CONST | pa11::CV_VOLATILE)) == 0) out += "_";
+return out; } if (bare.get() != NULL &&
 bare->kind == TypeKind::Pointer && pa11::strip_cv(bare->base)->kind == TypeKind::Function) { TypePtr function_type = pa11::strip_cv(bare->base);
 return template_type_symbol_text(function_type->base) + "_____" + function_type_parameter_symbol_suffix(function_type); } return template_display_symbol_text(pa11::describe_type(type));
 } void append_template_argument_separator(string& out, const string& next); string template_argument_symbol_part( const pa11::TemplateInstanceArgument& arg)
@@ -232,7 +238,7 @@ if (i != 0) append_template_argument_separator(out, part); out += part; }
 return out; } void append_template_argument_separator(string& out, const string& next) {
 if (next.size() >= 2 && next[0] == '_' && next[1] == '_') { if (out.empty() || out[out.size() - 1] != '_') out += "_";
 return; } size_t existing = 0; for (size_t i = out.size(); i > 0 && out[i - 1] == '_'; --i)
-++existing; for (size_t i = 0; i < next.size() && next[i] == '_'; ++i) ++existing; while (existing < 2)
+++existing; size_t leading = 0; for (size_t i = 0; i < next.size() && next[i] == '_'; ++i) ++leading; existing += leading; size_t wanted = (existing > leading || leading == 1) ? 3 : 2; while (existing < wanted)
 { out += "_"; ++existing; }
 } string template_record_symbol_part(TypePtr record) { TypePtr bare = pa11::strip_cv(record);
 string primary = !bare->template_primary_name.empty() ? bare->template_primary_name : (bare->scope != NULL ? bare->scope->name : bare->name); string out = template_display_symbol_text(primary);
@@ -255,9 +261,10 @@ return ""; if (type->kind == TypeKind::Cv) { string prefix;
 if ((type->cv & pa11::CV_CONST) != 0) prefix += "K"; if ((type->cv & pa11::CV_VOLATILE) != 0) prefix += "V";
 return prefix + template_abi_component_for_type(type->base); } if (type->kind == TypeKind::LValueReference) return "R" + template_abi_component_for_type(type->base);
 if (type->kind == TypeKind::RValueReference) return "O" + template_abi_component_for_type(type->base); if (type->kind == TypeKind::Pointer) return "P" + template_abi_component_for_type(type->base);
-if (type->kind == TypeKind::Function) { string out = "F" + template_abi_component_for_type(type->base);
+if (type->kind == TypeKind::Function) { string out; if ((type->cv & pa11::CV_CONST) != 0) out += "K"; if ((type->cv & pa11::CV_VOLATILE) != 0) out += "V"; out += "F" + template_abi_component_for_type(type->base);
 for (size_t i = 0; i < type->parameters.size(); ++i) out += template_abi_component_for_type(type->parameters[i]);
 if (type->parameters.empty()) out += "v"; out += "E"; return out; }
+if (type->kind == TypeKind::MemberPointer) return "M" + template_abi_component_for_type(type->member_class) + template_abi_component_for_type(type->base);
 if (type->kind == TypeKind::Array) return "A" + (type->unknown_bound ? string("") : to_string(type->bound)) + "_" + template_abi_component_for_type(type->base); TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Fundamental) return template_abi_builtin_code(bare->fundamental); if (bare->kind == TypeKind::Record && record_is_template_specialization(bare))
 { string primary = !bare->template_primary_name.empty() ? bare->template_primary_name : (bare->scope != NULL ? bare->scope->name : bare->name);
@@ -294,7 +301,18 @@ return "__rtti_" + template_record_global_symbol_part(bare); return "__rtti_" + 
 : binding->function_specialization_symbol + " "; return base + " " + specialization + string(binding->is_static_member ? "static " : "nonstatic ") + "refqual=" + to_string(binding->ref_qualifier) + " " +
 pa11::describe_type(binding->type); } bool function_template_specialization_binding_for_symbol( const Binding* binding)
 { return binding != NULL && (!binding->function_specialization_symbol.empty() || (binding->aliased_binding != NULL &&
-!binding->aliased_binding->function_specialization_symbol.empty())); } string template_family_name_for_symbol(TypePtr record) {
+!binding->aliased_binding->function_specialization_symbol.empty())); } bool member_pointer_adapter_overload_for_symbol(const Binding* current, const Binding* candidate) {
+if (current == NULL || candidate == NULL || current == candidate ||
+current->type.get() == NULL || candidate->type.get() == NULL ||
+current->type->kind != TypeKind::Function || candidate->type->kind != TypeKind::Function ||
+current->type->parameters.size() != candidate->type->parameters.size()) return false;
+size_t first = current->owner != NULL && current->owner->kind == ScopeKind::Class && !current->is_static_member ? 1 : 0;
+for (size_t i = first; i < current->type->parameters.size(); ++i) {
+TypePtr cur = pa11::strip_cv(object_type(current->type->parameters[i]));
+TypePtr cand = pa11::strip_cv(object_type(candidate->type->parameters[i]));
+if (cur.get() != NULL && cand.get() != NULL && cur->kind == TypeKind::MemberPointer &&
+cand->kind == TypeKind::Record && !is_reference(candidate->type->parameters[i])) return true; }
+return false; } string template_family_name_for_symbol(TypePtr record) {
 record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (record.get() == NULL || record->kind != TypeKind::Record) return ""; return record->template_primary_name.empty()
 ? record->name : record->template_primary_name; } bool template_argument_pattern_matches( const pa11::TemplateInstanceArgument& pattern,
 const pa11::TemplateInstanceArgument& actual); bool template_parameter_pattern_matches(TypePtr pattern, TypePtr actual) { pattern = pattern.get() != NULL ? pa11::strip_cv(pattern) : TypePtr();
@@ -326,18 +344,52 @@ placeholder->type.get() == NULL || binding->type.get() == NULL || placeholder->t
 placeholder->type->parameters.size() != binding->type->parameters.size()) return -1; int score = 0; for (size_t i = 1; i < placeholder->type->parameters.size(); ++i)
 { TypePtr pattern = object_type(placeholder->type->parameters[i]); TypePtr actual = object_type(binding->type->parameters[i]); if (!template_parameter_pattern_matches(pattern, actual))
 return -1; score += template_parameter_specificity(pattern); } return score;
+} bool type_contains_template_symbol_pattern(TypePtr type) {
+type = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (type.get() == NULL) return false;
+if (type->kind == TypeKind::TemplateParameter || type->kind == TypeKind::TemplateTemplateParameter || type->is_dependent_typename) return true;
+if (type->kind == TypeKind::Pointer || type->kind == TypeKind::LValueReference || type->kind == TypeKind::RValueReference || type->kind == TypeKind::Array)
+return type_contains_template_symbol_pattern(type->base); if (type->kind == TypeKind::MemberPointer)
+return type_contains_template_symbol_pattern(type->member_class) || type_contains_template_symbol_pattern(type->base);
+if (type->kind == TypeKind::Function) { if (type_contains_template_symbol_pattern(type->base)) return true;
+for (size_t i = 0; i < type->parameters.size(); ++i) if (type_contains_template_symbol_pattern(type->parameters[i])) return true; return false; }
+if (type->kind == TypeKind::Record && type->is_template_specialization) for (size_t i = 0; i < type->template_arguments.size(); ++i) {
+const pa11::TemplateInstanceArgument& arg = type->template_arguments[i]; if (arg.kind == pa11::TemplateInstanceArgumentKind::Type &&
+type_contains_template_symbol_pattern(arg.type)) return true; if (arg.kind == pa11::TemplateInstanceArgumentKind::Pack) for (size_t j = 0; j < arg.pack.size(); ++j)
+if (arg.pack[j].kind == pa11::TemplateInstanceArgumentKind::Type && type_contains_template_symbol_pattern(arg.pack[j].type)) return true; }
+return false;
+} bool constructor_template_symbol_placeholder_candidate(const Binding* binding, const string& base) {
+if (binding == NULL || binding->kind != BindingKind::Function || !is_class_constructor_binding(binding) || source_symbol_base(binding) != base ||
+function_template_specialization_binding_for_symbol(binding) || binding->is_generated_default_constructor || binding->is_generated_copy_move_constructor ||
+binding->type.get() == NULL || binding->type->kind != TypeKind::Function)
+return false; for (size_t i = 1; i < binding->type->parameters.size(); ++i) if (type_contains_template_symbol_pattern(object_type(binding->type->parameters[i]))) return true;
+return false;
+} size_t constructor_template_symbol_placeholder_count(const vector<Binding*>& overloads, const string& base) {
+size_t count = 0; for (size_t i = 0; i < overloads.size(); ++i) if (constructor_template_symbol_placeholder_candidate(overloads[i], base)) ++count;
+return count;
 } string ProgramLowerer::symbol_for(const Binding* binding) { if (binding != NULL &&
 binding->kind == BindingKind::Function && binding->aliased_binding != NULL && binding->aliased_binding->is_inline_definition) binding = binding->aliased_binding;
 map<const Binding*, string>::const_iterator found = symbols.find(binding); if (found != symbols.end()) return found->second; string base = source_symbol_base(binding);
 if (binding->kind == BindingKind::Function) { string key = function_symbol_key(binding, base); map<string, string>::const_iterator fit = function_symbols.find(key);
 if (fit != function_symbols.end()) { symbols[binding] = fit->second; return fit->second;
+} if (function_template_specialization_binding_for_symbol(binding) && used_symbols[base] == 0 && binding->owner != NULL) {
+map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
+if (overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* candidate = overloads->second[i];
+if (candidate == binding || candidate->kind != BindingKind::Function || source_symbol_base(candidate) != base ||
+!function_template_specialization_binding_for_symbol(candidate) || !member_pointer_adapter_overload_for_symbol(binding, candidate)) continue;
+string candidate_key = function_symbol_key(candidate, base);
+if (function_symbols.find(candidate_key) == function_symbols.end()) {
+function_symbols[candidate_key] = base; symbols[candidate] = base; used_symbols[base] = 1; }
+break; }
 } if (binding->owner != NULL && binding->owner->kind == ScopeKind::Class && binding->name == binding->owner->name &&
 function_template_specialization_binding_for_symbol(binding)) { TypePtr symbol_owner_record = pa11::record_type_for_scope(binding->owner);
-symbol_owner_record = symbol_owner_record.get() != NULL ? pa11::strip_cv(symbol_owner_record) : TypePtr(); bool symbol_owner_template_specialization = symbol_owner_record.get() != NULL &&
-symbol_owner_record->kind == TypeKind::Record && symbol_owner_record->is_template_specialization; if (!symbol_owner_template_specialization) {
+symbol_owner_record = symbol_owner_record.get() != NULL ? pa11::strip_cv(symbol_owner_record) : TypePtr(); if (symbol_owner_record.get() != NULL &&
+symbol_owner_record->kind == TypeKind::Record) {
 map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name); Binding* matched_placeholder = NULL; int matched_score = -1;
-if (overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* prior = overloads->second[i];
+bool specialized_owner = symbol_owner_record->is_template_specialization; bool allow_placeholder_match = !specialized_owner || (overloads != binding->owner->members.end() &&
+constructor_template_symbol_placeholder_count(overloads->second, base) > 1);
+if (allow_placeholder_match && overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* prior = overloads->second[i];
 if (prior == binding || prior->aliased_binding == binding || binding->aliased_binding == prior) break;
+if (specialized_owner && !constructor_template_symbol_placeholder_candidate(prior, base)) continue;
 if (source_symbol_base(prior) != base) continue; int score = constructor_template_placeholder_match_score(
 prior, binding); if (score > matched_score) { matched_score = score;
 matched_placeholder = prior; } } if (matched_placeholder != NULL)

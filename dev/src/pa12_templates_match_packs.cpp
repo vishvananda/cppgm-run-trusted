@@ -339,13 +339,33 @@ bool template_value_patterns_match_after_deduction(
 {
 	if (pattern.kind == TemplateArgumentKind::Value &&
 	    pattern.dependent &&
-	    pattern.value_expr_end > pattern.value_expr_begin &&
-	    !actual.dependent)
+	    pattern.value_expr_end > pattern.value_expr_begin)
+	{
+		if (actual.kind == TemplateArgumentKind::Pack && parser != NULL)
+		{
+			TemplateArgument evaluated;
+			if (parser->try_evaluate_template_value_argument_for_template_match(
+				    specialization,
+				    pattern,
+				    deduced,
+				    evaluated))
+			{
+				map<const void*, vector<TemplateArgument> >
+					empty_record_arguments;
+				return same_template_argument_value(evaluated,
+				                                    actual,
+				                                    empty_record_arguments);
+			}
+		}
+		if (actual.kind != TemplateArgumentKind::Value ||
+		    actual.dependent)
+			return true;
 		return parser->template_value_argument_matches_for_template_match(
 			specialization,
 			pattern,
 			actual,
 			deduced);
+	}
 	if (pattern.kind == TemplateArgumentKind::Pack)
 	{
 		if (actual.kind != TemplateArgumentKind::Pack ||

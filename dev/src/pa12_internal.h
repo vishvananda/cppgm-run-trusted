@@ -43,33 +43,6 @@ enum class SuffixKind
 	Function
 };
 
-struct Node
-{
-	string line;
-	vector<Node> children;
-	TypePtr type;
-	ValueCategory category;
-	Binding* binding;
-	Binding* direct_call;
-	bool has_op;
-	ETokenType op;
-	string token_text;
-	bool has_constant_value;
-	uint64_t constant_value;
-	string dependent_value_name;
-	string dependent_value_owner_template_name;
-	string dependent_value_member_name;
-	bool dependent_value_negated;
-	vector<pa11::TemplateInstanceArgument> dependent_value_owner_template_arguments;
-	bool suppress_virtual_dispatch;
-	bool virtual_dispatch;
-	bool is_typeid_expression;
-	bool is_dynamic_cast_expression;
-
-	Node();
-	explicit Node(const string& text);
-};
-
 enum class TemplateParameterKind
 {
 	Type,
@@ -111,6 +84,35 @@ struct TemplateArgument
 	static TemplateArgument dependent_value_arg(TypePtr type);
 	static TemplateArgument template_arg(TemplateDeclaration* declaration);
 	static TemplateArgument pack_arg(const vector<TemplateArgument>& values);
+};
+
+struct Node
+{
+	string line;
+	vector<Node> children;
+	TypePtr type;
+	ValueCategory category;
+	Binding* binding;
+	vector<Binding*> overloads;
+	map<Binding*, vector<TemplateArgument> > explicit_template_arguments;
+	Binding* direct_call;
+	bool has_op;
+	ETokenType op;
+	string token_text;
+	bool has_constant_value;
+	uint64_t constant_value;
+	string dependent_value_name;
+	string dependent_value_owner_template_name;
+	string dependent_value_member_name;
+	bool dependent_value_negated;
+	vector<pa11::TemplateInstanceArgument> dependent_value_owner_template_arguments;
+	bool suppress_virtual_dispatch;
+	bool virtual_dispatch;
+	bool is_typeid_expression;
+	bool is_dynamic_cast_expression;
+
+	Node();
+	explicit Node(const string& text);
 };
 
 bool template_argument_has_template_parameter( const TemplateArgument& arg, const map<const void*, vector<TemplateArgument> >& record_template_arguments);
@@ -370,6 +372,8 @@ public:
 	TypePtr substitute_type_for_template_match( TypePtr type, const map<string, TemplateArgument>& deduced);
 	TypePtr expand_alias_template_for_match( TypePtr type, const map<string, TemplateArgument>& deduced);
 	bool template_value_argument_matches_for_template_match( TemplateDeclaration* specialization, const TemplateArgument& pattern, const TemplateArgument& actual, const map<string, TemplateArgument>& deduced);
+	bool try_evaluate_template_value_argument_for_template_match( TemplateDeclaration* specialization, const TemplateArgument& pattern, const map<string, TemplateArgument>& deduced, TemplateArgument& out);
+	bool try_evaluate_dependent_value_expression_argument( const TemplateArgument& arg, TemplateArgument& out);
 	TemplateDeclaration* class_template_declaration_for_match( TypePtr type) const;
 
 	private:
@@ -421,6 +425,7 @@ public:
 	set<Binding*> override_function_parameter_name_bindings_;
 	set<Binding*> deleted_functions_;
 	map<const void*, Scope*> enum_owner_scopes_;
+	map<const void*, Scope*> record_owner_scopes_;
 	map<Scope*, vector<Binding*> > class_friend_functions_;
 	map<Scope*, vector<TypePtr> > class_friend_classes_;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies_;
@@ -521,6 +526,7 @@ public:
 				vector<TemplateArgument> expand_template_argument_pack(const TemplateArgument& argument) const;
 			void append_completed_template_pack_argument( TemplateDeclaration* declaration, size_t parameter_index, TypePtr parameter_type, const vector<TemplateArgument>& explicit_expanded, size_t& explicit_index, vector<TemplateArgument>& out);
 			TemplateArgument parse_default_template_argument( TemplateDeclaration* declaration, size_t parameter_index, const vector<TemplateArgument>& completed_args);
+			TemplateArgument convert_completed_non_type_template_argument( TemplateArgument argument, TypePtr parameter_type);
 			vector<TemplateArgument> complete_template_arguments( TemplateDeclaration* declaration, const vector<TemplateArgument>& explicit_arguments);
 		string template_argument_key( const vector<TemplateArgument>& arguments) const;
 		string template_specialization_name( TemplateDeclaration* declaration, const vector<TemplateArgument>& arguments) const;
@@ -551,7 +557,6 @@ public:
 			TemplateArgument template_argument_from_instance_argument( const pa11::TemplateInstanceArgument& argument) const;
 			TemplateArgument substitute_template_argument( const TemplateArgument& arg) const;
 			TypePtr make_integer_sequence_type( const vector<TemplateArgument>& arguments);
-			bool try_evaluate_dependent_value_expression_argument( const TemplateArgument& arg, TemplateArgument& out);
 		bool resolve_dependent_value_member_argument( const TemplateArgument& arg, TemplateArgument& out) const;
 		TypePtr substitute_template_type_parameter(TypePtr type, const string& name, TypePtr replacement) const;
 		TemplateArgument substitute_template_argument_type_parameter( const TemplateArgument& arg, const string& name, TypePtr replacement) const;
@@ -567,6 +572,17 @@ public:
 			bool deduce_function_template_arguments(TemplateDeclaration* declaration, const vector<Expr>& args, const vector<TemplateArgument>& explicit_arguments, vector<TemplateArgument>& out);
 			bool deduce_function_template_target_type(TemplateDeclaration* declaration, TypePtr target, const vector<TemplateArgument>& explicit_arguments, vector<TemplateArgument>& out);
 			bool deduce_template_type(TypePtr pattern, TypePtr argument, map<string, TypePtr>& deduced, const map<string, TypePtr>* fixed, map<string, TemplateArgument>* deduced_arguments = NULL) const;
+			bool deduce_explicit_function_template_arguments(TemplateDeclaration* declaration, const vector<TemplateArgument>& explicit_arguments, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, vector<TemplateArgument> >& deduced_packs, map<string, TemplateArgument>& fixed_arguments, vector<TemplateArgument>& out, bool& complete);
+			bool deduce_explicit_pack_template_argument(const TemplateParameterInfo& parameter, const vector<TemplateArgument>& explicit_arguments, size_t& explicit_index, map<string, vector<TemplateArgument> >& deduced_packs, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_explicit_single_template_argument(const TemplateParameterInfo& parameter, const TemplateArgument& explicit_arg, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_function_template_call_parameters(TemplateDeclaration* declaration, TypePtr fn, const vector<Expr>& args, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, vector<TemplateArgument> >& deduced_packs, map<string, TemplateArgument>& fixed_arguments, size_t& arg_index) const;
+			bool deduce_function_template_parameter_pack(TemplateDeclaration* declaration, TypePtr pattern, const string& pack_name, size_t remaining_function_parameters, const vector<Expr>& args, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, vector<TemplateArgument> >& deduced_packs, map<string, TemplateArgument>& fixed_arguments, size_t& arg_index) const;
+			bool deduce_function_template_overload_argument(TypePtr pattern, const Expr& actual, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_single_overload_template_argument(TypePtr pattern, const Expr& actual, const vector<TypePtr>& overload_types, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_overload_set_template_argument(TypePtr pattern, const Expr& actual, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_initializer_list_template_argument(TypePtr pattern, const Expr& actual, map<string, TypePtr>& deduced, const map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool deduce_regular_template_call_argument(TypePtr pattern, const Expr& actual, map<string, TypePtr>& deduced, map<string, TypePtr>& fixed, map<string, TemplateArgument>& fixed_arguments) const;
+			bool finish_deduced_function_template_arguments(TemplateDeclaration* declaration, map<string, TypePtr>& deduced, map<string, vector<TemplateArgument> >& deduced_packs, map<string, TemplateArgument>& fixed_arguments, vector<TemplateArgument>& out);
 		void parse_simple_or_function_declaration(Node& out, bool emit_node);
 		bool parse_qualified_constructor_definition(Node& out, bool emit_node, bool inline_spec = false, bool constexpr_spec = false);
 		bool parse_qualified_conversion_definition(Node& out, bool emit_node);

@@ -2,6 +2,90 @@
 
 namespace pa14 {
 namespace internal {
+namespace {
+
+const Node* global_definition_for_binding(const ProgramLowerer& program,
+                                          const Binding* binding)
+{
+	if (binding == NULL)
+		return NULL;
+	map<const Binding*, Node>::const_iterator emitted =
+		program.global_definition_nodes.find(binding);
+	if (emitted != program.global_definition_nodes.end())
+		return &emitted->second;
+	map<const Binding*, Node>::const_iterator deferred =
+		program.deferred_global_definitions.find(binding);
+	if (deferred != program.deferred_global_definitions.end())
+		return &deferred->second;
+	if (binding->aliased_binding != NULL)
+	{
+		emitted = program.global_definition_nodes.find(binding->aliased_binding);
+		if (emitted != program.global_definition_nodes.end())
+			return &emitted->second;
+		deferred = program.deferred_global_definitions.find(binding->aliased_binding);
+		if (deferred != program.deferred_global_definitions.end())
+			return &deferred->second;
+	}
+	return NULL;
+}
+
+Binding* function_pointer_initializer(const Node& node)
+{
+	if (node.children.empty())
+		return NULL;
+	const Node& init = node.children[0];
+	if (starts_with(init.line, "unary-expression") &&
+	    init.has_op &&
+	    init.op == OP_AMP &&
+	    !init.children.empty() &&
+	    init.children[0].binding != NULL &&
+	    init.children[0].binding->kind == BindingKind::Function)
+		return init.children[0].binding;
+	if (starts_with(init.line, "id-expression") &&
+	    init.binding != NULL &&
+	    init.binding->kind == BindingKind::Function)
+		return init.binding;
+	return NULL;
+}
+
+string declare_static_member_function_pointer_symbol(ProgramLowerer& program,
+                                                     const Binding* binding,
+                                                     TypePtr pointer_type)
+{
+	TypePtr pointer = pa11::strip_cv(pointer_type);
+	if (binding == NULL ||
+	    pointer.get() == NULL ||
+	    pointer->kind != TypeKind::Pointer ||
+	    pointer->base.get() == NULL ||
+	    pointer->base->kind != TypeKind::Function)
+		return "";
+	TypePtr owner = class_record_for_member(binding);
+	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+	if (owner.get() == NULL ||
+	    owner->kind != TypeKind::Record ||
+	    !owner->is_template_specialization)
+		return "";
+	string name = binding->name;
+	if (name.empty())
+		return "";
+	if (!program.declared_functions.insert(name).second)
+		return name;
+	TypePtr fn_type = pointer->base;
+	ostringstream out;
+	out << "declare function @" << name << "(";
+	for (size_t i = 0; i < fn_type->parameters.size(); ++i)
+	{
+		if (i != 0)
+			out << ", ";
+		out << "%arg" << i << " : " << lowir_parameter(fn_type->parameters[i]);
+	}
+	out << ") -> " << scalar_lowir_type(fn_type->base)
+	    << " [binding=internal]";
+	program.declares.push_back(out.str());
+	return name;
+}
+
+}  // namespace
 
 Value FunctionLowerer::emit_typeid_lvalue_addr(const Node& expr)
 {
@@ -125,6 +209,30 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	    pa11::strip_cv(object)->base.get() != NULL &&
 	    pa11::strip_cv(object)->base->kind == TypeKind::Function)
 	{
+		if ((expr.binding->is_constexpr ||
+		     pa11::type_has_const(expr.binding->type)) &&
+		    expr.binding->is_static_member)
+		{
+			const Node* definition =
+				global_definition_for_binding(program_, expr.binding);
+			Binding* fn = definition != NULL
+				? function_pointer_initializer(*definition) : NULL;
+			if (fn != NULL)
+			{
+				if (fn->is_inline_definition)
+					program_.demand_inline_function(fn);
+				string addr = fresh_temp();
+				string symbolic =
+					declare_static_member_function_pointer_symbol(
+						program_,
+						expr.binding,
+						object);
+				instr(addr + " = addr @" +
+				      (symbolic.empty() ? program_.symbol_for(fn) :
+				       symbolic));
+				return Value("ptr", addr);
+			}
+		}
 		program_.demand_global_declaration(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
@@ -289,6 +397,57 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		}
 		return Value("ptr", "$" + slot_for(expr.binding));
 	}
+	if (starts_with(expr.line, "member-pointer-expression"))
+	{
+		if (expr.children.size() < 2)
+			throw runtime_error("member pointer expression missing operand");
+		Value base;
+		if (expr.has_op && expr.op == OP_ARROWSTAR)
+			base = emit_rvalue(expr.children[0]);
+		else if (expr.children[0].category == ValueCategory::LValue ||
+		         expr.children[0].category == ValueCategory::XValue)
+			base = emit_lvalue_addr(expr.children[0]);
+		else
+		{
+			TypePtr object_record =
+				pa11::strip_cv(object_type(expr.children[0].type));
+			if (object_record->kind != TypeKind::Record)
+				throw runtime_error("unsupported member pointer object");
+			string slot = fresh_aux_slot("tmpobj", scalar_lowir_type(object_record));
+			string addr = fresh_temp();
+			instr(addr + " = addr $" + slot);
+			base = Value("ptr", addr);
+			function<Value()> object_addr = [base]() {
+				return base;
+			};
+			lower_object_init(object_addr, object_record, expr.children[0]);
+		}
+		base = ensure_pointer(base);
+		TypePtr object_record = expr.has_op && expr.op == OP_ARROWSTAR
+			? pa11::strip_cv(strip_for_value(expr.children[0].type))
+			: pa11::strip_cv(object_type(expr.children[0].type));
+		if (object_record.get() != NULL &&
+		    object_record->kind == TypeKind::Pointer)
+			object_record = pa11::strip_cv(object_record->base);
+		TypePtr member_pointer =
+			pa11::strip_cv(object_type(expr.children[1].type));
+		if (member_pointer->kind != TypeKind::MemberPointer)
+			throw runtime_error("member pointer operand type missing");
+		TypePtr owner_record = pa11::strip_cv(member_pointer->member_class);
+		if (object_record.get() != NULL &&
+		    object_record->kind == TypeKind::Record &&
+		    owner_record.get() != NULL &&
+		    !pa11::same_type(object_record, owner_record) &&
+		    record_has_base_subobject(object_record, owner_record))
+			base = emit_base_subobject_addr(base, object_record, owner_record);
+		Value encoded = emit_rvalue(expr.children[1]);
+		string offset = fresh_temp();
+		instr(offset + " = binary sub i64 " + encoded.text + ", 1");
+		string tmp = fresh_temp();
+		instr(tmp + " = index i8 [projection=field] " + base.text +
+		      ", " + offset);
+		return Value("ptr", tmp);
+	}
 	if (starts_with(expr.line, "member-expression") && expr.binding != NULL)
 		return emit_member_lvalue_addr(expr);
 	if (starts_with(expr.line, "base-subobject-expression"))
@@ -378,7 +537,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	if (starts_with(expr.line, "cast-expression") ||
 	    starts_with(expr.line, "id-expression xvalue"))
 		return emit_lvalue_addr(expr.children.empty() ? expr : expr.children[0]);
-	throw runtime_error("unsupported lvalue expression");
+	throw runtime_error("unsupported lvalue expression: " + expr.line);
 }
 
 Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)

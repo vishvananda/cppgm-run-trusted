@@ -115,8 +115,14 @@ vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
 bool Parser::active_type_parameter_pack(const string& name) const
 {
 	for (size_t i = template_type_parameter_packs_.size(); i > 0; --i)
+	{
 		if (template_type_parameter_packs_[i - 1].count(name) != 0)
 			return true;
+		if (i - 1 < template_type_substitutions_.size() &&
+		    template_type_substitutions_[i - 1].find(name) !=
+			    template_type_substitutions_[i - 1].end())
+			return false;
+	}
 	return false;
 }
 

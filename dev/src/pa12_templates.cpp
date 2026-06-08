@@ -393,7 +393,6 @@ bool hard_template_registration_error(const string& message)
 	return message == "template argument kind mismatch" ||
 	       message == "template pack argument kind mismatch" ||
 	       message == "missing template argument" ||
-	       message == "too many template arguments" ||
 	       message == "type template argument pack required" ||
 	       message == "value template argument pack required";
 }
@@ -602,9 +601,9 @@ candidate_only_class_template_specializations_.count( existing_record.get()) == 
 i < primary->class_specialization_declarations.size(); ++i) { TemplateDeclaration* existing = primary->class_specialization_declarations[i]; if (template_argument_key( existing->class_specialization_pattern) !=
 pattern_key) continue; if (declaration->has_definition) primary->class_specialization_declarations[i] = declaration; template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; if (declaration->has_definition && active_class_instantiations_.empty() && !validating_template_definition_) { try { validate_class_template_definition(declaration); }
-catch (const runtime_error& err) { if (string(err.what()) != "dependent typename not resolved") throw; } } return; } primary->class_specialization_declarations.push_back(declaration);
+catch (const runtime_error& err) { string message = err.what(); if (message != "dependent typename not resolved" && message != "too many template arguments") throw; } } return; } primary->class_specialization_declarations.push_back(declaration);
 template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; if (declaration->has_definition && active_class_instantiations_.empty() &&
-!validating_template_definition_) { try { validate_class_template_definition(declaration); } catch (const runtime_error& err) { if (string(err.what()) != "dependent typename not resolved") throw; } } return; }
+!validating_template_definition_) { try { validate_class_template_definition(declaration); } catch (const runtime_error& err) { string message = err.what(); if (message != "dependent typename not resolved" && message != "too many template arguments") throw; } } return; }
 declaration->has_definition = has_token(tokens_, pos_, declaration->decl_end, OP_LBRACE); TemplateDeclaration*& slot = class_templates_[owner][declaration->name];
 TypePtr owner_record = pa11::record_type_for_scope(owner); if (owner_record.get() != NULL) { map<const void*, TemplateDeclaration*>::iterator outer = record_template_declarations_.find(
 pa11::strip_cv(owner_record).get()); if (outer != record_template_declarations_.end()) { pair<TemplateDeclaration*, string> key = make_pair(outer->second, declaration->name); map<pair<TemplateDeclaration*, string>,
@@ -622,7 +621,7 @@ if (merged_parameters.size() < slot->parameters.size()) merged_parameters.resize
 slot->parameters = merged_parameters; slot->lexical_scope = declaration->lexical_scope; slot->decl_begin = declaration->decl_begin; slot->decl_end = declaration->decl_end; slot->tag = declaration->tag;
 slot->has_definition = true; } else merge_template_defaults(slot->parameters, declaration->parameters); } template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; if (declaration->has_definition) { if (active_class_instantiations_.empty() && !validating_template_definition_) { try { validate_class_template_definition(declaration);
-} catch (const runtime_error& err) { if (string(err.what()) != "dependent typename not resolved") throw; } } if (slot != declaration && class_templates_with_dependent_base_.count(declaration) != 0)
+} catch (const runtime_error& err) { string message = err.what(); if (message != "dependent typename not resolved" && message != "too many template arguments") throw; } } if (slot != declaration && class_templates_with_dependent_base_.count(declaration) != 0)
 class_templates_with_dependent_base_.insert(slot); } }
 
 void Parser::register_explicit_function_template_specialization(
@@ -1114,11 +1113,12 @@ bool Parser::find_function_parameter_pack_substitution(
 	const string& name,
 	vector<Binding*>& out) const
 {
-	for (size_t i = function_parameter_pack_substitutions_.size(); i > 0; --i)
+	if (function_parameter_pack_substitutions_.empty())
+		return false;
 	{
 		map<string, vector<Binding*> >::const_iterator found =
-			function_parameter_pack_substitutions_[i - 1].find(name);
-		if (found != function_parameter_pack_substitutions_[i - 1].end())
+			function_parameter_pack_substitutions_.back().find(name);
+		if (found != function_parameter_pack_substitutions_.back().end())
 		{
 			out = found->second;
 			return true;
@@ -1213,9 +1213,9 @@ find_template_type_substitution(spelling, root_type); TypePtr substituted_root =
 type_is_template_dependent(root_type); string owner_template_name; vector<pa11::TemplateInstanceArgument> owner_template_arguments; if (have_root_type_substitution && substituted_root.get() != NULL &&
 substituted_root->kind == pa11::TypeKind::Record && substituted_root->is_template_specialization) { owner_template_name = substituted_root->template_primary_name.empty()
 ? root_name : substituted_root->template_primary_name; owner_template_arguments = substituted_root->template_arguments; } TemplateArgument root_template; if (find_template_value_substitution(root_name, root_template) &&
-root_template.kind == TemplateArgumentKind::Template && root_template.template_declaration == NULL) dependent_root = true; vector<TemplateArgument> root_arguments; if (at(OP_LT)) { try {
+root_template.kind == TemplateArgumentKind::Template && root_template.template_declaration == NULL) dependent_root = true; if (have_root_type_substitution && !dependent_root) { pos_ = save; return false; } vector<TemplateArgument> root_arguments; if (at(OP_LT)) { try {
 parse_template_argument_list(root_arguments); } catch (const exception&) { pos_ = save; return false; } for (size_t i = 0; i < root_arguments.size(); ++i) if (template_argument_has_template_parameter( root_arguments[i],
-record_template_arguments_)) dependent_root = true; owner_template_arguments = dependent_value_instance_arguments(root_arguments); spelling += "<>"; } if (!dependent_root || !at(OP_COLON2)) { pos_ = save; return false; }
+record_template_arguments_)) dependent_root = true; owner_template_arguments = dependent_value_instance_arguments(root_arguments); spelling += "<>"; } if ((!dependent_root && !have_root_type_substitution) || !at(OP_COLON2)) { pos_ = save; return false; }
 string final_member_name; do { expect(OP_COLON2); spelling += "::"; consume(KW_TEMPLATE); if (!at_identifier()) { pos_ = save; return false; } string member_name = consume_identifier(); spelling += member_name;
 final_member_name = member_name; if (at(OP_LT)) { if (!skip_template_id_argument_tokens(tokens_, pos_)) { pos_ = save; return false; } spelling += "<>"; } } while (at(OP_COLON2)); TypePtr dependent_value_type;
 if (!validating_template_definition_ && !root_name.empty() && !final_member_name.empty()) { size_t type_save = pos_; try { TemplateDeclaration* alias = find_alias_template(NULL, root_name);
@@ -1235,7 +1235,10 @@ dependent.value_expr_begin = save; dependent.value_expr_end = pos_; return depen
 ConstexprValue value; if (try_evaluate_constexpr_expr(expr.node, value) && !value.is_object) { expr.has_constant_value = true; expr.constant_value = value.int_value; expr.node.has_constant_value = true;
 expr.node.constant_value = value.int_value; } } if (expr.valid && !expr.has_constant_value) { try { Conversion conv = convert_to(expr, pa11::make_fundamental(FT_BOOL)); if (conv.viable && !conv.expr.has_constant_value) {
 ConstexprValue value; if (try_evaluate_constexpr_expr(conv.expr.node, value)) apply_constexpr_value(conv.expr, value); } if (conv.viable && conv.expr.has_constant_value) expr = conv.expr; } catch (const runtime_error&) {
-} } Binding* function_binding = NULL; if (expr.binding != NULL && expr.binding->kind == BindingKind::Function) function_binding = expr.binding; else if (expr.overloads.size() == 1 &&
+} } TypePtr expr_bare = expr.type.get() != NULL ? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr(); if (expr_bare.get() != NULL && expr_bare->kind == pa11::TypeKind::MemberPointer && expr.node.has_op &&
+expr.node.op == OP_AMP && !expr.node.children.empty() && expr.node.children[0].binding != NULL && expr.dependent_value_owner_template_name.empty() && expr.overloads.size() <= 1) { Binding* member = expr.node.children[0].binding; if (member->aliased_binding != NULL && member->target_scope != NULL)
+member = member->aliased_binding; TemplateArgument arg = TemplateArgument::value_arg(expression_object_type(expr.type), reinterpret_cast<uint64_t>( member)); arg.value_binding = member; return arg; }
+Binding* function_binding = NULL; if (expr.binding != NULL && expr.binding->kind == BindingKind::Function) function_binding = expr.binding; else if (expr.overloads.size() == 1 &&
 expr.overloads[0]->kind == BindingKind::Function) function_binding = expr.overloads[0]; if (function_binding != NULL) { TypePtr value_type = expr.type; if (value_type.get() != NULL &&
 value_type->kind == pa11::TypeKind::Function) value_type = pa11::make_pointer(value_type); TemplateArgument arg = TemplateArgument::value_arg(value_type, reinterpret_cast<uint64_t>( function_binding));
 arg.value_binding = function_binding; return arg; } if (expr.binding != NULL && expr.binding->kind == BindingKind::Variable && expr.category == ValueCategory::LValue && !expr.has_constant_value) {
@@ -1244,7 +1247,7 @@ TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.v
 expr.dependent_value_owner_template_name; arg.value_member_name = expr.dependent_value_member_name; arg.value_negated = expr.dependent_value_negated; arg.value_owner_template_arguments =
 expr.dependent_value_owner_template_arguments; arg.value_expr_begin = save; arg.value_expr_end = expr_end; return arg; } TemplateArgument arg = TemplateArgument::value_arg(expression_object_type(expr.type),
 reinterpret_cast<uint64_t>( expr.binding)); arg.value_binding = expr.binding; return arg; } if (!expr.has_constant_value) { if (!active_class_instantiations_.empty() || !template_type_substitutions_.empty() ||
-!template_value_substitutions_.empty()) { TemplateArgument arg = TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.value_name = expr.dependent_value_name; arg.value_owner_template_name =
+!template_value_substitutions_.empty()) { TemplateArgument qualified_dependent; size_t replay_save = pos_; pos_ = save; bool saw_amp = consume(OP_AMP); bool parsed_qualified = saw_amp && try_parse_dependent_qualified_non_type_template_argument(qualified_dependent); if (parsed_qualified) { qualified_dependent.type = expression_object_type(expr.type); qualified_dependent.value_expr_begin = save; qualified_dependent.value_expr_end = expr_end; pos_ = replay_save; return qualified_dependent; } pos_ = replay_save; TemplateArgument arg = TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.value_name = expr.dependent_value_name; arg.value_owner_template_name =
 expr.dependent_value_owner_template_name; arg.value_member_name = expr.dependent_value_member_name; arg.value_negated = expr.dependent_value_negated; arg.value_owner_template_arguments =
 expr.dependent_value_owner_template_arguments; arg.value_expr_begin = save; arg.value_expr_end = expr_end; return arg; } throw runtime_error("invalid non-type template argument"); }
 return TemplateArgument::value_arg(expression_object_type(expr.type), expr.constant_value); }

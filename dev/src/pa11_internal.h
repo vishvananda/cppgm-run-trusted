@@ -119,6 +119,8 @@ struct Type
 	uint64_t record_align;
 	uint64_t record_forced_align;
 	uint64_t direct_base_offset;
+	vector<TypePtr> direct_bases;
+	vector<uint64_t> direct_base_offsets;
 	bool layout_valid;
 	bool is_polymorphic;
 	bool introduces_vptr;
@@ -187,6 +189,7 @@ struct Binding
 	int ref_qualifier;
 	bool is_noop_constructor;
 	bool is_noop_destructor;
+	bool is_cleanup_only_destructor;
 	uint64_t member_offset;
 	bool is_bit_field;
 	uint64_t bit_width;
@@ -285,6 +288,8 @@ string describe_type(const TypePtr& type);
 uint64_t type_size(const TypePtr& type);
 uint64_t type_align(const TypePtr& type);
 void layout_record_type(TypePtr type);
+vector<TypePtr> record_direct_bases(TypePtr type);
+uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base);
 TypePtr record_type_for_scope(Scope* scope);
 
 Scope* create_child_scope(Scope* parent,

@@ -25,6 +25,39 @@ bool Parser::template_value_argument_matches_for_template_match(
 	    actual.kind != TemplateArgumentKind::Value ||
 	    pattern.value_expr_end <= pattern.value_expr_begin)
 		return false;
+	TemplateArgument typed_pattern = pattern;
+	if (typed_pattern.type.get() == NULL && actual.type.get() != NULL)
+		typed_pattern.type = actual.type;
+	TemplateArgument evaluated;
+	if (!try_evaluate_template_value_argument_for_template_match(
+		    specialization,
+		    typed_pattern,
+		    deduced,
+		    evaluated))
+		return false;
+	if (evaluated.kind != TemplateArgumentKind::Value ||
+	    evaluated.dependent ||
+	    actual.value_binding != NULL)
+		return false;
+	TypePtr expr_type = evaluated.type;
+	if (!compatible_template_value_types(expr_type, actual.type))
+		return false;
+	TypePtr value_type =
+		actual.type.get() != NULL ? actual.type : expr_type;
+	return canonical_template_value(value_type, evaluated.value) ==
+	       canonical_template_value(value_type, actual.value);
+}
+
+bool Parser::try_evaluate_template_value_argument_for_template_match(
+	TemplateDeclaration* specialization,
+	const TemplateArgument& pattern,
+	const map<string, TemplateArgument>& deduced,
+	TemplateArgument& out)
+{
+	if (specialization == NULL ||
+	    pattern.kind != TemplateArgumentKind::Value ||
+	    pattern.value_expr_end <= pattern.value_expr_begin)
+		return false;
 	size_t save_pos = pos_;
 	vector<Token> save_tokens = tokens_;
 	vector<Scope*> save_scopes = scopes_;
@@ -84,58 +117,8 @@ bool Parser::template_value_argument_matches_for_template_match(
 		scopes_.push_back(specialization->lexical_scope != NULL
 		                  ? specialization->lexical_scope
 		                  : specialization->owner);
-		if (pattern.value_expr_end > tokens_.size())
-			tokens_ = declaration_tokens_;
-		pos_ = pattern.value_expr_begin;
-		++template_argument_expression_depth_;
-		Expr expr = parse_assignment_expression();
-		template_argument_expression_depth_ = save_expression_depth;
-		if (pos_ == pattern.value_expr_end)
-		{
-			if (expr.valid && !expr.has_constant_value)
-			{
-				ConstexprValue value;
-				if (try_evaluate_constexpr_expr(expr.node, value) &&
-				    !value.is_object)
-					apply_constexpr_value(expr, value);
-			}
-			if (expr.valid && !expr.has_constant_value &&
-			    actual.type.get() != NULL)
-			{
-				try
-				{
-					Conversion conv = convert_to(expr, actual.type);
-					if (conv.viable && !conv.expr.has_constant_value)
-					{
-						ConstexprValue value;
-						if (try_evaluate_constexpr_expr(conv.expr.node,
-						                                value))
-							apply_constexpr_value(conv.expr, value);
-					}
-					if (conv.viable && conv.expr.has_constant_value)
-						expr = conv.expr;
-				}
-				catch (const runtime_error&)
-				{
-				}
-			}
-			if (expr.valid && expr.has_constant_value &&
-			    actual.value_binding == NULL)
-			{
-				TypePtr expr_type = expression_object_type(expr.type);
-				if (compatible_template_value_types(expr_type,
-				                                    actual.type))
-				{
-					TypePtr value_type =
-						actual.type.get() != NULL ? actual.type : expr_type;
-					result =
-						canonical_template_value(value_type,
-						                         expr.constant_value) ==
-						canonical_template_value(value_type,
-						                         actual.value);
-				}
-			}
-		}
+		result = try_evaluate_dependent_value_expression_argument(pattern,
+		                                                          out);
 	}
 	catch (const runtime_error&)
 	{
@@ -153,7 +136,7 @@ bool Parser::template_value_argument_matches_for_template_match(
 	tokens_ = save_tokens;
 	pos_ = save_pos;
 	return result;
-	}
+}
 
 bool Parser::try_evaluate_dependent_value_expression_argument(
 	const TemplateArgument& arg,
@@ -297,13 +280,46 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 							result = true;
 						}
 				}
-				if (expr.valid && !expr.has_constant_value &&
-				    arg.type.get() != NULL)
+				bool member_pointer_address =
+					expr.valid &&
+					expr.node.has_op &&
+					expr.node.op == OP_AMP &&
+					!expr.node.children.empty() &&
+					expr.node.children[0].binding != NULL;
+				if (expr.valid && arg.type.get() != NULL &&
+				    (!expr.has_constant_value || member_pointer_address))
 				{
 				try
 				{
 					TypePtr target = substitute_template_type(arg.type);
 					Conversion conv = convert_to(expr, target);
+					if (conv.viable)
+					{
+						TypePtr converted_bare =
+							conv.expr.type.get() != NULL
+							? pa11::strip_cv(
+								expression_object_type(conv.expr.type))
+							: TypePtr();
+						if (converted_bare.get() != NULL &&
+						    converted_bare->kind ==
+							    pa11::TypeKind::MemberPointer &&
+						    conv.expr.node.has_op &&
+						    conv.expr.node.op == OP_AMP &&
+						    !conv.expr.node.children.empty() &&
+						    conv.expr.node.children[0].binding != NULL)
+						{
+							Binding* member =
+								conv.expr.node.children[0].binding;
+							if (member->aliased_binding != NULL &&
+							    member->target_scope != NULL)
+								member = member->aliased_binding;
+							out = TemplateArgument::value_arg(
+								expression_object_type(conv.expr.type),
+								reinterpret_cast<uint64_t>(member));
+							out.value_binding = member;
+							result = true;
+						}
+					}
 					if (conv.viable && !conv.expr.has_constant_value)
 					{
 						ConstexprValue value;
@@ -318,7 +334,7 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 				{
 				}
 			}
-				if (expr.valid && expr.has_constant_value)
+				if (!result && expr.valid && expr.has_constant_value)
 				{
 					out = TemplateArgument::value_arg(
 						expression_object_type(expr.type),

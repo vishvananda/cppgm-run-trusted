@@ -764,7 +764,13 @@ pa11::TemplateInstanceArgument template_instance_argument(
 	}
 	vector<pa11::TemplateInstanceArgument> pack;
 	for (size_t i = 0; i < argument.pack.size(); ++i)
-		pack.push_back(template_instance_argument(argument.pack[i]));
+	{
+		TemplateArgument element = argument.pack[i];
+		if (element.kind == TemplateArgumentKind::Value &&
+		    !element.dependent)
+			element.pack_expansion = false;
+		pack.push_back(template_instance_argument(element));
+	}
 	return pa11::TemplateInstanceArgument::pack_arg(pack);
 }
 

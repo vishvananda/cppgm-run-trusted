@@ -439,6 +439,32 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		                  type);
 		return type;
 	};
+	auto complete_qualifier_record = [&](TypePtr qualifier_type) {
+		size_t saved_pos = pos_;
+		vector<Scope*> saved_scopes = scopes_;
+		complete_template_record(qualifier_type);
+		scopes_ = saved_scopes;
+		pos_ = saved_pos;
+	};
+	auto instantiate_qualifier_template_members = [&](TypePtr qualifier_type) {
+		size_t saved_pos = pos_;
+		vector<Scope*> saved_scopes = scopes_;
+		complete_template_record(qualifier_type);
+		instantiate_member_function_templates(qualifier_type);
+		instantiate_member_variable_templates(qualifier_type);
+		scopes_ = saved_scopes;
+		pos_ = saved_pos;
+	};
+	auto complete_qualifier_binding = [&](Binding* binding) {
+		size_t saved_pos = pos_;
+		vector<Scope*> saved_scopes = scopes_;
+		if (binding != NULL && binding->type.get() != NULL)
+			complete_member_class_template_record(binding);
+		if (binding != NULL && binding->type.get() != NULL)
+			complete_template_record(binding->type);
+		scopes_ = saved_scopes;
+		pos_ = saved_pos;
+	};
 	if (consume(OP_COLON2))
 	{
 		scope = global_scope();
@@ -491,11 +517,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 									type = primary->type;
 							}
 							if (!type_is_template_dependent(type))
-							{
-								complete_template_record(type);
-								instantiate_member_function_templates(type);
-								instantiate_member_variable_templates(type);
-							}
+								instantiate_qualifier_template_members(type);
 						type = pa11::strip_cv(type);
 						if (type->kind != pa11::TypeKind::Record ||
 						    type->scope == NULL)
@@ -519,9 +541,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				break;
 			}
 			if (binding->type.get() != NULL)
-			{
-				complete_template_record(binding->type);
-			}
+				complete_qualifier_record(binding->type);
 			Scope* next = resolve_qualifier(binding);
 			if (next == NULL)
 				throw runtime_error("qualified lookup root not found");
@@ -549,7 +569,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		}
 		type = expression_object_type(type);
 		type = pa11::strip_cv(type);
-		complete_template_record(type);
+		complete_qualifier_record(type);
 		if ((type->kind != pa11::TypeKind::Record &&
 		     type->kind != pa11::TypeKind::Enum) ||
 		    type->scope == NULL)
@@ -567,12 +587,24 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				bool have_template_subst =
 					find_template_value_substitution(root, template_subst) &&
 					template_subst.kind == TemplateArgumentKind::Template;
-				TemplateDeclaration* alias = find_alias_template(NULL, root);
-				TemplateDeclaration* templ = alias == NULL
-					? find_class_template(NULL, root) : NULL;
-				if (have_template_subst ||
-				    alias != NULL ||
-				    templ != NULL)
+					TemplateDeclaration* alias = find_alias_template(NULL, root);
+					TemplateDeclaration* templ = alias == NULL
+						? find_class_template(NULL, root) : NULL;
+					if (alias == NULL &&
+					    templ == NULL &&
+					    !active_functions_.empty() &&
+					    active_functions_.back() != NULL &&
+					    active_functions_.back()->owner != NULL &&
+					    active_functions_.back()->owner->kind == ScopeKind::Class)
+					{
+						Scope* owner_scope = active_functions_.back()->owner;
+						alias = find_alias_template(owner_scope, root);
+						templ = alias == NULL
+							? find_class_template(owner_scope, root) : NULL;
+					}
+					if (have_template_subst ||
+					    alias != NULL ||
+					    templ != NULL)
 					{
 						vector<TemplateArgument> arguments;
 						parse_template_argument_list(arguments);
@@ -650,11 +682,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 								type = primary->type;
 						}
 							if (!type_is_template_dependent(type))
-							{
-								complete_template_record(type);
-								instantiate_member_function_templates(type);
-								instantiate_member_variable_templates(type);
-							}
+								instantiate_qualifier_template_members(type);
 						type = pa11::strip_cv(type);
 					if (type->kind != pa11::TypeKind::Record ||
 					    type->scope == NULL)
@@ -671,11 +699,11 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		}
 		else
 			pos_ = save;
-		if (scope == NULL)
-		{
-			string ordinary_root = consume_identifier();
-			expect(OP_COLON2);
-			TypePtr subst_root;
+			if (scope == NULL)
+			{
+				string ordinary_root = consume_identifier();
+				expect(OP_COLON2);
+				TypePtr subst_root;
 			if (find_template_type_substitution(ordinary_root, subst_root))
 			{
 				subst_root = pa11::strip_cv(subst_root);
@@ -695,7 +723,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 							instantiate_class_template(decl->second,
 							                           args->second));
 				}
-				complete_template_record(subst_root);
+				complete_qualifier_record(subst_root);
 				if (subst_root->kind == pa11::TypeKind::Record &&
 				    subst_root->scope != NULL)
 				{
@@ -744,7 +772,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				}
 				if (binding_type.get() != NULL)
 				{
-					complete_template_record(binding_type);
+					complete_qualifier_record(binding_type);
 					TypePtr bare = pa11::strip_cv(binding_type);
 					if (bare->kind == pa11::TypeKind::Record &&
 					    bare->scope != NULL)
@@ -767,7 +795,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		Binding* binding =
 			pa11::lookup_unqualified(current_scope(), root, pa11::LOOKUP_QUALIFIER);
 		if (binding != NULL && binding->type.get() != NULL)
-			complete_template_record(binding->type);
+			complete_qualifier_record(binding->type);
 		TypePtr binding_type =
 			binding != NULL && binding->type.get() != NULL
 			? pa11::strip_cv(binding->type) : TypePtr();
@@ -804,9 +832,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 			throw runtime_error("qualified lookup component not found");
 		}
 		if (found[0]->type.get() != NULL)
-			complete_member_class_template_record(found[0]);
-		if (found[0]->type.get() != NULL)
-			complete_template_record(found[0]->type);
+			complete_qualifier_binding(found[0]);
 		scope = resolve_qualifier(found[0]);
 		if (scope == NULL)
 			throw runtime_error("qualified lookup component not a scope");
@@ -846,11 +872,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				? instantiate_alias_template(alias, arguments)
 				: instantiate_class_template(templ, arguments);
 			if (!type_is_template_dependent(type))
-			{
-				complete_template_record(type);
-				instantiate_member_function_templates(type);
-				instantiate_member_variable_templates(type);
-			}
+				instantiate_qualifier_template_members(type);
 		type = pa11::strip_cv(type);
 		if (type->kind != pa11::TypeKind::Record || type->scope == NULL)
 			throw runtime_error("template-id qualifier is not a scope");
@@ -876,9 +898,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				throw runtime_error("qualified lookup component not found");
 			}
 			if (found[0]->type.get() != NULL)
-				complete_member_class_template_record(found[0]);
-			if (found[0]->type.get() != NULL)
-				complete_template_record(found[0]->type);
+				complete_qualifier_binding(found[0]);
 			scope = resolve_qualifier(found[0]);
 			if (scope == NULL)
 				throw runtime_error("qualified lookup component not a scope");
@@ -953,7 +973,7 @@ bool Parser::binary_operator(ETokenType& op, int& prec) const
 	case OP_LSHIFT: case OP_RSHIFT: prec = 8; return true;
 	case OP_PLUS: case OP_MINUS: prec = 9; return true;
 	case OP_STAR: case OP_DIV: case OP_MOD: prec = 10; return true;
-	case OP_ARROWSTAR: prec = 11; return true;
+	case OP_DOTSTAR: case OP_ARROWSTAR: prec = 11; return true;
 	default:
 		return false;
 	}

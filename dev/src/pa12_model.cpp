@@ -72,11 +72,16 @@ void collect_in_scope(Scope* scope,
 	if (!out.empty())
 		return;
 	TypePtr record = pa11::record_type_for_scope(scope);
-	TypePtr base = record.get() != NULL && record->base.get() != NULL
-		? pa11::strip_cv(record->base) : TypePtr();
-	if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-	    base->scope != NULL)
-		collect_in_scope(base->scope, name, mask, seen, out);
+	vector<TypePtr> bases = record.get() != NULL
+		? pa11::record_direct_bases(record) : vector<TypePtr>();
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL)
+			collect_in_scope(base->scope, name, mask, seen, out);
+	}
 }
 
 bool type_is_floating(TypePtr type)
@@ -324,21 +329,61 @@ bool same_named_record_type(TypePtr left, TypePtr right)
 	       same_scope_path(l->scope, r->scope);
 }
 
+bool same_record_base_target(TypePtr left, TypePtr right)
+{
+	return pa11::same_type(left, right) ||
+	       same_template_specialization_record(left, right) ||
+	       same_named_record_type(left, right);
+}
+
+void collect_record_base_distances(TypePtr source,
+                                   TypePtr target,
+                                   int distance,
+                                   vector<TypePtr>& seen,
+                                   int& best,
+                                   int& matches)
+{
+	if (source.get() == NULL || target.get() == NULL)
+		return;
+	TypePtr s = pa11::strip_cv(source);
+	TypePtr t = pa11::strip_cv(target);
+	if (s.get() == NULL || s->kind != pa11::TypeKind::Record ||
+	    t.get() == NULL || t->kind != pa11::TypeKind::Record)
+		return;
+	for (size_t i = 0; i < seen.size(); ++i)
+		if (same_record_base_target(seen[i], s))
+			return;
+	seen.push_back(s);
+	if (same_record_base_target(s, t))
+	{
+		best = min(best, distance);
+		++matches;
+		seen.pop_back();
+		return;
+	}
+	vector<TypePtr> bases = pa11::record_direct_bases(s);
+	for (size_t i = 0; i < bases.size(); ++i)
+		collect_record_base_distances(bases[i],
+		                              t,
+		                              distance + 1,
+		                              seen,
+		                              best,
+		                              matches);
+	seen.pop_back();
+}
+
 int record_base_distance_impl(TypePtr source, TypePtr target)
 {
+	if (source.get() == NULL || target.get() == NULL)
+		return 1000000;
 	TypePtr t = pa11::strip_cv(target);
-	int distance = 0;
-	for (TypePtr s = pa11::strip_cv(source);
-	     s.get() != NULL && s->kind == pa11::TypeKind::Record;
-	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
-	{
-		if (pa11::same_type(s, t) ||
-		    same_template_specialization_record(s, t) ||
-		    same_named_record_type(s, t))
-			return distance;
-		++distance;
-	}
-	return 1000000;
+	if (t.get() == NULL || t->kind != pa11::TypeKind::Record)
+		return 1000000;
+	vector<TypePtr> seen;
+	int best = 1000000;
+	int matches = 0;
+	collect_record_base_distances(source, t, 0, seen, best, matches);
+	return matches == 1 ? best : 1000000;
 }
 
 bool qualification_compatible_impl(TypePtr target,
@@ -558,6 +603,7 @@ TypePtr Parser::add_record(Scope* scope,
 		existing->type->complete = existing->type->complete || complete;
 		if (class_scope != NULL)
 			existing->type->scope = class_scope;
+		record_owner_scopes_[existing->type.get()] = scope;
 		return existing->type;
 	}
 	TypePtr type =
@@ -567,6 +613,7 @@ TypePtr Parser::add_record(Scope* scope,
 		                       class_scope);
 	Binding* binding = pa11::add_binding(scope, BindingKind::Type, name, type);
 	binding->target_scope = class_scope;
+	record_owner_scopes_[type.get()] = scope;
 	return type;
 }
 
@@ -688,19 +735,24 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 		if (!direct.empty())
 			return direct;
 		TypePtr record = pa11::record_type_for_scope(scope);
-		TypePtr base = record.get() != NULL && record->base.get() != NULL
-			? pa11::strip_cv(record->base) : TypePtr();
-		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL &&
-		    !record_skips_dependent_base_unqualified_lookup(record))
+		vector<TypePtr> bases = record.get() != NULL
+			? pa11::record_direct_bases(record) : vector<TypePtr>();
+		vector<Binding*> base_found;
+		for (size_t b = 0; b < bases.size(); ++b)
 		{
-			complete_template_record(base);
-			vector<Binding*> base_found;
-			set<Scope*> seen;
-			collect_in_scope(base->scope, name, mask, seen, base_found);
-			if (!base_found.empty())
-				return base_found;
+			TypePtr base = bases[b].get() != NULL
+				? pa11::strip_cv(bases[b]) : TypePtr();
+			if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
+			    base->scope != NULL &&
+			    !record_skips_dependent_base_unqualified_lookup(record))
+			{
+				complete_template_record(base);
+				set<Scope*> seen;
+				collect_in_scope(base->scope, name, mask, seen, base_found);
+			}
 		}
+		if (!base_found.empty())
+			return base_found;
 	}
 	return vector<Binding*>();
 }
@@ -805,40 +857,42 @@ bool Parser::types_reference_compatible(TypePtr target, TypePtr source) const
 
 int Parser::record_base_distance(TypePtr source, TypePtr target) const
 {
-	TypePtr t = pa11::strip_cv(target);
-	if (t->kind != pa11::TypeKind::Record)
+	if (source.get() == NULL || target.get() == NULL)
 		return 1000000;
-	int distance = 0;
+	TypePtr t = pa11::strip_cv(target);
+	if (t.get() == NULL || t->kind != pa11::TypeKind::Record)
+		return 1000000;
+	vector<TypePtr> pending;
 	vector<TypePtr> seen;
-	for (TypePtr s = pa11::strip_cv(source);
-	     s.get() != NULL && s->kind == pa11::TypeKind::Record;
-	     s = s->base.get() != NULL ? pa11::strip_cv(s->base) : TypePtr())
+	TypePtr s = pa11::strip_cv(source);
+	if (s.get() != NULL)
+		pending.push_back(s);
+	while (!pending.empty())
 	{
+		TypePtr cur = pa11::strip_cv(pending.back());
+		pending.pop_back();
+		if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record)
+			continue;
+		bool already_seen = false;
 		for (size_t i = 0; i < seen.size(); ++i)
-			if (pa11::same_type(seen[i], s) ||
-			    same_template_specialization_record(seen[i], s) ||
-			    same_named_record_type(seen[i], s))
-				return 1000000;
-		seen.push_back(s);
-		if (pa11::same_type(s, t) ||
-		    same_template_specialization_record(s, t) ||
-		    same_named_record_type(s, t))
-			return distance;
+			if (same_record_base_target(seen[i], cur))
+				already_seen = true;
+		if (already_seen)
+			continue;
+		seen.push_back(cur);
 		try
 		{
-			const_cast<Parser*>(this)->complete_template_record(s);
+			const_cast<Parser*>(this)->complete_template_record(cur);
 		}
 		catch (const exception&)
 		{
 			return 1000000;
 		}
-		if (pa11::same_type(s, t) ||
-		    same_template_specialization_record(s, t) ||
-		    same_named_record_type(s, t))
-			return distance;
-		++distance;
+		vector<TypePtr> bases = pa11::record_direct_bases(cur);
+		for (size_t i = 0; i < bases.size(); ++i)
+			pending.push_back(bases[i]);
 	}
-	return 1000000;
+	return record_base_distance_impl(source, target);
 }
 
 bool Parser::active_function_matches(Binding* function) const
@@ -1011,7 +1065,25 @@ int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
 			return 4 + cv_rank;
 		}
 	}
+	if (src_bare->kind == pa11::TypeKind::MemberPointer &&
+	    dst_bare->kind == pa11::TypeKind::MemberPointer)
+	{
+		if (!qualification_compatible(dst_bare->base, src_bare->base))
+			return 1000000;
+		TypePtr src_class = pa11::strip_cv(src_bare->member_class);
+		TypePtr dst_class = pa11::strip_cv(dst_bare->member_class);
+		if (pa11::same_type(src_class, dst_class))
+			return pa11::same_type(src_bare->base, dst_bare->base) ? 0 : 2;
+		int distance = record_base_distance(dst_class, src_class);
+		if (distance < 1000000)
+			return distance + 2;
+		return 1000000;
+	}
 	if (type_is_pointer(src) &&
+	    pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental &&
+	    pa11::strip_cv(dst)->fundamental == FT_BOOL)
+		return 6;
+	if (src_bare->kind == pa11::TypeKind::MemberPointer &&
 	    pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental &&
 	    pa11::strip_cv(dst)->fundamental == FT_BOOL)
 		return 6;

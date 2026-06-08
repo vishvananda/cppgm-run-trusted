@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_templates_function_support.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -25,6 +26,24 @@ bool record_has_nonpublic_field(TypePtr record)
 bool is_destructor_binding(Binding* binding)
 {
 	return binding != NULL && !binding->name.empty() && binding->name[0] == '~';
+}
+
+void stamp_template_member_function_symbol(Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    !binding->function_specialization_symbol.empty() ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class)
+		return;
+	TypePtr record = pa11::record_type_for_scope(binding->owner);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL ||
+	    record->kind != pa11::TypeKind::Record ||
+	    !record->is_template_specialization)
+		return;
+	binding->function_specialization_symbol =
+		abi_binding_symbol(binding, map<string, size_t>());
 }
 
 unsigned pointed_record_cv(TypePtr ptr)
@@ -342,13 +361,17 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	}
 
 	Scope* declarator_scope = NULL;
-	if (at(OP_COLON2) || (at_identifier() && lookahead(OP_COLON2, 1)))
+	if (at(OP_COLON2) ||
+	    (at_identifier() &&
+	     (lookahead(OP_COLON2, 1) || lookahead(OP_LT, 1))))
 	{
 		size_t qualifier_save = pos_;
 		try
 		{
 			Scope* qualifier = parse_nested_name_specifier(NULL);
-			if (qualifier != NULL && qualifier->kind == ScopeKind::Class)
+			if (qualifier != NULL &&
+			    qualifier->kind == ScopeKind::Class &&
+			    !at(OP_STAR))
 				declarator_scope = qualifier;
 		}
 		catch (const exception&)
@@ -614,6 +637,16 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
+	vector<Scope*> saved_initializer_scopes;
+	bool pushed_initializer_scope = false;
+	if (declarator_scope != NULL && !declares_function)
+	{
+		saved_initializer_scopes = scopes_;
+		scopes_.push_back(declarator_scope);
+		pushed_initializer_scope = true;
+	}
+	try
+	{
 	if (consume(OP_ASS))
 	{
 		if (at(OP_LBRACE))
@@ -674,6 +707,15 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		}
 		expect(OP_RPAREN);
 	}
+	}
+	catch (...)
+	{
+		if (pushed_initializer_scope)
+			scopes_ = saved_initializer_scopes;
+		throw;
+	}
+	if (pushed_initializer_scope)
+		scopes_ = saved_initializer_scopes;
 
 	size_t decl_span_begin = local_static_decl_span_begin(tokens_,
 	                                                      decl_start,
@@ -1185,6 +1227,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			function->is_final_virtual ||
 			(suffix != NULL && suffix->final_decl);
 	}
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(function);
 	if (suffix != NULL)
 	{
 		vector<Expr> defaults;

@@ -713,6 +713,55 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	Expr pack;
 	if (make_call_pack_expr(callee, args, pack))
 		return pack;
+	if (callee.node.line.compare(0, 34, "member-pointer-function-expression") == 0)
+	{
+		TypePtr callee_type = expression_object_type(callee.type);
+		callee_type = pa11::strip_cv(callee_type);
+		if (callee_type->kind == pa11::TypeKind::Pointer)
+			callee_type = callee_type->base;
+		if (callee_type->kind != pa11::TypeKind::Function ||
+		    callee_type->parameters.empty() ||
+		    callee.node.children.size() < 2)
+			throw runtime_error("member pointer call target is not callable");
+		if (args.size() + 1 != callee_type->parameters.size() &&
+		    !callee_type->variadic)
+			throw runtime_error("wrong argument count");
+		Expr object;
+		object.valid = true;
+		object.node = callee.node.children[0];
+		object.type = object.node.type;
+		object.category = object.node.category;
+		object.binding = object.node.binding;
+		Expr object_arg = callee.node.has_op && callee.node.op == OP_ARROWSTAR
+			? object : make_address_expr("&", object);
+		vector<Expr> converted;
+		converted.push_back(object_arg);
+		for (size_t i = 0; i < args.size(); ++i)
+			converted.push_back(args[i]);
+		for (size_t i = 0; i < callee_type->parameters.size(); ++i)
+		{
+			Conversion conv = convert_to(converted[i],
+			                             callee_type->parameters[i]);
+			if (!conv.viable)
+				throw runtime_error("invalid argument conversion");
+			converted[i] = conv.expr;
+		}
+		Expr out;
+		out.type = callee_type->base;
+		out.category = call_category(out.type);
+		out.node = Node("call-expression " + value_category_name(out.category) +
+		                " " + pa11::describe_type(out.type));
+		add_child(out.node, callee.node);
+		for (size_t i = 0; i < converted.size(); ++i)
+			add_child(out.node, converted[i].node);
+		out.valid = true;
+		if (unevaluated_expression_depth_ == 0 &&
+		    out.category == ValueCategory::PRValue &&
+		    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record)
+			ensure_default_destructor(out.type);
+		annotate_expr_node(out);
+		return out;
+	}
 	TypePtr callee_object = pa11::strip_cv(expression_object_type(callee.type));
 	if (callee.overloads.empty() &&
 	    callee_object->kind == pa11::TypeKind::Record &&

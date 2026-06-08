@@ -413,25 +413,26 @@ TemplateArgument Parser::substitute_template_argument_type_parameter(
 			if (owner.get() != NULL &&
 			    owner->kind == pa11::TypeKind::Record)
 			{
-				out.value_owner_template_name =
-					owner->template_primary_name.empty()
-					? owner->name
-					: owner->template_primary_name;
-				out.value_owner_template_arguments.clear();
-				map<const void*, vector<TemplateArgument> >::const_iterator args =
-					record_template_arguments_.find(owner.get());
-				if (args != record_template_arguments_.end() &&
-				    !args->second.empty())
-				{
-					for (size_t i = 0; i < args->second.size(); ++i)
-						out.value_owner_template_arguments.push_back(
-							template_instance_argument(args->second[i]));
+					out.value_owner_template_name =
+						owner->template_primary_name.empty()
+						? owner->name
+						: owner->template_primary_name;
+					out.value_owner_template_arguments.clear();
+					if (!owner->template_arguments.empty())
+						out.value_owner_template_arguments =
+							owner->template_arguments;
+					else
+					{
+						map<const void*, vector<TemplateArgument> >::const_iterator args =
+							record_template_arguments_.find(owner.get());
+						if (args != record_template_arguments_.end() &&
+						    !args->second.empty())
+							for (size_t i = 0; i < args->second.size(); ++i)
+								out.value_owner_template_arguments.push_back(
+									template_instance_argument(args->second[i]));
+					}
 				}
-				else
-					out.value_owner_template_arguments =
-						owner->template_arguments;
 			}
-		}
 		return out;
 	}
 	if (arg.kind == TemplateArgumentKind::Pack)
@@ -613,19 +614,139 @@ bool Parser::resolve_dependent_value_member_argument(
 				if (it != sit->second.end())
 					declaration = it->second;
 			}
-		if (alias_declaration == NULL && declaration == NULL)
-		{
-			return false;
-		}
-		owner = alias_declaration != NULL
-			? const_cast<Parser*>(this)->instantiate_alias_template(
-				alias_declaration,
-				owner_args)
+			if (alias_declaration == NULL && declaration == NULL)
+			{
+				return false;
+			}
+			if (declaration != NULL && !owner_args.empty())
+			{
+				bool owner_args_too_large = true;
+				for (size_t pi = 0; pi < declaration->parameters.size(); ++pi)
+					if (declaration->parameters[pi].is_pack)
+						owner_args_too_large = false;
+				owner_args_too_large =
+					owner_args_too_large &&
+					owner_args.size() > declaration->parameters.size();
+				if (owner_args_too_large)
+				{
+					for (size_t ci = 0;
+					     ci < declaration->class_specialization_declarations.size() &&
+					     owner_args_too_large;
+					     ++ci)
+					{
+						TemplateDeclaration* candidate =
+							declaration->class_specialization_declarations[ci];
+						if (candidate == NULL ||
+						    candidate->parameters.size() != owner_args.size())
+							continue;
+						Parser* self = const_cast<Parser*>(this);
+						vector<map<string, TypePtr> > save_type_subst =
+							self->template_type_substitutions_;
+						vector<map<string, TemplateArgument> > save_value_subst =
+							self->template_value_substitutions_;
+						vector<set<string> > save_pack_subst =
+							self->template_type_parameter_packs_;
+						map<string, TypePtr> type_subst;
+						map<string, TemplateArgument> value_subst;
+						set<string> pack_subst;
+						for (size_t pi = 0; pi < candidate->parameters.size(); ++pi)
+						{
+							const TemplateParameterInfo& parameter =
+								candidate->parameters[pi];
+							if (parameter.name.empty())
+								continue;
+							const TemplateArgument& owner_arg = owner_args[pi];
+							if (parameter.kind == TemplateParameterKind::Type)
+							{
+								if (parameter.is_pack)
+								{
+									type_subst[parameter.name] =
+										pa11::make_template_parameter_type(
+											parameter.name);
+									value_subst[parameter.name] = owner_arg;
+									pack_subst.insert(parameter.name);
+								}
+								else if (owner_arg.kind == TemplateArgumentKind::Type)
+									type_subst[parameter.name] = owner_arg.type;
+							}
+							else
+								value_subst[parameter.name] = owner_arg;
+						}
+						self->template_type_substitutions_.push_back(type_subst);
+						self->template_value_substitutions_.push_back(value_subst);
+						self->template_type_parameter_packs_.push_back(pack_subst);
+						vector<TemplateArgument> recovered_args;
+						try
+						{
+							for (size_t pi = 0;
+							     pi < candidate->class_specialization_pattern.size();
+							     ++pi)
+								recovered_args.push_back(
+									substitute_template_argument(
+										candidate->
+											class_specialization_pattern[pi]));
+						}
+						catch (...)
+						{
+							self->template_type_substitutions_ = save_type_subst;
+							self->template_value_substitutions_ = save_value_subst;
+							self->template_type_parameter_packs_ = save_pack_subst;
+							throw;
+						}
+						self->template_type_substitutions_ = save_type_subst;
+						self->template_value_substitutions_ = save_value_subst;
+						self->template_type_parameter_packs_ = save_pack_subst;
+						bool recovered_too_large = true;
+						for (size_t pi = 0; pi < declaration->parameters.size(); ++pi)
+							if (declaration->parameters[pi].is_pack)
+								recovered_too_large = false;
+						recovered_too_large =
+							recovered_too_large &&
+							recovered_args.size() > declaration->parameters.size();
+						if (!recovered_too_large)
+						{
+							owner_args = recovered_args;
+							owner_args_too_large = false;
+						}
+					}
+					if (owner_args_too_large)
+						for (size_t ai = active_class_instantiations_.size();
+						     ai > 0;
+						     --ai)
+						{
+							const ActiveClassInstantiation& active =
+								active_class_instantiations_[ai - 1];
+							if (active.declaration == NULL ||
+							    active.declaration->name != declaration->name ||
+							    active.declaration->owner != declaration->owner)
+								continue;
+							TypePtr active_type = active.type.get() != NULL
+								? pa11::strip_cv(active.type) : TypePtr();
+							if (active_type.get() == NULL ||
+							    active_type->kind != pa11::TypeKind::Record ||
+							    active_type->template_arguments.empty())
+								continue;
+							vector<TemplateArgument> canonical_args;
+							for (size_t ti = 0;
+							     ti < active_type->template_arguments.size();
+							     ++ti)
+								canonical_args.push_back(
+									template_argument_from_instance_argument(
+										active_type->template_arguments[ti]));
+							owner_args = canonical_args;
+							break;
+						}
+				}
+			}
+			owner = alias_declaration != NULL
+				? const_cast<Parser*>(this)->instantiate_alias_template(
+					alias_declaration,
+					owner_args)
 			: const_cast<Parser*>(this)->instantiate_class_template(
 				declaration,
 				owner_args);
 	}
-		owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
 	if (owner.get() == NULL ||
 	    owner->kind != pa11::TypeKind::Record ||
 	    owner->scope == NULL)
@@ -783,6 +904,51 @@ bool Parser::resolve_dependent_value_member_argument(
 			return true;
 		}
 		throw runtime_error("dependent value member not resolved");
+	}
+	TypePtr target = arg.type.get() != NULL
+		? pa11::strip_cv(substitute_template_type(arg.type)) : TypePtr();
+	if (target.get() != NULL &&
+	    target->kind == pa11::TypeKind::MemberPointer)
+	{
+		TypePtr target_class = target->member_class.get() != NULL
+			? pa11::strip_cv(target->member_class) : TypePtr();
+		if (target_class.get() != NULL &&
+		    (target_class->kind == pa11::TypeKind::TemplateParameter ||
+		     target_class->is_dependent_typename))
+			target = pa11::make_member_pointer(owner, target->base);
+		Parser* self = const_cast<Parser*>(this);
+		Binding* first = found[0];
+		Expr inner;
+		inner.valid = true;
+		inner.binding = first;
+		inner.type = first->type;
+		inner.category = ValueCategory::LValue;
+		for (size_t i = 0; i < found.size(); ++i)
+			if (found[i]->kind == BindingKind::Function)
+				inner.overloads.push_back(found[i]);
+		inner.node = Node("id-expression lvalue " +
+		                  pa11::describe_type(inner.type) + " " +
+		                  qualified_decl_name(first));
+		inner.node.binding = first;
+		annotate_expr_node(inner);
+		Expr address = self->make_address_expr("&", inner);
+		Conversion conv = self->convert_to(address, target);
+		if (!conv.viable ||
+		    !conv.expr.node.has_op ||
+		    conv.expr.node.op != OP_AMP ||
+		    conv.expr.node.children.empty() ||
+		    conv.expr.node.children[0].binding == NULL)
+			return false;
+		Binding* member = conv.expr.node.children[0].binding;
+		if (member->aliased_binding != NULL &&
+		    member->target_scope != NULL)
+			member = member->aliased_binding;
+		out = TemplateArgument::value_arg(
+			expression_object_type(conv.expr.type),
+			reinterpret_cast<uint64_t>(member));
+		out.value_binding = member;
+		out.value_name = arg.value_name;
+		return true;
 	}
 	Binding* binding = found[0];
 	if (!binding->has_constant)

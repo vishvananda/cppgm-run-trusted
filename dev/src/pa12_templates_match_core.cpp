@@ -600,6 +600,34 @@ bool same_template_argument_value(
 			return left.value_binding == right.value_binding &&
 			       (left.type.get() == NULL || right.type.get() == NULL ||
 			        pa11::same_type(left.type, right.type));
+		if (active_template_match_parser != NULL &&
+		    left.dependent &&
+		    left.value_expr_end > left.value_expr_begin &&
+		    !right.dependent)
+		{
+			TemplateArgument evaluated;
+			if (active_template_match_parser
+				    ->try_evaluate_dependent_value_expression_argument(
+					    left,
+					    evaluated))
+				return same_template_argument_value(evaluated,
+				                                    right,
+				                                    record_arguments);
+		}
+		if (active_template_match_parser != NULL &&
+		    right.dependent &&
+		    right.value_expr_end > right.value_expr_begin &&
+		    !left.dependent)
+		{
+			TemplateArgument evaluated;
+			if (active_template_match_parser
+				    ->try_evaluate_dependent_value_expression_argument(
+					    right,
+					    evaluated))
+				return same_template_argument_value(left,
+				                                    evaluated,
+				                                    record_arguments);
+		}
 		if (left.dependent && right.dependent &&
 		    left.value_expr_end > left.value_expr_begin)
 			return left.value_expr_begin == right.value_expr_begin &&

@@ -78,6 +78,73 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 			size_t save = pos_;
 			string class_name = consume_identifier();
 			expect(OP_COLON2);
+			TypePtr class_type;
+			if (!find_template_type_substitution(class_name, class_type))
+			{
+				Binding* binding =
+					pa11::lookup_unqualified(current_scope(),
+					                         class_name,
+					                         pa11::LOOKUP_TYPE);
+				class_type = binding != NULL ? binding->type : TypePtr();
+			}
+			if (class_type.get() != NULL && consume(OP_STAR))
+			{
+				unsigned cv = pa11::CV_NONE;
+				while (at_simple_cv())
+					cv |= consume_cv_flag();
+				ops.push_back(PtrOp(class_type, cv));
+				continue;
+			}
+			pos_ = save;
+		}
+		if (at(OP_COLON2) ||
+		    (at_identifier() && lookahead(OP_COLON2, 1)))
+		{
+			size_t save = pos_;
+			try
+			{
+				string spelling;
+				Scope* scope = parse_nested_name_specifier(&spelling);
+				TypePtr class_type = scope != NULL &&
+				                     scope->kind == ScopeKind::Class
+					? pa11::record_type_for_scope(scope) : TypePtr();
+				if (scope != NULL &&
+				    scope->kind == ScopeKind::Class &&
+				    class_type.get() != NULL &&
+				    consume(OP_STAR))
+				{
+					unsigned cv = pa11::CV_NONE;
+					while (at_simple_cv())
+						cv |= consume_cv_flag();
+					ops.push_back(PtrOp(class_type, cv));
+					continue;
+				}
+			}
+			catch (const exception&)
+			{
+			}
+			pos_ = save;
+		}
+		{
+			size_t save = pos_;
+			TypePtr class_type;
+			if (try_parse_type_name(class_type) &&
+			    consume(OP_COLON2) &&
+			    consume(OP_STAR))
+			{
+				unsigned cv = pa11::CV_NONE;
+				while (at_simple_cv())
+					cv |= consume_cv_flag();
+				ops.push_back(PtrOp(class_type, cv));
+				continue;
+			}
+			pos_ = save;
+		}
+		if (at_identifier() && lookahead(OP_COLON2, 1))
+		{
+			size_t save = pos_;
+			string class_name = consume_identifier();
+			expect(OP_COLON2);
 			vector<Binding*> found =
 				lookup_unqualified_set(current_scope(), class_name, pa11::LOOKUP_TYPE);
 			if (found.empty() || !consume(OP_STAR))

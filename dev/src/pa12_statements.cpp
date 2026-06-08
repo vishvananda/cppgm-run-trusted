@@ -6,6 +6,7 @@ if (pa11::same_type(l, r)) return true; return l->kind == pa11::TypeKind::Record
 l->is_template_specialization && r->is_template_specialization && l->name == r->name; }
 static Expr expr_from_node(const Node& node) { Expr out; out.valid = true;
 out.node = node; out.type = node.type; out.category = node.category; out.binding = node.binding;
+out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_template_arguments;
 out.has_constant_value = node.has_constant_value; out.constant_value = node.constant_value; out.dependent_value_name = node.dependent_value_name; out.dependent_value_owner_template_name =
 node.dependent_value_owner_template_name; out.dependent_value_member_name = node.dependent_value_member_name; out.dependent_value_negated = node.dependent_value_negated; out.dependent_value_owner_template_arguments =
 node.dependent_value_owner_template_arguments; out.braced_init_list = node.line.compare(0, 16, "braced-init-list") == 0; return out;

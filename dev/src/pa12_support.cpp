@@ -284,6 +284,8 @@ void annotate_expr_node(Expr& expr)
 	expr.node.type = expr.type;
 	expr.node.category = expr.category;
 	expr.node.binding = expr.binding;
+	expr.node.overloads = expr.overloads;
+	expr.node.explicit_template_arguments = expr.explicit_template_arguments;
 	expr.node.has_constant_value = expr.has_constant_value;
 	expr.node.constant_value = expr.constant_value;
 	expr.node.dependent_value_name = expr.dependent_value_name;

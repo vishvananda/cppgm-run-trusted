@@ -732,16 +732,30 @@ TypePtr Parser::substitute_template_type(TypePtr type) const
 				     primary_has_pack_parameter))
 				{
 					vector<TemplateArgument> substituted;
-					for (size_t i = 0;
-					     i < type->template_arguments.size();
-					     ++i)
-					{
-						TemplateArgument arg =
-							raw_template_argument_from_instance_argument(
-								type->template_arguments[i]);
-						arg = substitute_template_argument(arg);
-						vector<TemplateArgument> expanded =
-							expand_template_argument_pack(arg);
+						for (size_t i = 0;
+						     i < type->template_arguments.size();
+						     ++i)
+						{
+							TemplateArgument original_arg =
+								raw_template_argument_from_instance_argument(
+									type->template_arguments[i]);
+							TemplateArgument arg = original_arg;
+							arg = substitute_template_argument(arg);
+							TypePtr original_arg_type =
+								original_arg.kind == TemplateArgumentKind::Type
+								? pa11::strip_cv(original_arg.type) : TypePtr();
+							bool whole_primary_type_argument =
+								i < primary->parameters.size() &&
+								!primary->parameters[i].is_pack &&
+								original_arg_type.get() != NULL &&
+								(original_arg_type->kind ==
+								     pa11::TypeKind::Function ||
+								 original_arg_type->kind ==
+								     pa11::TypeKind::MemberPointer);
+							vector<TemplateArgument> expanded =
+								whole_primary_type_argument
+								? vector<TemplateArgument>(1, arg)
+								: expand_template_argument_pack(arg);
 						for (size_t j = 0; j < expanded.size(); ++j)
 						{
 							TemplateArgument element =
@@ -776,9 +790,11 @@ TypePtr Parser::substitute_template_type(TypePtr type) const
 				TypePtr original_arg_type =
 					original_arg.kind == TemplateArgumentKind::Type
 					? pa11::strip_cv(original_arg.type) : TypePtr();
-				bool function_type_argument =
-					original_arg_type.get() != NULL &&
-					original_arg_type->kind == pa11::TypeKind::Function;
+					bool function_type_argument =
+						original_arg_type.get() != NULL &&
+						(original_arg_type->kind == pa11::TypeKind::Function ||
+						 original_arg_type->kind ==
+						     pa11::TypeKind::MemberPointer);
 				vector<TemplateArgument> expanded;
 				if (!function_type_argument &&
 				    (original_arg.pack_expansion ||

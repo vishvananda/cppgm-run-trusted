@@ -20,6 +20,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
 		return;
+	size_t save_pos = pos_;
+	vector<Scope*> save_scopes = scopes_;
 	map<const void*, TemplateDeclaration*>::iterator outer =
 		record_template_declarations_.find(bare.get());
 	TemplateDeclaration* owner_declaration = outer != record_template_declarations_.end()
@@ -1026,6 +1028,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 				}
 			}
 		}
+	scopes_ = save_scopes;
+	pos_ = save_pos;
 	}
 
 void Parser::instantiate_member_variable_templates(TypePtr type)
@@ -1033,6 +1037,8 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
 		return;
+	size_t outer_pos = pos_;
+	vector<Scope*> outer_scopes = scopes_;
 	map<const void*, TemplateDeclaration*>::iterator outer =
 		record_template_declarations_.find(bare.get());
 	if (outer == record_template_declarations_.end())
@@ -1105,12 +1111,18 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 			                  : declaration->owner);
 			bool explicit_initializer = false;
 			for (size_t j = declaration->decl_begin;
-			     j < declaration->decl_end && j < declaration_tokens_.size();
+			     j < declaration_tokens_.size();
 			     ++j)
-				if (declaration_tokens_[j].kind ==
-				        posttoken::TokenKind::Simple &&
-				    declaration_tokens_[j].type == OP_ASS)
+			{
+				if (declaration_tokens_[j].kind !=
+				    posttoken::TokenKind::Simple)
+					continue;
+				if (declaration_tokens_[j].type == OP_SEMICOLON)
+					break;
+				if (declaration_tokens_[j].type == OP_ASS ||
+				    declaration_tokens_[j].type == OP_LBRACE)
 					explicit_initializer = true;
+			}
 			if (!explicit_initializer)
 			{
 				vector<Binding*> members =
@@ -1176,10 +1188,18 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 					pos_ = save_pos;
 					continue;
 				}
-			}
-			pos_ = declaration->decl_begin;
-			Node node;
-			parse_simple_or_function_declaration(node, true);
+				}
+				pos_ = declaration->decl_begin;
+				Node node;
+				try
+				{
+					parse_simple_or_function_declaration(node, true);
+				}
+				catch (const exception&)
+				{
+					declaration->emitted_variable_specializations.erase(key);
+					throw;
+				}
 			vector<Node*> replay_nodes;
 			if (node.binding != NULL)
 				replay_nodes.push_back(&node);
@@ -1223,6 +1243,8 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 			pos_ = save_pos;
 		}
 	}
+	scopes_ = outer_scopes;
+	pos_ = outer_pos;
 }
 
 }  // namespace internal

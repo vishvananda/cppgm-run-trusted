@@ -25,15 +25,22 @@ bool variable_template_visible_in_scope_tree(
 			return true;
 	}
 	TypePtr record = pa11::record_type_for_scope(scope);
-	TypePtr base = record.get() != NULL && record->base.get() != NULL
-		? pa11::strip_cv(record->base) : TypePtr();
-	return base.get() != NULL &&
-	       base->kind == pa11::TypeKind::Record &&
-	       base->scope != NULL &&
-	       variable_template_visible_in_scope_tree(base->scope,
-	                                               name,
-	                                               variable_templates,
-	                                               seen);
+	vector<TypePtr> bases = record.get() != NULL
+		? pa11::record_direct_bases(record) : vector<TypePtr>();
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->scope != NULL &&
+		    variable_template_visible_in_scope_tree(base->scope,
+		                                            name,
+		                                            variable_templates,
+		                                            seen))
+			return true;
+	}
+	return false;
 }
 
 }  // namespace
@@ -64,18 +71,23 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 				return out;
 		}
 		TypePtr record = pa11::record_type_for_scope(name.qualifier);
-		TypePtr base = record.get() != NULL && record->base.get() != NULL
-			? pa11::strip_cv(record->base) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL &&
-		    !record_skips_dependent_base_unqualified_lookup(record))
+		vector<TypePtr> bases = record.get() != NULL
+			? pa11::record_direct_bases(record) : vector<TypePtr>();
+		for (size_t b = 0; b < bases.size(); ++b)
 		{
-			QualifiedName nested = name;
-			nested.qualifier = base->scope;
-			out = find_function_templates(nested);
-			if (!out.empty())
-				return out;
+			TypePtr base = bases[b].get() != NULL
+				? pa11::strip_cv(bases[b]) : TypePtr();
+			if (base.get() != NULL &&
+			    base->kind == pa11::TypeKind::Record &&
+			    base->scope != NULL &&
+			    !record_skips_dependent_base_unqualified_lookup(record))
+			{
+				QualifiedName nested = name;
+				nested.qualifier = base->scope;
+				out = find_function_templates(nested);
+				if (!out.empty())
+					return out;
+			}
 		}
 		return out;
 	}
@@ -99,19 +111,24 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 				return out;
 		}
 		TypePtr record = pa11::record_type_for_scope(cur);
-		TypePtr base = record.get() != NULL && record->base.get() != NULL
-			? pa11::strip_cv(record->base) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL &&
-		    record_dependent_base_lookup_skips_.count(
-			    pa11::strip_cv(record).get()) == 0)
+		vector<TypePtr> bases = record.get() != NULL
+			? pa11::record_direct_bases(record) : vector<TypePtr>();
+		for (size_t b = 0; b < bases.size(); ++b)
 		{
-			QualifiedName nested = name;
-			nested.qualifier = base->scope;
-			out = find_function_templates(nested);
-			if (!out.empty())
-				return out;
+			TypePtr base = bases[b].get() != NULL
+				? pa11::strip_cv(bases[b]) : TypePtr();
+			if (base.get() != NULL &&
+			    base->kind == pa11::TypeKind::Record &&
+			    base->scope != NULL &&
+			    record_dependent_base_lookup_skips_.count(
+				    pa11::strip_cv(record).get()) == 0)
+			{
+				QualifiedName nested = name;
+				nested.qualifier = base->scope;
+				out = find_function_templates(nested);
+				if (!out.empty())
+					return out;
+			}
 		}
 	}
 	return out;

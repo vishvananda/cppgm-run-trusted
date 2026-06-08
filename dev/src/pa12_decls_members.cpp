@@ -1,10 +1,10 @@
 #include "pa12_internal.h"
+#include "pa12_templates_function_support.h"
 
 using namespace std;
 
 namespace pa12 {
 namespace internal {
-namespace {
 
 bool record_has_reference_field(TypePtr type)
 {
@@ -39,7 +39,23 @@ vector<Binding*> declared_instance_fields(TypePtr type)
 	return fields;
 }
 
-}  // namespace
+void stamp_template_member_function_symbol(Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    !binding->function_specialization_symbol.empty() ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class)
+		return;
+	TypePtr record = pa11::record_type_for_scope(binding->owner);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL ||
+	    record->kind != pa11::TypeKind::Record ||
+	    !record->is_template_specialization)
+		return;
+	binding->function_specialization_symbol =
+		abi_binding_symbol(binding, map<string, size_t>());
+}
 
 bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 {
@@ -120,6 +136,8 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 	                          fn_type);
 	dtor->unwind_no = suffix.noexcept_decl;
 	function_parameter_names_[dtor] = vector<string>(1, "this");
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(dtor);
 	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = dtor;
@@ -218,7 +236,13 @@ void Parser::parse_constructor_body_from_parameters(
 				continue;
 			}
 		}
-		if (parameters[i].type.get() == NULL)
+		TypePtr parameter_type =
+			parameters[i].type.get() != NULL
+			? substitute_template_type(parameters[i].type) : TypePtr();
+		if (parameter_type.get() == NULL &&
+		    i + 1 < function->type->parameters.size())
+			parameter_type = function->type->parameters[i + 1];
+		if (parameter_type.get() == NULL)
 		{
 			if (!parameters[i].pack_expression_name.empty())
 				parameter_packs[parameters[i].pack_expression_name];
@@ -239,32 +263,56 @@ void Parser::parse_constructor_body_from_parameters(
 		Binding* param = NULL;
 		if (!pname.empty())
 		{
-			param = pa11::add_binding(function_scope,
-			                          BindingKind::Parameter,
-			                          pname,
-			                          parameters[i].type);
-			if (!parameters[i].pack_expression_name.empty())
-				parameter_packs[parameters[i].pack_expression_name]
-					.push_back(param);
+				param = pa11::add_binding(function_scope,
+				                          BindingKind::Parameter,
+				                          pname,
+				                          parameter_type);
+				if (!parameters[i].pack_expression_name.empty())
+					parameter_packs[parameters[i].pack_expression_name]
+						.push_back(param);
+			}
+			Node param_node("parameter " + node_name + " " +
+			                pa11::describe_type(parameter_type));
+			param_node.binding = param;
+			param_node.type = parameter_type;
+			add_child(fn, param_node);
 		}
-		Node param_node("parameter " + node_name + " " +
-		                pa11::describe_type(parameters[i].type));
-		param_node.binding = param;
-		param_node.type = parameters[i].type;
-		add_child(fn, param_node);
-	}
+		map<Binding*, vector<string> >::const_iterator saved_names =
+			function_parameter_names_.find(function);
+		for (size_t pi = parameters.size() + 1;
+		     pi < function->type->parameters.size();
+		     ++pi)
+		{
+			string pname =
+				saved_names != function_parameter_names_.end() &&
+				pi < saved_names->second.size() &&
+				!saved_names->second[pi].empty()
+				? saved_names->second[pi]
+				: "__param" + to_string(pi);
+			Binding* param =
+				pa11::add_binding(function_scope,
+				                  BindingKind::Parameter,
+				                  pname,
+				                  function->type->parameters[pi]);
+			Node param_node("parameter " + pname + " " +
+			                pa11::describe_type(
+				                function->type->parameters[pi]));
+			param_node.binding = param;
+			param_node.type = function->type->parameters[pi];
+			add_child(fn, param_node);
+		}
 
-	scopes_.push_back(function_scope);
+		scopes_.push_back(function_scope);
 	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
 	active_functions_.push_back(function);
 	function_parameter_pack_substitutions_.push_back(parameter_packs);
 	Node body("compound-statement");
 	map<Binding*, Node> explicit_member_initializers;
-	bool explicit_base = false;
+	vector<Node> explicit_base_actions;
 	bool delegating = false;
-	Node explicit_base_action;
-	TypePtr direct_base = class_type->base.get() != NULL
-		? pa11::strip_cv(class_type->base) : TypePtr();
+	vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
+	TypePtr direct_base = !direct_bases.empty() && direct_bases[0].get() != NULL
+		? pa11::strip_cv(direct_bases[0]) : TypePtr();
 	if (consume(OP_COLON))
 	{
 		for (;;)
@@ -281,6 +329,11 @@ void Parser::parse_constructor_body_from_parameters(
 			                                        name,
 			                                        pa11::LOOKUP_VARIABLE);
 			Expr init;
+			vector<Expr> parsed_args;
+			size_t parsed_args_begin = 0;
+			size_t parsed_args_end = 0;
+			bool have_paren_init = false;
+			bool init_target_is_base = false;
 			bool have_init = false;
 			if (at(OP_LBRACE))
 			{
@@ -289,9 +342,13 @@ void Parser::parse_constructor_body_from_parameters(
 			}
 			else if (consume(OP_LPAREN))
 			{
+				have_paren_init = true;
 				if (!at(OP_RPAREN))
 				{
+					parsed_args_begin = pos_;
 					vector<Expr> args = parse_argument_list();
+					parsed_args_end = pos_;
+					parsed_args = args;
 					TypePtr init_target;
 					if (name == class_scope->name)
 						init_target = class_type;
@@ -301,13 +358,20 @@ void Parser::parse_constructor_body_from_parameters(
 					                                  name,
 					                                  have_init_template_args
 					                                  ? &init_template_args : NULL))
+					{
 						init_target = direct_base;
+						init_target_is_base = true;
+					}
 					else if (field != NULL)
 						init_target = field->type;
 					if (init_target.get() != NULL &&
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
 					{
+						if (init_target_is_base)
+						{
+						}
+						else
 						try
 						{
 							init = make_constructor_init_expr(init_target,
@@ -345,15 +409,21 @@ void Parser::parse_constructor_body_from_parameters(
 					                                  name,
 					                                  have_init_template_args
 					                                  ? &init_template_args : NULL))
+					{
 						init_target = direct_base;
+						init_target_is_base = true;
+					}
 					else if (field != NULL)
 						init_target = field->type;
 					if (init_target.get() != NULL &&
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
-						init = make_constructor_init_expr(init_target,
-						                                  vector<Expr>(),
-						                                  false);
+					{
+						if (!init_target_is_base)
+							init = make_constructor_init_expr(init_target,
+							                                  vector<Expr>(),
+							                                  false);
+					}
 					else
 					{
 						init.valid = true;
@@ -365,17 +435,69 @@ void Parser::parse_constructor_body_from_parameters(
 				}
 				expect(OP_RPAREN);
 			}
-			if (direct_base.get() != NULL &&
-			    initializer_names_direct_base(class_scope,
-			                                  direct_base,
-			                                  name,
-			                                  have_init_template_args
-			                                  ? &init_template_args : NULL))
+			bool init_pack_expansion = consume(OP_DOTS);
+			vector<TypePtr> matching_bases;
+			for (size_t b = 0; b < direct_bases.size(); ++b)
 			{
-				explicit_base_action =
-					make_base_init_action(direct_base,
-					                      have_init ? &init.node : NULL);
-				explicit_base = true;
+				TypePtr base = direct_bases[b].get() != NULL
+					? pa11::strip_cv(direct_bases[b]) : TypePtr();
+				if (base.get() != NULL &&
+				    initializer_names_direct_base(
+					    class_scope,
+					    base,
+					    name,
+					    have_init_template_args
+					    ? &init_template_args : NULL))
+					matching_bases.push_back(base);
+			}
+			if (!matching_bases.empty())
+			{
+				vector<Expr> expanded_inits;
+				if (init_pack_expansion && parsed_args.size() == 1)
+				{
+					if (parsed_args[0].pack_expansion &&
+					    !parsed_args[0].pack.empty())
+						expanded_inits = parsed_args[0].pack;
+					else try
+					{
+						try_expand_expression_pack_pattern(
+							parsed_args_begin,
+							parsed_args_end,
+							expanded_inits);
+					}
+					catch (const runtime_error&)
+					{
+						expanded_inits.clear();
+					}
+				}
+				for (size_t b = 0; b < matching_bases.size(); ++b)
+				{
+					if (have_paren_init)
+					{
+						vector<Expr> base_args = parsed_args;
+						if (init_pack_expansion)
+						{
+							if (expanded_inits.size() !=
+							    matching_bases.size())
+								throw runtime_error(
+									"pack expansion size mismatch");
+							base_args.clear();
+							base_args.push_back(expanded_inits[b]);
+						}
+						Expr base_init =
+							make_constructor_init_expr(matching_bases[b],
+							                           base_args,
+							                           false);
+						explicit_base_actions.push_back(
+							make_base_init_action(matching_bases[b],
+							                      &base_init.node));
+					}
+					else
+						explicit_base_actions.push_back(
+							make_base_init_action(
+								matching_bases[b],
+								have_init ? &init.node : NULL));
+				}
 			}
 			else if (name == class_scope->name && have_init)
 			{
@@ -405,20 +527,27 @@ void Parser::parse_constructor_body_from_parameters(
 	if (delegating)
 	{
 	}
-	else if (explicit_base)
-		add_child(body, explicit_base_action);
-	else if (direct_base.get() != NULL &&
-	         direct_base->kind == pa11::TypeKind::Record)
+	else if (!explicit_base_actions.empty())
+		for (size_t i = 0; i < explicit_base_actions.size(); ++i)
+			add_child(body, explicit_base_actions[i]);
+	else if (!direct_bases.empty())
 	{
-		Binding* base_ctor = ensure_default_constructor(direct_base);
-		if (base_ctor != NULL &&
-		    suppress_implicit_template_base_init_ &&
-		    base_ctor->is_generated_default_constructor)
-			mark_suppressed_generated_constructor_dependencies(base_ctor);
-		else if (base_ctor != NULL)
+		for (size_t b = 0; b < direct_bases.size(); ++b)
 		{
-			Node base_action = make_base_init_action(direct_base, NULL);
-			add_child(body, base_action);
+			TypePtr base = direct_bases[b].get() != NULL
+				? pa11::strip_cv(direct_bases[b]) : TypePtr();
+			if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
+				continue;
+			Binding* base_ctor = ensure_default_constructor(base);
+			if (base_ctor != NULL &&
+			    suppress_implicit_template_base_init_ &&
+			    base_ctor->is_generated_default_constructor)
+				mark_suppressed_generated_constructor_dependencies(base_ctor);
+			else if (base_ctor != NULL)
+			{
+				Node base_action = make_base_init_action(base, NULL);
+				add_child(body, base_action);
+			}
 		}
 	}
 	vector<Binding*> fields;
@@ -621,6 +750,8 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		ctor->is_defaulted = true;
 		ctor->is_generated_default_constructor = parameters.empty();
 	}
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(ctor);
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
 	        pa11::describe_type(fn_type));
 	fn.binding = ctor;
@@ -708,11 +839,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 	}
 	Node body("compound-statement");
 	map<Binding*, Node> explicit_member_initializers;
-	bool explicit_base = false;
+	vector<Node> explicit_base_actions;
 	bool delegating = false;
-	Node explicit_base_action;
-	TypePtr direct_base = class_type->base.get() != NULL
-		? pa11::strip_cv(class_type->base) : TypePtr();
+	vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
+	TypePtr direct_base = !direct_bases.empty() && direct_bases[0].get() != NULL
+		? pa11::strip_cv(direct_bases[0]) : TypePtr();
 	if (!defaulted && consume(OP_COLON))
 	{
 		for (;;)
@@ -729,6 +860,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 			                                        init_name,
 			                                        pa11::LOOKUP_VARIABLE);
 			Expr init;
+			vector<Expr> parsed_args;
+			size_t parsed_args_begin = 0;
+			size_t parsed_args_end = 0;
+			bool have_paren_init = false;
+			bool init_target_is_base = false;
 			bool have_init = false;
 			if (at(OP_LBRACE))
 			{
@@ -737,9 +873,13 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 			}
 			else if (consume(OP_LPAREN))
 			{
+				have_paren_init = true;
 				if (!at(OP_RPAREN))
 				{
+					parsed_args_begin = pos_;
 					vector<Expr> args = parse_argument_list();
+					parsed_args_end = pos_;
+					parsed_args = args;
 					TypePtr init_target;
 					if (init_name == class_scope->name)
 						init_target = class_type;
@@ -749,13 +889,20 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 					                                  init_name,
 					                                  have_init_template_args
 					                                  ? &init_template_args : NULL))
+					{
 						init_target = direct_base;
+						init_target_is_base = true;
+					}
 					else if (field != NULL)
 						init_target = field->type;
 					if (init_target.get() != NULL &&
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
 					{
+						if (init_target_is_base)
+						{
+						}
+						else
 						try
 						{
 							init = make_constructor_init_expr(init_target,
@@ -793,15 +940,21 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 					                                  init_name,
 					                                  have_init_template_args
 					                                  ? &init_template_args : NULL))
+					{
 						init_target = direct_base;
+						init_target_is_base = true;
+					}
 					else if (field != NULL)
 						init_target = field->type;
 					if (init_target.get() != NULL &&
 					    pa11::strip_cv(init_target)->kind ==
 					    pa11::TypeKind::Record)
-						init = make_constructor_init_expr(init_target,
-						                                  vector<Expr>(),
-						                                  false);
+					{
+						if (!init_target_is_base)
+							init = make_constructor_init_expr(init_target,
+							                                  vector<Expr>(),
+							                                  false);
+					}
 					else
 					{
 						init.valid = true;
@@ -813,17 +966,69 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 				}
 				expect(OP_RPAREN);
 			}
-			if (direct_base.get() != NULL &&
-			    initializer_names_direct_base(class_scope,
-			                                  direct_base,
-			                                  init_name,
-			                                  have_init_template_args
-			                                  ? &init_template_args : NULL))
+			bool init_pack_expansion = consume(OP_DOTS);
+			vector<TypePtr> matching_bases;
+			for (size_t b = 0; b < direct_bases.size(); ++b)
 			{
-				explicit_base_action =
-					make_base_init_action(direct_base,
-					                      have_init ? &init.node : NULL);
-				explicit_base = true;
+				TypePtr base = direct_bases[b].get() != NULL
+					? pa11::strip_cv(direct_bases[b]) : TypePtr();
+				if (base.get() != NULL &&
+				    initializer_names_direct_base(
+					    class_scope,
+					    base,
+					    init_name,
+					    have_init_template_args
+					    ? &init_template_args : NULL))
+					matching_bases.push_back(base);
+			}
+			if (!matching_bases.empty())
+			{
+				vector<Expr> expanded_inits;
+				if (init_pack_expansion && parsed_args.size() == 1)
+				{
+					if (parsed_args[0].pack_expansion &&
+					    !parsed_args[0].pack.empty())
+						expanded_inits = parsed_args[0].pack;
+					else try
+					{
+						try_expand_expression_pack_pattern(
+							parsed_args_begin,
+							parsed_args_end,
+							expanded_inits);
+					}
+					catch (const runtime_error&)
+					{
+						expanded_inits.clear();
+					}
+				}
+				for (size_t b = 0; b < matching_bases.size(); ++b)
+				{
+					if (have_paren_init)
+					{
+						vector<Expr> base_args = parsed_args;
+						if (init_pack_expansion)
+						{
+							if (expanded_inits.size() !=
+							    matching_bases.size())
+								throw runtime_error(
+									"pack expansion size mismatch");
+							base_args.clear();
+							base_args.push_back(expanded_inits[b]);
+						}
+						Expr base_init =
+							make_constructor_init_expr(matching_bases[b],
+							                           base_args,
+							                           false);
+						explicit_base_actions.push_back(
+							make_base_init_action(matching_bases[b],
+							                      &base_init.node));
+					}
+					else
+						explicit_base_actions.push_back(
+							make_base_init_action(
+								matching_bases[b],
+								have_init ? &init.node : NULL));
+				}
 			}
 			else if (init_name == class_scope->name && have_init)
 			{
@@ -851,20 +1056,27 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 	if (delegating)
 	{
 	}
-	else if (explicit_base)
-		add_child(body, explicit_base_action);
-	else if (direct_base.get() != NULL &&
-	         direct_base->kind == pa11::TypeKind::Record)
+	else if (!explicit_base_actions.empty())
+		for (size_t i = 0; i < explicit_base_actions.size(); ++i)
+			add_child(body, explicit_base_actions[i]);
+	else if (!direct_bases.empty())
 	{
-		Binding* base_ctor = ensure_default_constructor(direct_base);
-		if (base_ctor != NULL &&
-		    suppress_implicit_template_base_init_ &&
-		    base_ctor->is_generated_default_constructor)
-			mark_suppressed_generated_constructor_dependencies(base_ctor);
-		else if (base_ctor != NULL)
+		for (size_t b = 0; b < direct_bases.size(); ++b)
 		{
-			Node base_action = make_base_init_action(direct_base, NULL);
-			add_child(body, base_action);
+			TypePtr base = direct_bases[b].get() != NULL
+				? pa11::strip_cv(direct_bases[b]) : TypePtr();
+			if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
+				continue;
+			Binding* base_ctor = ensure_default_constructor(base);
+			if (base_ctor != NULL &&
+			    suppress_implicit_template_base_init_ &&
+			    base_ctor->is_generated_default_constructor)
+				mark_suppressed_generated_constructor_dependencies(base_ctor);
+			else if (base_ctor != NULL)
+			{
+				Node base_action = make_base_init_action(base, NULL);
+				add_child(body, base_action);
+			}
 		}
 	}
 	vector<Binding*> fields;
@@ -1013,6 +1225,8 @@ bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node)
 	function->unwind_no = suffix.noexcept_decl;
 	function->ref_qualifier = suffix.ref_qualifier;
 	function_parameter_names_[function] = vector<string>(1, "this");
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(function);
 	Node node;
 	Node fn("function-definition " + qualified_decl_name(function) + " " +
 	        pa11::describe_type(fn_type));
@@ -1062,6 +1276,8 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 	function->is_protected_member = !class_protected_access_.empty() &&
 	                                class_protected_access_.back();
 	function_parameter_names_[function] = vector<string>(1, "this");
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(function);
 	if (consume(OP_ASS))
 	{
 		if (consume(KW_DELETE))
@@ -1097,197 +1313,6 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 	pending.body_pos = pos_;
 	skip_balanced(OP_LBRACE, OP_RBRACE);
 	enqueue_pending_member_body(class_scope, pending);
-	return true;
-}
-
-bool Parser::parse_constructor_like_member(bool explicit_ctor,
-                                           bool constexpr_ctor)
-{
-	if (current_scope()->kind != ScopeKind::Class || !at_identifier())
-		return false;
-	Scope* class_scope = current_scope();
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL)
-		throw runtime_error("constructor without class type");
-	if (!constructor_name_matches_scope(class_scope, current().source))
-		return false;
-	if (!lookahead(OP_LPAREN, 1))
-		return false;
-	consume_identifier();
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	parse_parameter_clause(parameters, variadic);
-	expect(OP_RPAREN);
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-
-	TypePtr this_type = pa11::make_pointer(class_type);
-	vector<TypePtr> fn_params;
-	fn_params.push_back(this_type);
-	for (size_t i = 0; i < parameters.size(); ++i)
-		fn_params.push_back(parameters[i].type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      variadic);
-	fn_type = substitute_template_type(fn_type);
-	for (size_t i = 0;
-	     i < parameters.size() && i + 1 < fn_type->parameters.size();
-	     ++i)
-		parameters[i].type = fn_type->parameters[i + 1];
-	Binding* ctor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          class_scope->name,
-	                          fn_type);
-	ctor->is_constexpr = ctor->is_constexpr || constexpr_ctor;
-	vector<string> ctor_names(1, "this");
-	for (size_t i = 0; i < parameters.size(); ++i)
-		ctor_names.push_back(parameters[i].name);
-	function_parameter_names_[ctor] = ctor_names;
-	vector<Expr> ctor_defaults(fn_params.size());
-	bool have_ctor_defaults = false;
-	for (size_t i = 0; i < parameters.size(); ++i)
-	{
-		if (parameters[i].has_default)
-		{
-			ctor_defaults[i + 1] = parameters[i].default_value;
-			have_ctor_defaults = true;
-		}
-	}
-	if (have_ctor_defaults)
-		default_arguments_[ctor] = ctor_defaults;
-	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) ||
-	                             constexpr_ctor;
-	ctor->is_explicit = explicit_ctor;
-	ctor->unwind_no = suffix.noexcept_decl;
-	ctor->is_private = !class_private_access_.empty() &&
-	                   class_private_access_.back();
-	ctor->is_protected_member = !class_protected_access_.empty() &&
-	                            class_protected_access_.back();
-	if (consume(OP_ASS))
-	{
-		if (consume(KW_DEFAULT))
-		{
-			ctor->is_defaulted = true;
-			ctor->is_inline_definition = true;
-			ctor->unwind_no = true;
-			if (parameters.empty())
-			{
-				Node fn("function-definition " + qualified_decl_name(ctor) +
-				        " " + pa11::describe_type(fn_type));
-				fn.binding = ctor;
-				fn.type = fn_type;
-				Node this_node("parameter this " +
-				               pa11::describe_type(fn_params[0]));
-				this_node.type = fn_params[0];
-				add_child(fn, this_node);
-				add_child(fn, Node("compound-statement"));
-				PendingFunctionBody pending;
-				pending.function = ctor;
-				pending.node = fn;
-				pending.prebuilt_node = true;
-				enqueue_pending_member_body(class_scope, pending);
-			}
-				if (parameters.size() == 1 &&
-				    pa11::is_reference_type(parameters[0].type) &&
-				    pa11::same_type(pa11::strip_cv(parameters[0].type->base),
-				                    pa11::strip_cv(class_type)) &&
-				    !record_has_reference_field(class_type))
-				{
-					Node fn("function-definition " + qualified_decl_name(ctor) +
-					        " " + pa11::describe_type(fn_type));
-					fn.binding = ctor;
-					fn.type = fn_type;
-					fn.token_text = "copy-move-helper";
-					Node this_node("parameter this " +
-					               pa11::describe_type(fn_params[0]));
-				this_node.type = fn_params[0];
-				add_child(fn, this_node);
-				string pname = parameters[0].name.empty()
-					? "__param1" : parameters[0].name;
-				Node param_node("parameter " + pname + " " +
-				                pa11::describe_type(parameters[0].type));
-				param_node.type = parameters[0].type;
-				add_child(fn, param_node);
-				add_child(fn, Node("compound-statement"));
-				PendingFunctionBody pending;
-				pending.function = ctor;
-				pending.node = fn;
-				pending.prebuilt_node = true;
-				enqueue_pending_member_body(class_scope, pending);
-			}
-			expect(OP_SEMICOLON);
-			return true;
-		}
-		if (consume(KW_DELETE))
-		{
-			deleted_functions_.insert(ctor);
-			expect(OP_SEMICOLON);
-			return true;
-		}
-		throw runtime_error("unsupported constructor definition");
-	}
-	if (consume(OP_SEMICOLON))
-	{
-		if (force_new_function_binding_ &&
-		    active_class_instantiations_.empty())
-		{
-			Node fn("function-declaration " + qualified_decl_name(ctor) +
-			        " " + pa11::describe_type(fn_type));
-			fn.binding = ctor;
-			fn.type = fn_type;
-			extra_lowir_nodes_.push_back(fn);
-		}
-		return true;
-	}
-
-	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = ctor;
-	fn.type = fn_type;
-	if (ctor->is_inline_definition)
-	{
-		if (force_new_function_binding_ &&
-		    active_class_instantiations_.empty())
-		{
-			Node holder("constructor-definition-holder");
-			add_child(holder, fn);
-			parse_constructor_body_from_parameters(ctor,
-			                                       class_type,
-			                                       parameters,
-			                                       holder);
-			extra_lowir_nodes_.push_back(holder.children.back());
-			return true;
-		}
-		PendingFunctionBody pending;
-		pending.function = ctor;
-		pending.node = fn;
-		pending.parameters = parameters;
-		pending.body_pos = pos_;
-		pending.constructor_body = true;
-		pending.class_type = class_type;
-		if (consume(OP_COLON))
-		{
-			for (;;)
-			{
-				while (!at(OP_LPAREN) && !at(OP_LBRACE) && !at_eof())
-					++pos_;
-				if (at(OP_LPAREN))
-					skip_balanced(OP_LPAREN, OP_RPAREN);
-				else if (at(OP_LBRACE))
-					skip_balanced(OP_LBRACE, OP_RBRACE);
-				if (!consume(OP_COMMA))
-					break;
-			}
-		}
-		skip_balanced(OP_LBRACE, OP_RBRACE);
-		enqueue_pending_member_body(class_scope, pending);
-		return true;
-	}
-	Node holder("constructor-definition-holder");
-	add_child(holder, fn);
-	parse_constructor_body_from_parameters(ctor, class_type, parameters, holder);
-	extra_lowir_nodes_.push_back(holder.children.back());
 	return true;
 }
 
@@ -1343,6 +1368,8 @@ bool Parser::parse_destructor_like_member()
 	                   class_private_access_.back();
 	dtor->is_protected_member = !class_protected_access_.empty() &&
 	                            class_protected_access_.back();
+	if (!active_class_instantiation_dependent())
+		stamp_template_member_function_symbol(dtor);
 	if (consume(OP_ASS))
 	{
 		if (consume(KW_DEFAULT) || consume(KW_DELETE))
