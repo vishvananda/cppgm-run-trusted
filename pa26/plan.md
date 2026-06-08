@@ -51,6 +51,47 @@ The required feature surface is:
   out of reference order, reorder constructor and `operator()` definitions to
   match the caller's call order without changing generated code.
 
+## Architecture Review
+
+- The implementation keeps PA26 ownership in the existing semantic pipeline:
+  `Type::direct_bases`, base offsets, selected member owners, base conversion
+  paths, and member-pointer classes are typed semantic facts rather than LowIR
+  text recovered downstream.
+- PA26 direct-base layout is centralized in PA11 record layout helpers, with
+  `record_direct_bases` preserving compatibility for older single-base code.
+  LowIR lowering uses `emit_base_subobject_addr` / direct-base offsets instead
+  of ad hoc byte constants at call sites.
+- Generated default, copy/move, assignment, destructor, aggregate, zero-init,
+  ABI-classification, cleanup, and global-init helpers must walk all direct
+  bases in declaration/destruction order. Audit cleanup closed remaining
+  first-base-only walks in the shared PA12/PA14 helper paths.
+- `dynamic_cast<void*>` is a PA26-only RTTI slice over the existing single-vptr
+  ABI. It now lowers directly through the vptr offset-to-top slot for
+  polymorphic source records and does not emit an unreachable runtime
+  `__dynamic_cast` fallback block for this case.
+- The reviewed source paths do not shell out to reference binaries, host
+  compilers, interpreters, VMs, trampolines, copied runtime payloads, or
+  templated LowIR blobs to satisfy PA26 output.
+- Performance-sensitive PA26 operations use stored base vectors, layout caches,
+  selected binding facts, and actual call-reference ordering. The audit did not
+  find timeout knobs, repeated full-suite walks, or new hot-path quadratic scans
+  in the changed implementation.
+
+## Final Architecture Review
+
+- After cleanup, the PA26 architecture matches the README boundary: supported
+  non-virtual multiple-base layout, lookup, this adjustment, generated special
+  members, pointer-to-member lowering, and `dynamic_cast<void*>` stay inside
+  the normal semantic and LowIR generation pipeline.
+- The remaining single-vptr polymorphic code is kept behind the assignment
+  boundary. PA26 direct-base object-model helpers use all direct bases; older
+  single-primary-base RTTI/vtable routines remain scoped to the README's
+  existing ABI limit.
+- The corrected `dynamic_cast<void*>` reference records the required object-top
+  lowering and no longer blesses a dead runtime fallback success path.
+- No architecture, performance, regression, cheating, or file-audit blockers
+  remain from this audit pass.
+
 ## Validation
 
 - Use scoped PA26 report runs during diagnosis:
@@ -61,9 +102,12 @@ The required feature surface is:
 - Commit cohesive progress only after a stable checkpoint, and leave
   `git status --short` clean when complete.
 
-## Current Fix
+## Current Audit Cleanup
 
-- Keep `Class::*` declarators on the ordinary local initializer lookup path.
-  The parser may use the class name to build the member-pointer type, but it
-  must not treat that class as the declared-name qualifier or push it while
-  parsing an initializer such as `int Derived::* p = local_base_ptr;`.
+- Remove the unreachable `dynamic_cast<void*>` runtime fallback so the PA26
+  object-top lowering is the only generated path for that assignment feature.
+- Finish converting first-base-only generated-member, zero-init, destructor,
+  ABI, and aggregate helper walks to direct-base-vector traversal.
+- Keep the oracle update limited to the semantic LowIR delta for
+  `100-dynamic-cast-void`: no dead fallback block and no unused `void` RTTI /
+  `__dynamic_cast` declarations.

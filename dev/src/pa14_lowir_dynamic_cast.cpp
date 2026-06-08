@@ -8,31 +8,6 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 {
 	if (expr.children.empty())
 		throw runtime_error("dynamic_cast missing operand");
-	if (program_.declared_functions.insert(
-		    "__external_runtime___Unwind_Resume").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime___Unwind_Resume() -> void "
-			"[return=noreturn, role=eh_resume, linkage=c, "
-			"binding=strong, object=_Unwind_Resume]");
-	if (program_.declared_functions.insert(
-		    "__external_runtime____gxx_personality_v0").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime____gxx_personality_v0() "
-			"-> void [role=eh_personality, linkage=c, binding=strong, "
-			"object=__gxx_personality_v0]");
-	if (program_.declared_functions.insert(
-		    "__external_runtime____dynamic_cast").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime____dynamic_cast"
-			"(%arg0 : ptr, %arg1 : ptr, %arg2 : ptr, %arg3 : i64) -> ptr "
-			"[linkage=c, binding=strong, object=__dynamic_cast]");
-	if (reference_result &&
-	    program_.declared_functions.insert(
-		    "__external_runtime____cxa_bad_cast").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime____cxa_bad_cast() -> void "
-			"[effects=readnone, unwind=may, return=noreturn, linkage=c, "
-			"binding=strong, object=__cxa_bad_cast]");
 	const Node& operand = expr.children[0];
 	TypePtr target_type = pa11::strip_cv(expr.type);
 	TypePtr target_object;
@@ -64,17 +39,9 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 	if (target_void_pointer)
 	{
 		if (source_object.get() == NULL ||
-		    source_object->kind != TypeKind::Record)
+		    source_object->kind != TypeKind::Record ||
+		    !source_object->is_polymorphic)
 			throw runtime_error("unsupported dynamic_cast type");
-		program_.emit_rtti(source_object);
-		string source_rtti = program_.typeid_rtti_symbol(source_object);
-		string target_rtti = "__external_rtti__void";
-		if (program_.declared_globals.insert(target_rtti).second)
-			program_.global_declares.push_back(
-				"declare global @" + target_rtti +
-				" [binding=strong, object=_ZTIv]");
-		if (source_rtti.empty())
-			throw runtime_error("unsupported dynamic_cast rtti");
 		string slot = fresh_aux_slot("dyn_cast", "ptr");
 		instr("store ptr 0, $" + slot);
 		string is_null = fresh_temp();
@@ -93,22 +60,36 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 		instr(top + " = index i8 " + source_ptr.text + ", " + offset);
 		instr("store ptr " + top + ", $" + slot);
 		terminate("jump ^" + end);
-		start_block(fresh_block("block"));
-		string source_addr = fresh_temp();
-		instr(source_addr + " = addr @" + source_rtti);
-		string target_addr = fresh_temp();
-		instr(target_addr + " = addr @" + target_rtti);
-		string result = fresh_temp();
-		instr(result + " = call ptr @__external_runtime____dynamic_cast(" +
-		      source_ptr.text + ", " + source_addr + ", " + target_addr +
-		      ", -2)");
-		instr("store ptr " + result + ", $" + slot);
-		terminate("jump ^" + end);
 		start_block(end);
 		string loaded = fresh_temp();
 		instr(loaded + " = load ptr $" + slot);
 		return Value("ptr", loaded);
 	}
+	if (program_.declared_functions.insert(
+		    "__external_runtime___Unwind_Resume").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime___Unwind_Resume() -> void "
+			"[return=noreturn, role=eh_resume, linkage=c, "
+			"binding=strong, object=_Unwind_Resume]");
+	if (program_.declared_functions.insert(
+		    "__external_runtime____gxx_personality_v0").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____gxx_personality_v0() "
+			"-> void [role=eh_personality, linkage=c, binding=strong, "
+			"object=__gxx_personality_v0]");
+	if (program_.declared_functions.insert(
+		    "__external_runtime____dynamic_cast").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____dynamic_cast"
+			"(%arg0 : ptr, %arg1 : ptr, %arg2 : ptr, %arg3 : i64) -> ptr "
+			"[linkage=c, binding=strong, object=__dynamic_cast]");
+	if (reference_result &&
+	    program_.declared_functions.insert(
+		    "__external_runtime____cxa_bad_cast").second)
+		program_.declares.push_back(
+			"declare function @__external_runtime____cxa_bad_cast() -> void "
+			"[effects=readnone, unwind=may, return=noreturn, linkage=c, "
+			"binding=strong, object=__cxa_bad_cast]");
 	if (source_object.get() == NULL || target_object.get() == NULL ||
 	    source_object->kind != TypeKind::Record ||
 	    target_object->kind != TypeKind::Record)

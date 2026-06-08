@@ -354,7 +354,8 @@ active_class_instantiations_.empty()) throw; return; }
 } try { pa11::layout_record_type(bare);
 } catch (const runtime_error& err) { if ((string(err.what()) != "incomplete class type" &&
 string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw; return;
-} for (size_t i = 0; i < init.children.size() && i < bare->fields.size(); ++i) ensure_aggregate_constructors_for_init(bare->fields[i]->type, init.children[i]);
+} size_t child_index = 0; { vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size() && child_index < init.children.size(); ++b)
+ensure_aggregate_constructors_for_init(bases[b], init.children[child_index++]); } for (size_t i = 0; child_index < init.children.size() && i < bare->fields.size(); ++i) ensure_aggregate_constructors_for_init(bare->fields[i]->type, init.children[child_index++]);
 } Node Parser::make_member_init_action(Binding* field, const Node* init) { Node action("member-init-action " + field->name);
 action.binding = field; action.type = field->type; TypePtr bare = pa11::strip_cv(field->type); if (init != NULL)
 { Node child = *init; if (child.line == "braced-init-list") {

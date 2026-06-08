@@ -29,9 +29,10 @@ return binding; } return NULL; }
 bool type_needs_defaulted_copy_move_helper(TypePtr type, bool move); bool record_needs_defaulted_copy_move_helper(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record) return false; if (bare->is_polymorphic) return true; Binding* exact = find_any_copy_move_constructor(bare, move); if (exact != NULL && !exact->is_defaulted)
 return true; if (exact == NULL && move) { Binding* copy = find_any_copy_move_constructor(bare, false);
-if (copy != NULL && !copy->is_defaulted) return true; } pa11::layout_record_type(bare);
-if (bare->base.get() != NULL && type_needs_defaulted_copy_move_helper(bare->base, move)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
-if (type_needs_defaulted_copy_move_helper(bare->fields[i]->type, move)) return true; return false; }
+	if (copy != NULL && !copy->is_defaulted) return true; } pa11::layout_record_type(bare);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (type_needs_defaulted_copy_move_helper(bases[i], move)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
+	if (type_needs_defaulted_copy_move_helper(bare->fields[i]->type, move)) return true; return false; }
 bool type_needs_defaulted_copy_move_helper(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array)
 return type_needs_defaulted_copy_move_helper(bare->base, move); if (bare->kind != TypeKind::Record) return false; return record_needs_defaulted_copy_move_helper(bare, move);
 } bool defaulted_copy_move_constructor_needs_helper(Binding* binding, TypePtr type) { if (binding == NULL ||
@@ -61,19 +62,20 @@ for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->se
 binding->type->kind == TypeKind::Function) return binding; } return NULL;
 } bool type_needs_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Array) return type_needs_destructor(bare->base); if (bare->kind != TypeKind::Record) return false;
-Binding* dtor = find_destructor(bare); if (dtor != NULL && !dtor->is_noop_destructor) return true; pa11::layout_record_type(bare);
-if (bare->base.get() != NULL && type_needs_destructor(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i) if (type_needs_destructor(bare->fields[i]->type))
-return true; return false; } bool type_contains_record(TypePtr type)
+	Binding* dtor = find_destructor(bare); if (dtor != NULL && !dtor->is_noop_destructor) return true; pa11::layout_record_type(bare);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (type_needs_destructor(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i) if (type_needs_destructor(bare->fields[i]->type))
+	return true; return false; } bool type_contains_record(TypePtr type)
 { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Record) return true;
 if (bare->kind == TypeKind::Array) return type_contains_record(bare->base); return false; }
 bool default_init_no_op(TypePtr type) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array)
 return default_init_no_op(bare->base); if (bare->kind != TypeKind::Record) return false; Binding* ctor = find_constructor(bare, 0);
-if (ctor != NULL && !ctor->is_generated_default_constructor) return ctor->is_noop_constructor; pa11::layout_record_type(bare); if (bare->base.get() != NULL && !default_init_no_op(bare->base))
-return false; for (size_t i = 0; i < bare->fields.size(); ++i) if (!default_init_no_op(bare->fields[i]->type)) return false;
-return true; } bool no_op_generated_default_constructor(Binding* ctor, TypePtr type) {
-if (ctor == NULL || !ctor->is_generated_default_constructor) return false; TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Record && bare->is_polymorphic)
-return false; if (bare->kind == TypeKind::Record && bare->base.get() != NULL) return false; if (ctor->unwind_no)
-return true; return default_init_no_op(type); } bool has_inline_constructor(TypePtr type)
+	if (ctor != NULL && !ctor->is_generated_default_constructor) return ctor->is_noop_constructor; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i) if (!default_init_no_op(bases[i])) return false; for (size_t i = 0; i < bare->fields.size(); ++i) if (!default_init_no_op(bare->fields[i]->type)) return false;
+	return true; } bool no_op_generated_default_constructor(Binding* ctor, TypePtr type) {
+	if (ctor == NULL || !ctor->is_generated_default_constructor) return false; TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Record && bare->is_polymorphic)
+	return false; if (bare->kind == TypeKind::Record && !pa11::record_direct_bases(bare).empty()) return false; if (ctor->unwind_no)
+	return true; return default_init_no_op(type); } bool has_inline_constructor(TypePtr type)
 { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record || bare->scope == NULL) return false;
 map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end()) return false;
 for (size_t i = 0; i < found->second.size(); ++i) if (found->second[i]->kind == BindingKind::Function && found->second[i]->type->kind == TypeKind::Function && found->second[i]->is_inline_definition)
@@ -102,13 +104,13 @@ return false; return !record_has_aggregate_blocking_constructor(type) && !record
 bool is_string_literal_node(const Node& node) { return !node.token_text.empty() && node.token_text[node.token_text.size() - 1] == '"';
 } bool zero_init_has_store(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Array) return !bare->unknown_bound && bare->bound != 0 && zero_init_has_store(bare->base); if (bare->kind != TypeKind::Record)
-return true; pa11::layout_record_type(bare); if (bare->base.get() != NULL && zero_init_has_store(bare->base)) return true;
-for (size_t i = 0; i < bare->fields.size(); ++i) if (zero_init_has_store(bare->fields[i]->type)) return true; return false;
-} bool type_has_reference_subobject(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
-if (bare->kind == TypeKind::Array) return type_has_reference_subobject(bare->base); if (bare->kind != TypeKind::Record) return false;
-pa11::layout_record_type(bare); if (bare->base.get() != NULL && type_has_reference_subobject(bare->base)) return true;
-for (size_t i = 0; i < bare->fields.size(); ++i) { if (is_reference(bare->fields[i]->type) || type_has_reference_subobject(bare->fields[i]->type))
-return true; } return false; }
+	return true; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) if (zero_init_has_store(bases[i])) return true;
+	for (size_t i = 0; i < bare->fields.size(); ++i) if (zero_init_has_store(bare->fields[i]->type)) return true; return false;
+	} bool type_has_reference_subobject(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Array) return type_has_reference_subobject(bare->base); if (bare->kind != TypeKind::Record) return false;
+	pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) if (type_has_reference_subobject(bases[i])) return true;
+	for (size_t i = 0; i < bare->fields.size(); ++i) { if (is_reference(bare->fields[i]->type) || type_has_reference_subobject(bare->fields[i]->type))
+	return true; } return false; }
 bool record_has_user_assignment_operator(TypePtr type) { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record || bare->scope == NULL)
 return false; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find("operator="); if (found == bare->scope->members.end())
 return false; for (size_t i = 0; i < found->second.size(); ++i) if (found->second[i]->kind == BindingKind::Function && !found->second[i]->is_generated_copy_move_assignment)
@@ -154,7 +156,7 @@ constructor_destination_before_protected_try_ = saved_destination_before_try; } 
 emit_pending_temp_cleanups(); register_cleanup(var.binding, type); return true; }
 void FunctionLowerer::lower_variable_decl(const Node& var) { if (!starts_with(var.line, "variable ") || var.binding == NULL) return; if (var.binding->is_local_static) { lower_local_static_decl(var); return; } string slot = return_slot_variables_.find(var.binding) == return_slot_variables_.end() ? slot_for(var.binding) : string(); if (var.children.empty()) { TypePtr bare = pa11::strip_cv(var.binding->type); if (type_contains_record(var.binding->type)) { if (bare->kind != TypeKind::Array) ensure_pointer(emit_lvalue_addr(var)); function<Value()> addr_for = [this, &var]() { return ensure_pointer(emit_lvalue_addr(var)); };
 lower_default_init(addr_for, var.binding->type); register_cleanup(var.binding, var.binding->type); } return; } TypePtr type = var.binding->type; if (starts_with(var.children[0].line, "no-op-initializer")) { if (type_contains_record(var.binding->type)) { TypePtr bare_noop = pa11::strip_cv(var.binding->type); bool materialize_noop = (pa11::type_has_const(var.binding->type) && has_inline_constructor(var.binding->type)) || zero_init_has_store(var.binding->type) || type_needs_cleanup(var.binding->type); if (bare_noop->kind == TypeKind::Array) materialize_noop = materialize_noop && pa11::type_has_const(var.binding->type); if (materialize_noop) ensure_pointer(emit_lvalue_addr(var)); register_cleanup(var.binding, var.binding->type); } return; } if (starts_with(var.children[0].line, "constructor-action")) {
-Binding* ctor = !var.children[0].children.empty() ? var.children[0].children[0].direct_call : NULL; bool noop_constructor = no_op_generated_default_constructor(ctor, var.binding->type); if (!noop_constructor && var.children[0].token_text.empty() && ctor != NULL && ctor->is_generated_default_constructor && !pa11::strip_cv(var.binding->type)->is_polymorphic) { noop_constructor = default_init_no_op(var.binding->type); if (noop_constructor) { TypePtr record = pa11::strip_cv(var.binding->type); Binding* base_ctor = record->kind == TypeKind::Record && record->base.get() != NULL ? find_constructor(record->base, 0) : NULL; if (base_ctor != NULL) { program_.constructor_symbol_for(base_ctor, true); program_.demand_inline_function(base_ctor, false); program_.demand_inline_function(base_ctor, true); } } } if (noop_constructor) {
+Binding* ctor = !var.children[0].children.empty() ? var.children[0].children[0].direct_call : NULL; bool noop_constructor = no_op_generated_default_constructor(ctor, var.binding->type); if (!noop_constructor && var.children[0].token_text.empty() && ctor != NULL && ctor->is_generated_default_constructor && !pa11::strip_cv(var.binding->type)->is_polymorphic) { noop_constructor = default_init_no_op(var.binding->type); if (noop_constructor) { TypePtr record = pa11::strip_cv(var.binding->type); if (record->kind == TypeKind::Record) { vector<TypePtr> bases = pa11::record_direct_bases(record); for (size_t i = 0; i < bases.size(); ++i) { Binding* base_ctor = find_constructor(bases[i], 0); if (base_ctor != NULL) { program_.constructor_symbol_for(base_ctor, true); program_.demand_inline_function(base_ctor, false); program_.demand_inline_function(base_ctor, true); } } } } } if (noop_constructor) {
 ensure_pointer(emit_lvalue_addr(var)); emit_pending_temp_cleanups(); register_cleanup(var.binding, var.binding->type); return; } if (!var.children[0].children.empty()) emit_rvalue(var.children[0].children[0]); emit_pending_temp_cleanups(); register_cleanup(var.binding, var.binding->type); return; } TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array && is_string_literal_node(var.children[0])) { Value base = ensure_pointer(emit_lvalue_addr(var)); function<Value()> addr_for = [base]() { return base; }; lower_string_array_init(addr_for, type, var.children[0]); return; } if ((bare->kind == TypeKind::Record || bare->kind == TypeKind::Array) && starts_with(var.children[0].line, "braced-init-list")) { lower_braced_variable_init(var, type); return; } if (bare->kind == TypeKind::Record) {
 Value base = ensure_pointer(emit_lvalue_addr(var)); function<Value()> addr_for = [base]() { return base; }; bool saved_destination_before_try = constructor_destination_before_protected_try_; constructor_destination_before_protected_try_ = true; lower_object_init(addr_for, type, var.children[0]); constructor_destination_before_protected_try_ = saved_destination_before_try; emit_pending_temp_cleanups(); register_cleanup(var.binding, type); return; } if (is_reference(type)) { Value source = ensure_pointer(emit_lvalue_addr(var.children[0])); TypePtr from_ptr = pa11::make_pointer(object_type(var.children[0].type)); TypePtr to_ptr = pa11::make_pointer(type->base); Value converted = convert_value(source, from_ptr, to_ptr); instr("store ptr " + converted.text + ", $" + slot); } else {
 if (starts_with(var.children[0].line, "call-expression")) { call_result_store_slot_ = slot; call_result_store_type_ = type; call_result_store_consumed_ = false; } Value init = emit_rvalue(var.children[0]); if (!call_result_store_consumed_) { TypePtr init_bare = pa11::strip_cv(strip_for_value(var.children[0].type)); TypePtr target_bare = pa11::strip_cv(strip_for_value(type)); bool literal_value = !init.text.empty() && init.text[0] != '%' && init.text[0] != '$' && init.text[0] != '@'; bool materialize_widening_literal = literal_value && pa11::is_integral_or_bool_type(init_bare) && pa11::is_integral_or_bool_type(target_bare) && pa11::type_size(target_bare) > pa11::type_size(init_bare); init = convert_value(init, var.children[0].type, type, !materialize_widening_literal);
@@ -271,9 +273,10 @@ program_.demand_inline_function(dtor); Value target = addr_for(); string arg = t
 } pa11::layout_record_type(bare); for (size_t n = 0; n < bare->fields.size(); ++n) {
 size_t i = bare->fields.size() - 1 - n; Binding* field = bare->fields[i]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
 string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr);
-}; lower_destructor_for_object(field_addr, field->type); } if (bare->base.get() != NULL)
-{ function<Value()> base_addr = [this, addr_for, bare]() { Value base = addr_for(); return emit_base_subobject_addr(base, bare, bare->base);
-}; lower_destructor_for_object(base_addr, bare->base); } }
+	}; lower_destructor_for_object(field_addr, field->type); } vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t n = 0; n < bases.size(); ++n) { size_t i = bases.size() - 1 - n; TypePtr direct_base = bases[i];
+	function<Value()> base_addr = [this, addr_for, bare, direct_base]() { Value base = addr_for(); return emit_base_subobject_addr(base, bare, direct_base);
+	}; lower_destructor_for_object(base_addr, direct_base); } }
 void FunctionLowerer::lower_scope_destructor_for_object( const function<Value()>& addr_for, TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Array) { lower_destructor_for_object(addr_for, type);
 return; } TypePtr elem = bare->base; uint64_t count = bare->unknown_bound ? 0 : bare->bound;

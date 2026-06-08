@@ -67,22 +67,24 @@ return false; TypePtr param_record = pa11::strip_cv(param->base); TypePtr target
 return false; return binding->type->parameters[1]->kind == TypeKind::RValueReference; } bool type_has_user_copy_move_or_destructor(TypePtr type);
 bool type_has_abi_indirect_special_member(TypePtr type); bool defaulted_member_affects_call_abi(const Binding* binding) { if (binding->owner == NULL || binding->owner->kind != ScopeKind::Class)
 return binding->is_inline_definition; TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return binding->is_inline_definition;
-TypePtr bare = pa11::strip_cv(record); if (bare->tag == "union") return true; pa11::layout_record_type(bare);
-if (bare->base.get() != NULL && type_has_abi_indirect_special_member(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
-if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
+	TypePtr bare = pa11::strip_cv(record); if (bare->tag == "union") return true; pa11::layout_record_type(bare);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (type_has_abi_indirect_special_member(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
+	if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
 bool special_member_affects_call_abi(const Binding* binding) { if (binding->is_generated_copy_move_constructor || binding->is_generated_default_destructor)
 return false; if (!binding->is_defaulted) return true; return defaulted_member_affects_call_abi(binding);
 } bool record_has_user_copy_move_or_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record || bare->scope == NULL) return false; if (bare->tag == "union") return true;
 map<string, vector<Binding*> >::const_iterator ctors = bare->scope->members.find(bare->scope->name); if (ctors != bare->scope->members.end()) {
 for (size_t i = 0; i < ctors->second.size(); ++i) { Binding* ctor = ctors->second[i]; if (bare->is_template_specialization &&
-ctor->is_defaulted && !ctor->is_generated_copy_move_constructor && is_move_constructor(ctor, bare) && (bare->base.get() != NULL || !bare->fields.empty()))
-return true; if (is_copy_or_move_constructor(ctor, bare) && special_member_affects_call_abi(ctor)) return true;
-} } string dtor_name = "~" + bare->scope->name; map<string, vector<Binding*> >::const_iterator dtors =
-bare->scope->members.find(dtor_name); if (dtors != bare->scope->members.end()) { for (size_t i = 0; i < dtors->second.size(); ++i)
-if (dtors->second[i]->kind == BindingKind::Function && special_member_affects_call_abi(dtors->second[i])) return true; }
-if (bare->base.get() != NULL && type_has_user_copy_move_or_destructor(bare->base)) return true; pa11::layout_record_type(bare);
-for (size_t i = 0; i < bare->fields.size(); ++i) if (type_has_user_copy_move_or_destructor(bare->fields[i]->type)) return true; return false;
+	ctor->is_defaulted && !ctor->is_generated_copy_move_constructor && is_move_constructor(ctor, bare) && (!pa11::record_direct_bases(bare).empty() || !bare->fields.empty()))
+	return true; if (is_copy_or_move_constructor(ctor, bare) && special_member_affects_call_abi(ctor)) return true;
+	} } string dtor_name = "~" + bare->scope->name; map<string, vector<Binding*> >::const_iterator dtors =
+	bare->scope->members.find(dtor_name); if (dtors != bare->scope->members.end()) { for (size_t i = 0; i < dtors->second.size(); ++i)
+	if (dtors->second[i]->kind == BindingKind::Function && special_member_affects_call_abi(dtors->second[i])) return true; }
+	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (type_has_user_copy_move_or_destructor(bases[i])) return true; pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i) if (type_has_user_copy_move_or_destructor(bare->fields[i]->type)) return true; return false;
 } bool type_has_user_copy_move_or_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Array) return type_has_user_copy_move_or_destructor(bare->base); if (bare->kind == TypeKind::Record) return record_has_user_copy_move_or_destructor(bare);
 return false; } bool record_has_abi_indirect_special_member(TypePtr type) {
@@ -93,8 +95,9 @@ if ((is_move_constructor(ctor, bare) || (bare->is_template_specialization && is_
 return true; } } string dtor_name = "~" + bare->scope->name;
 map<string, vector<Binding*> >::const_iterator dtors = bare->scope->members.find(dtor_name); if (dtors != bare->scope->members.end()) {
 for (size_t i = 0; i < dtors->second.size(); ++i) if (dtors->second[i]->kind == BindingKind::Function && special_member_affects_call_abi(dtors->second[i])) return true;
-} if (bare->base.get() != NULL && type_has_abi_indirect_special_member(bare->base)) return true;
-pa11::layout_record_type(bare); for (size_t i = 0; i < bare->fields.size(); ++i) if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true;
+	} vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (type_has_abi_indirect_special_member(bases[i])) return true;
+	pa11::layout_record_type(bare); for (size_t i = 0; i < bare->fields.size(); ++i) if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true;
 return false; } bool type_has_abi_indirect_special_member(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array) return type_has_abi_indirect_special_member(bare->base); if (bare->kind == TypeKind::Record)
 return record_has_abi_indirect_special_member(bare); return false; }
@@ -106,8 +109,8 @@ if (bare->kind != TypeKind::Record) return false; if (is_initializer_list_type(t
 return record_has_user_copy_move_or_destructor(bare); } bool record_has_nontrivial_value_transfer(TypePtr type) {
 return record_has_user_copy_move_or_destructor(type); } bool record_has_storage_copy(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array) return record_has_storage_copy(bare->base); if (bare->kind != TypeKind::Record)
-return true; pa11::layout_record_type(bare); if (bare->base.get() != NULL && record_has_storage_copy(bare->base))
-return true; return !bare->fields.empty(); } string lowir_literal(TypePtr type, const Node& node)
+	return true; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	if (record_has_storage_copy(bases[i])) return true; return !bare->fields.empty(); } string lowir_literal(TypePtr type, const Node& node)
 { if (node.token_text == "nullptr") return "nullptr"; if (node.has_constant_value && !is_float_type(type))
 return to_string(node.constant_value); if (!node.token_text.empty()) return node.token_text; return to_string(node.constant_value);
 } string lowir_parameter(TypePtr type) { string out = scalar_lowir_type(type);

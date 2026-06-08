@@ -11,6 +11,10 @@ bool record_has_reference_field(TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
 		return false;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (record_has_reference_field(bases[i]))
+			return true;
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 	{
 		TypePtr field = bare->fields[i]->type;
@@ -19,7 +23,7 @@ bool record_has_reference_field(TypePtr type)
 		if (record_has_reference_field(field))
 			return true;
 	}
-	return bare->base.get() != NULL && record_has_reference_field(bare->base);
+	return false;
 }
 
 vector<Binding*> declared_instance_fields(TypePtr type)

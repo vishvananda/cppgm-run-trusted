@@ -1,8 +1,6 @@
-declare global @__external_rtti__void [binding=strong, object=_ZTIv]
 declare global @__external_rtti_vtable____class_type_info [binding=strong, object=_ZTVN10__cxxabiv117__class_type_infoE]
 declare global @__external_rtti_vtable____si_class_type_info [binding=strong, object=_ZTVN10__cxxabiv120__si_class_type_infoE]
 declare function @__external_runtime___Unwind_Resume() -> void [return=noreturn, role=eh_resume, linkage=c, binding=strong, object=_Unwind_Resume]
-declare function @__external_runtime____dynamic_cast(%arg0 : ptr, %arg1 : ptr, %arg2 : ptr, %arg3 : i64) -> ptr [linkage=c, binding=strong, object=__dynamic_cast]
 declare function @__external_runtime____gxx_personality_v0() -> void [role=eh_personality, linkage=c, binding=strong, object=__gxx_personality_v0]
 declare function @operator_delete(%arg0 : ptr) -> void [unwind=no, binding=strong, object=cppgm_builtin_operator_delete]
 
@@ -66,20 +64,13 @@ function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
     store ptr %t9, $dyn_cast__1
     jump ^dyn_cast_end_2
 
-  block ^block_3:
-    %t10 = addr @__rtti_class_YB
-    %t11 = addr @__external_rtti__void
-    %t12 = call ptr @__external_runtime____dynamic_cast(%t4, %t10, %t11, -2)
-    store ptr %t12, $dyn_cast__1
-    jump ^dyn_cast_end_2
-
   block ^dyn_cast_end_2:
-    %t13 = load ptr $dyn_cast__1
-    %t14 = cmp ne ptr %t13, 0
-    %t15 = convert zext i32 u8 %t14
-    %t16 = addr $d
-    call void @YD___YD(%t16)
-    return i32 %t15
+    %t10 = load ptr $dyn_cast__1
+    %t11 = cmp ne ptr %t10, 0
+    %t12 = convert zext i32 u8 %t11
+    %t13 = addr $d
+    call void @YD___YD(%t13)
+    return i32 %t12
 }
 function @YD__YD(%this : ptr) -> void [unwind=no, binding=weak, object=_ZN2YDC1Ev] {
   slot $this : ptr

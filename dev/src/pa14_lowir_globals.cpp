@@ -38,8 +38,10 @@ bool record_has_destructor(TypePtr type)
 			return true;
 	}
 	pa11::layout_record_type(bare);
-	if (bare->base.get() != NULL && record_has_destructor(bare->base))
-		return true;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (record_has_destructor(bases[i]))
+			return true;
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 		if (record_has_destructor(bare->fields[i]->type))
 			return true;

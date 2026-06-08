@@ -55,8 +55,10 @@ bool type_contains_enum(TypePtr type)
 	if (bare->kind != TypeKind::Record)
 		return false;
 	pa11::layout_record_type(bare);
-	if (bare->base.get() != NULL && type_contains_enum(bare->base))
-		return true;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (type_contains_enum(bases[i]))
+			return true;
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 		if (type_contains_enum(bare->fields[i]->type))
 			return true;
@@ -272,13 +274,13 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 		}
 	} destination_guard(this);
 	if (bare->kind == TypeKind::Record)
-{ pa11::layout_record_type(bare); if (bare->tag == "union") { if (bare->fields.empty()) return; Binding* field = bare->fields[0]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
-string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr); }; if (index >= clauses.size())
-lower_zero_init(field_addr, field->type); else { bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
-lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } return; } if (bare->base.get() != NULL) { function<Value()> base_addr = [this, addr_for, bare]() {
-Value base = addr_for(); return emit_base_subobject_addr(base, bare, bare->base); }; if (index >= clauses.size()) lower_base_zero_init(addr_for, bare, bare->base); else { const Node& child = clauses[index];
-if (same_record_initializer(child, bare->base)) lower_object_init(base_addr, bare->base, clauses[index++]); else if (is_brace_elision_aggregate(bare->base) && !starts_with(child.line, "braced-init-list"))
-lower_aggregate_elements(base_addr, bare->base, clauses, index); else lower_object_init(base_addr, bare->base, clauses[index++]); } } for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i];
+	{ pa11::layout_record_type(bare); if (bare->tag == "union") { if (bare->fields.empty()) return; Binding* field = bare->fields[0]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
+	string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr); }; if (index >= clauses.size())
+	lower_zero_init(field_addr, field->type); else { bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
+	lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } return; } vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size(); ++b) { TypePtr direct_base = bases[b]; function<Value()> base_addr = [this, addr_for, bare, direct_base]() {
+	Value base = addr_for(); return emit_base_subobject_addr(base, bare, direct_base); }; if (index >= clauses.size()) lower_base_zero_init(addr_for, bare, direct_base); else { const Node& child = clauses[index];
+	if (same_record_initializer(child, direct_base)) lower_object_init(base_addr, direct_base, clauses[index++]); else if (is_brace_elision_aggregate(direct_base) && !starts_with(child.line, "braced-init-list"))
+	lower_aggregate_elements(base_addr, direct_base, clauses, index); else lower_object_init(base_addr, direct_base, clauses[index++]); } } for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i];
 	function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for(); string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset));
 return Value("ptr", addr); }; if (index >= clauses.size()) { lower_zero_init(field_addr, field->type); continue; } const Node& child = clauses[index]; if (same_record_initializer(child, field->type)) {
 if (is_no_op_generated_default_prvalue(child, field->type)) { ++index; continue; } Binding* copy_move = NULL; if (child.category == ValueCategory::LValue || child.category == ValueCategory::XValue) {
@@ -876,8 +878,9 @@ void FunctionLowerer::lower_base_zero_init(const function<Value()>& addr_for,
 	if (has_inline_constructor(type))
 		throw runtime_error("no default constructor");
 	pa11::layout_record_type(bare);
-	if (bare->base.get() != NULL)
-		lower_base_zero_init(base_addr, bare, bare->base);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+		lower_base_zero_init(base_addr, bare, bases[i]);
 	for (size_t i = 0; i < bare->fields.size(); ++i)
 	{
 		Binding* field = bare->fields[i];
@@ -915,8 +918,9 @@ void FunctionLowerer::lower_zero_init(const function<Value()>& addr_for, TypePtr
 		if (has_inline_constructor(type))
 			throw runtime_error("no default constructor");
 		pa11::layout_record_type(bare);
-		if (bare->base.get() != NULL)
-			lower_base_zero_init(addr_for, bare, bare->base);
+		vector<TypePtr> bases = pa11::record_direct_bases(bare);
+		for (size_t i = 0; i < bases.size(); ++i)
+			lower_base_zero_init(addr_for, bare, bases[i]);
 		for (size_t i = 0; i < bare->fields.size(); ++i)
 		{
 			Binding* field = bare->fields[i];
