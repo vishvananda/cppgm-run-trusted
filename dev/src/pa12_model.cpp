@@ -303,6 +303,22 @@ bool same_template_specialization_record(TypePtr left, TypePtr right)
 	       l->name == r->name;
 }
 
+bool same_template_record_family(TypePtr left, TypePtr right)
+{
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	if (l->kind != pa11::TypeKind::Record ||
+	    r->kind != pa11::TypeKind::Record)
+		return false;
+	string lname = l->is_template_specialization &&
+	               !l->template_primary_name.empty()
+		? l->template_primary_name : l->name;
+	string rname = r->is_template_specialization &&
+	               !r->template_primary_name.empty()
+		? r->template_primary_name : r->name;
+	return !lname.empty() && lname == rname;
+}
+
 bool same_scope_path(Scope* left, Scope* right)
 {
 	if (left == right)
@@ -953,6 +969,9 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 	}
 	if (active_class == NULL)
 		return false;
+	TypePtr active_type = pa11::record_type_for_scope(active_class);
+	active_type = active_type.get() != NULL
+		? pa11::strip_cv(active_type) : TypePtr();
 	map<Scope*, vector<TypePtr> >::const_iterator cit =
 		class_friend_classes_.find(class_scope);
 	if (cit == class_friend_classes_.end())
@@ -961,7 +980,14 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 	{
 		TypePtr friend_type = pa11::strip_cv(cit->second[i]);
 		if (friend_type->kind == pa11::TypeKind::Record &&
-		    friend_type->scope == active_class)
+		    (friend_type->scope == active_class ||
+		     (active_type.get() != NULL &&
+		      active_type->kind == pa11::TypeKind::Record &&
+		      (pa11::same_type(friend_type, active_type) ||
+		       same_template_specialization_record(friend_type,
+		                                           active_type) ||
+		       same_template_record_family(friend_type,
+		                                   active_type)))))
 			return true;
 	}
 	return false;

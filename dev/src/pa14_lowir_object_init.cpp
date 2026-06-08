@@ -715,14 +715,27 @@ bool FunctionLowerer::lower_record_same_type_init(
 		return true;
 	}
 	Value target = addr_for();
+	if (returned_prvalue)
+	{
+		call_result_store_addr_ = target.text;
+		call_result_store_type_ = type;
+		call_result_store_consumed_ = false;
+	}
 	string source = (init.category == ValueCategory::LValue ||
 	                 init.category == ValueCategory::XValue)
 		? ensure_pointer(emit_lvalue_addr(init)).text
 		: emit_rvalue(init).text;
-	if (record_has_storage_copy(type) || returned_prvalue)
+	if (!call_result_store_consumed_ &&
+	    (record_has_storage_copy(type) || returned_prvalue))
 		instr("copyobj " + to_string(pa11::type_size(type)) + "x" +
 		      to_string(pa11::type_align(type)) + " " + source + ", " +
 		      target.text);
+	if (returned_prvalue)
+	{
+		call_result_store_addr_.clear();
+		call_result_store_type_.reset();
+		call_result_store_consumed_ = false;
+	}
 	return true;
 }
 

@@ -127,10 +127,33 @@ bool virtual_signature_matches(Binding* base, Binding* derived)
 bool class_has_polymorphic_base(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
-	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-	return base.get() != NULL &&
-	       base->kind == pa11::TypeKind::Record &&
-	       base->is_polymorphic;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->is_polymorphic)
+			return true;
+	}
+	return false;
+}
+
+TypePtr primary_polymorphic_base(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == pa11::TypeKind::Record &&
+		    base->is_polymorphic)
+			return base;
+	}
+	return TypePtr();
 }
 
 bool has_declared_destructor(TypePtr record)
@@ -145,17 +168,29 @@ bool has_declared_destructor(TypePtr record)
 bool inherits_virtual_destructor(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
-	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-	for (TypePtr cur = base;
-	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
-	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	vector<TypePtr> pending = pa11::record_direct_bases(bare);
+	vector<TypePtr> seen;
+	for (size_t pending_i = 0; pending_i < pending.size(); ++pending_i)
 	{
+		TypePtr cur = pending[pending_i].get() != NULL
+			? pa11::strip_cv(pending[pending_i]) : TypePtr();
+		if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record)
+			continue;
+		bool already = false;
+		for (size_t i = 0; i < seen.size(); ++i)
+			if (pa11::same_type(seen[i], cur))
+				already = true;
+		if (already)
+			continue;
+		seen.push_back(cur);
 		for (size_t i = 0; i < cur->virtual_entries.size(); ++i)
 		{
 			Binding* fn = cur->virtual_entries[i].function;
 			if (fn != NULL && is_destructor_binding(fn))
 				return true;
 		}
+		vector<TypePtr> bases = pa11::record_direct_bases(cur);
+		pending.insert(pending.end(), bases.begin(), bases.end());
 	}
 	return false;
 }
@@ -1061,11 +1096,22 @@ void Parser::validate_aggregate_braced_initialization(TypePtr record)
 Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) const
 {
 	TypePtr bare = pa11::strip_cv(record);
-	TypePtr base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-	for (TypePtr cur = base;
-	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
-	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	vector<TypePtr> pending = pa11::record_direct_bases(bare);
+	vector<TypePtr> seen;
+	while (!pending.empty())
 	{
+		TypePtr cur = pending.back().get() != NULL
+			? pa11::strip_cv(pending.back()) : TypePtr();
+		pending.pop_back();
+		if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record)
+			continue;
+		bool already = false;
+		for (size_t i = 0; i < seen.size(); ++i)
+			if (pa11::same_type(seen[i], cur))
+				already = true;
+		if (already)
+			continue;
+		seen.push_back(cur);
 		for (size_t i = 0; i < cur->virtual_entries.size(); ++i)
 		{
 			Binding* candidate = cur->virtual_entries[i].function;
@@ -1074,6 +1120,8 @@ Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) cons
 			    virtual_signature_matches(candidate, function))
 				return candidate;
 		}
+		vector<TypePtr> bases = pa11::record_direct_bases(cur);
+		pending.insert(pending.end(), bases.begin(), bases.end());
 	}
 	return NULL;
 }
@@ -1083,24 +1131,47 @@ void Parser::complete_class_virtuals(TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
-	TypePtr direct_base =
-		bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
 	bool dependent_base_validation =
 		validating_template_definition_ &&
 		record_dependent_base_lookup_skips_.count(bare.get()) != 0;
-	if (!dependent_base_validation &&
-	    direct_base.get() != NULL &&
-	    direct_base->kind == pa11::TypeKind::Record &&
-	    direct_base.get() != bare.get())
+	if (!dependent_base_validation)
 	{
-		complete_template_record(direct_base);
-		complete_class_virtuals(direct_base);
+		for (size_t i = 0; i < direct_bases.size(); ++i)
+		{
+			TypePtr direct_base = direct_bases[i].get() != NULL
+				? pa11::strip_cv(direct_bases[i]) : TypePtr();
+			if (direct_base.get() != NULL &&
+			    direct_base->kind == pa11::TypeKind::Record &&
+			    direct_base.get() != bare.get())
+			{
+				complete_template_record(direct_base);
+				complete_class_virtuals(direct_base);
+			}
+		}
 	}
 	if (!dependent_base_validation &&
 	    inherits_virtual_destructor(bare) &&
 	    !has_declared_destructor(bare))
 		ensure_default_destructor(bare);
+	auto demand_virtual_function_body = [this](Binding* member) {
+		if (member == NULL ||
+		    member->is_pure_virtual ||
+		    validating_template_definition_ ||
+		    function_template_candidate_instantiation_depth_ != 0)
+			return;
+		parse_pending_function_body(member);
+		parse_pending_member_body(member);
+		ensure_function_body_extra_node(member);
+		if (member->aliased_binding != NULL)
+		{
+			parse_pending_function_body(member->aliased_binding);
+			parse_pending_member_body(member->aliased_binding);
+			ensure_function_body_extra_node(member->aliased_binding);
+		}
+	};
 	bare->virtual_entries.clear();
+	TypePtr direct_base = primary_polymorphic_base(bare);
 	if (!dependent_base_validation &&
 	    direct_base.get() != NULL &&
 	    direct_base->kind == pa11::TypeKind::Record &&
@@ -1132,6 +1203,7 @@ void Parser::complete_class_virtuals(TypePtr type)
 				if (bare->virtual_entries[j].function == overridden)
 					bare->virtual_entries[j].function = member;
 			}
+			demand_virtual_function_body(member);
 			bare->is_polymorphic = true;
 			continue;
 		}
@@ -1145,6 +1217,7 @@ void Parser::complete_class_virtuals(TypePtr type)
 		bare->virtual_entries.push_back(pa11::VirtualTableEntry(member, false));
 		if (is_destructor_binding(member))
 			bare->virtual_entries.push_back(pa11::VirtualTableEntry(member, true));
+		demand_virtual_function_body(member);
 		bare->is_polymorphic = true;
 	}
 	bare->introduces_vptr =
@@ -1204,13 +1277,19 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 		target->kind == ScopeKind::Class &&
 		!class_private_access_.empty() &&
 		class_private_access_.back();
-	function->is_protected_member =
-		target->kind == ScopeKind::Class &&
-		!class_protected_access_.empty() &&
-		class_protected_access_.back();
-	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
-	function->ref_qualifier = ref_qualifier;
-	if (specs.auto_decl)
+		function->is_protected_member =
+			target->kind == ScopeKind::Class &&
+			!class_protected_access_.empty() &&
+			class_protected_access_.back();
+		function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+		function->ref_qualifier = ref_qualifier;
+		if (suffix != NULL &&
+		    target->kind == ScopeKind::Class &&
+		    constructor_name_matches_scope(target, name))
+			for (size_t i = 0; i < suffix->parameters.size(); ++i)
+				if (suffix->parameters[i].has_default)
+					function->has_default_arguments = true;
+		if (specs.auto_decl)
 	{
 		auto_return_functions_.insert(function);
 		auto_return_patterns_[function] = type->base;

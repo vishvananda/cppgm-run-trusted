@@ -152,7 +152,10 @@ Type::Type(TypeKind k)
 	  record_size(0),
 	  record_align(1),
 	  record_forced_align(0),
+	  nonvirtual_size(0),
+	  nonvirtual_align(1),
 	  direct_base_offset(0),
+	  direct_base_virtuals(),
 	  layout_valid(false),
 	  is_polymorphic(false),
 	  introduces_vptr(false)
@@ -178,10 +181,11 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_generated_aggregate_constructor(false),
 	  is_generated_copy_move_constructor(false),
 	  is_generated_copy_move_assignment(false),
-	  is_generated_default_destructor(false),
-	  is_defaulted(false),
-	  is_explicit(false),
-	  is_private(false),
+		  is_generated_default_destructor(false),
+		  is_defaulted(false),
+		  is_explicit(false),
+		  has_default_arguments(false),
+		  is_private(false),
 	  is_protected_member(false),
 	  is_mutable_member(false),
 	  is_reference_member(false),
@@ -664,6 +668,298 @@ bool record_uses_object_storage(TypePtr type)
 
 }  // namespace
 
+static bool direct_base_is_virtual(TypePtr record, size_t index)
+{
+	TypePtr bare = strip_cv(record);
+	return index < bare->direct_base_virtuals.size() &&
+	       bare->direct_base_virtuals[index];
+}
+
+static uint64_t align_up(uint64_t offset, uint64_t align)
+{
+	if (align == 0)
+		align = 1;
+	uint64_t padding = offset % align;
+	return padding == 0 ? offset : offset + align - padding;
+}
+
+static bool type_vector_contains(const vector<TypePtr>& types, TypePtr type)
+{
+	TypePtr wanted = strip_cv(type);
+	for (size_t i = 0; i < types.size(); ++i)
+		if (types[i].get() != NULL &&
+		    same_type(strip_cv(types[i]), wanted))
+			return true;
+	return false;
+}
+
+static void collect_record_virtual_bases(TypePtr record,
+                                         vector<TypePtr>& out)
+{
+	TypePtr bare = record.get() != NULL ? strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return;
+	vector<TypePtr> bases = record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr direct = bases[i].get() != NULL
+			? strip_cv(bases[i]) : TypePtr();
+		if (direct.get() == NULL || direct->kind != TypeKind::Record)
+			continue;
+		if (direct_base_is_virtual(bare, i) &&
+		    !type_vector_contains(out, direct))
+			out.push_back(direct);
+		collect_record_virtual_bases(direct, out);
+	}
+}
+
+static uint64_t record_nonvirtual_subobject_size(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	layout_record_type(bare);
+	uint64_t size = bare->nonvirtual_size != 0
+		? bare->nonvirtual_size : bare->record_size;
+	if (size == 0)
+		size = 1;
+	return align_up(size, bare->record_align);
+}
+
+static uint64_t record_virtual_subobject_size(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	layout_record_type(bare);
+	return bare->nonvirtual_size != 0 ? bare->nonvirtual_size : 1;
+}
+
+static uint64_t record_virtual_subobject_align(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	layout_record_type(bare);
+	return bare->nonvirtual_align != 0 ? bare->nonvirtual_align : 1;
+}
+
+static size_t primary_polymorphic_base_index(TypePtr record,
+                                             const vector<TypePtr>& bases)
+{
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		if (direct_base_is_virtual(record, i))
+			continue;
+		TypePtr base = bases[i].get() != NULL ? strip_cv(bases[i]) : TypePtr();
+		if (base.get() != NULL &&
+		    base->kind == TypeKind::Record &&
+		    base->is_polymorphic)
+			return i;
+	}
+	return static_cast<size_t>(-1);
+}
+
+struct RecordLayoutCursor
+{
+	uint64_t offset;
+	uint64_t align;
+	uint64_t nonvirtual_align;
+
+	explicit RecordLayoutCursor(uint64_t forced_align)
+		: offset(0),
+		  align(max<uint64_t>(1, forced_align)),
+		  nonvirtual_align(align)
+	{
+	}
+};
+
+static vector<size_t> direct_base_layout_order(size_t primary_base,
+                                               size_t base_count)
+{
+	vector<size_t> layout_order;
+	if (primary_base != static_cast<size_t>(-1))
+		layout_order.push_back(primary_base);
+	for (size_t b = 0; b < base_count; ++b)
+		if (b != primary_base)
+			layout_order.push_back(b);
+	return layout_order;
+}
+
+static void layout_record_direct_bases(TypePtr bare,
+                                       const vector<TypePtr>& direct_bases,
+                                       size_t primary_base,
+                                       bool introduces_vptr,
+                                       RecordLayoutCursor& cursor)
+{
+	vector<size_t> layout_order =
+		direct_base_layout_order(primary_base, direct_bases.size());
+	for (size_t order_i = 0; order_i < layout_order.size(); ++order_i)
+	{
+		size_t b = layout_order[order_i];
+		if (direct_base_is_virtual(bare, b))
+			continue;
+		TypePtr direct_base = direct_bases[b].get() != NULL
+			? strip_cv(direct_bases[b]) : TypePtr();
+		if (direct_base.get() == NULL || direct_base->kind != TypeKind::Record)
+		{
+			bare->direct_base_offsets[b] = 0;
+			continue;
+		}
+		layout_record_type(direct_base);
+		uint64_t base_align = type_align(direct_base);
+		cursor.align = max<uint64_t>(cursor.align, base_align);
+		cursor.nonvirtual_align =
+			max<uint64_t>(cursor.nonvirtual_align, base_align);
+		uint64_t base_offset = 0;
+		if (b == 0 && introduces_vptr &&
+		    record_uses_object_storage(direct_base))
+		{
+			cursor.offset = 8;
+			cursor.offset = align_up(cursor.offset, base_align);
+			base_offset = cursor.offset;
+			cursor.offset += record_nonvirtual_subobject_size(direct_base);
+		}
+		else if (!record_uses_object_storage(direct_base) &&
+		         direct_base->virtual_bases.empty())
+			base_offset = 0;
+		else
+		{
+			cursor.offset = align_up(cursor.offset, base_align);
+			base_offset = cursor.offset;
+			cursor.offset += record_nonvirtual_subobject_size(direct_base);
+		}
+		bare->direct_base_offsets[b] = base_offset;
+		if (b == 0)
+			bare->direct_base_offset = base_offset;
+	}
+}
+
+static void layout_record_member(TypePtr bare,
+                                 Binding* member,
+                                 RecordLayoutCursor& cursor,
+                                 uint64_t& bit_unit_offset,
+                                 uint64_t& bit_unit_size,
+                                 uint64_t& bit_used)
+{
+	uint64_t member_align = type_align(member->type);
+	uint64_t member_size = type_size(member->type);
+	if (member_align == 0)
+		member_align = 1;
+	if (bare->tag == "union")
+	{
+		member->member_offset = 0;
+		member->bit_offset = 0;
+		bare->fields.push_back(member);
+		cursor.offset = max<uint64_t>(cursor.offset, member_size);
+		cursor.align = max<uint64_t>(cursor.align, member_align);
+		cursor.nonvirtual_align =
+			max<uint64_t>(cursor.nonvirtual_align, member_align);
+		return;
+	}
+	if (member->is_bit_field)
+	{
+		uint64_t unit_bits = member_size * 8;
+		if (member->bit_width == 0)
+		{
+			if (bit_used != 0)
+				cursor.offset = bit_unit_offset + bit_unit_size;
+			uint64_t padding = cursor.offset % member_align;
+			if (padding != 0)
+				cursor.offset += member_align - padding;
+			bit_used = 0;
+			bit_unit_size = 0;
+			cursor.align = max(cursor.align, member_align);
+			cursor.nonvirtual_align =
+				max(cursor.nonvirtual_align, member_align);
+			return;
+		}
+		if (bit_used == 0)
+		{
+			cursor.offset = align_up(cursor.offset, member_align);
+			bit_unit_offset = cursor.offset;
+			bit_unit_size = member_size;
+		}
+		if (bit_used + member->bit_width > unit_bits)
+		{
+			cursor.offset = bit_unit_offset + bit_unit_size;
+			cursor.offset = align_up(cursor.offset, member_align);
+			bit_unit_offset = cursor.offset;
+			bit_unit_size = member_size;
+			bit_used = 0;
+		}
+		member->member_offset = bit_unit_offset;
+		member->bit_offset = bit_used;
+		bare->fields.push_back(member);
+		bit_used += member->bit_width;
+		cursor.align = max(cursor.align, member_align);
+		cursor.nonvirtual_align = max(cursor.nonvirtual_align, member_align);
+		return;
+	}
+	if (bit_used != 0)
+	{
+		cursor.offset = bit_unit_offset + bit_unit_size;
+		bit_used = 0;
+		bit_unit_size = 0;
+	}
+	cursor.offset = align_up(cursor.offset, member_align);
+	member->member_offset = cursor.offset;
+	bare->fields.push_back(member);
+	cursor.offset += member_size;
+	cursor.align = max(cursor.align, member_align);
+	cursor.nonvirtual_align = max(cursor.nonvirtual_align, member_align);
+}
+
+static void layout_record_members(TypePtr bare, RecordLayoutCursor& cursor)
+{
+	if (bare->scope == NULL)
+		return;
+	uint64_t bit_unit_offset = 0;
+	uint64_t bit_unit_size = 0;
+	uint64_t bit_used = 0;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member->kind != BindingKind::Variable ||
+		    member->is_static_member ||
+		    member->aliased_binding != NULL)
+			continue;
+		layout_record_member(bare, member, cursor,
+		                     bit_unit_offset, bit_unit_size, bit_used);
+	}
+	if (bit_used != 0)
+		cursor.offset = bit_unit_offset + bit_unit_size;
+}
+
+static void layout_record_virtual_bases(TypePtr bare,
+                                        RecordLayoutCursor& cursor)
+{
+	for (size_t i = 0; i < bare->virtual_bases.size(); ++i)
+	{
+		TypePtr vbase = strip_cv(bare->virtual_bases[i]);
+		layout_record_type(vbase);
+		uint64_t vbase_align = record_virtual_subobject_align(vbase);
+		cursor.offset = align_up(cursor.offset, vbase_align);
+		bare->virtual_base_offsets[i] = cursor.offset;
+		cursor.offset += record_virtual_subobject_size(vbase);
+		cursor.align = max<uint64_t>(cursor.align, type_align(vbase));
+	}
+}
+
+static void assign_direct_virtual_base_offsets(
+	TypePtr bare,
+	const vector<TypePtr>& direct_bases)
+{
+	for (size_t i = 0; i < direct_bases.size(); ++i)
+		if (direct_base_is_virtual(bare, i))
+		{
+			TypePtr direct = direct_bases[i].get() != NULL
+				? strip_cv(direct_bases[i]) : TypePtr();
+			if (direct.get() != NULL && direct->kind == TypeKind::Record)
+				for (size_t v = 0; v < bare->virtual_bases.size(); ++v)
+					if (same_type(strip_cv(bare->virtual_bases[v]), direct))
+					{
+						bare->direct_base_offsets[i] =
+							bare->virtual_base_offsets[v];
+						break;
+					}
+		}
+}
+
 void layout_record_type(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -675,152 +971,45 @@ void layout_record_type(TypePtr type)
 		return;
 	bare->fields.clear();
 	bare->direct_base_offset = 0;
-	bare->direct_base_offsets.clear();
-	uint64_t offset = 0;
-	uint64_t align = max<uint64_t>(1, bare->record_forced_align);
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
 	vector<TypePtr> direct_bases = bare->direct_bases;
 	if (direct_bases.empty() && bare->base.get() != NULL)
 		direct_bases.push_back(bare->base);
-	TypePtr direct_base =
-		!direct_bases.empty() && direct_bases[0].get() != NULL
-		? strip_cv(direct_bases[0]) : TypePtr();
+	bare->direct_base_offsets.assign(direct_bases.size(), 0);
+	collect_record_virtual_bases(bare, bare->virtual_bases);
+	bare->virtual_base_offsets.assign(bare->virtual_bases.size(), 0);
+	RecordLayoutCursor cursor(bare->record_forced_align);
+	size_t primary_base = primary_polymorphic_base_index(bare, direct_bases);
+	TypePtr direct_base = primary_base != static_cast<size_t>(-1)
+		? strip_cv(direct_bases[primary_base])
+		: TypePtr();
 	bool base_polymorphic =
+		primary_base != static_cast<size_t>(-1) &&
 		direct_base.get() != NULL &&
 		direct_base->kind == TypeKind::Record &&
 		direct_base->is_polymorphic;
 	bool introduces_vptr = bare->is_polymorphic && !base_polymorphic;
-	for (size_t b = 0; b < direct_bases.size(); ++b)
-	{
-		direct_base = direct_bases[b].get() != NULL
-			? strip_cv(direct_bases[b]) : TypePtr();
-		if (direct_base.get() == NULL || direct_base->kind != TypeKind::Record)
-		{
-			bare->direct_base_offsets.push_back(0);
-			continue;
-		}
-		layout_record_type(direct_base);
-		uint64_t base_align = type_align(direct_base);
-		align = max<uint64_t>(align, base_align);
-		uint64_t base_offset = 0;
-		if (b == 0 && introduces_vptr && record_uses_object_storage(direct_base))
-		{
-			offset = 8;
-			uint64_t padding = offset % base_align;
-			if (padding != 0)
-				offset += base_align - padding;
-			base_offset = offset;
-			offset += type_size(direct_base);
-		}
-		else if (!record_uses_object_storage(direct_base))
-			base_offset = 0;
-		else
-		{
-			uint64_t padding = offset % base_align;
-			if (padding != 0)
-				offset += base_align - padding;
-			base_offset = offset;
-			offset = type_size(direct_base);
-			offset += base_offset;
-		}
-		bare->direct_base_offsets.push_back(base_offset);
-		if (b == 0)
-			bare->direct_base_offset = base_offset;
-	}
+	layout_record_direct_bases(bare, direct_bases, primary_base,
+	                           introduces_vptr, cursor);
 	if (introduces_vptr)
 	{
-		align = max<uint64_t>(align, 8);
-		if (offset < 8)
-			offset = 8;
+		cursor.align = max<uint64_t>(cursor.align, 8);
+		cursor.nonvirtual_align = max<uint64_t>(cursor.nonvirtual_align, 8);
+		if (cursor.offset < 8)
+			cursor.offset = 8;
 	}
-	if (bare->scope != NULL)
-	{
-		uint64_t bit_unit_offset = 0;
-		uint64_t bit_unit_size = 0;
-		uint64_t bit_used = 0;
-		for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
-		{
-			Binding* member = bare->scope->binding_order[i];
-				if (member->kind != BindingKind::Variable ||
-				    member->is_static_member ||
-				    member->aliased_binding != NULL)
-					continue;
-			uint64_t member_align = type_align(member->type);
-			uint64_t member_size = type_size(member->type);
-			if (member_align == 0)
-				member_align = 1;
-			if (bare->tag == "union")
-			{
-				member->member_offset = 0;
-				member->bit_offset = 0;
-				bare->fields.push_back(member);
-				offset = max<uint64_t>(offset, member_size);
-				align = max<uint64_t>(align, member_align);
-				continue;
-			}
-			if (member->is_bit_field)
-			{
-				uint64_t unit_bits = member_size * 8;
-				if (member->bit_width == 0)
-				{
-					if (bit_used != 0)
-						offset = bit_unit_offset + bit_unit_size;
-					uint64_t padding = offset % member_align;
-					if (padding != 0)
-						offset += member_align - padding;
-					bit_used = 0;
-					bit_unit_size = 0;
-					align = max(align, member_align);
-					continue;
-				}
-				if (bit_used == 0)
-				{
-					uint64_t padding = offset % member_align;
-					if (padding != 0)
-						offset += member_align - padding;
-					bit_unit_offset = offset;
-					bit_unit_size = member_size;
-				}
-				if (bit_used + member->bit_width > unit_bits)
-				{
-					offset = bit_unit_offset + bit_unit_size;
-					uint64_t padding = offset % member_align;
-					if (padding != 0)
-						offset += member_align - padding;
-					bit_unit_offset = offset;
-					bit_unit_size = member_size;
-					bit_used = 0;
-				}
-				member->member_offset = bit_unit_offset;
-				member->bit_offset = bit_used;
-				bare->fields.push_back(member);
-				bit_used += member->bit_width;
-				align = max(align, member_align);
-				continue;
-			}
-			if (bit_used != 0)
-			{
-				offset = bit_unit_offset + bit_unit_size;
-				bit_used = 0;
-				bit_unit_size = 0;
-			}
-			uint64_t padding = offset % member_align;
-			if (padding != 0)
-				offset += member_align - padding;
-			member->member_offset = offset;
-			bare->fields.push_back(member);
-			offset += member_size;
-			align = max(align, member_align);
-		}
-		if (bit_used != 0)
-			offset = bit_unit_offset + bit_unit_size;
-	}
-	if (offset == 0)
-		offset = 1;
-	uint64_t tail = offset % align;
-	if (tail != 0)
-		offset += align - tail;
-	bare->record_size = offset;
-	bare->record_align = align;
+	layout_record_members(bare, cursor);
+	if (cursor.offset == 0)
+		cursor.offset = 1;
+	bare->nonvirtual_size =
+		align_up(cursor.offset, cursor.nonvirtual_align);
+	bare->nonvirtual_align = cursor.nonvirtual_align;
+	layout_record_virtual_bases(bare, cursor);
+	assign_direct_virtual_base_offsets(bare, direct_bases);
+	cursor.offset = align_up(cursor.offset, cursor.align);
+	bare->record_size = cursor.offset;
+	bare->record_align = cursor.align;
 	bare->layout_valid = true;
 }
 
@@ -856,6 +1045,45 @@ uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base)
 			return i < bare->direct_base_offsets.size()
 				? bare->direct_base_offsets[i] : 0;
 	}
+	return 0;
+}
+
+bool record_direct_base_is_virtual(TypePtr record, size_t index)
+{
+	if (record.get() == NULL)
+		return false;
+	TypePtr bare = strip_cv(record);
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return false;
+	return direct_base_is_virtual(bare, index);
+}
+
+vector<TypePtr> record_virtual_bases(TypePtr type)
+{
+	vector<TypePtr> out;
+	if (type.get() == NULL)
+		return out;
+	TypePtr bare = strip_cv(type);
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return out;
+	layout_record_type(bare);
+	return bare->virtual_bases;
+}
+
+uint64_t record_virtual_base_offset(TypePtr record, TypePtr virtual_base)
+{
+	if (record.get() == NULL || virtual_base.get() == NULL)
+		return 0;
+	TypePtr bare = strip_cv(record);
+	TypePtr wanted = strip_cv(virtual_base);
+	if (bare.get() == NULL || wanted.get() == NULL ||
+	    bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return 0;
+	layout_record_type(bare);
+	for (size_t i = 0; i < bare->virtual_bases.size(); ++i)
+		if (same_type(strip_cv(bare->virtual_bases[i]), wanted))
+			return i < bare->virtual_base_offsets.size()
+				? bare->virtual_base_offsets[i] : 0;
 	return 0;
 }
 

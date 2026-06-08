@@ -118,9 +118,14 @@ struct Type
 	uint64_t record_size;
 	uint64_t record_align;
 	uint64_t record_forced_align;
+	uint64_t nonvirtual_size;
+	uint64_t nonvirtual_align;
 	uint64_t direct_base_offset;
 	vector<TypePtr> direct_bases;
 	vector<uint64_t> direct_base_offsets;
+	vector<bool> direct_base_virtuals;
+	vector<TypePtr> virtual_bases;
+	vector<uint64_t> virtual_base_offsets;
 	bool layout_valid;
 	bool is_polymorphic;
 	bool introduces_vptr;
@@ -165,9 +170,10 @@ struct Binding
 	bool is_generated_copy_move_constructor;
 	bool is_generated_copy_move_assignment;
 	bool is_generated_default_destructor;
-	bool is_defaulted;
-	bool is_explicit;
-	bool is_private;
+		bool is_defaulted;
+		bool is_explicit;
+		bool has_default_arguments;
+		bool is_private;
 	bool is_protected_member;
 	bool is_mutable_member;
 	bool is_reference_member;
@@ -290,6 +296,9 @@ uint64_t type_align(const TypePtr& type);
 void layout_record_type(TypePtr type);
 vector<TypePtr> record_direct_bases(TypePtr type);
 uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base);
+bool record_direct_base_is_virtual(TypePtr record, size_t index);
+vector<TypePtr> record_virtual_bases(TypePtr type);
+uint64_t record_virtual_base_offset(TypePtr record, TypePtr virtual_base);
 TypePtr record_type_for_scope(Scope* scope);
 
 Scope* create_child_scope(Scope* parent,

@@ -728,6 +728,11 @@ public:
 		TypePtr make_member_function_type(Scope* class_scope, TypePtr type);
 		Node make_member_init_action(Binding* field, const Node* init);
 		Node make_base_init_action(TypePtr base, const Node* init);
+		void append_constructor_base_init_actions(
+			TypePtr class_type,
+			const vector<TypePtr>& direct_bases,
+			const vector<Node>& explicit_base_actions,
+			Node& body);
 		Node make_member_fini_action(Binding* field);
 		Node make_base_fini_action(TypePtr base);
 		void mark_suppressed_generated_constructor_dependencies(Binding* ctor);

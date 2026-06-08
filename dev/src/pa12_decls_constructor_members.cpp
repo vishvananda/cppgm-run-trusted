@@ -55,14 +55,15 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	function_parameter_names_[ctor] = ctor_names;
 	vector<Expr> ctor_defaults(fn_params.size());
 	bool have_ctor_defaults = false;
-	for (size_t i = 0; i < parameters.size(); ++i)
-	{
-		if (parameters[i].has_default)
+		for (size_t i = 0; i < parameters.size(); ++i)
 		{
-			ctor_defaults[i + 1] = parameters[i].default_value;
-			have_ctor_defaults = true;
+			if (parameters[i].has_default)
+			{
+				ctor_defaults[i + 1] = parameters[i].default_value;
+				have_ctor_defaults = true;
+				ctor->has_default_arguments = true;
+			}
 		}
-	}
 	if (have_ctor_defaults)
 		default_arguments_[ctor] = ctor_defaults;
 	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) ||

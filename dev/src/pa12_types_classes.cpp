@@ -186,12 +186,27 @@ TypePtr Parser::parse_class_specifier()
 	}
 	TypePtr direct_base;
 	vector<TypePtr> direct_bases;
+	vector<bool> direct_base_virtuals;
 	if (consume(OP_COLON))
 	{
 		do
 		{
-			if (at(KW_PUBLIC) || at(KW_PRIVATE) || at(KW_PROTECTED))
-				++pos_;
+			bool virtual_base = false;
+			bool consumed_base_attr = true;
+			while (consumed_base_attr)
+			{
+				consumed_base_attr = false;
+				if (consume(KW_VIRTUAL))
+				{
+					virtual_base = true;
+					consumed_base_attr = true;
+				}
+				if (at(KW_PUBLIC) || at(KW_PRIVATE) || at(KW_PROTECTED))
+				{
+					++pos_;
+					consumed_base_attr = true;
+				}
+			}
 			TypePtr parsed_direct_base;
 			bool save_parsing_base = parsing_base_specifier_;
 			parsing_base_specifier_ = true;
@@ -247,6 +262,7 @@ TypePtr Parser::parse_class_specifier()
 							}
 						}
 						direct_bases.push_back(expanded_base);
+						direct_base_virtuals.push_back(virtual_base);
 						if (direct_base.get() == NULL &&
 						    expanded_base.get() != NULL)
 							direct_base = expanded_base;
@@ -255,6 +271,7 @@ TypePtr Parser::parse_class_specifier()
 				else
 				{
 					direct_bases.push_back(parsed_direct_base);
+					direct_base_virtuals.push_back(virtual_base);
 					if (direct_base.get() == NULL)
 						direct_base = parsed_direct_base;
 				}
@@ -363,6 +380,7 @@ TypePtr Parser::parse_class_specifier()
 		}
 	}
 		type->direct_bases = direct_bases;
+		type->direct_base_virtuals = direct_base_virtuals;
 		type->base = direct_bases.empty() ? TypePtr() : direct_bases[0];
 	for (size_t i = 0; i < direct_bases.size(); ++i)
 	{

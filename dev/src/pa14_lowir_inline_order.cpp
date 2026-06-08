@@ -1297,14 +1297,44 @@ bool class_ctor = is_class_constructor(binding); bool class_dtor = is_class_dest
 demanded_inline_complete_entries.end(); bool need_base = (class_ctor && demanded_constructor_base_entries.find(binding) != demanded_constructor_base_entries.end()) || (class_dtor &&
 demanded_destructor_base_entries.find(binding) != demanded_destructor_base_entries.end()); bool ctor_owner_polymorphic = false; if (class_ctor) { TypePtr owner_record = class_record_for_member(binding);
 owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); ctor_owner_polymorphic = owner_record.get() != NULL && owner_record->is_polymorphic; }
+if (class_ctor && need_complete && binding->is_generated_copy_move_constructor) { TypePtr owner_record = class_record_for_member(binding);
+owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL && owner_record->kind == TypeKind::Record && !pa11::record_virtual_bases(owner_record).empty()) need_complete = false; }
 if (defined_functions.find(name) != defined_functions.end()) need_complete = false; if (defined_functions.find(name + "__base_entry") != defined_functions.end()) need_base = false; bool has_function_type =
 binding->type.get() != NULL && binding->type->kind == TypeKind::Function; bool multi_parameter_ctor = has_function_type && binding->type->parameters.size() > 1; bool ctor_has_record_parameter = false;
 bool ctor_has_reference_record_parameter = false; if (has_function_type) for (size_t i = 1; i < binding->type->parameters.size(); ++i) { TypePtr param = binding->type->parameters[i]; bool reference_param =
 param->kind == TypeKind::LValueReference || param->kind == TypeKind::RValueReference; if (reference_param) param = param->base; param = pa11::strip_cv(param); if (param.get() != NULL && param->kind == TypeKind::Record) {
 ctor_has_record_parameter = true; if (reference_param) ctor_has_reference_record_parameter = true; } } bool template_specialization_ctor = binding_has_template_specialization_context(binding) &&
 !binding->is_generated_default_constructor && !binding->is_generated_aggregate_constructor && !binding->is_generated_copy_move_constructor && function_definition_body_empty(*found->second);
-if (class_ctor && need_base && !need_complete && !binding->is_generated_default_constructor && ((ctor_owner_polymorphic && multi_parameter_ctor) || (template_specialization_ctor && (!ctor_has_record_parameter ||
-ctor_has_reference_record_parameter))) && has_function_type && defined_functions.find(name) == defined_functions.end()) need_complete = true; if (!need_complete && !need_base) continue; if (need_complete)
+bool ctor_owner_has_virtual_bases = false;
+bool ctor_owner_is_static_downcast_source = false;
+if (class_ctor)
+{
+	TypePtr owner_record = class_record_for_member(binding);
+	owner_record = owner_record.get() != NULL
+		? pa11::strip_cv(owner_record) : TypePtr();
+	ctor_owner_has_virtual_bases =
+		owner_record.get() != NULL &&
+		owner_record->kind == TypeKind::Record &&
+		!pa11::record_virtual_bases(owner_record).empty();
+	ctor_owner_is_static_downcast_source =
+		is_static_downcast_source_record(owner_record);
+}
+bool constructor_complete_needed_for_abi =
+	ctor_owner_is_static_downcast_source ||
+	(ctor_owner_polymorphic && multi_parameter_ctor) ||
+	(template_specialization_ctor &&
+	 (!ctor_has_record_parameter || ctor_has_reference_record_parameter)) ||
+	(ctor_owner_has_virtual_bases &&
+	 ((multi_parameter_ctor && !binding->has_default_arguments) ||
+	  binding_has_template_specialization_context(binding)));
+if (class_ctor && need_base && !need_complete &&
+    !binding->is_generated_default_constructor &&
+    constructor_complete_needed_for_abi &&
+    has_function_type &&
+    defined_functions.find(name) == defined_functions.end())
+	need_complete = true;
+if (class_ctor && need_complete && binding->is_generated_copy_move_constructor) { TypePtr owner_record = class_record_for_member(binding);
+owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL && owner_record->kind == TypeKind::Record && !pa11::record_virtual_bases(owner_record).empty()) need_complete = false; } if (!need_complete && !need_base) continue; if (need_complete)
 defined_functions.insert(name); if (need_base) defined_functions.insert(name + "__base_entry"); const Binding* saved_active = active_inline_definition; size_t saved_dependency_insert_count =
 active_inline_dependency_insert_count; active_inline_definition = binding; active_inline_dependency_insert_count = 0; FunctionLowerer lowerer(*this, *found->second); if (binding->is_generated_copy_move_assignment)
 ++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; active_inline_definition = saved_active;

@@ -55,6 +55,7 @@ struct FunctionOut
 	bool returns_pointer_result;
 	vector<string> slots;
 	vector<Block> blocks;
+	vector<pair<string, string> > constructor_base_entry_arg_rewrites;
 
 	FunctionOut()
 		: binding(NULL),
@@ -156,10 +157,32 @@ bool binding_has_template_specialization_context(const Binding* binding);
 bool template_static_member_definition_matches(const Binding* use,
                                                const Binding* definition);
 string record_lowir_name(TypePtr record);
+string rtti_record_symbol_part(TypePtr record);
 bool template_record_uses_abi_global_symbol(TypePtr record);
 string template_record_global_symbol_part(TypePtr record);
 string vtable_symbol_for_record(TypePtr record);
+string vtable_view_symbol_for_record(TypePtr record,
+                                     TypePtr view_base,
+                                     uint64_t offset);
+uint64_t vtable_address_point_offset(TypePtr record);
+string vtt_symbol_for_record(TypePtr record);
+string construction_vtable_symbol_for_record(TypePtr record,
+                                             TypePtr constructed,
+                                             uint64_t offset,
+                                             size_t slice);
+bool record_uses_virtual_base_vtt(TypePtr record);
+vector<pair<TypePtr, uint64_t> > vtt_ordered_vtable_views(TypePtr record);
+size_t construction_vtt_group_size(TypePtr record);
+size_t construction_vtt_slot_for_direct_base(TypePtr record,
+                                             TypePtr direct_base);
+size_t construction_vtt_slot_for_view(TypePtr record,
+                                      TypePtr view_base,
+                                      uint64_t offset);
 string rtti_symbol_for_record(TypePtr record);
+vector<pair<TypePtr, uint64_t> > polymorphic_vtable_views(TypePtr record);
+TypePtr hidden_virtual_base_context_record(TypePtr type);
+vector<TypePtr> hidden_virtual_bases_for_record(TypePtr record);
+vector<TypePtr> hidden_virtual_bases_for_parameter(TypePtr type);
 
 struct ProgramLowerer
 {
@@ -184,10 +207,13 @@ struct ProgramLowerer
 	map<const Binding*, Node> synthetic_inline_definitions;
 	map<const Binding*, Node> deferred_global_definitions;
 		map<const Binding*, size_t> inline_definition_ranks;
+	map<pair<const Binding*, size_t>, vector<TypePtr> >
+		hidden_parameter_virtual_bases;
 	map<const Binding*, string> function_declarations_by_binding;
 	set<const Binding*> demanded_inline_complete_entries;
 	set<const Binding*> demanded_constructor_base_entries;
 	set<const Binding*> demanded_destructor_base_entries;
+	set<const void*> static_downcast_source_records;
 	set<const void*> emitted_vtables;
 	set<const void*> emitted_rtti;
 	set<string> declared_pure_virtual_signatures;
@@ -220,7 +246,15 @@ struct ProgramLowerer
 	string catch_rtti_symbol(TypePtr type);
 	void emit_deleting_destructor_entry(const Binding* dtor);
 	void register_inline_definition(const Node& node);
+	vector<TypePtr> hidden_virtual_bases_for_function_parameter(
+		const Binding* binding,
+		size_t parameter_index,
+		TypePtr type);
 	void register_function_declaration(const Node& node);
+	void mark_static_downcast_source_record(TypePtr record);
+	bool is_static_downcast_source_record(TypePtr record) const;
+	void emit_generated_empty_constructor(const Binding* binding,
+	                                      const string& name);
 	void demand_function_declaration(const Binding* binding);
 	void demand_global_declaration(const Binding* binding);
 	bool demand_deferred_global_definition(const Binding* binding);
@@ -330,6 +364,8 @@ public:
 	FunctionLowerer(ProgramLowerer& program, const Node& fn);
 
 	FunctionOut lower();
+	FunctionOut lower_deleting_destructor_entry(const string& name,
+	                                            const string& header);
 
 private:
 	struct CallEmissionState
@@ -396,6 +432,7 @@ private:
 	TypePtr logical_call_result_type_;
 	bool logical_call_result_consumed_;
 	string call_result_store_slot_;
+	string call_result_store_addr_;
 	TypePtr call_result_store_type_;
 	bool call_result_store_consumed_;
 	string record_return_slot_;
@@ -419,6 +456,8 @@ private:
 	bool lower_defaulted_storage_special_member();
 	void lower_stmt(const Node& node);
 	void lower_compound(const Node& node);
+	void lower_deleting_destructor_compound(const Node& node);
+	void lower_deleting_destructor_nonvirtual_bases(TypePtr record);
 	void lower_decl_stmt(const Node& node);
 		void lower_variable_decl(const Node& var);
 		bool lower_braced_variable_init(const Node& var, TypePtr type);
@@ -465,6 +504,17 @@ private:
 	                                const function<Value()>& member_addr);
 	void lower_base_init(const Node& node);
 	Value emit_base_subobject_addr(Value object, TypePtr source, TypePtr target);
+	const Binding* hidden_virtual_base_parameter_binding(
+		const Node& expr) const;
+	bool hidden_virtual_base_argument_for_parameter(
+		const Binding* binding,
+		TypePtr target,
+		string& hidden_base,
+		TypePtr& hidden_base_record);
+	Value emit_hidden_virtual_base_addr_for_lvalue(const Node& expr,
+	                                              TypePtr target,
+	                                              bool& found,
+	                                              TypePtr* hidden_record = NULL);
 	void lower_aggregate_init(const function<Value()>& addr_for,
 	                          TypePtr type,
 	                          const Node& init);
@@ -591,6 +641,52 @@ private:
 	void prepare_call_setup_protection(const Node& expr,
 	                                   CallEmissionState& call);
 	void lower_call_arguments(const Node& expr, CallEmissionState& call);
+	bool lower_variadic_record_call_argument(const Node& arg,
+	                                         CallEmissionState& call);
+	bool append_hidden_member_object_argument(const Node& object_arg,
+	                                          TypePtr owner_record,
+	                                          CallEmissionState& call);
+	bool append_hidden_member_object_lvalue_argument(
+		const Node& hidden_lookup_arg,
+		TypePtr owner_record,
+		CallEmissionState& call);
+	bool append_hidden_member_cast_argument(const Node& hidden_lookup_arg,
+	                                        TypePtr owner_record,
+	                                        CallEmissionState& call);
+	void find_hidden_member_this_argument(TypePtr owner_record,
+	                                      string& hidden_base,
+	                                      TypePtr& hidden_base_record);
+	void find_hidden_member_parameter_argument(const Node& hidden_lookup_arg,
+	                                           TypePtr owner_record,
+	                                           string& hidden_base,
+	                                           TypePtr& hidden_base_record);
+	void maybe_open_call_temp_cleanup_region(CallEmissionState& call);
+	void append_hidden_call_arguments(const Node& expr,
+	                                  CallEmissionState& call);
+	string hidden_parameter_pvb_from_existing_parameter(const Node& arg,
+	                                                   TypePtr vbase);
+	string hidden_parameter_pvb_from_explicit_record(
+		const Node* arg,
+		const string& explicit_record_arg,
+		TypePtr context,
+		TypePtr vbase);
+	string hidden_parameter_pvb_from_argument_value(
+		const Node* arg,
+		const string& explicit_record_arg,
+		TypePtr context,
+		TypePtr vbase);
+	void append_hidden_parameter_call_arguments(const Node& expr,
+	                                            CallEmissionState& call,
+	                                            bool member_this_param);
+	string hidden_this_call_argument(const Node* object_arg,
+	                                 const string& explicit_arg,
+	                                 bool object_arg_is_this,
+	                                 TypePtr this_record,
+	                                 TypePtr vbase,
+	                                 size_t vbase_index);
+	void append_hidden_this_call_arguments(const Node& expr,
+	                                       CallEmissionState& call,
+	                                       bool member_this_param);
 	void finish_setup_only_protection(CallEmissionState& call);
 	void resolve_call_callee(const Node& expr, CallEmissionState& call);
 	bool emit_record_return_call(CallEmissionState& call, Value& out);

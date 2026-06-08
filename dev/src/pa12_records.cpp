@@ -28,16 +28,22 @@ return binding; } } return NULL;
 if (bare->kind != pa11::TypeKind::Record) return NULL; complete_template_record(bare); bool reemit_stale_generated_default = false;
 Binding* existing = find_default_constructor(bare); if (existing != NULL) { parse_pending_member_body(existing);
 bool have_extra_definition = false; for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i) if (extra_lowir_nodes_[i].binding == existing) have_extra_definition = true;
-if (existing->is_generated_default_constructor && existing->is_inline_definition && !have_extra_definition) existing->is_inline_definition = false;
+if (existing->is_generated_default_constructor && existing->is_inline_definition && !have_extra_definition && !bare->is_polymorphic) existing->is_inline_definition = false;
 bool stale_generated_default = !existing->is_inline_definition && existing->is_generated_default_constructor; if (!stale_generated_default)
 return existing; existing->is_generated_default_constructor = true; reemit_stale_generated_default = true; }
-pa11::layout_record_type(bare); vector<Node> init_actions; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare); bool forced_nontrivial = false; if (!force_trivial || !bare->fields.empty() || !direct_bases.empty()) {
-for (size_t b = 0; b < direct_bases.size(); ++b) { TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); Binding* base_ctor = direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record
+pa11::layout_record_type(bare); vector<Node> init_actions; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare); vector<TypePtr> virtual_bases = pa11::record_virtual_bases(bare); bool has_virtual_bases = !virtual_bases.empty(); bool forced_nontrivial = false; if (!force_trivial || !bare->fields.empty() || !direct_bases.empty()) {
+for (size_t b = 0; b < virtual_bases.size(); ++b) { TypePtr virtual_base = virtual_bases[b].get() != NULL ? pa11::strip_cv(virtual_bases[b]) : TypePtr(); Binding* base_ctor = virtual_base.get() != NULL && virtual_base->kind == pa11::TypeKind::Record
+? ensure_default_constructor(virtual_base) : NULL; if (virtual_base.get() != NULL && virtual_base->kind == pa11::TypeKind::Record && base_ctor != NULL) {
+bool base_noop = base_ctor->is_noop_constructor || (base_ctor->is_generated_default_constructor && base_ctor->unwind_no);
+if (base_noop && !base_ctor->is_generated_default_constructor && (base_ctor->is_private || base_ctor->is_protected_member))
+forced_nontrivial = true;
+if ((!base_noop || virtual_base->is_polymorphic || !pa11::record_virtual_bases(virtual_base).empty())) init_actions.push_back(make_base_init_action(virtual_base, NULL)); } }
+for (size_t b = 0; b < direct_bases.size(); ++b) { if (pa11::record_direct_base_is_virtual(bare, b)) continue; TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); Binding* base_ctor = direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record
 ? ensure_default_constructor(direct_base) : NULL; if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record && base_ctor != NULL) {
 bool base_noop = base_ctor->is_noop_constructor || (base_ctor->is_generated_default_constructor && base_ctor->unwind_no);
 if (base_noop && !base_ctor->is_generated_default_constructor && (base_ctor->is_private || base_ctor->is_protected_member))
 forced_nontrivial = true;
-if ((!base_noop || direct_base->is_polymorphic)) init_actions.push_back(make_base_init_action(direct_base, NULL)); } } for (size_t i = 0; i < bare->fields.size(); ++i)
+if ((!base_noop || direct_base->is_polymorphic || !pa11::record_virtual_bases(direct_base).empty())) init_actions.push_back(make_base_init_action(direct_base, NULL)); } } for (size_t i = 0; i < bare->fields.size(); ++i)
 { Binding* field = bare->fields[i]; map<Binding*, Node>::const_iterator init = default_member_initializers_.find(field);
 if (init != default_member_initializers_.end()) init_actions.push_back(make_member_init_action(field, &init->second)); else {
 TypePtr field_bare = pa11::strip_cv(field->type); Binding* field_ctor = ensure_default_constructor(field->type); Binding* elem_ctor = field_bare->kind == pa11::TypeKind::Array ? ensure_default_constructor(field_bare->base) : NULL;
@@ -54,14 +60,14 @@ map<string, vector<Binding*> >::const_iterator ctors = bare->scope->members.find
 if (ctors->second[i]->kind == BindingKind::Function && !ctors->second[i]->is_generated_default_constructor && !ctors->second[i]->is_generated_aggregate_constructor && !ctors->second[i]->is_generated_copy_move_constructor)
 has_declared_constructor = true; } bool empty_implicit_record = (bare->tag == "union" ||
 (bare->fields.empty() && direct_bases.empty())) && !has_declared_constructor; if (has_declared_constructor) return NULL;
-if (init_actions.empty() && !force_trivial && !empty_implicit_record && !bare->is_polymorphic) { return NULL;
+if (init_actions.empty() && !force_trivial && !empty_implicit_record && !bare->is_polymorphic && !has_virtual_bases) { return NULL;
 } const void* key = bare.get(); if (generated_default_ctors_.find(key) != generated_default_ctors_.end()) {
 Binding* generated = find_default_constructor(bare); if (!(generated != NULL && generated->is_generated_default_constructor && !generated->is_inline_definition))
 return generated; existing = generated; } generated_default_ctors_.insert(key);
 TypePtr this_type = pa11::make_pointer(bare); vector<TypePtr> params; params.push_back(this_type); TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 params, false); Binding* ctor = existing != NULL ? existing
 : add_value(bare->scope, BindingKind::Function, bare->scope->name, fn_type); ctor->type = fn_type; ctor->is_inline_definition = true;
-if (reemit_stale_generated_default) ctor->is_inline_definition = false; ctor->is_generated_default_constructor = true; ctor->is_noop_constructor = init_actions.empty();
+if (reemit_stale_generated_default) ctor->is_inline_definition = false; ctor->is_generated_default_constructor = true; ctor->is_noop_constructor = init_actions.empty() && !bare->is_polymorphic && !has_virtual_bases;
 ctor->unwind_no = init_actions.empty() && !forced_nontrivial; Node fn("function-definition " + qualified_decl_name(ctor) + " " + pa11::describe_type(fn_type)); fn.binding = ctor;
 fn.type = fn_type; Node param("parameter this " + pa11::describe_type(this_type)); param.type = this_type; add_child(fn, param);
 Node body("compound-statement"); for (size_t i = 0; i < init_actions.size(); ++i) add_child(body, init_actions[i]); add_child(fn, body);
@@ -154,7 +160,7 @@ TypePtr type, bool move, const map<Binding*, vector<Expr> >* default_arguments);
 	find_copy_move_constructor_binding(bare, move, default_arguments); if (constructor_binding_needs_helper(exact)) return true; if (move &&
 	constructor_binding_needs_helper( find_copy_move_constructor_binding( bare, false, default_arguments))) return true;
 	if (bare->is_polymorphic) return true;
-	pa11::layout_record_type(bare); { vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size(); ++b) if (type_needs_copy_move_helper(bases[b], move, default_arguments)) return true; }
+	pa11::layout_record_type(bare); if (!pa11::record_virtual_bases(bare).empty()) return true; { vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size(); ++b) if (type_needs_copy_move_helper(bases[b], move, default_arguments)) return true; }
 for (size_t i = 0; i < bare->fields.size(); ++i) { if (bare->fields[i]->is_bit_field) continue;
 if (type_needs_copy_move_helper( bare->fields[i]->type, move, default_arguments)) return true; }
 return false; } bool type_needs_copy_move_helper( TypePtr type,

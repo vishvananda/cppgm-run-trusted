@@ -65,18 +65,21 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 		instr(loaded + " = load ptr $" + slot);
 		return Value("ptr", loaded);
 	}
-	if (program_.declared_functions.insert(
-		    "__external_runtime___Unwind_Resume").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime___Unwind_Resume() -> void "
-			"[return=noreturn, role=eh_resume, linkage=c, "
-			"binding=strong, object=_Unwind_Resume]");
-	if (program_.declared_functions.insert(
-		    "__external_runtime____gxx_personality_v0").second)
-		program_.declares.push_back(
-			"declare function @__external_runtime____gxx_personality_v0() "
-			"-> void [role=eh_personality, linkage=c, binding=strong, "
-			"object=__gxx_personality_v0]");
+	if (reference_result)
+	{
+		if (program_.declared_functions.insert(
+			    "__external_runtime___Unwind_Resume").second)
+			program_.declares.push_back(
+				"declare function @__external_runtime___Unwind_Resume() -> void "
+				"[return=noreturn, role=eh_resume, linkage=c, "
+				"binding=strong, object=_Unwind_Resume]");
+		if (program_.declared_functions.insert(
+			    "__external_runtime____gxx_personality_v0").second)
+			program_.declares.push_back(
+				"declare function @__external_runtime____gxx_personality_v0() "
+				"-> void [role=eh_personality, linkage=c, binding=strong, "
+				"object=__gxx_personality_v0]");
+	}
 	if (program_.declared_functions.insert(
 		    "__external_runtime____dynamic_cast").second)
 		program_.declares.push_back(
@@ -114,9 +117,16 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 	string target_addr = fresh_temp();
 	instr(target_addr + " = addr @" + target_rtti);
 	string result = fresh_temp();
+	int64_t hint = -2;
+	if (record_has_base_subobject(target_object, source_object))
+		hint = static_cast<int64_t>(
+			base_subobject_offset(target_object, source_object));
+	else if (record_has_base_subobject(source_object, target_object))
+		hint = static_cast<int64_t>(
+			base_subobject_offset(source_object, target_object));
 	instr(result + " = call ptr @__external_runtime____dynamic_cast(" +
 	      source_ptr.text + ", " + source_addr + ", " + target_addr +
-	      ", 0)");
+	      ", " + to_string(hint) + ")");
 	instr("store ptr " + result + ", $" + slot);
 	if (reference_result)
 	{

@@ -71,6 +71,20 @@ return binding->is_inline_definition; TypePtr record = pa11::record_type_for_sco
 	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
 	if (type_has_abi_indirect_special_member(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
 	if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
+bool record_declares_or_inherits_virtual_base(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < bare->direct_base_virtuals.size(); ++i)
+		if (bare->direct_base_virtuals[i])
+			return true;
+	vector<TypePtr> bases = bare->direct_bases;
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (record_declares_or_inherits_virtual_base(bases[i]))
+			return true;
+	return false;
+}
 bool special_member_affects_call_abi(const Binding* binding) { if (binding->is_generated_copy_move_constructor || binding->is_generated_default_destructor)
 return false; if (!binding->is_defaulted) return true; return defaulted_member_affects_call_abi(binding);
 } bool record_has_user_copy_move_or_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
@@ -105,11 +119,11 @@ return record_has_abi_indirect_special_member(bare); return false; }
 bool record_pass_by_address(TypePtr type) { if (is_initializer_list_type(type, NULL)) return false; TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record)
 return false; if (pa11::type_size(bare) > 16) return true; return record_has_abi_indirect_special_member(bare);
 } bool record_return_by_address(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
-if (bare->kind != TypeKind::Record) return false; if (is_initializer_list_type(type, NULL)) return false; if (pa11::type_size(bare) > 16) return true;
+if (bare->kind != TypeKind::Record) return false; if (is_initializer_list_type(type, NULL)) return false; if (record_declares_or_inherits_virtual_base(bare)) return true; if (pa11::type_size(bare) > 16) return true;
 return record_has_user_copy_move_or_destructor(bare); } bool record_has_nontrivial_value_transfer(TypePtr type) {
 return record_has_user_copy_move_or_destructor(type); } bool record_has_storage_copy(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array) return record_has_storage_copy(bare->base); if (bare->kind != TypeKind::Record)
-	return true; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
+	return true; pa11::layout_record_type(bare); if (!pa11::record_virtual_bases(bare).empty()) return false; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
 	if (record_has_storage_copy(bases[i])) return true; return !bare->fields.empty(); } string lowir_literal(TypePtr type, const Node& node)
 { if (node.token_text == "nullptr") return "nullptr"; if (node.has_constant_value && !is_float_type(type))
 return to_string(node.constant_value); if (!node.token_text.empty()) return node.token_text; return to_string(node.constant_value);
@@ -296,10 +310,104 @@ if (record_is_template_specialization(scope_record)) part = template_record_symb
 } } if (parts.empty()) parts.push_back(bare->name);
 ostringstream out; for (size_t i = parts.size(); i > 0; --i) { if (i != parts.size())
 out << "__"; out << sanitized_symbol_part(parts[i - 1]); } return out.str();
+} string rtti_record_symbol_part(TypePtr record) { TypePtr bare = pa11::strip_cv(record);
+vector<string> parts; for (Scope* s = bare->scope; s != NULL; s = s->parent) { if ((s->kind == ScopeKind::Namespace || s->kind == ScopeKind::Class) &&
+!s->name.empty()) { if (s->kind == ScopeKind::Namespace && s->name == "<unnamed>") continue; string part = s->name;
+if (part.compare(0, 8, "__lambda") == 0) { size_t pos = 0; while ((pos = part.find("::", pos)) != string::npos)
+{ part.replace(pos, 2, "__"); pos += 2; }
+} if (s->kind == ScopeKind::Class) { TypePtr scope_record = pa11::record_type_for_scope(s);
+if (record_is_template_specialization(scope_record)) part = template_record_symbol_part(scope_record); } parts.push_back(part);
+} } if (parts.empty()) parts.push_back(bare->name);
+ostringstream out; for (size_t i = parts.size(); i > 0; --i) { if (i != parts.size())
+out << "__"; out << sanitized_symbol_part(parts[i - 1]); } return out.str();
 } string vtable_symbol_for_record(TypePtr record) { TypePtr bare = pa11::strip_cv(record);
 if (template_record_uses_abi_global_symbol(bare)) return "__vtable_" + template_record_global_symbol_part(bare); return record_lowir_name(record) + "__vtable"; }
+string vtable_view_symbol_for_record(TypePtr record, TypePtr view_base, uint64_t offset)
+{ return record_lowir_name(record) + "____view__" + record_lowir_name(view_base) + "__" + to_string(offset) + "__vtable"; }
+uint64_t vtable_address_point_offset(TypePtr record)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record) return 16; return pa11::record_virtual_bases(bare).empty() ? 16 : 24; }
+string vtt_symbol_for_record(TypePtr record)
+{ return record_lowir_name(record) + "____vtt"; }
+string construction_vtable_symbol_for_record(TypePtr record, TypePtr constructed, uint64_t offset, size_t slice)
+{ return record_lowir_name(record) + "____construction__" + record_lowir_name(constructed) + "__" + to_string(offset) + "__s" + to_string(slice) + "__vtable"; }
+namespace { bool view_vector_contains(const vector<pair<TypePtr, uint64_t> >& views, TypePtr record, uint64_t offset)
+{ TypePtr bare = pa11::strip_cv(record); for (size_t i = 0; i < views.size(); ++i) if (views[i].second == offset && pa11::same_type(pa11::strip_cv(views[i].first), bare)) return true; return false; }
+void collect_polymorphic_vtable_views(TypePtr root, TypePtr record, uint64_t base_offset, vector<pair<TypePtr, uint64_t> >& out)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr root_bare = root.get() != NULL ? pa11::strip_cv(root) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || root_bare.get() == NULL || root_bare->kind != TypeKind::Record) return; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record) continue; uint64_t offset = pa11::record_direct_base_is_virtual(bare, i) ? pa11::record_virtual_base_offset(root_bare, direct) : base_offset + pa11::record_direct_base_offset(bare, direct); if (direct->is_polymorphic && offset != 0 && !view_vector_contains(out, direct, offset)) out.push_back(make_pair(direct, offset)); collect_polymorphic_vtable_views(root_bare, direct, offset, out); } }
+}  // namespace
+vector<pair<TypePtr, uint64_t> > polymorphic_vtable_views(TypePtr record)
+{ vector<pair<TypePtr, uint64_t> > out; collect_polymorphic_vtable_views(record, record, 0, out); return out; }
+namespace {
+bool record_is_virtual_base_of_for_vtt(TypePtr record, TypePtr base)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr wanted = base.get() != NULL ? pa11::strip_cv(base) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record ||
+	    wanted.get() == NULL || wanted->kind != TypeKind::Record)
+		return false;
+	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
+	for (size_t i = 0; i < vbases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
+			return true;
+	return false;
+}
+}
+bool record_uses_virtual_base_vtt(TypePtr record)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); return bare.get() != NULL && bare->kind == TypeKind::Record && !pa11::record_virtual_bases(bare).empty(); }
+vector<pair<TypePtr, uint64_t> > vtt_ordered_vtable_views(TypePtr record)
+{ vector<pair<TypePtr, uint64_t> > views = polymorphic_vtable_views(record); vector<pair<TypePtr, uint64_t> > ordered; for (size_t i = 0; i < views.size(); ++i) if (!record_is_virtual_base_of_for_vtt(record, views[i].first)) ordered.push_back(views[i]); for (size_t i = 0; i < views.size(); ++i) if (record_is_virtual_base_of_for_vtt(record, views[i].first)) ordered.push_back(views[i]); return ordered; }
+size_t construction_vtt_group_size(TypePtr record)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || !bare->is_polymorphic || !record_uses_virtual_base_vtt(bare)) return 0; size_t size = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() != NULL && direct->kind == TypeKind::Record && direct->is_polymorphic && record_uses_virtual_base_vtt(direct)) size += construction_vtt_group_size(direct); } size += vtt_ordered_vtable_views(bare).size(); return size; }
+size_t construction_vtt_slot_for_direct_base(TypePtr record, TypePtr direct_base)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr wanted = direct_base.get() != NULL ? pa11::strip_cv(direct_base) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return static_cast<size_t>(-1); size_t slot = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record || !direct->is_polymorphic || !record_uses_virtual_base_vtt(direct)) continue; if (pa11::same_type(direct, wanted)) return slot; slot += construction_vtt_group_size(direct); } return static_cast<size_t>(-1); }
+size_t construction_vtt_slot_for_view(TypePtr record, TypePtr view_base, uint64_t offset)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr wanted = view_base.get() != NULL ? pa11::strip_cv(view_base) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return static_cast<size_t>(-1); size_t slot = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() != NULL && direct->kind == TypeKind::Record && direct->is_polymorphic && record_uses_virtual_base_vtt(direct)) slot += construction_vtt_group_size(direct); } vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare); for (size_t i = 0; i < views.size(); ++i) if (views[i].second == offset && pa11::same_type(pa11::strip_cv(views[i].first), wanted)) return slot + i; return static_cast<size_t>(-1); }
+TypePtr hidden_virtual_base_context_record(TypePtr type)
+{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL) return TypePtr(); if (bare->kind == TypeKind::LValueReference || bare->kind == TypeKind::RValueReference) bare = pa11::strip_cv(bare->base); if (bare.get() != NULL && bare->kind == TypeKind::Pointer) bare = pa11::strip_cv(bare->base); if (bare.get() != NULL && bare->kind == TypeKind::Record) return bare; return TypePtr(); }
+vector<TypePtr> hidden_virtual_bases_for_record(TypePtr record)
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || !bare->complete) return vector<TypePtr>(); return pa11::record_virtual_bases(bare); }
+vector<TypePtr> hidden_virtual_bases_for_parameter(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return vector<TypePtr>();
+	bool pointer_parameter = false;
+	if (bare->kind == TypeKind::LValueReference ||
+	    bare->kind == TypeKind::RValueReference)
+	{
+		TypePtr ref_base = pa11::strip_cv(bare->base);
+		pointer_parameter = ref_base.get() != NULL &&
+		                    ref_base->kind == TypeKind::Pointer;
+	}
+	else
+		pointer_parameter = bare->kind == TypeKind::Pointer;
+	TypePtr record = hidden_virtual_base_context_record(type);
+	if (record.get() == NULL)
+		return vector<TypePtr>();
+	if (!record->complete)
+		return vector<TypePtr>();
+	if (!pointer_parameter)
+		return hidden_virtual_bases_for_record(record);
+	TypePtr top = bare;
+	if (top->kind == TypeKind::LValueReference ||
+	    top->kind == TypeKind::RValueReference)
+		top = pa11::strip_cv(top->base);
+	if (top.get() == NULL || top->kind != TypeKind::Pointer)
+		return hidden_virtual_bases_for_record(record);
+	vector<TypePtr> out;
+	vector<TypePtr> bases = pa11::record_direct_bases(record);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (pa11::record_direct_base_is_virtual(record, i))
+		{
+			TypePtr base = bases[i].get() != NULL
+				? pa11::strip_cv(bases[i]) : TypePtr();
+			if (base.get() != NULL && base->kind == TypeKind::Record)
+				out.push_back(base);
+		}
+	return out.empty() ? hidden_virtual_bases_for_record(record) : out;
+}
 string rtti_symbol_for_record(TypePtr record) { TypePtr bare = pa11::strip_cv(record); if (template_record_uses_abi_global_symbol(bare))
-return "__rtti_" + template_record_global_symbol_part(bare); return "__rtti_" + bare->tag + "_" + record_lowir_name(bare); } string function_symbol_key(const Binding* binding, const string& base)
+return "__rtti_" + template_record_global_symbol_part(bare); return "__rtti_" + bare->tag + "_" + rtti_record_symbol_part(bare); } string function_symbol_key(const Binding* binding, const string& base)
 { string specialization = binding->function_specialization_symbol.empty() ? string()
 : binding->function_specialization_symbol + " "; return base + " " + specialization + string(binding->is_static_member ? "static " : "nonstatic ") + "refqual=" + to_string(binding->ref_qualifier) + " " +
 pa11::describe_type(binding->type); } bool function_template_specialization_binding_for_symbol( const Binding* binding)
@@ -403,7 +511,24 @@ int& prior_count = used_symbols[base]; ++prior_count; string prior_name = base; 
 prior_name += "__ov" + to_string(prior_count); function_symbols[prior_key] = prior_name; pit = function_symbols.find(prior_key);
 } if (prior == matched_placeholder) { symbols[binding] = pit->second;
 function_symbols[key] = pit->second; return pit->second; } }
-} } } if (binding->owner != NULL &&
+} } } if (binding->owner != NULL && binding->owner->kind == ScopeKind::Namespace && !base.empty() && base[0] != '<' && function_template_specialization_binding_for_symbol(binding)) { map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
+if (overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* prior = overloads->second[i];
+if (prior->kind != BindingKind::Function || source_symbol_base(prior) != base || function_template_specialization_binding_for_symbol(prior) || type_contains_template_symbol_pattern(prior->type)) continue; string prior_key = function_symbol_key(prior, base);
+if (function_symbols.find(prior_key) == function_symbols.end()) { int& prior_count = used_symbols[base]; ++prior_count; string prior_name = base; if (prior_count > 1)
+prior_name += "__ov" + to_string(prior_count); function_symbols[prior_key] = prior_name; symbols[prior] = prior_name; } } }
+if (binding->owner != NULL && binding->owner->kind == ScopeKind::Namespace && !base.empty() && base[0] != '<' && !function_template_specialization_binding_for_symbol(binding)) { map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
+if (overloads != binding->owner->members.end()) { for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* prior = overloads->second[i];
+if (prior->kind != BindingKind::Function || source_symbol_base(prior) != base || function_template_specialization_binding_for_symbol(prior) || type_contains_template_symbol_pattern(prior->type)) continue; string prior_key = function_symbol_key(prior, base);
+if (function_symbols.find(prior_key) == function_symbols.end()) { int& prior_count = used_symbols[base]; ++prior_count; string prior_name = base; if (prior_count > 1)
+prior_name += "__ov" + to_string(prior_count); function_symbols[prior_key] = prior_name; symbols[prior] = prior_name; } if (prior == binding || prior->aliased_binding == binding || binding->aliased_binding == prior) break; }
+map<string, string>::const_iterator reserved = function_symbols.find(key); if (reserved != function_symbols.end()) { symbols[binding] = reserved->second; return reserved->second; } } } if (binding->is_generated_copy_move_constructor && used_symbols[base] == 0 && binding->owner != NULL &&
+binding->owner->kind == ScopeKind::Class && binding->name == binding->owner->name) { TypePtr owner_record =
+pa11::record_type_for_scope(binding->owner); owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL &&
+owner_record->kind == TypeKind::Record && record_declares_or_inherits_virtual_base(owner_record)) { map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
+if (overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* prior = overloads->second[i];
+if (prior->kind != BindingKind::Function || prior == binding || source_symbol_base(prior) != base || !prior->is_generated_default_constructor || prior->type.get() == NULL || prior->type->kind != TypeKind::Function || prior->type->parameters.size() != 1) continue; string prior_key = function_symbol_key(prior, base);
+if (function_symbols.find(prior_key) == function_symbols.end()) { int& prior_count = used_symbols[base]; ++prior_count; string prior_name = base; if (prior_count > 1)
+prior_name += "__ov" + to_string(prior_count); function_symbols[prior_key] = prior_name; symbols[prior] = prior_name; } break; } } } if (binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class && binding->name == binding->owner->name) { TypePtr owner_record =
 pa11::record_type_for_scope(binding->owner); owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL &&
 owner_record->kind == TypeKind::Record) { map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);

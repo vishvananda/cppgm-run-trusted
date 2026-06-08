@@ -507,17 +507,56 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		{
 			if (record_has_base_subobject(source, target))
 			{
+				bool found_hidden = false;
+				Value hidden =
+					emit_hidden_virtual_base_addr_for_lvalue(
+						expr.children[0], target, found_hidden);
+				if (found_hidden)
+					return hidden;
+				if (fn_.binding->owner != NULL &&
+				    fn_.binding->owner->kind == ScopeKind::Class &&
+				    !fn_.binding->is_static_member &&
+				    !is_class_constructor_binding(fn_.binding) &&
+				    !is_class_destructor_binding(fn_.binding) &&
+				    pa11::same_type(source,
+				                    pa11::strip_cv(
+					                    class_record_for_member(fn_.binding))))
+				{
+					for (size_t p = 0; p < fn_.children.size(); ++p)
+						if (starts_with(fn_.children[p].line, "parameter "))
+						{
+							string hidden_base;
+							TypePtr hidden_base_record;
+							if (hidden_virtual_base_argument_for_parameter(
+								fn_.children[p].binding,
+								target,
+								hidden_base,
+								hidden_base_record))
+							{
+								if (pa11::same_type(
+									    pa11::strip_cv(hidden_base_record),
+									    target))
+									return Value("ptr", hidden_base);
+								return emit_base_subobject_addr(
+									Value("ptr", hidden_base),
+									hidden_base_record,
+									target);
+							}
+							break;
+						}
+				}
 				Value base = emit_lvalue_addr(expr.children[0]);
 				return emit_base_subobject_addr(base, source, target);
 			}
 			if (record_has_base_subobject(target, source))
 			{
+				program_.mark_static_downcast_source_record(source);
 				Value base = emit_lvalue_addr(expr.children[0]);
 				uint64_t offset = base_subobject_offset(target, source);
 				if (offset == 0)
 					return base;
 				string addr = fresh_temp();
-				instr(addr + " = index i8 [projection=derived_object] " +
+				instr(addr + " = index i8 [projection=base_subobject] " +
 				      base.text + ", -" + to_string(offset));
 				return Value("ptr", addr);
 			}
@@ -553,6 +592,129 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	}
 	if (expr.children.empty())
 		throw runtime_error("member expression missing object");
+	TypePtr owner_record = pa11::record_type_for_scope(member->owner);
+	if (starts_with(expr.children[0].line, "id-expression") &&
+	    expr.children[0].binding != NULL &&
+	    expr.children[0].binding->kind == BindingKind::Parameter &&
+	    owner_record.get() != NULL)
+	{
+		TypePtr object_record = expr.has_op && expr.op == OP_ARROW
+			? pa11::strip_cv(strip_for_value(expr.children[0].type))
+			: pa11::strip_cv(object_type(expr.children[0].type));
+		if (object_record.get() != NULL &&
+		    object_record->kind == TypeKind::Pointer)
+			object_record = pa11::strip_cv(object_record->base);
+		if (object_record.get() != NULL &&
+		    object_record->kind == TypeKind::Record &&
+		    !pa11::same_type(object_record, owner_record) &&
+		    record_has_base_subobject(object_record, owner_record))
+		{
+				Binding* param_binding = expr.children[0].binding;
+				string hidden_base;
+				TypePtr hidden_base_record;
+				size_t hidden_index = 0;
+			for (size_t pi = 0; pi < fn_.children.size(); ++pi)
+			{
+				if (!starts_with(fn_.children[pi].line, "parameter "))
+					continue;
+				Binding* candidate = fn_.children[pi].binding;
+				TypePtr ptype = candidate != NULL ? candidate->type : TypePtr();
+						bool member_this_param =
+							fn_.binding->owner != NULL &&
+							fn_.binding->owner->kind == ScopeKind::Class &&
+							!fn_.binding->is_static_member &&
+							candidate != NULL &&
+							pi == 0;
+						if (member_this_param)
+						{
+							vector<TypePtr> this_vbases =
+								hidden_virtual_bases_for_record(
+									class_record_for_member(fn_.binding));
+							for (size_t v = 0; v < this_vbases.size(); ++v)
+								if (candidate == param_binding &&
+								    !is_class_constructor_binding(fn_.binding) &&
+								    !is_class_destructor_binding(fn_.binding) &&
+								    (pa11::same_type(pa11::strip_cv(this_vbases[v]),
+								                     pa11::strip_cv(owner_record)) ||
+								     record_has_base_subobject(
+									     pa11::strip_cv(this_vbases[v]),
+									     owner_record)))
+									{
+										hidden_base = "%__vbptr" + to_string(v);
+										hidden_base_record =
+											pa11::strip_cv(this_vbases[v]);
+									}
+							continue;
+						}
+						vector<TypePtr> vbases =
+							hidden_virtual_bases_for_parameter(ptype);
+						for (size_t v = 0; v < vbases.size(); ++v)
+						{
+							TypePtr hidden_record = pa11::strip_cv(vbases[v]);
+							if (candidate == param_binding &&
+							    (pa11::same_type(hidden_record,
+							                    pa11::strip_cv(owner_record)) ||
+							     record_has_base_subobject(hidden_record,
+							                               owner_record)))
+							{
+						TypePtr pbare = pa11::strip_cv(ptype);
+						if ((pbare->kind == TypeKind::LValueReference ||
+						     pbare->kind == TypeKind::RValueReference) &&
+						    pa11::strip_cv(pbare->base)->kind ==
+							    TypeKind::Record)
+						{
+							hidden_base = fresh_temp();
+							instr(hidden_base + " = load ptr $" +
+							      slot_for(param_binding) + "__pvb" +
+							      to_string(v));
+						}
+								else
+									hidden_base = "%__pvbptr" +
+										to_string(hidden_index);
+								hidden_base_record = hidden_record;
+							}
+					++hidden_index;
+				}
+			}
+			if (!hidden_base.empty())
+			{
+				Value projected_base =
+					emit_base_subobject_addr(Value("ptr", hidden_base),
+					                         hidden_base_record.get() != NULL
+					                         ? hidden_base_record
+					                         : owner_record,
+					                         owner_record);
+				if (expr.has_op && expr.op == OP_ARROW &&
+				    hidden_base_record.get() != NULL &&
+				    !pa11::same_type(pa11::strip_cv(hidden_base_record),
+				                     pa11::strip_cv(owner_record)))
+					projected_base = emit_base_subobject_addr(projected_base,
+					                                         owner_record,
+					                                         owner_record);
+				string tmp = fresh_temp();
+				TypePtr member_bare = pa11::strip_cv(member->type);
+				TypePtr expr_bare = pa11::strip_cv(expr.type);
+				bool reference_member =
+					member->is_reference_member ||
+					pa11::is_reference_type(pa11::strip_cv(member->type)) ||
+					pa11::is_reference_type(pa11::strip_cv(expr.type)) ||
+					(member_bare->kind == TypeKind::Pointer &&
+					 expr_bare->kind != TypeKind::Pointer);
+				string projection = reference_member
+					? "reference_field" : "field";
+				instr(tmp + " = index i8 [projection=" + projection +
+				      "] " + projected_base.text + ", " +
+				      to_string(member->member_offset));
+				if (reference_member)
+				{
+					string ref = fresh_temp();
+					instr(ref + " = load ptr " + tmp);
+					return Value("ptr", ref);
+				}
+				return Value("ptr", tmp);
+			}
+		}
+	}
 	Value base;
 	if (expr.has_op && expr.op == OP_ARROW)
 		base = emit_rvalue(expr.children[0]);
@@ -575,29 +737,129 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 		lower_object_init(object_addr, object_record, expr.children[0]);
 	}
 	base = ensure_pointer(base);
+	bool projected_virtual_base_owner = false;
 	TypePtr object_record = expr.has_op && expr.op == OP_ARROW
 		? pa11::strip_cv(strip_for_value(expr.children[0].type))
 		: pa11::strip_cv(object_type(expr.children[0].type));
 	if (object_record.get() != NULL &&
 	    object_record->kind == TypeKind::Pointer)
 		object_record = pa11::strip_cv(object_record->base);
-	TypePtr owner_record = pa11::record_type_for_scope(member->owner);
 	if (object_record.get() != NULL &&
 	    object_record->kind == TypeKind::Record &&
 	    owner_record.get() != NULL &&
 	    !pa11::same_type(object_record, owner_record))
 	{
-		if (record_has_base_subobject(object_record, owner_record))
-		{
-			base = emit_base_subobject_addr(base,
-			                                object_record,
-			                                owner_record);
+			if (record_has_base_subobject(object_record, owner_record))
+			{
+				string hidden_base;
+				TypePtr hidden_base_record;
+				if (!expr.children.empty() &&
+			    starts_with(expr.children[0].line, "id-expression") &&
+			    expr.children[0].binding != NULL &&
+			    expr.children[0].binding->kind == BindingKind::Parameter)
+			{
+				Binding* param_binding = expr.children[0].binding;
+				size_t hidden_index = 0;
+				for (size_t pi = 0; pi < fn_.children.size(); ++pi)
+				{
+					if (!starts_with(fn_.children[pi].line, "parameter "))
+						continue;
+					Binding* candidate = fn_.children[pi].binding;
+					TypePtr ptype = candidate != NULL ? candidate->type : TypePtr();
+					bool member_this_param =
+						fn_.binding->owner != NULL &&
+						fn_.binding->owner->kind == ScopeKind::Class &&
+						!fn_.binding->is_static_member &&
+						candidate != NULL &&
+						pi == 0;
+					if (member_this_param)
+					{
+						vector<TypePtr> this_vbases =
+							hidden_virtual_bases_for_record(
+								class_record_for_member(fn_.binding));
+						for (size_t v = 0; v < this_vbases.size(); ++v)
+								if (candidate == param_binding &&
+								    !is_class_constructor_binding(fn_.binding) &&
+								    !is_class_destructor_binding(fn_.binding) &&
+								    (pa11::same_type(pa11::strip_cv(this_vbases[v]),
+								                     pa11::strip_cv(owner_record)) ||
+								     record_has_base_subobject(
+									     pa11::strip_cv(this_vbases[v]),
+									     owner_record)))
+								{
+									hidden_base = "%__vbptr" + to_string(v);
+									hidden_base_record =
+										pa11::strip_cv(this_vbases[v]);
+								}
+						continue;
+					}
+					vector<TypePtr> vbases =
+						hidden_virtual_bases_for_parameter(ptype);
+					for (size_t v = 0; v < vbases.size(); ++v)
+					{
+						TypePtr hidden_record = pa11::strip_cv(vbases[v]);
+						if (candidate == param_binding &&
+						    (pa11::same_type(hidden_record,
+						                    pa11::strip_cv(owner_record)) ||
+						     record_has_base_subobject(hidden_record,
+						                               owner_record)))
+						{
+							TypePtr pbare = pa11::strip_cv(ptype);
+							if ((pbare->kind == TypeKind::LValueReference ||
+							     pbare->kind == TypeKind::RValueReference) &&
+							    pa11::strip_cv(pbare->base)->kind ==
+								    TypeKind::Record)
+							{
+								hidden_base = fresh_temp();
+								instr(hidden_base + " = load ptr $" +
+								      slot_for(param_binding) + "__pvb" +
+								      to_string(v));
+							}
+							else
+								hidden_base = "%__pvbptr" +
+									to_string(hidden_index);
+							hidden_base_record = hidden_record;
+						}
+						++hidden_index;
+					}
+				}
+			}
+			if (!hidden_base.empty())
+				base = emit_base_subobject_addr(Value("ptr", hidden_base),
+				                                hidden_base_record.get() != NULL
+				                                ? hidden_base_record
+				                                : owner_record,
+				                                owner_record);
+			else
+			{
+				base = emit_base_subobject_addr(base,
+				                                object_record,
+				                                owner_record);
+				vector<TypePtr> vbases =
+					pa11::record_virtual_bases(object_record);
+				if (object_record->is_polymorphic)
+					for (size_t v = 0; v < vbases.size(); ++v)
+					{
+						TypePtr vbase = pa11::strip_cv(vbases[v]);
+						if (pa11::same_type(vbase,
+						                    pa11::strip_cv(owner_record)))
+						{
+							projected_virtual_base_owner = true;
+							break;
+						}
+					}
+				if (starts_with(expr.children[0].line, "call-expression"))
+					base = emit_base_subobject_addr(base,
+					                                owner_record,
+					                                owner_record);
+			}
 		}
 	}
 	if (!expr.children.empty() &&
-	    starts_with(expr.children[0].line, "member-expression") &&
-	    expr.children[0].binding != NULL &&
-	    expr.children[0].binding->name == "__this")
+	    ((starts_with(expr.children[0].line, "member-expression") &&
+	      expr.children[0].binding != NULL &&
+	      expr.children[0].binding->name == "__this") ||
+	     projected_virtual_base_owner))
 	{
 		string projected = fresh_temp();
 		instr(projected + " = index i8 [projection=base_subobject] " +

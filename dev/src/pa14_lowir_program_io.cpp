@@ -31,6 +31,45 @@ void emit_empty_this_function(ProgramLowerer& program,
 	fn.slots.push_back("  slot $this : ptr");
 	Block entry("entry");
 	entry.instrs.push_back("    store ptr %this, $this");
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() != NULL &&
+	    record->kind == TypeKind::Record &&
+	    record->is_polymorphic)
+	{
+		program.demand_vtable(record);
+		entry.instrs.push_back("    %t1 = load ptr $this");
+		entry.instrs.push_back("    %t2 = addr @" +
+		                       vtable_symbol_for_record(record));
+		entry.instrs.push_back(
+			"    %t3 = index i8 %t2, " +
+			to_string(vtable_address_point_offset(record)));
+		entry.instrs.push_back("    store ptr %t3, %t1");
+		vector<pair<TypePtr, uint64_t> > views =
+			vtt_ordered_vtable_views(record);
+		for (size_t i = 0; i < views.size(); ++i)
+		{
+			string base = "%t" + to_string(4 + i * 3);
+			string table = "%t" + to_string(5 + i * 3);
+			string view = table;
+			entry.instrs.push_back(
+				"    " + base + " = index i8 [projection=base_subobject] %t1, " +
+				to_string(views[i].second));
+			entry.instrs.push_back(
+				"    " + table + " = addr @" +
+				vtable_view_symbol_for_record(record,
+				                              views[i].first,
+				                              views[i].second));
+			if (vtable_address_point_offset(record) != 16)
+			{
+				view = "%t" + to_string(6 + i * 3);
+				entry.instrs.push_back(
+					"    " + view + " = index i8 " + table + ", " +
+					to_string(vtable_address_point_offset(record)));
+			}
+			entry.instrs.push_back("    store ptr " + view + ", " + base);
+		}
+	}
 	entry.instrs.push_back("    return void");
 	entry.terminated = true;
 	fn.blocks.push_back(entry);
@@ -110,12 +149,13 @@ bool demand_generated_empty_constructor(ProgramLowerer& program,
 		program.demand_inline_function(binding);
 		return true;
 	}
-	if (program.defined_functions.insert(name).second)
-		emit_empty_this_function(program, name, binding);
+	program.emit_generated_empty_constructor(binding, name);
 	return true;
 }
 
-string ordinary_function_declaration(const Binding* binding, const string& name)
+string ordinary_function_declaration(ProgramLowerer& program,
+                                     const Binding* binding,
+                                     const string& name)
 {
 	bool indirect_result =
 		pa11::strip_cv(binding->type->base)->kind == TypeKind::Record &&
@@ -130,6 +170,45 @@ string ordinary_function_declaration(const Binding* binding, const string& name)
 			out << ", ";
 		out << "%arg" << i << " : "
 		    << lowir_parameter(binding->type->parameters[i]);
+	}
+	size_t hidden_pvb_index = 0;
+	bool member_this_param =
+		binding->owner != NULL &&
+		binding->owner->kind == ScopeKind::Class &&
+		!binding->is_static_member &&
+		!binding->type->parameters.empty();
+	for (size_t i = member_this_param ? 1 : 0;
+	     i < binding->type->parameters.size();
+	     ++i)
+	{
+		vector<TypePtr> vbases =
+			program.hidden_virtual_bases_for_function_parameter(
+				binding, i, binding->type->parameters[i]);
+		for (size_t v = 0; v < vbases.size(); ++v)
+		{
+			if (hidden_pvb_index != 0 ||
+			    !binding->type->parameters.empty() ||
+			    indirect_result)
+				out << ", ";
+			out << "%__pvbptr" << hidden_pvb_index++ << " : ptr";
+		}
+	}
+	vector<TypePtr> this_vbases =
+		member_this_param &&
+		!is_class_constructor_binding(binding) &&
+		!is_class_destructor_binding(binding)
+		? (binding->is_virtual
+		   ? program.hidden_virtual_bases_for_function_parameter(
+			   binding, 0, binding->type->parameters[0])
+		   : hidden_virtual_bases_for_record(class_record_for_member(binding)))
+		: vector<TypePtr>();
+	for (size_t v = 0; v < this_vbases.size(); ++v)
+	{
+		if (hidden_pvb_index != 0 ||
+		    !binding->type->parameters.empty() ||
+		    indirect_result || v != 0)
+			out << ", ";
+		out << "%__vbptr" << v << " : ptr";
 	}
 	out << ") -> " << (indirect_result ? "void" :
 	                    scalar_lowir_type(binding->type->base));
@@ -238,6 +317,13 @@ bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
 
 }  // namespace
 
+void ProgramLowerer::emit_generated_empty_constructor(const Binding* binding,
+                                                      const string& name)
+{
+	if (defined_functions.insert(name).second)
+		emit_empty_this_function(*this, name, binding);
+}
+
 void ProgramLowerer::demand_function_declaration(const Binding* binding)
 {
 	if (binding == NULL)
@@ -258,13 +344,13 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		    demand_generated_empty_constructor(*this, binding, name))
 			return;
 		declared_functions.insert(name);
-		declares.push_back(ordinary_function_declaration(binding, name));
+		declares.push_back(ordinary_function_declaration(*this, binding, name));
 		return;
 	}
 	if (demand_generated_empty_constructor(*this, binding, name))
 		return;
 	declared_functions.insert(name);
-	declares.push_back(found->second);
+	declares.push_back(ordinary_function_declaration(*this, binding, name));
 }
 
 

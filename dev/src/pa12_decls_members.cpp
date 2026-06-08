@@ -43,6 +43,68 @@ vector<Binding*> declared_instance_fields(TypePtr type)
 	return fields;
 }
 
+void Parser::append_constructor_base_init_actions(
+	TypePtr class_type,
+	const vector<TypePtr>& direct_bases,
+	const vector<Node>& explicit_base_actions,
+	Node& body)
+{
+	TypePtr bare = pa11::strip_cv(class_type);
+	vector<TypePtr> bases;
+	if (bare.get() != NULL && bare->kind == pa11::TypeKind::Record)
+	{
+		vector<TypePtr> virtual_bases = pa11::record_virtual_bases(bare);
+		for (size_t i = 0; i < virtual_bases.size(); ++i)
+		{
+			TypePtr base = virtual_bases[i].get() != NULL
+				? pa11::strip_cv(virtual_bases[i]) : TypePtr();
+			if (base.get() != NULL && base->kind == pa11::TypeKind::Record)
+				bases.push_back(base);
+		}
+	}
+	for (size_t i = 0; i < direct_bases.size(); ++i)
+	{
+		if (bare.get() != NULL && bare->kind == pa11::TypeKind::Record &&
+		    pa11::record_direct_base_is_virtual(bare, i))
+			continue;
+		TypePtr base = direct_bases[i].get() != NULL
+			? pa11::strip_cv(direct_bases[i]) : TypePtr();
+		if (base.get() != NULL && base->kind == pa11::TypeKind::Record)
+			bases.push_back(base);
+	}
+	for (size_t b = 0; b < bases.size(); ++b)
+	{
+		TypePtr base = bases[b];
+		bool explicit_init = false;
+		for (size_t i = 0; i < explicit_base_actions.size(); ++i)
+		{
+			TypePtr explicit_base =
+				explicit_base_actions[i].type.get() != NULL
+				? pa11::strip_cv(explicit_base_actions[i].type)
+				: TypePtr();
+			if (explicit_base.get() != NULL &&
+			    pa11::same_type(explicit_base, base))
+			{
+				add_child(body, explicit_base_actions[i]);
+				explicit_init = true;
+				break;
+			}
+		}
+		if (explicit_init)
+			continue;
+		Binding* base_ctor = ensure_default_constructor(base);
+		if (base_ctor != NULL &&
+		    suppress_implicit_template_base_init_ &&
+		    base_ctor->is_generated_default_constructor)
+			mark_suppressed_generated_constructor_dependencies(base_ctor);
+		else if (base_ctor != NULL)
+		{
+			Node base_action = make_base_init_action(base, NULL);
+			add_child(body, base_action);
+		}
+	}
+}
+
 void stamp_template_member_function_symbol(Binding* binding)
 {
 	if (binding == NULL ||
@@ -531,29 +593,11 @@ void Parser::parse_constructor_body_from_parameters(
 	if (delegating)
 	{
 	}
-	else if (!explicit_base_actions.empty())
-		for (size_t i = 0; i < explicit_base_actions.size(); ++i)
-			add_child(body, explicit_base_actions[i]);
-	else if (!direct_bases.empty())
-	{
-		for (size_t b = 0; b < direct_bases.size(); ++b)
-		{
-			TypePtr base = direct_bases[b].get() != NULL
-				? pa11::strip_cv(direct_bases[b]) : TypePtr();
-			if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
-				continue;
-			Binding* base_ctor = ensure_default_constructor(base);
-			if (base_ctor != NULL &&
-			    suppress_implicit_template_base_init_ &&
-			    base_ctor->is_generated_default_constructor)
-				mark_suppressed_generated_constructor_dependencies(base_ctor);
-			else if (base_ctor != NULL)
-			{
-				Node base_action = make_base_init_action(base, NULL);
-				add_child(body, base_action);
-			}
-		}
-	}
+	else
+		append_constructor_base_init_actions(class_type,
+		                                     direct_bases,
+		                                     explicit_base_actions,
+		                                     body);
 	vector<Binding*> fields;
 	try
 	{
@@ -740,6 +784,9 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 	Binding* ctor = existing_ctor != NULL
 		? existing_ctor
 		: add_function_binding(class_scope, class_scope->name, fn_type, false);
+	for (size_t i = 0; i < parameters.size(); ++i)
+		if (parameters[i].has_default)
+			ctor->has_default_arguments = true;
 	ctor->is_constexpr = ctor->is_constexpr || constexpr_spec;
 	ctor->is_inline_definition =
 		ctor->is_inline_definition || inline_spec || constexpr_spec;
@@ -1060,29 +1107,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 	if (delegating)
 	{
 	}
-	else if (!explicit_base_actions.empty())
-		for (size_t i = 0; i < explicit_base_actions.size(); ++i)
-			add_child(body, explicit_base_actions[i]);
-	else if (!direct_bases.empty())
-	{
-		for (size_t b = 0; b < direct_bases.size(); ++b)
-		{
-			TypePtr base = direct_bases[b].get() != NULL
-				? pa11::strip_cv(direct_bases[b]) : TypePtr();
-			if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
-				continue;
-			Binding* base_ctor = ensure_default_constructor(base);
-			if (base_ctor != NULL &&
-			    suppress_implicit_template_base_init_ &&
-			    base_ctor->is_generated_default_constructor)
-				mark_suppressed_generated_constructor_dependencies(base_ctor);
-			else if (base_ctor != NULL)
-			{
-				Node base_action = make_base_init_action(base, NULL);
-				add_child(body, base_action);
-			}
-		}
-	}
+	else
+		append_constructor_base_init_actions(class_type,
+		                                     direct_bases,
+		                                     explicit_base_actions,
+		                                     body);
 	vector<Binding*> fields;
 	try
 	{

@@ -144,19 +144,6 @@ void collect_template_specialization_records(TypePtr type,
 
 }  // namespace
 
-FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
-                                        const string& name)
-{
-	FunctionOut base_entry = lowered;
-	base_entry.name = name + "__base_entry";
-	string from = "function @" + name + "(";
-	string to = "function @" + name + "__base_entry(";
-	size_t pos = base_entry.header.find(from);
-	if (pos != string::npos)
-		base_entry.header.replace(pos, from.size(), to);
-	return base_entry;
-}
-
 ProgramLowerer::ProgramLowerer()
 	: active_inline_definition(NULL),
 	  active_inline_dependency_insert_count(0),
@@ -164,6 +151,22 @@ ProgramLowerer::ProgramLowerer()
 	  needs_eh_declarations(false),
 	  generated_assignment_emit_depth(0)
 {
+}
+
+void ProgramLowerer::mark_static_downcast_source_record(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() != NULL && bare->kind == TypeKind::Record)
+		static_downcast_source_records.insert(bare.get());
+}
+
+bool ProgramLowerer::is_static_downcast_source_record(TypePtr record) const
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->kind == TypeKind::Record &&
+	       static_downcast_source_records.find(bare.get()) !=
+		       static_downcast_source_records.end();
 }
 
 string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
@@ -739,16 +742,22 @@ void ProgramLowerer::collect_node(const Node& node)
 	}
 	if (starts_with(node.line, "function-definition "))
 	{
+		if (node.binding != NULL && node.binding->is_inline_definition)
+		{
+			register_inline_definition(node);
+			if (node.binding->is_virtual)
+			{
+				TypePtr record = class_record_for_member(node.binding);
+				if (record.get() != NULL)
+					demand_vtable(record);
+			}
+			return;
+		}
 		if (node.binding != NULL && node.binding->is_virtual)
 		{
 			TypePtr record = class_record_for_member(node.binding);
 			if (record.get() != NULL)
 				demand_vtable(record);
-		}
-		if (node.binding != NULL && node.binding->is_inline_definition)
-		{
-			register_inline_definition(node);
-			return;
 		}
 		if (node.binding != NULL)
 			defined_functions.insert(symbol_for(node.binding));
@@ -807,6 +816,45 @@ void ProgramLowerer::register_function_declaration(const Node& node)
 		out << "%arg" << i << " : "
 		    << lowir_parameter(binding->type->parameters[i]);
 	}
+	size_t hidden_pvb_index = 0;
+	bool member_this_param =
+		binding->owner != NULL &&
+		binding->owner->kind == ScopeKind::Class &&
+		!binding->is_static_member &&
+		!binding->type->parameters.empty();
+	for (size_t i = member_this_param ? 1 : 0;
+	     i < binding->type->parameters.size();
+	     ++i)
+	{
+		vector<TypePtr> vbases =
+			hidden_virtual_bases_for_function_parameter(
+				binding, i, binding->type->parameters[i]);
+		for (size_t v = 0; v < vbases.size(); ++v)
+		{
+			if (hidden_pvb_index != 0 ||
+			    !binding->type->parameters.empty() ||
+			    indirect_result)
+				out << ", ";
+			out << "%__pvbptr" << hidden_pvb_index++ << " : ptr";
+		}
+	}
+	vector<TypePtr> this_vbases =
+		member_this_param &&
+		!is_class_constructor_binding(binding) &&
+		!is_class_destructor_binding(binding)
+		? (binding->is_virtual
+		   ? hidden_virtual_bases_for_function_parameter(
+			   binding, 0, binding->type->parameters[0])
+		   : hidden_virtual_bases_for_record(class_record_for_member(binding)))
+		: vector<TypePtr>();
+	for (size_t v = 0; v < this_vbases.size(); ++v)
+	{
+		if (hidden_pvb_index != 0 ||
+		    !binding->type->parameters.empty() ||
+		    indirect_result || v != 0)
+			out << ", ";
+		out << "%__vbptr" << v << " : ptr";
+	}
 	out << ") -> " << (indirect_result ? "void" :
 	                    scalar_lowir_type(binding->type->base));
 	vector<string> metadata;
@@ -845,6 +893,129 @@ void ProgramLowerer::register_inline_definition(const Node& node)
 	if (inline_definitions.find(node.binding) == inline_definitions.end() ||
 	    binding_has_template_specialization_context(node.binding))
 		inline_definitions[node.binding] = &node;
+	if (demanded_inline_complete_entries.find(node.binding) !=
+	    demanded_inline_complete_entries.end())
+		demand_inline_function(node.binding);
+	if (demanded_constructor_base_entries.find(node.binding) !=
+	        demanded_constructor_base_entries.end() ||
+	    demanded_destructor_base_entries.find(node.binding) !=
+	        demanded_destructor_base_entries.end())
+		demand_inline_function(node.binding, false);
+	if (declared_functions.find(symbol_for(node.binding)) != declared_functions.end())
+		demand_inline_function(node.binding);
+}
+
+namespace {
+
+bool hidden_vbase_vector_contains(const vector<TypePtr>& bases, TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(bases[i]), bare))
+			return true;
+	return false;
+}
+
+void collect_parameter_virtual_base_member_uses(const Node& node,
+                                                const Binding* parameter,
+                                                const vector<TypePtr>& all_vbases,
+                                                vector<TypePtr>& used)
+{
+	if (starts_with(node.line, "member-expression") &&
+	    node.binding != NULL &&
+	    !node.children.empty() &&
+	    starts_with(node.children[0].line, "id-expression") &&
+	    node.children[0].binding == parameter)
+	{
+		Binding* member =
+			node.binding->aliased_binding != NULL &&
+			node.binding->target_scope != NULL
+			? node.binding->aliased_binding : node.binding;
+		if (!member->is_static_member && member->owner != NULL)
+		{
+			TypePtr owner = pa11::record_type_for_scope(member->owner);
+			owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+			for (size_t i = 0; i < all_vbases.size(); ++i)
+			{
+				TypePtr vbase = pa11::strip_cv(all_vbases[i]);
+				if (owner.get() != NULL &&
+				    (pa11::same_type(vbase, owner) ||
+				     record_has_base_subobject(vbase, owner)) &&
+				    !hidden_vbase_vector_contains(used, vbase))
+					used.push_back(vbase);
+			}
+		}
+	}
+	for (size_t i = 0; i < node.children.size(); ++i)
+		collect_parameter_virtual_base_member_uses(node.children[i],
+		                                           parameter,
+		                                           all_vbases,
+		                                           used);
+}
+
+}  // namespace
+
+vector<TypePtr> ProgramLowerer::hidden_virtual_bases_for_function_parameter(
+	const Binding* binding,
+	size_t parameter_index,
+	TypePtr type)
+{
+	vector<TypePtr> defaults = hidden_virtual_bases_for_parameter(type);
+	if (defaults.empty() || binding == NULL)
+		return defaults;
+	pair<const Binding*, size_t> key(binding, parameter_index);
+	map<pair<const Binding*, size_t>, vector<TypePtr> >::const_iterator cached =
+		hidden_parameter_virtual_bases.find(key);
+	if (cached != hidden_parameter_virtual_bases.end())
+		return cached->second;
+	vector<TypePtr> selected = defaults;
+	const Node* fn = NULL;
+	map<const Binding*, const Node*>::const_iterator found =
+		inline_definitions.find(binding);
+	if (found != inline_definitions.end())
+		fn = found->second;
+	map<const Binding*, Node>::const_iterator synthetic =
+		synthetic_inline_definitions.find(binding);
+	if (fn == NULL && synthetic != synthetic_inline_definitions.end())
+		fn = &synthetic->second;
+	if (fn != NULL)
+	{
+		Binding* param_binding = NULL;
+		size_t param = 0;
+		for (size_t i = 0; i < fn->children.size(); ++i)
+		{
+			if (!starts_with(fn->children[i].line, "parameter "))
+				continue;
+			if (param == parameter_index)
+			{
+				param_binding = fn->children[i].binding;
+				break;
+			}
+			++param;
+		}
+		TypePtr bare = pa11::strip_cv(type);
+		bool record_reference =
+			(bare->kind == TypeKind::LValueReference ||
+			 bare->kind == TypeKind::RValueReference) &&
+			pa11::strip_cv(bare->base)->kind == TypeKind::Record;
+		bool record_pointer =
+			bare->kind == TypeKind::Pointer &&
+			pa11::strip_cv(bare->base)->kind == TypeKind::Record;
+		if (param_binding != NULL && (record_reference || record_pointer))
+		{
+			vector<TypePtr> used;
+			collect_parameter_virtual_base_member_uses(*fn,
+			                                           param_binding,
+			                                           defaults,
+			                                           used);
+			if (record_pointer)
+				selected = used;
+			else if (!used.empty())
+				selected = used;
+		}
+	}
+	hidden_parameter_virtual_bases[key] = selected;
+	return selected;
 }
 
 void ProgramLowerer::demand_inline_function(const Binding* binding,
@@ -863,6 +1034,22 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 		demanded_inline_complete_entries.insert(binding);
 	else if (!class_ctor && !class_dtor)
 		return;
+	else if (class_ctor &&
+	         !binding->is_generated_default_constructor &&
+	         !binding->is_generated_aggregate_constructor &&
+	         !binding->is_generated_copy_move_constructor)
+	{
+		TypePtr active_record =
+			active_inline_definition != NULL
+			? class_record_for_member(active_inline_definition)
+			: TypePtr();
+		active_record = active_record.get() != NULL
+			? pa11::strip_cv(active_record) : TypePtr();
+		if (active_record.get() != NULL &&
+		    active_record->kind == TypeKind::Record &&
+		    !pa11::record_virtual_bases(active_record).empty())
+			demanded_inline_complete_entries.insert(binding);
+	}
 	demand_move_assignment_copy_dependency(binding);
 	string name = symbol_for(binding);
 	if (complete_entry && defined_functions.find(name) != defined_functions.end())

@@ -317,7 +317,83 @@ void FunctionLowerer::lower_value_call_argument(const Node& arg,
 		                            preserve_no_storage_lvalue);
 		return;
 		}
+		TypePtr param_bare = pa11::strip_cv(param);
+		if (param_bare->kind == TypeKind::Pointer &&
+		    pa11::strip_cv(param_bare->base)->kind == TypeKind::Record &&
+		    starts_with(arg.line, "unary-expression") &&
+		    arg.has_op && arg.op == OP_AMP &&
+		    !arg.children.empty())
+		{
+			TypePtr target = pa11::strip_cv(param_bare->base);
+			TypePtr source = pa11::strip_cv(object_type(arg.children[0].type));
+			if (source.get() != NULL &&
+			    source->kind == TypeKind::Record &&
+			    !pa11::same_type(source, target) &&
+			    record_has_base_subobject(source, target))
+			{
+				bool found_hidden = false;
+				TypePtr hidden_record;
+				Value hidden =
+					emit_hidden_virtual_base_addr_for_lvalue(
+						arg.children[0], target, found_hidden,
+						&hidden_record);
+				if (found_hidden)
+				{
+					if (!pa11::same_type(pa11::strip_cv(hidden_record),
+					                    target))
+						hidden = emit_base_subobject_addr(hidden,
+						                                  target,
+						                                  target);
+					args.push_back(hidden.text);
+					return;
+				}
+			}
+		}
 		Value raw = emit_rvalue(arg);
+		TypePtr arg_bare = pa11::strip_cv(arg.type);
+		TypePtr arg_decl_bare = arg.binding != NULL
+			? pa11::strip_cv(arg.binding->type) : arg_bare;
+		if ((arg_decl_bare->kind == TypeKind::LValueReference ||
+		     arg_decl_bare->kind == TypeKind::RValueReference) &&
+		    pa11::strip_cv(arg_decl_bare->base)->kind == TypeKind::Pointer &&
+		    param_bare->kind == TypeKind::Pointer)
+		{
+			TypePtr source_pointer = pa11::strip_cv(arg_decl_bare->base);
+			TypePtr from_pointee = pa11::strip_cv(source_pointer->base);
+			TypePtr to_pointee = pa11::strip_cv(param_bare->base);
+			if (from_pointee->kind == TypeKind::Record &&
+			    to_pointee->kind == TypeKind::Record &&
+			    record_has_base_subobject(from_pointee, to_pointee))
+			{
+				uint64_t offset =
+					base_subobject_offset(from_pointee, to_pointee);
+				if (offset != 0)
+				{
+					string slot = fresh_aux_slot("basecast", "ptr");
+					string is_null = fresh_temp();
+					instr(is_null + " = cmp eq ptr " + raw.text + ", 0");
+					string null_block = fresh_block("basecast_null");
+					string adjust_block = fresh_block("basecast_adjust");
+					string end_block = fresh_block("basecast_end");
+					terminate("branch " + is_null + ", ^" + null_block +
+					          ", ^" + adjust_block);
+					start_block(null_block);
+					instr("store ptr 0, $" + slot);
+					terminate("jump ^" + end_block);
+					start_block(adjust_block);
+					string adjusted = fresh_temp();
+					instr(adjusted + " = index i8 " + raw.text + ", " +
+					      to_string(offset));
+					instr("store ptr " + adjusted + ", $" + slot);
+					terminate("jump ^" + end_block);
+					start_block(end_block);
+					string loaded = fresh_temp();
+					instr(loaded + " = load ptr $" + slot);
+					args.push_back(loaded);
+					return;
+				}
+			}
+		}
 		Value converted = convert_binary_value(raw, arg.type, param);
 		if (converted.type == "ptr" && converted.text == "0" &&
 		    arg.token_text == "nullptr")
@@ -376,6 +452,18 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 			param = pa11::make_fundamental(FT_DOUBLE);
 		lower_call_argument(expr.children[i], param, args);
 	}
+	CallEmissionState hidden_call;
+	hidden_call.direct = direct;
+	hidden_call.callee_type = callee_type;
+	hidden_call.arg_start = 1;
+	hidden_call.args.insert(hidden_call.args.end(),
+	                        args.begin() + 1,
+	                        args.end());
+	append_hidden_call_arguments(expr, hidden_call);
+	args.erase(args.begin() + 1, args.end());
+	args.insert(args.end(),
+	            hidden_call.args.begin(),
+	            hidden_call.args.end());
 	ostringstream call;
 	call << "call void " << callee << "(";
 	for (size_t i = 0; i < args.size(); ++i)
@@ -516,17 +604,23 @@ void FunctionLowerer::prepare_call_setup_protection(
 				break;
 			}
 		}
-	call.protect_setup_only =
-		eh_try_depth_ == 0 && has_active_cleanups() &&
-		call.setup_may_create_temp_cleanup &&
-		!call_setup_can_use_outer_eh(expr, call.callee_type,
-		                             call.arg_start);
-	call.protected_setup =
-		eh_try_depth_ == 0 && !call.protect_setup_only &&
-		((has_active_cleanups() &&
-		  call_setup_can_use_outer_eh(expr, call.callee_type,
-		                              call.arg_start)) ||
-		 (!has_active_cleanups() && call.setup_may_create_temp_cleanup));
+		call.protect_setup_only =
+			eh_try_depth_ == 0 && has_active_cleanups() &&
+			call.setup_may_create_temp_cleanup &&
+			!call_setup_can_use_outer_eh(expr, call.callee_type,
+			                             call.arg_start);
+		bool protect_virtual_record_result =
+			eh_try_depth_ == 0 && has_active_cleanups() &&
+			call.virtual_call &&
+			call.ret.compare(0, 4, "obj<") == 0 &&
+			!call_result_store_addr_.empty();
+		call.protected_setup =
+			eh_try_depth_ == 0 && !call.protect_setup_only &&
+			(protect_virtual_record_result ||
+			 (has_active_cleanups() &&
+			  call_setup_can_use_outer_eh(expr, call.callee_type,
+			                              call.arg_start)) ||
+			 (!has_active_cleanups() && call.setup_may_create_temp_cleanup));
 	if (call.protected_setup || call.protect_setup_only)
 	{
 		call.protected_dispatch = active_unwind_dispatch_.empty()
@@ -535,73 +629,6 @@ void FunctionLowerer::prepare_call_setup_protection(
 		call.protected_define_dispatch = active_unwind_dispatch_.empty();
 		instr("eh_try ^" + call.protected_dispatch);
 		++eh_try_depth_;
-	}
-}
-
-void FunctionLowerer::lower_call_arguments(const Node& expr,
-                                           CallEmissionState& call)
-{
-	for (size_t i = call.arg_start; i < expr.children.size(); ++i)
-	{
-		bool variadic_extra =
-			i - call.arg_start >= call.callee_type->parameters.size();
-		if (variadic_extra &&
-		    pa11::strip_cv(object_type(expr.children[i].type))->kind ==
-			    TypeKind::Record)
-		{
-			const Node& arg = expr.children[i];
-			if (arg.category == ValueCategory::LValue ||
-			    arg.category == ValueCategory::XValue)
-				call.args.push_back(
-					ensure_pointer(emit_lvalue_addr(arg)).text);
-			else
-			{
-				TypePtr record = object_type(arg.type);
-				string slot =
-					fresh_aux_slot("arg", slot_lowir_type(record));
-				string addr_name = fresh_temp();
-				instr(addr_name + " = addr $" + slot);
-				Value target_addr("ptr", addr_name);
-				function<Value()> addr_for = [target_addr]() {
-					return target_addr;
-				};
-				lower_object_init(addr_for, record, arg);
-				call.args.push_back(target_addr.text);
-			}
-			continue;
-		}
-		TypePtr param = !variadic_extra
-			? call.callee_type->parameters[i - call.arg_start]
-			: expr.children[i].type;
-		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
-			param = pa11::make_fundamental(FT_DOUBLE);
-		TypePtr result = pa11::strip_cv(call.callee_type->base);
-		TypePtr bare_param = pa11::strip_cv(param);
-		bool function_template_callee =
-			call.direct != NULL &&
-			(!call.direct->function_specialization_symbol.empty() ||
-			 (call.direct->aliased_binding != NULL &&
-			  !call.direct->aliased_binding->
-				  function_specialization_symbol.empty()));
-		bool preserve_no_storage_lvalue =
-			!variadic_extra &&
-			function_template_callee &&
-			result->kind == TypeKind::Record &&
-			bare_param->kind == TypeKind::Record;
-		lower_call_argument(expr.children[i], param, call.args,
-		                    &call.temp_cleanups,
-		                    preserve_no_storage_lvalue);
-		if (!call.temp_cleanup_region_open && !call.temp_cleanups.empty() &&
-		    !call.protected_setup && !call.protect_setup_only &&
-		    call_temp_cleanup_defer_depth_ == 0 && eh_try_depth_ == 0)
-		{
-			call.temp_cleanup_dispatch =
-				fresh_block("call_unwind_dispatch");
-			call.temp_cleanup_end = fresh_block("call_unwind_end");
-			instr("eh_try ^" + call.temp_cleanup_dispatch);
-			++eh_try_depth_;
-			call.temp_cleanup_region_open = true;
-		}
 	}
 }
 
@@ -723,6 +750,38 @@ bool FunctionLowerer::emit_record_return_call(CallEmissionState& call,
 		for (size_t i = 0; i < call.callee_type->parameters.size(); ++i)
 			indirect_call << ", %arg" << i << " : "
 			              << lowir_parameter(call.callee_type->parameters[i]);
+		size_t hidden = 0;
+		bool member_this_param =
+			call.direct != NULL &&
+			call.direct->owner != NULL &&
+			call.direct->owner->kind == ScopeKind::Class &&
+			!call.direct->is_static_member &&
+			!call.callee_type->parameters.empty();
+		for (size_t i = member_this_param ? 1 : 0;
+		     i < call.callee_type->parameters.size();
+		     ++i)
+		{
+			vector<TypePtr> vbases = call.direct != NULL
+				? program_.hidden_virtual_bases_for_function_parameter(
+					call.direct, i, call.callee_type->parameters[i])
+				: hidden_virtual_bases_for_parameter(
+					call.callee_type->parameters[i]);
+			for (size_t v = 0; v < vbases.size(); ++v)
+				indirect_call << ", %__pvbptr" << hidden++ << " : ptr";
+		}
+		if (member_this_param &&
+		    call.direct != NULL &&
+		    !is_class_constructor_binding(call.direct) &&
+		    !is_class_destructor_binding(call.direct))
+		{
+			vector<TypePtr> vbases = call.direct->is_virtual
+				? program_.hidden_virtual_bases_for_function_parameter(
+					call.direct, 0, call.callee_type->parameters[0])
+				: hidden_virtual_bases_for_record(
+					class_record_for_member(call.direct));
+			for (size_t v = 0; v < vbases.size(); ++v)
+				indirect_call << ", %__vbptr" << v << " : ptr";
+		}
 		indirect_call << ") -> void";
 	}
 	if (call.temp_cleanups.empty() || call_temp_cleanup_defer_depth_ > 0)
@@ -783,6 +842,47 @@ void FunctionLowerer::build_scalar_call(CallEmissionState& call)
 			out << "%arg" << i << " : "
 			    << lowir_parameter(call.callee_type->parameters[i]);
 		}
+		size_t hidden = 0;
+		bool member_this_param =
+			call.direct != NULL &&
+			call.direct->owner != NULL &&
+			call.direct->owner->kind == ScopeKind::Class &&
+			!call.direct->is_static_member &&
+			!call.callee_type->parameters.empty();
+		for (size_t i = member_this_param ? 1 : 0;
+		     i < call.callee_type->parameters.size();
+		     ++i)
+		{
+			vector<TypePtr> vbases = call.direct != NULL
+				? program_.hidden_virtual_bases_for_function_parameter(
+					call.direct, i, call.callee_type->parameters[i])
+				: hidden_virtual_bases_for_parameter(
+					call.callee_type->parameters[i]);
+			for (size_t v = 0; v < vbases.size(); ++v)
+			{
+				if (hidden != 0 || !call.callee_type->parameters.empty())
+					out << ", ";
+				out << "%__pvbptr" << hidden++ << " : ptr";
+			}
+		}
+		if (member_this_param &&
+		    call.direct != NULL &&
+		    !is_class_constructor_binding(call.direct) &&
+		    !is_class_destructor_binding(call.direct))
+		{
+			vector<TypePtr> vbases = call.direct->is_virtual
+				? program_.hidden_virtual_bases_for_function_parameter(
+					call.direct, 0, call.callee_type->parameters[0])
+				: hidden_virtual_bases_for_record(
+					class_record_for_member(call.direct));
+			for (size_t v = 0; v < vbases.size(); ++v)
+			{
+				if (hidden != 0 || !call.callee_type->parameters.empty() ||
+				    v != 0)
+					out << ", ";
+				out << "%__vbptr" << v << " : ptr";
+			}
+		}
 		out << ") -> " << call.ret;
 	}
 	call.call_text = out.str();
@@ -797,9 +897,12 @@ bool FunctionLowerer::emit_protected_setup_scalar_call(
 {
 	if (!call.protected_setup)
 		return false;
-	bool spill_result =
-		call.ret != "void" && call.ret.compare(0, 4, "obj<") != 0;
-	bool consume_store = spill_result && !call_result_store_slot_.empty();
+		bool spill_result =
+			call.ret != "void" && call.ret.compare(0, 4, "obj<") != 0;
+		bool record_result = call.ret.compare(0, 4, "obj<") == 0;
+		bool consume_record_store =
+			record_result && !call_result_store_addr_.empty();
+		bool consume_store = spill_result && !call_result_store_slot_.empty();
 	bool normal_temp_cleanup =
 		!call.temp_cleanups.empty() &&
 		(call.cleanup_temps_in_call || consume_store);
@@ -814,15 +917,22 @@ bool FunctionLowerer::emit_protected_setup_scalar_call(
 		loaded = fresh_temp();
 		instr(loaded + " = load " + call.ret + " $" + slot);
 	}
-	if (consume_store)
-	{
-		Value stored = convert_value(Value(call.ret, loaded),
-		                             call.callee_type->base,
-		                             call_result_store_type_);
-		instr("store " + scalar_lowir_type(call_result_store_type_) +
-		      " " + stored.text + ", $" + call_result_store_slot_);
-		call_result_store_consumed_ = true;
-	}
+		if (consume_store)
+		{
+			Value stored = convert_value(Value(call.ret, loaded),
+			                             call.callee_type->base,
+			                             call_result_store_type_);
+			instr("store " + scalar_lowir_type(call_result_store_type_) +
+			      " " + stored.text + ", $" + call_result_store_slot_);
+			call_result_store_consumed_ = true;
+		}
+		else if (consume_record_store)
+		{
+			instr("copyobj " + to_string(pa11::type_size(call_result_store_type_)) +
+			      "x" + to_string(pa11::type_align(call_result_store_type_)) +
+			      " " + call.tmp + ", " + call_result_store_addr_);
+			call_result_store_consumed_ = true;
+		}
 	if (normal_temp_cleanup)
 		emit_temporary_cleanups(call.temp_cleanups);
 	--eh_try_depth_;
@@ -926,9 +1036,12 @@ bool FunctionLowerer::emit_active_cleanup_scalar_call(CallEmissionState& call,
 	if (!call.temp_cleanups.empty() || eh_try_depth_ != 0 ||
 	    !has_active_cleanups())
 		return false;
-	bool spill_result =
-		call.ret != "void" && call.ret.compare(0, 4, "obj<") != 0;
-	string slot = call.preallocated_call_slot;
+		bool spill_result =
+			call.ret != "void" && call.ret.compare(0, 4, "obj<") != 0;
+		bool record_result = call.ret.compare(0, 4, "obj<") == 0;
+		bool consume_record_store =
+			record_result && !call_result_store_addr_.empty();
+		string slot = call.preallocated_call_slot;
 	string loaded;
 	string dispatch = active_unwind_dispatch_.empty()
 		? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
@@ -944,15 +1057,22 @@ bool FunctionLowerer::emit_active_cleanup_scalar_call(CallEmissionState& call,
 		loaded = fresh_temp();
 		instr(loaded + " = load " + call.ret + " $" + slot);
 	}
-	if (spill_result && !call_result_store_slot_.empty())
-	{
-		Value stored = convert_value(Value(call.ret, loaded),
-		                             call.callee_type->base,
-		                             call_result_store_type_);
-		instr("store " + scalar_lowir_type(call_result_store_type_) + " " +
-		      stored.text + ", $" + call_result_store_slot_);
-		call_result_store_consumed_ = true;
-	}
+		if (spill_result && !call_result_store_slot_.empty())
+		{
+			Value stored = convert_value(Value(call.ret, loaded),
+			                             call.callee_type->base,
+			                             call_result_store_type_);
+			instr("store " + scalar_lowir_type(call_result_store_type_) + " " +
+			      stored.text + ", $" + call_result_store_slot_);
+			call_result_store_consumed_ = true;
+		}
+		else if (consume_record_store)
+		{
+			instr("copyobj " + to_string(pa11::type_size(call_result_store_type_)) +
+			      "x" + to_string(pa11::type_align(call_result_store_type_)) +
+			      " " + call.tmp + ", " + call_result_store_addr_);
+			call_result_store_consumed_ = true;
+		}
 	--eh_try_depth_;
 	instr("eh_end");
 	if (!define_dispatch)
@@ -997,6 +1117,7 @@ Value FunctionLowerer::emit_call(const Node& expr)
 	preallocate_call_result_slot(expr, call);
 	prepare_call_setup_protection(expr, call);
 	lower_call_arguments(expr, call);
+	append_hidden_call_arguments(expr, call);
 	finish_setup_only_protection(call);
 	resolve_call_callee(expr, call);
 	Value out;

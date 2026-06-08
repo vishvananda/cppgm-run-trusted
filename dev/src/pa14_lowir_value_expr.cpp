@@ -611,13 +611,44 @@ Value FunctionLowerer::convert_value(Value value,
 		{
 			TypePtr from_pointee = pa11::strip_cv(from_bare->base);
 			TypePtr to_pointee = pa11::strip_cv(to_bare->base);
+				if (from_pointee->kind == TypeKind::Record &&
+				    to_pointee->kind == TypeKind::Record &&
+				    record_has_base_subobject(from_pointee, to_pointee))
+				{
+					return emit_base_subobject_addr(value,
+					                                from_pointee,
+					                                to_pointee);
+			}
 			if (from_pointee->kind == TypeKind::Record &&
 			    to_pointee->kind == TypeKind::Record &&
-			    record_has_base_subobject(from_pointee, to_pointee))
+			    record_has_base_subobject(to_pointee, from_pointee))
 			{
-				return emit_base_subobject_addr(value,
-				                                from_pointee,
-				                                to_pointee);
+				program_.mark_static_downcast_source_record(from_pointee);
+				uint64_t offset = base_subobject_offset(to_pointee,
+				                                       from_pointee);
+				if (offset == 0)
+					return value;
+				string slot = fresh_aux_slot("basecast", "ptr");
+				string is_null = fresh_temp();
+				instr(is_null + " = cmp eq ptr " + value.text + ", 0");
+				string null_block = fresh_block("basecast_null");
+				string adjust_block = fresh_block("basecast_adjust");
+				string end_block = fresh_block("basecast_end");
+				terminate("branch " + is_null + ", ^" + null_block +
+				          ", ^" + adjust_block);
+				start_block(null_block);
+				instr("store ptr 0, $" + slot);
+				terminate("jump ^" + end_block);
+				start_block(adjust_block);
+				string adjusted = fresh_temp();
+				instr(adjusted + " = index i8 [projection=base_subobject] " +
+				      value.text + ", -" + to_string(offset));
+				instr("store ptr " + adjusted + ", $" + slot);
+				terminate("jump ^" + end_block);
+				start_block(end_block);
+				string loaded = fresh_temp();
+				instr(loaded + " = load ptr $" + slot);
+				return Value("ptr", loaded);
 			}
 		}
 		return Value(dst, value.text);
@@ -788,7 +819,74 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 	}
 	if (expr.has_op && (expr.op == OP_LAND || expr.op == OP_LOR))
 		return emit_logical_binary(expr);
-	Value lhs = emit_rvalue(expr.children[0]);
+	bool wrap_lhs_materialized_member =
+		eh_try_depth_ == 0 &&
+		has_active_cleanups() &&
+		starts_with(expr.children[0].line, "member-expression") &&
+		node_contains_call_expression(expr.children[0]) &&
+		expr.children[0].category == ValueCategory::LValue &&
+		scalar_lowir_type(expr.children[0].type).compare(0, 4, "obj<") != 0;
+	string dispatch;
+	bool define_dispatch = false;
+	Value lhs;
+	if (wrap_lhs_materialized_member)
+	{
+		Value lhs_addr;
+		if (!expr.children[0].children.empty() &&
+		    starts_with(expr.children[0].children[0].line, "call-expression") &&
+		    expr.children[0].binding != NULL)
+		{
+			const Node& member_expr = expr.children[0];
+			TypePtr object_record =
+				pa11::strip_cv(object_type(member_expr.children[0].type));
+			string slot = fresh_aux_slot("tmpobj",
+			                             scalar_lowir_type(object_record));
+			string object_addr_name = fresh_temp();
+			instr(object_addr_name + " = addr $" + slot);
+			Value object_addr("ptr", object_addr_name);
+			function<Value()> object_addr_for = [object_addr]() {
+				return object_addr;
+			};
+			lower_object_init(object_addr_for, object_record,
+			                  member_expr.children[0]);
+			dispatch = active_unwind_dispatch_.empty()
+				? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+			define_dispatch = active_unwind_dispatch_.empty();
+			instr("eh_try ^" + dispatch);
+			++eh_try_depth_;
+			Binding* member = member_expr.binding;
+			TypePtr owner_record = pa11::record_type_for_scope(member->owner);
+			Value projected_base = object_addr;
+			if (owner_record.get() != NULL &&
+			    object_record.get() != NULL &&
+			    object_record->kind == TypeKind::Record &&
+			    owner_record->kind == TypeKind::Record &&
+			    !pa11::same_type(object_record, owner_record))
+				projected_base = emit_base_subobject_addr(object_addr,
+				                                         object_record,
+				                                         owner_record);
+			string field_addr = fresh_temp();
+			instr(field_addr + " = index i8 [projection=field] " +
+			      projected_base.text + ", " +
+			      to_string(member->member_offset));
+			lhs_addr = Value("ptr", field_addr);
+		}
+		else
+		{
+			lhs_addr = ensure_pointer(emit_lvalue_addr(expr.children[0]));
+			dispatch = active_unwind_dispatch_.empty()
+				? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+			define_dispatch = active_unwind_dispatch_.empty();
+			instr("eh_try ^" + dispatch);
+			++eh_try_depth_;
+		}
+		string loaded = fresh_temp();
+		instr(loaded + " = load " + scalar_lowir_type(expr.children[0].type) +
+		      " " + lhs_addr.text);
+		lhs = Value(scalar_lowir_type(expr.children[0].type), loaded);
+	}
+	else
+		lhs = emit_rvalue(expr.children[0]);
 	Value rhs = emit_rvalue(expr.children[1]);
 	TypePtr lhs_type = strip_for_value(expr.children[0].type);
 	TypePtr rhs_type = strip_for_value(expr.children[1].type);
@@ -854,6 +952,21 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 	string tmp = fresh_temp();
 	instr(tmp + " = " + string(cmp ? "cmp " : "binary ") + op + " " +
 	      type + " " + lhs.text + ", " + rhs.text);
+	if (wrap_lhs_materialized_member)
+	{
+		--eh_try_depth_;
+		instr("eh_end");
+		if (define_dispatch)
+		{
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = dispatch;
+			start_block(dispatch);
+			emit_unwind_cleanups();
+			terminate("resume");
+			start_block(end);
+		}
+	}
 	return Value(cmp ? "u8" : scalar_lowir_type(expr.type), tmp);
 }
 
@@ -1288,150 +1401,33 @@ Value FunctionLowerer::emit_cast(const Node& expr)
 		      raw.text);
 		return Value(scalar_lowir_type(expr.type), tmp);
 	}
+	if (cast_source->kind == TypeKind::Pointer &&
+	    cast_target->kind == TypeKind::Pointer &&
+	    expr.children[0].binding != NULL &&
+	    expr.children[0].binding->kind == BindingKind::Parameter &&
+	    expr.children[0].binding->name == "this")
+	{
+		TypePtr source_record = pa11::strip_cv(cast_source->base);
+		TypePtr target_record = pa11::strip_cv(cast_target->base);
+		if (source_record->kind == TypeKind::Record &&
+		    target_record->kind == TypeKind::Record &&
+		    record_has_base_subobject(target_record, source_record))
+		{
+			program_.mark_static_downcast_source_record(source_record);
+			Value raw = emit_rvalue(expr.children[0]);
+			uint64_t offset = base_subobject_offset(target_record,
+			                                       source_record);
+			if (offset == 0)
+				return raw;
+			string tmp = fresh_temp();
+			instr(tmp + " = index i8 [projection=base_subobject] " +
+			      raw.text + ", -" + to_string(offset));
+			return Value("ptr", tmp);
+		}
+	}
 	return convert_value(emit_rvalue(expr.children[0]),
 	                     expr.children[0].type,
 	                     expr.type);
-}
-
-Value FunctionLowerer::emit_conditional(const Node& expr)
-{
-	string type = expr.category == ValueCategory::LValue ? "ptr" :
-	              scalar_lowir_type(expr.type);
-	string slot = fresh_aux_slot(expr.category == ValueCategory::LValue ?
-	                             "condaddr" : "cond", type);
-	string yes = fresh_block(expr.category == ValueCategory::LValue ?
-	                         "condaddr_then" : "cond_then");
-	string no = fresh_block(expr.category == ValueCategory::LValue ?
-	                        "condaddr_else" : "cond_else");
-	string end = fresh_block(expr.category == ValueCategory::LValue ?
-	                         "condaddr_end" : "cond_end");
-	if (eh_try_depth_ == 0 && has_active_cleanups() &&
-	    node_contains_call_expression(expr.children[0]))
-		branch_with_unwind_cleanups(expr.children[0], yes, no);
-	else
-	{
-		Value cond = emit_rvalue(expr.children[0]);
-		if (is_float_type(expr.children[0].type))
-			cond = bool_value(cond, expr.children[0].type);
-		terminate_with_pending_temp_cleanups(cond.text, yes, no);
-	}
-	start_block(yes);
-	Value yv;
-	if (expr.category == ValueCategory::LValue)
-		yv = ensure_pointer(emit_lvalue_addr(expr.children[1]));
-	else
-	{
-		if (starts_with(expr.children[1].line, "call-expression"))
-		{
-			call_result_store_slot_ = slot;
-			call_result_store_type_ = expr.type;
-			call_result_store_consumed_ = false;
-		}
-		yv = emit_rvalue(expr.children[1]);
-		if (!call_result_store_consumed_)
-			yv = convert_value(yv, expr.children[1].type, expr.type);
-	}
-	if (expr.category == ValueCategory::LValue)
-		yv = convert_value(yv,
-		                   pa11::make_pointer(object_type(expr.children[1].type)),
-		                   pa11::make_pointer(expr.type));
-	if (!call_result_store_consumed_)
-		instr("store " + type + " " + yv.text + ", $" + slot);
-	call_result_store_slot_.clear();
-	call_result_store_type_.reset();
-	call_result_store_consumed_ = false;
-	emit_pending_temp_cleanups();
-	terminate("jump ^" + end);
-	start_block(no);
-	Value nv;
-	if (expr.category == ValueCategory::LValue)
-		nv = ensure_pointer(emit_lvalue_addr(expr.children[2]));
-	else
-	{
-		if (starts_with(expr.children[2].line, "call-expression"))
-		{
-			call_result_store_slot_ = slot;
-			call_result_store_type_ = expr.type;
-			call_result_store_consumed_ = false;
-		}
-		nv = emit_rvalue(expr.children[2]);
-		if (!call_result_store_consumed_)
-			nv = convert_value(nv, expr.children[2].type, expr.type);
-	}
-	if (expr.category == ValueCategory::LValue)
-		nv = convert_value(nv,
-		                   pa11::make_pointer(object_type(expr.children[2].type)),
-		                   pa11::make_pointer(expr.type));
-	if (!call_result_store_consumed_)
-		instr("store " + type + " " + nv.text + ", $" + slot);
-	call_result_store_slot_.clear();
-	call_result_store_type_.reset();
-	call_result_store_consumed_ = false;
-	emit_pending_temp_cleanups();
-	terminate("jump ^" + end);
-	start_block(end);
-	string tmp = fresh_temp();
-	instr(tmp + " = load " + type + " $" + slot);
-	return Value(type, tmp);
-}
-
-Value FunctionLowerer::emit_conditional_value(const Node& expr)
-{
-	string type = scalar_lowir_type(expr.type);
-	string slot = fresh_aux_slot("cond", type);
-	string yes = fresh_block("cond_then");
-	string no = fresh_block("cond_else");
-	string end = fresh_block("cond_end");
-	if (eh_try_depth_ == 0 && has_active_cleanups() &&
-	    node_contains_call_expression(expr.children[0]))
-		branch_with_unwind_cleanups(expr.children[0], yes, no);
-	else
-	{
-		Value cond = emit_rvalue(expr.children[0]);
-		if (is_float_type(expr.children[0].type))
-			cond = bool_value(cond, expr.children[0].type);
-		terminate_with_pending_temp_cleanups(cond.text, yes, no);
-	}
-	start_block(yes);
-	if (starts_with(expr.children[1].line, "call-expression"))
-	{
-		call_result_store_slot_ = slot;
-		call_result_store_type_ = expr.type;
-		call_result_store_consumed_ = false;
-	}
-	Value yv = emit_rvalue(expr.children[1]);
-	if (!call_result_store_consumed_)
-	{
-		yv = convert_value(yv, expr.children[1].type, expr.type);
-		instr("store " + type + " " + yv.text + ", $" + slot);
-	}
-	call_result_store_slot_.clear();
-	call_result_store_type_.reset();
-	call_result_store_consumed_ = false;
-	emit_pending_temp_cleanups();
-	terminate("jump ^" + end);
-	start_block(no);
-	if (starts_with(expr.children[2].line, "call-expression"))
-	{
-		call_result_store_slot_ = slot;
-		call_result_store_type_ = expr.type;
-		call_result_store_consumed_ = false;
-	}
-	Value nv = emit_rvalue(expr.children[2]);
-	if (!call_result_store_consumed_)
-	{
-		nv = convert_value(nv, expr.children[2].type, expr.type);
-		instr("store " + type + " " + nv.text + ", $" + slot);
-	}
-	call_result_store_slot_.clear();
-	call_result_store_type_.reset();
-	call_result_store_consumed_ = false;
-	emit_pending_temp_cleanups();
-	terminate("jump ^" + end);
-	start_block(end);
-	string tmp = fresh_temp();
-	instr(tmp + " = load " + type + " $" + slot);
-	return Value(type, tmp);
 }
 
 void FunctionLowerer::branch_on(const Node& expr, const string& yes, const string& no)

@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include <algorithm>
 #include <utility>
 namespace pa14 { namespace internal { bool node_contains_call_expression(const Node& node) {
 if (starts_with(node.line, "call-expression")) return true; for (size_t i = 0; i < node.children.size(); ++i) if (node_contains_call_expression(node.children[i]))
@@ -30,10 +31,36 @@ if (bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return f
 { TypePtr stripped = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (stripped.get() == NULL) continue; if (pa11::same_type(stripped, wanted)) return true;
 if (record_has_base_subobject(stripped, wanted)) return true; } return false;
 } uint64_t base_subobject_offset(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL)
-return 0; TypePtr cur = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
-if (cur->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return 0; vector<pair<TypePtr, uint64_t> > pending; pending.push_back(make_pair(cur, 0)); vector<TypePtr> seen;
-while (!pending.empty()) { TypePtr record = pa11::strip_cv(pending.back().first); uint64_t base_offset = pending.back().second; pending.pop_back(); if (record.get() == NULL || record->kind != TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i], record)) already = true; if (already) continue; seen.push_back(record); pa11::layout_record_type(record); vector<TypePtr> bases = pa11::record_direct_bases(record); for (size_t i = 0; i < bases.size(); ++i) { TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record) continue; uint64_t offset = base_offset + pa11::record_direct_base_offset(record, direct); if (pa11::same_type(direct, wanted)) return offset; pending.push_back(make_pair(direct, offset)); } }
+return 0; TypePtr root = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
+if (root->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return 0; vector<pair<TypePtr, uint64_t> > pending; pending.push_back(make_pair(root, 0)); vector<pair<TypePtr, uint64_t> > seen;
+while (!pending.empty()) { TypePtr record = pa11::strip_cv(pending.back().first); uint64_t base_offset = pending.back().second; pending.pop_back(); if (record.get() == NULL || record->kind != TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i].first, record) && seen[i].second == base_offset) already = true; if (already) continue; seen.push_back(make_pair(record, base_offset)); pa11::layout_record_type(record); vector<TypePtr> bases = pa11::record_direct_bases(record); for (size_t i = 0; i < bases.size(); ++i) { TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record) continue; uint64_t offset = pa11::record_direct_base_is_virtual(record, i) ? pa11::record_virtual_base_offset(root, direct) : base_offset + pa11::record_direct_base_offset(record, direct); if (pa11::same_type(direct, wanted)) return offset; pending.push_back(make_pair(direct, offset)); } }
 return 0; }
+bool target_is_virtual_base_subobject(TypePtr source, TypePtr target)
+{ TypePtr bare = source.get() != NULL ? pa11::strip_cv(source) : TypePtr(); TypePtr wanted = target.get() != NULL ? pa11::strip_cv(target) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return false; vector<TypePtr> vbases = pa11::record_virtual_bases(bare); for (size_t i = 0; i < vbases.size(); ++i) if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted)) return true; return false; }
+vector<size_t> hidden_virtual_base_slot_store_order(
+	const vector<TypePtr>& bases)
+{
+	vector<size_t> order;
+	for (size_t i = 0; i < bases.size(); ++i)
+		order.push_back(i);
+	stable_sort(order.begin(), order.end(),
+	            [&bases](size_t lhs, size_t rhs) {
+		TypePtr left = bases[lhs].get() != NULL
+			? pa11::strip_cv(bases[lhs]) : TypePtr();
+		TypePtr right = bases[rhs].get() != NULL
+			? pa11::strip_cv(bases[rhs]) : TypePtr();
+		bool left_contains_right =
+			left.get() != NULL && right.get() != NULL &&
+			record_has_base_subobject(left, right);
+		bool right_contains_left =
+			left.get() != NULL && right.get() != NULL &&
+			record_has_base_subobject(right, left);
+		if (left_contains_right != right_contains_left)
+			return right_contains_left;
+		return false;
+	});
+	return order;
+}
 Binding* find_record_copy_move_constructor(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record || bare->scope == NULL)
 return NULL; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end())
 return NULL; for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];
@@ -50,7 +77,7 @@ continue; if (pa11::same_type(pa11::strip_cv(param->base), bare)) return binding
 return NULL; } FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn) : program_(program),
 fn_(fn), current_(NULL), temp_counter_(0), block_counter_(0),
 aux_slot_counter_(0), eh_try_depth_(0), call_temp_cleanup_defer_depth_(0), logical_call_result_consumed_(false),
-call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
+call_result_store_addr_(), call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
 constructor_destination_before_protected_try_(false) { } void FunctionLowerer::add_slot(const string& name, const string& type)
 { if (starts_with(name, "__begin") || starts_with(name, "__end")) out_.has_range_for_state = true; out_.slots.push_back("  slot $" + name + " : " + type); } string FunctionLowerer::slot_for(const Binding* binding)
 { map<const Binding*, string>::const_iterator found = slots_.find(binding); if (found != slots_.end()) return found->second;
@@ -64,13 +91,177 @@ string name = prefix + "__" + to_string(aux_slot_counter_); add_slot(name, type)
 void FunctionLowerer::start_block(const string& name) { blocks_.push_back(unique_ptr<Block>(new Block(name))); current_ = blocks_.back().get();
 } void FunctionLowerer::instr(const string& text) { if (current_ == NULL || current_->terminated)
 return; current_->instrs.push_back("    " + text); } Value FunctionLowerer::emit_base_subobject_addr(Value object,
-TypePtr source, TypePtr target) { string addr = fresh_temp();
+TypePtr source, TypePtr target) { TypePtr bare = source.get() != NULL ? pa11::strip_cv(source) : TypePtr(); if (bare.get() != NULL && bare->kind == TypeKind::Record && bare->is_polymorphic && target_is_virtual_base_subobject(bare, target)) { string vptr = fresh_temp(); instr(vptr + " = load ptr " + object.text); string offset_addr = fresh_temp(); instr(offset_addr + " = index i8 " + vptr + ", -" + to_string(vtable_address_point_offset(bare))); string offset = fresh_temp(); instr(offset + " = load i64 " + offset_addr); string addr = fresh_temp(); instr(addr + " = index i8 " + object.text + ", " + offset); return Value("ptr", addr); } string addr = fresh_temp();
 instr(addr + " = index i8 [projection=base_subobject] " + object.text + ", " + to_string(base_subobject_offset(source, target))); return Value("ptr", addr); }
+const Binding* FunctionLowerer::hidden_virtual_base_parameter_binding(
+	const Node& expr) const
+{
+	if (expr.binding != NULL &&
+	    expr.binding->kind == BindingKind::Parameter)
+		return expr.binding;
+	if (starts_with(expr.line, "unary-expression") &&
+	    expr.has_op && expr.op == OP_STAR &&
+	    !expr.children.empty() &&
+	    expr.children[0].binding != NULL &&
+	    expr.children[0].binding->kind == BindingKind::Parameter)
+		return expr.children[0].binding;
+	if ((starts_with(expr.line, "cast-expression") ||
+	     starts_with(expr.line, "parenthesized-expression")) &&
+	    expr.children.size() == 1)
+		return hidden_virtual_base_parameter_binding(expr.children[0]);
+	return NULL;
+}
+
+bool FunctionLowerer::hidden_virtual_base_argument_for_parameter(
+	const Binding* binding,
+	TypePtr target,
+	string& hidden_base,
+	TypePtr& hidden_base_record)
+{
+	hidden_base.clear();
+	hidden_base_record = TypePtr();
+	if (binding == NULL || target.get() == NULL)
+		return false;
+	TypePtr target_record = pa11::strip_cv(target);
+	if (target_record.get() == NULL ||
+	    target_record->kind != TypeKind::Record ||
+	    fn_.binding == NULL ||
+	    fn_.binding->type.get() == NULL ||
+	    fn_.binding->type->kind != TypeKind::Function)
+		return false;
+	TypePtr fn_type = fn_.binding->type;
+	size_t param_index = 0;
+	size_t hidden_pvb_index = 0;
+	for (size_t i = 0; i < fn_.children.size(); ++i)
+	{
+		if (!starts_with(fn_.children[i].line, "parameter "))
+			continue;
+		Binding* candidate = fn_.children[i].binding;
+		TypePtr ptype = param_index < fn_type->parameters.size()
+			? fn_type->parameters[param_index]
+			: (candidate != NULL ? candidate->type : TypePtr());
+		bool member_this_param =
+			fn_.binding->owner != NULL &&
+			fn_.binding->owner->kind == ScopeKind::Class &&
+			!fn_.binding->is_static_member &&
+			param_index == 0;
+		if (member_this_param)
+		{
+			if (candidate == binding &&
+			    !is_class_constructor_binding(fn_.binding) &&
+			    !is_class_destructor_binding(fn_.binding))
+			{
+				vector<TypePtr> vbases =
+					hidden_virtual_bases_for_record(
+						class_record_for_member(fn_.binding));
+				for (size_t v = 0; v < vbases.size(); ++v)
+				{
+					TypePtr hidden_record = pa11::strip_cv(vbases[v]);
+					if (hidden_record.get() != NULL &&
+					    (pa11::same_type(hidden_record, target_record) ||
+					     record_has_base_subobject(hidden_record,
+					                               target_record)))
+					{
+						hidden_base = "%__vbptr" + to_string(v);
+						hidden_base_record = hidden_record;
+						return true;
+					}
+				}
+			}
+			++param_index;
+			continue;
+		}
+		vector<TypePtr> hidden_vbases =
+			program_.hidden_virtual_bases_for_function_parameter(
+				fn_.binding, param_index, ptype);
+		if (candidate == binding)
+		{
+			TypePtr pbare = ptype.get() != NULL
+				? pa11::strip_cv(ptype) : TypePtr();
+			bool record_reference =
+				pbare.get() != NULL &&
+				(pbare->kind == TypeKind::LValueReference ||
+				 pbare->kind == TypeKind::RValueReference) &&
+				pa11::strip_cv(pbare->base)->kind == TypeKind::Record;
+			if (record_reference)
+			{
+				vector<TypePtr> slot_vbases =
+					hidden_virtual_bases_for_record(
+						pa11::strip_cv(pbare->base));
+				for (size_t v = 0; v < slot_vbases.size(); ++v)
+				{
+					TypePtr hidden_record =
+						pa11::strip_cv(slot_vbases[v]);
+					if (hidden_record.get() != NULL &&
+					    (pa11::same_type(hidden_record, target_record) ||
+					     record_has_base_subobject(hidden_record,
+					                               target_record)))
+					{
+						hidden_base = fresh_temp();
+						instr(hidden_base + " = load ptr $" +
+						      slot_for(binding) + "__pvb" +
+						      to_string(v));
+						hidden_base_record = hidden_record;
+						return true;
+					}
+				}
+			}
+			for (size_t v = 0; v < hidden_vbases.size(); ++v)
+			{
+				TypePtr hidden_record =
+					pa11::strip_cv(hidden_vbases[v]);
+				if (hidden_record.get() != NULL &&
+				    (pa11::same_type(hidden_record, target_record) ||
+				     record_has_base_subobject(hidden_record,
+				                               target_record)))
+				{
+					hidden_base = "%__pvbptr" +
+						to_string(hidden_pvb_index + v);
+					hidden_base_record = hidden_record;
+					return true;
+				}
+			}
+		}
+		hidden_pvb_index += hidden_vbases.size();
+		++param_index;
+	}
+	return false;
+}
+
+Value FunctionLowerer::emit_hidden_virtual_base_addr_for_lvalue(
+	const Node& expr,
+	TypePtr target,
+	bool& found,
+	TypePtr* hidden_record)
+{
+	found = false;
+	if (hidden_record != NULL)
+		*hidden_record = TypePtr();
+	const Binding* binding = hidden_virtual_base_parameter_binding(expr);
+	string hidden_base;
+	TypePtr hidden_base_record;
+	if (!hidden_virtual_base_argument_for_parameter(binding,
+	                                               target,
+	                                               hidden_base,
+	                                               hidden_base_record))
+		return Value();
+	found = true;
+	if (hidden_record != NULL)
+		*hidden_record = hidden_base_record;
+	if (pa11::same_type(pa11::strip_cv(hidden_base_record),
+	                    pa11::strip_cv(target)))
+		return Value("ptr", hidden_base);
+	return emit_base_subobject_addr(Value("ptr", hidden_base),
+	                                hidden_base_record,
+	                                target);
+}
 void FunctionLowerer::terminate(const string& text) { if (current_ == NULL || current_->terminated) return;
 current_->instrs.push_back("    " + text); current_->terminated = true; } void FunctionLowerer::lower_vptr_store(TypePtr record)
 { TypePtr bare = pa11::strip_cv(record); if (bare->kind != TypeKind::Record || !bare->is_polymorphic) return;
 program_.demand_vtable(bare); string self = fresh_temp(); instr(self + " = load ptr $this"); string vt = fresh_temp();
-instr(vt + " = addr @" + vtable_symbol_for_record(bare)); string addr_point = fresh_temp(); instr(addr_point + " = index i8 " + vt + ", 16"); instr("store ptr " + addr_point + ", " + self);
+instr(vt + " = addr @" + vtable_symbol_for_record(bare)); string addr_point = fresh_temp(); instr(addr_point + " = index i8 " + vt + ", " + to_string(vtable_address_point_offset(bare))); instr("store ptr " + addr_point + ", " + self);
+vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare); set<uint64_t> stored_view_offsets;
+for (size_t i = 0; i < views.size(); ++i) { if (!stored_view_offsets.insert(views[i].second).second) continue; string object = fresh_temp(); instr(object + " = load ptr $this"); string base = fresh_temp(); instr(base + " = index i8 [projection=base_subobject] " + object + ", " + to_string(views[i].second)); string view = fresh_temp(); instr(view + " = addr @" + vtable_view_symbol_for_record(bare, views[i].first, views[i].second)); if (vtable_address_point_offset(bare) != 16) { string view_addr = fresh_temp(); instr(view_addr + " = index i8 " + view + ", " + to_string(vtable_address_point_offset(bare))); view = view_addr; } instr("store ptr " + view + ", " + base); }
 } void FunctionLowerer::maybe_lower_constructor_vptr(size_t index, size_t total) { Binding* binding = fn_.binding;
 if (!is_class_constructor_binding(binding)) return; TypePtr record = class_record_for_member(binding); if (record.get() == NULL ||
 !pa11::strip_cv(record)->is_polymorphic) return; const Node* current = index < total ? &fn_.children[index] : NULL; if (current != NULL && starts_with(current->line, "base-init-action"))
@@ -81,8 +272,7 @@ pa11::layout_record_type(bare); for (size_t n = 0; n < bare->fields.size(); ++n)
 Binding* field = bare->fields[i]; function<Value()> field_addr = [this, field]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this");
 string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + this_ptr + ", " + to_string(field->member_offset)); return Value("ptr", addr);
 }; lower_destructor_for_object(field_addr, field->type); emitted = true; }
-if (bare->base.get() != NULL) { Node action("base-fini-action " + pa11::strip_cv(bare->base)->name); action.type = bare->base;
-lower_base_fini(action); emitted = true; } }
+vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t n = 0; n < bases.size(); ++n) { size_t i = bases.size() - 1 - n; TypePtr base = pa11::strip_cv(bases[i]); Node action("base-fini-action " + base->name); action.type = base; lower_base_fini(action); emitted = true; } }
 FunctionOut FunctionLowerer::lower() { Binding* binding = fn_.binding; if (binding == NULL)
 throw runtime_error("missing function binding"); out_.binding = binding; string name = program_.symbol_for(binding); out_.name = name; TypePtr fn_type = binding->type;
 bool indirect_result = pa11::strip_cv(fn_type->base)->kind == TypeKind::Record && record_return_by_address(fn_type->base); ostringstream header;
@@ -91,7 +281,7 @@ header << "function @" << name << "("; if (indirect_result) header << "%ret : pt
 { if (i != 0 || indirect_result) header << ", "; string pname = i < fn_.children.size() &&
 starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : ""; size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space);
 if (pname.empty()) pname = "__param" + to_string(i); TypePtr ptype = fn_type->parameters[i]; header << "%" << pname << " : " << lowir_parameter(ptype);
-} header << ") -> " << (indirect_result ? "void" : scalar_lowir_type(fn_type->base)); vector<string> metadata;
+} size_t hidden_pvb_index = 0; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && !fn_type->parameters.empty(); for (size_t i = member_this_param ? 1 : 0; i < fn_type->parameters.size(); ++i) { vector<TypePtr> vbases = program_.hidden_virtual_bases_for_function_parameter(fn_.binding, i, fn_type->parameters[i]); for (size_t v = 0; v < vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result) header << ", "; header << "%__pvbptr" << hidden_pvb_index++ << " : ptr"; } } vector<TypePtr> this_vbases = member_this_param && !is_class_constructor_binding(fn_.binding) && !is_class_destructor_binding(fn_.binding) ? (fn_.binding->is_virtual ? program_.hidden_virtual_bases_for_function_parameter(fn_.binding, 0, fn_type->parameters[0]) : hidden_virtual_bases_for_record(class_record_for_member(fn_.binding))) : vector<TypePtr>(); for (size_t v = 0; v < this_vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result || v != 0) header << ", "; header << "%__vbptr" << v << " : ptr"; } header << ") -> " << (indirect_result ? "void" : scalar_lowir_type(fn_type->base)); vector<string> metadata;
 if (fn_type->variadic) metadata.push_back("arity=variadic"); if (binding->language_linkage == "c") metadata.push_back("linkage=c");
 if (binding->unwind_no) metadata.push_back("unwind=no"); if (binding->name == "__cppgm_init") metadata.push_back("role=init");
 else if (binding->name == "__cppgm_fini") metadata.push_back("role=fini"); else if (binding->name == "main") {
@@ -112,29 +302,251 @@ emit_scope_cleanups(cleanups_.back()); if (pa11::is_void_type(fn_type->base) || 
 instr("zeroinit " + to_string(pa11::type_size(fn_type->base)) + "x" + to_string(pa11::type_align(fn_type->base)) + " $" + record_return_slot_);
 terminate("return " + scalar_lowir_type(fn_type->base) + " $" + record_return_slot_); } else
 terminate("return " + scalar_lowir_type(fn_type->base) + " 0"); } cleanups_.pop_back(); for (size_t i = 0; i < blocks_.size(); ++i)
-out_.blocks.push_back(*blocks_[i]); return out_; } void FunctionLowerer::lower_params()
+out_.blocks.push_back(*blocks_[i]); return out_; }
+
+FunctionOut FunctionLowerer::lower_deleting_destructor_entry(
+	const string& name,
+	const string& header)
+{
+	Binding* binding = fn_.binding;
+	if (binding == NULL)
+		throw runtime_error("missing deleting destructor binding");
+	out_.binding = binding;
+	out_.name = name;
+	out_.header = header;
+	cleanups_.push_back(vector<Cleanup>());
+	lower_params();
+	start_block("entry");
+	lower_param_stores();
+	TypePtr record = class_record_for_member(binding);
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() != NULL && bare->kind == TypeKind::Record &&
+	    binding->is_virtual)
+		lower_vptr_store(bare);
+	for (size_t i = 0; i < fn_.children.size(); ++i)
+		if (starts_with(fn_.children[i].line, "compound-statement"))
+			lower_deleting_destructor_compound(fn_.children[i]);
+	if (current_ != NULL && !current_->terminated)
+	{
+		emit_scope_cleanups(cleanups_.back());
+		lower_deleting_destructor_nonvirtual_bases(bare);
+		string del_arg = fresh_temp();
+		instr(del_arg + " = load ptr $this");
+		instr("call void @operator_delete(" + del_arg + ")");
+		terminate("return void");
+	}
+	cleanups_.pop_back();
+	for (size_t i = 0; i < blocks_.size(); ++i)
+		out_.blocks.push_back(*blocks_[i]);
+	return out_;
+}
+
+void FunctionLowerer::lower_deleting_destructor_compound(const Node& node)
+{
+	cleanups_.push_back(vector<Cleanup>());
+	for (size_t i = 0; i < node.children.size(); ++i)
+	{
+		if (starts_with(node.children[i].line, "base-fini-action") ||
+		    starts_with(node.children[i].line, "member-fini-action"))
+			continue;
+		lower_stmt(node.children[i]);
+	}
+	if (current_ != NULL && !current_->terminated)
+		emit_scope_cleanups(cleanups_.back());
+	cleanups_.pop_back();
+}
+
+void FunctionLowerer::lower_deleting_destructor_nonvirtual_bases(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t n = 0; n < bases.size(); ++n)
+	{
+		size_t i = bases.size() - 1 - n;
+		if (pa11::record_direct_base_is_virtual(bare, i))
+			continue;
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() == NULL || base->kind != TypeKind::Record)
+			continue;
+		Binding* base_dtor = find_destructor(base);
+		if (base_dtor == NULL || !base_dtor->is_virtual)
+			continue;
+		program_.demand_function_declaration(base_dtor);
+		string base_callee = program_.destructor_symbol_for(base_dtor, true);
+		program_.demand_inline_function(base_dtor, false);
+		string reload = fresh_temp();
+		instr(reload + " = load ptr $this");
+		string base_addr = fresh_temp();
+		instr(base_addr + " = index i8 [projection=base_subobject] " +
+		      reload + ", " + to_string(base_subobject_offset(bare, base)));
+		vector<string> args;
+		args.push_back(base_addr);
+		if (base->is_polymorphic && record_uses_virtual_base_vtt(base))
+		{
+			size_t vtt_slot = construction_vtt_slot_for_direct_base(bare,
+			                                                        base);
+			if (vtt_slot != static_cast<size_t>(-1))
+			{
+				string vtt_base = fresh_temp();
+				instr(vtt_base + " = addr @" + vtt_symbol_for_record(bare));
+				string vtt_arg = vtt_base;
+				if (vtt_slot != 0)
+				{
+					vtt_arg = fresh_temp();
+					instr(vtt_arg + " = index i8 " + vtt_base + ", " +
+					      to_string(vtt_slot * 8));
+				}
+				args.push_back(vtt_arg);
+			}
+		}
+		vector<TypePtr> vbases = hidden_virtual_bases_for_record(base);
+		for (size_t v = 0; v < vbases.size(); ++v)
+		{
+			string hidden = "0";
+			if (record_has_base_subobject(bare, vbases[v]))
+			{
+				string this_ptr = fresh_temp();
+				instr(this_ptr + " = load ptr $this");
+				uint64_t offset = base_subobject_offset(bare, vbases[v]);
+				if (offset == 0)
+					hidden = this_ptr;
+				else
+				{
+					hidden = fresh_temp();
+					instr(hidden + " = index i8 " + this_ptr + ", " +
+					      to_string(offset));
+				}
+			}
+			args.push_back(hidden);
+		}
+		ostringstream call;
+		call << "call void @" << base_callee << "(";
+		for (size_t a = 0; a < args.size(); ++a)
+		{
+			if (a != 0)
+				call << ", ";
+			call << args[a];
+		}
+		call << ")";
+		instr(call.str());
+	}
+}
+
+void FunctionLowerer::lower_params()
 { TypePtr fn_type = fn_.binding->type; size_t param_index = 0; for (size_t i = 0; i < fn_.children.size(); ++i)
 { if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10);
 size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space); if (pname.empty()) pname = "__param" + to_string(param_index);
 if (pname.size() > 1 && pname[0] == 't') { int n = 0; bool digits = true;
 for (size_t j = 1; j < pname.size(); ++j) if (pname[j] >= '0' && pname[j] <= '9') n = n * 10 + (pname[j] - '0'); else
 digits = false; if (digits && n > temp_counter_) temp_counter_ = n; }
-Binding* binding = fn_.children[i].binding; TypePtr ptype = fn_type->parameters[param_index]; if (binding == NULL) {
-if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(ptype)); ++param_index;
+Binding* binding = fn_.children[i].binding; TypePtr ptype = fn_type->parameters[param_index]; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && param_index == 0; TypePtr ptype_bare = pa11::strip_cv(ptype); bool pvb_slots = !member_this_param && (ptype_bare->kind == TypeKind::LValueReference || ptype_bare->kind == TypeKind::RValueReference) && pa11::strip_cv(ptype_bare->base)->kind == TypeKind::Record; vector<TypePtr> param_vbases = pvb_slots ? hidden_virtual_bases_for_record(pa11::strip_cv(ptype_bare->base)) : vector<TypePtr>(); if (binding == NULL) {
+if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(ptype)); for (size_t v = 0; v < param_vbases.size(); ++v) add_slot(pname + "__pvb" + to_string(v), "ptr"); ++param_index;
 } else { slots_[binding] = pname;
-if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(binding->type)); if (pa11::strip_cv(ptype)->kind == TypeKind::Record &&
+if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(binding->type)); for (size_t v = 0; v < param_vbases.size(); ++v) add_slot(pname + "__pvb" + to_string(v), "ptr"); if (pa11::strip_cv(ptype)->kind == TypeKind::Record &&
 record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_index; }
-} } void FunctionLowerer::lower_param_stores() {
-TypePtr fn_type = fn_.binding->type; size_t param_index = 0; for (size_t i = 0; i < fn_.children.size(); ++i) {
-if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10); size_t space = pname.find(' ');
-pname = space == string::npos ? pname : pname.substr(0, space); if (pname.empty()) pname = "__param" + to_string(param_index); TypePtr ptype = fn_type->parameters[param_index];
-if (pa11::strip_cv(ptype)->kind == TypeKind::Record) { Binding* binding = fn_.children[i].binding; if (!record_pass_by_address(ptype) &&
-record_has_storage_copy(ptype)) { string addr = fresh_temp(); instr(addr + " = addr $" + pname);
-instr("copyobj " + to_string(pa11::type_size(ptype)) + "x" + to_string(pa11::type_align(ptype)) + " %" + pname + ", " + addr); }
-if (!cleanups_.empty() && parameter_type_needs_destructor(ptype)) { if (record_pass_by_address(ptype)) cleanups_.back().push_back(
-Cleanup("%" + pname, ptype, true)); else if (binding != NULL) cleanups_.back().push_back( Cleanup(binding, binding->type, true));
-} ++param_index; continue; }
-instr("store " + scalar_lowir_type(ptype) + " %" + pname + ", $" + pname); ++param_index; }
+} } void FunctionLowerer::lower_param_stores()
+{
+	TypePtr fn_type = fn_.binding->type;
+	size_t param_index = 0;
+	size_t hidden_pvb_index = 0;
+	for (size_t i = 0; i < fn_.children.size(); ++i)
+	{
+		if (!starts_with(fn_.children[i].line, "parameter "))
+			continue;
+		string pname = fn_.children[i].line.substr(10);
+		size_t space = pname.find(' ');
+		pname = space == string::npos ? pname : pname.substr(0, space);
+		if (pname.empty())
+			pname = "__param" + to_string(param_index);
+		TypePtr ptype = fn_type->parameters[param_index];
+		bool member_this_param =
+			fn_.binding->owner != NULL &&
+			fn_.binding->owner->kind == ScopeKind::Class &&
+			!fn_.binding->is_static_member &&
+			param_index == 0;
+		TypePtr ptype_bare = pa11::strip_cv(ptype);
+		vector<TypePtr> hidden_vbases = !member_this_param
+			? program_.hidden_virtual_bases_for_function_parameter(
+				fn_.binding, param_index, ptype)
+			: vector<TypePtr>();
+		bool store_pvb_slots =
+			!member_this_param &&
+			(ptype_bare->kind == TypeKind::LValueReference ||
+			 ptype_bare->kind == TypeKind::RValueReference) &&
+			pa11::strip_cv(ptype_bare->base)->kind == TypeKind::Record;
+		vector<TypePtr> slot_vbases = store_pvb_slots
+			? hidden_virtual_bases_for_record(pa11::strip_cv(ptype_bare->base))
+			: vector<TypePtr>();
+		size_t hidden_start = hidden_pvb_index;
+		Binding* binding = fn_.children[i].binding;
+		if (pa11::strip_cv(ptype)->kind == TypeKind::Record)
+		{
+			if (!record_pass_by_address(ptype) &&
+			    record_has_storage_copy(ptype))
+			{
+				string addr = fresh_temp();
+				instr(addr + " = addr $" + pname);
+				instr("copyobj " + to_string(pa11::type_size(ptype)) +
+				      "x" + to_string(pa11::type_align(ptype)) + " %" +
+				      pname + ", " + addr);
+			}
+			if (!cleanups_.empty() && parameter_type_needs_destructor(ptype))
+			{
+				if (record_pass_by_address(ptype))
+					cleanups_.back().push_back(
+						Cleanup("%" + pname, ptype, true));
+				else if (binding != NULL)
+					cleanups_.back().push_back(
+						Cleanup(binding, binding->type, true));
+			}
+		}
+		else
+			instr("store " + scalar_lowir_type(ptype) + " %" + pname +
+			      ", $" + pname);
+		if (store_pvb_slots)
+		{
+			TypePtr context = hidden_virtual_base_context_record(ptype);
+			vector<size_t> store_order =
+				hidden_virtual_base_slot_store_order(slot_vbases);
+			for (size_t n = 0; n < store_order.size(); ++n)
+			{
+				size_t v = store_order[n];
+				size_t selected = hidden_vbases.size();
+				for (size_t h = 0; h < hidden_vbases.size(); ++h)
+					if (pa11::same_type(pa11::strip_cv(hidden_vbases[h]),
+					                    pa11::strip_cv(slot_vbases[v])))
+					{
+						selected = h;
+						break;
+					}
+				if (selected != hidden_vbases.size())
+					instr("store ptr %__pvbptr" +
+					      to_string(hidden_start + selected) +
+					      ", $" + pname + "__pvb" + to_string(v));
+				else
+				{
+					uint64_t offset =
+						base_subobject_offset(context, slot_vbases[v]);
+					if (offset == 0)
+						instr("store ptr %" + pname + ", $" + pname +
+						      "__pvb" + to_string(v));
+					else
+					{
+						string tmp = fresh_temp();
+						instr(tmp + " = index i8 %" + pname + ", " +
+						      to_string(offset));
+						instr("store ptr " + tmp + ", $" + pname +
+						      "__pvb" + to_string(v));
+					}
+				}
+			}
+		}
+		hidden_pvb_index += hidden_vbases.size();
+		++param_index;
+	}
 } bool FunctionLowerer::lower_defaulted_storage_special_member() { Binding* binding = fn_.binding;
 if (binding == NULL || !binding->is_defaulted || binding->owner == NULL || binding->owner->kind != ScopeKind::Class ||
 binding->type->kind != TypeKind::Function || binding->type->parameters.size() != 2 || !is_reference(binding->type->parameters[1])) return false;
@@ -181,9 +593,17 @@ Binding* binding = node.children[i].children[0].binding; string suffix = " " + b
 suffix) == 0); } if (pa11::strip_cv(fn_.binding->type->base)->kind == TypeKind::Record && record_return_by_address(fn_.binding->type->base) &&
 (returns_declared_variable || (starts_with(node.children[i].line, "simple-declaration") && node.children[i].children.size() == 1 && starts_with(node.children[i].children[0].line, "variable ") &&
 node.children[i].children[0].binding != NULL && !earlier_return && node.children[i].children[0].binding == final_return_binding))) return_slot_variables_.insert(node.children[i].children[0].binding);
-lower_stmt(node.children[i]); } if (top_function_body && is_class_constructor_binding(fn_.binding) && !constructor_vptr_written)
+lower_stmt(node.children[i]); } if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions);
+if (top_function_body && is_class_destructor_binding(fn_.binding) && destructor_has_fini_actions)
+{ TypePtr record = class_record_for_member(fn_.binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+if (bare.get() != NULL && bare->kind == TypeKind::Record) { vector<TypePtr> vbases = hidden_virtual_bases_for_record(bare);
+for (size_t n = 0; n < vbases.size(); ++n) { size_t i = vbases.size() - 1 - n; TypePtr vbase = vbases[i].get() != NULL ? pa11::strip_cv(vbases[i]) : TypePtr();
+if (vbase.get() == NULL || vbase->kind != TypeKind::Record) continue; bool direct_virtual_base = false; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
+for (size_t b = 0; b < direct_bases.size(); ++b) { TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); if (direct_base.get() != NULL && pa11::record_direct_base_is_virtual(bare, b) && pa11::same_type(direct_base, vbase)) direct_virtual_base = true; }
+if (direct_virtual_base) continue; Node action("base-fini-action " + vbase->name); action.type = vbase; lower_base_fini(action); } } }
+if (top_function_body && is_class_constructor_binding(fn_.binding) && !constructor_vptr_written)
 { TypePtr record = class_record_for_member(fn_.binding); if (record.get() != NULL) lower_vptr_store(record);
-	} if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions); if (current_ != NULL && !current_->terminated) { bool ended_with_throw = false; for (size_t n = 0; n < current_->instrs.size(); ++n) { const string& inst = current_->instrs[current_->instrs.size() - 1 - n]; if (inst.find("@__external_runtime____cxa_throw") != string::npos) { ended_with_throw = true; break; } if (inst.find("eh_end") == string::npos) break; } if (!ended_with_throw) emit_scope_cleanups(cleanups_.back()); }
+	} if (current_ != NULL && !current_->terminated) { bool ended_with_throw = false; for (size_t n = 0; n < current_->instrs.size(); ++n) { const string& inst = current_->instrs[current_->instrs.size() - 1 - n]; if (inst.find("@__external_runtime____cxa_throw") != string::npos) { ended_with_throw = true; break; } if (inst.find("eh_end") == string::npos) break; } if (!ended_with_throw) emit_scope_cleanups(cleanups_.back()); }
 cleanups_.pop_back(); } void FunctionLowerer::lower_stmt(const Node& node)
 { if (starts_with(node.line, "compound-statement")) lower_compound(node); else if (starts_with(node.line, "base-init-action"))
 lower_base_init(node); else if (starts_with(node.line, "member-init-action")) lower_member_init(node); else if (starts_with(node.line, "delegating-init-action"))
