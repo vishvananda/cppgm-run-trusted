@@ -128,8 +128,21 @@ void read_word_token(const string& text,
                      vector<Token>& out)
 {
 	const size_t start = i++;
-	while (i < text.size() && !is_word_delim(text[i]))
+	while (i < text.size())
+	{
+		if ((text[i] == '+' || text[i] == '-') && i > start)
+		{
+			const char prev = text[i - 1];
+			if (prev == 'e' || prev == 'E' || prev == 'p' || prev == 'P')
+			{
+				++i;
+				continue;
+			}
+		}
+		if (is_word_delim(text[i]))
+			break;
 		++i;
+	}
 	out.push_back(Token(text.substr(start, i - start), line));
 }
 

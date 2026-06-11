@@ -137,9 +137,13 @@ Type object_type(size_t bytes, size_t align)
 Span parse_span_text(const string& text)
 {
 	const size_t x = text.find('x');
-	if (x == string::npos)
-		throw runtime_error("invalid byte span");
 	Span out;
+	if (x == string::npos)
+	{
+		out.bytes = checked_positive_size(text);
+		out.align = 1;
+		return out;
+	}
 	out.bytes = checked_positive_size(text.substr(0, x));
 	out.align = checked_positive_size(text.substr(x + 1));
 	if (!is_power_of_two(out.align))

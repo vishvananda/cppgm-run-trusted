@@ -1,8 +1,10 @@
 // Student-facing scaffold for the PA28 `lowir2native` binary.
 
 #include "exceptions.h"
+#include "lowir2native.h"
 #include "tool_help_text.h"
 
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -73,14 +75,28 @@ bool has_batch_stdin_arg(const vector<string> & args)
   return has_arg(args, "--batch-stdin");
 }
 
-int run_not_implemented_batch_mode()
+vector<string> split_tab_fields(const string & line)
 {
-  string line;
-  while(getline(cin, line)) {
-    (void)line;
-    cout << "EXIT_NOT_IMPLEMENTED" << endl;
+  vector<string> fields;
+  size_t pos = 0;
+  while(pos <= line.size()) {
+    const size_t next = line.find('\t', pos);
+    if(next == string::npos) {
+      fields.push_back(line.substr(pos));
+      break;
+    }
+    fields.push_back(line.substr(pos, next - pos));
+    pos = next + 1;
   }
-  return EXIT_SUCCESS;
+  return fields;
+}
+
+void truncate_file(const string & path)
+{
+  ofstream out(path.c_str());
+  if(!out) {
+    throw runtime_error("cannot open output capture");
+  }
 }
 
 LowIR2NativeInvocation parse_lowir2native_invocation(const vector<string> & args)
@@ -141,10 +157,49 @@ LowIR2NativeInvocation parse_lowir2native_invocation(const vector<string> & args
   return invocation;
 }
 
+lowir2native::Options invocation_options(const LowIR2NativeInvocation & invocation)
+{
+  lowir2native::Options options;
+  options.target = invocation.output_target;
+  options.outfile = invocation.outfile;
+  options.machine_ir_file = invocation.machine_ir_file;
+  return options;
+}
+
+int run_batch_mode()
+{
+  string line;
+  while(getline(cin, line)) {
+    try {
+      const vector<string> fields = split_tab_fields(line);
+      if(fields.size() < 5) {
+        throw runtime_error("invalid batch request");
+      }
+      truncate_file(fields[0]);
+      if(fields[1] != fields[0]) {
+        truncate_file(fields[1]);
+      }
+      vector<string> args(fields.begin() + 4, fields.end());
+      const LowIR2NativeInvocation invocation =
+          parse_lowir2native_invocation(args);
+      lowir2native::compile(invocation.srcfiles,
+                            invocation_options(invocation));
+      cout << "EXIT_SUCCESS" << endl;
+    }
+    catch(const NotImplementedException &) {
+      cout << "EXIT_NOT_IMPLEMENTED" << endl;
+    }
+    catch(const exception &) {
+      cout << "EXIT_FAILURE" << endl;
+    }
+  }
+  return EXIT_SUCCESS;
+}
+
 int run_lowir2native_mode(const vector<string> & args)
 {
   if(has_batch_stdin_arg(args)) {
-    return run_not_implemented_batch_mode();
+    return run_batch_mode();
   }
 
   if(has_help_arg(args)) {
@@ -154,9 +209,8 @@ int run_lowir2native_mode(const vector<string> & args)
 
   const LowIR2NativeInvocation invocation =
       parse_lowir2native_invocation(args);
-  (void)invocation;
-
-  throw NotImplementedException();
+  lowir2native::compile(invocation.srcfiles, invocation_options(invocation));
+  return EXIT_SUCCESS;
 }
 
 }  // namespace

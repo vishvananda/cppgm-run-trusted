@@ -122,6 +122,8 @@ private:
 
 	Operand parse_operand()
 	{
+		if (match_simple(OP_MINUS))
+			return make_immediate_operand(negate_literal_value(expect_literal()));
 		if (peek().kind == posttoken::TokenKind::Identifier)
 			return parse_identifier_operand();
 		if (peek().kind == posttoken::TokenKind::Literal)
