@@ -498,9 +498,11 @@ pa29::Options make_pa29_options(const DriverInvocation & invocation)
 {
   pa29::Options options;
   options.preprocess = make_preproc_options();
+  vector<string> builtin_include_paths = options.preprocess.include_paths;
+  options.preprocess.include_paths = invocation.include_paths;
   options.preprocess.include_paths.insert(options.preprocess.include_paths.end(),
-                                          invocation.include_paths.begin(),
-                                          invocation.include_paths.end());
+                                          builtin_include_paths.begin(),
+                                          builtin_include_paths.end());
   options.target = invocation.target;
   options.library_paths = invocation.library_paths;
   options.libraries = invocation.libraries;

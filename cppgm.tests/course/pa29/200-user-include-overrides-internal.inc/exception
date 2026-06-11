@@ -1,0 +1,4 @@
+int selected_exception_header()
+{
+  return 0;
+}

@@ -428,6 +428,7 @@ void compile_source_to_object(const string& srcfile,
                               const string& objfile,
                               const Options& options)
 {
+	normalize_target(options.target);
 	compile_source_to_lowir(srcfile, objfile, options);
 }
 

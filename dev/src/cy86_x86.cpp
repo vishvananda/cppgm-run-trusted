@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 using namespace std;
@@ -1184,15 +1185,35 @@ void publish_external_raw_symbol_labels(Program& program,
 	program.labels[external_global_label(name)] = address;
 }
 
+void reserve_external_symbol_label(set<string>& labels, const string& label)
+{
+	if (!labels.insert(label).second)
+		throw runtime_error("duplicate external object symbol");
+}
+
+void reserve_external_symbol_labels(set<string>& labels,
+                                    const ExternalSymbol& symbol)
+{
+	if (symbol.name.empty())
+		return;
+	reserve_external_symbol_label(labels, symbol.name);
+	reserve_external_symbol_label(labels, external_global_label(symbol.name));
+	if (symbol.function)
+		reserve_external_symbol_label(labels,
+		                              external_function_label(symbol.name));
+}
+
 void seed_external_symbol_labels(Program& program,
                                  const vector<ExternalObject>& objects)
 {
+	set<string> labels;
 	for (size_t o = 0; o < objects.size(); ++o)
 		for (size_t s = 0; s < objects[o].symbols.size(); ++s)
 			if (objects[o].symbols[s].defined &&
 			    objects[o].symbols[s].global &&
 			    !objects[o].symbols[s].name.empty())
 			{
+				reserve_external_symbol_labels(labels, objects[o].symbols[s]);
 				publish_external_raw_symbol_labels(program,
 				                                   objects[o].symbols[s].name,
 				                                   0);
