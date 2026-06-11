@@ -191,6 +191,18 @@ bool is_scalar_runtime_type(const Type& type)
 	return is_integer_type(type) || is_float_type(type) || is_ptr_type(type);
 }
 
+bool is_direct_object_abi(const Type& type)
+{
+	return is_obj_type(type) && type.obj_size <= 8;
+}
+
+int direct_object_abi_width_bits(const Type& type)
+{
+	if (!is_direct_object_abi(type))
+		throw runtime_error("object is not direct ABI object");
+	return type.obj_size <= 4 ? 32 : 64;
+}
+
 size_t storage_size(const Type& type)
 {
 	return type.size;
@@ -198,6 +210,8 @@ size_t storage_size(const Type& type)
 
 size_t stack_storage_size(const Type& type)
 {
+	if (is_direct_object_abi(type))
+		return static_cast<size_t>(direct_object_abi_width_bits(type) / 8);
 	if (is_obj_type(type) || is_f80_type(type))
 		return type.size;
 	return type.size < 8 ? 8 : type.size;

@@ -9,6 +9,8 @@ using namespace std;
 namespace lowir2cy86 {
 namespace {
 
+bool allow_f80_surface = false;
+
 size_t align_up(size_t value, size_t align)
 {
 	if (align <= 1)
@@ -307,6 +309,8 @@ Type instruction_result_type(const Instruction& ins)
 
 void reject_unsupported_f80_surface(const Instruction& ins)
 {
+	if (allow_f80_surface)
+		return;
 	if (ins.kind == InstrKind::Convert)
 		return;
 	if (is_f80_type(ins.type) || is_f80_type(ins.src_type))
@@ -478,7 +482,7 @@ void collect_function_locals(Function& fn)
 		require_unique_insert(seen, fn.params[i].name);
 		validate_parameter_metadata(fn.params[i], fn.ret, i);
 		fn.param_types[fn.params[i].name] = fn.params[i].type;
-		if (is_f80_type(fn.params[i].type))
+		if (!allow_f80_surface && is_f80_type(fn.params[i].type))
 			throw runtime_error("unsupported f80 parameter");
 	}
 	seen.clear();
@@ -492,7 +496,7 @@ void collect_function_locals(Function& fn)
 void validate_function(Function& fn, const Program& program)
 {
 	validate_function_metadata(fn.metadata);
-	if (is_f80_type(fn.ret))
+	if (!allow_f80_surface && is_f80_type(fn.ret))
 		throw runtime_error("unsupported f80 return");
 	collect_function_locals(fn);
 	if (fn.declaration)
@@ -533,7 +537,7 @@ void validate_block(Function& fn,
 void assign_layout(Function& fn)
 {
 	size_t offset = 0;
-	if (is_obj_type(fn.ret) && !fn.declaration)
+	if (is_obj_type(fn.ret) && !is_direct_object_abi(fn.ret) && !fn.declaration)
 		fn.hidden_result_offset = allocate_stack_slot(offset, parse_type_text("ptr"));
 	for (size_t i = 0; i < fn.params.size(); ++i)
 	{
@@ -574,7 +578,8 @@ void collect_top_level(Program& program)
 		require_unique_insert(symbols, program.globals[i].name);
 		program.global_by_name[program.globals[i].name] = i;
 		validate_global_metadata(program.globals[i].metadata);
-		if (program.globals[i].has_type && is_f80_type(program.globals[i].type))
+		if (!allow_f80_surface && program.globals[i].has_type &&
+		    is_f80_type(program.globals[i].type))
 			throw runtime_error("unsupported f80 global");
 	}
 	for (size_t i = 0; i < program.functions.size(); ++i)
@@ -680,9 +685,7 @@ bool function_uses_eh(const Function& fn)
 	return false;
 }
 
-}  // namespace
-
-void validate_and_layout(Program& program)
+void validate_and_layout_impl(Program& program)
 {
 	collect_top_level(program);
 	resolve_roles(program);
@@ -695,6 +698,40 @@ void validate_and_layout(Program& program)
 		program.needs_eh_runtime =
 		    program.needs_eh_runtime || function_uses_eh(program.functions[i]);
 	}
+}
+
+}  // namespace
+
+void validate_and_layout(Program& program)
+{
+	const bool prev = allow_f80_surface;
+	allow_f80_surface = false;
+	try
+	{
+		validate_and_layout_impl(program);
+	}
+	catch (...)
+	{
+		allow_f80_surface = prev;
+		throw;
+	}
+	allow_f80_surface = prev;
+}
+
+void validate_and_layout_allow_f80(Program& program)
+{
+	const bool prev = allow_f80_surface;
+	allow_f80_surface = true;
+	try
+	{
+		validate_and_layout_impl(program);
+	}
+	catch (...)
+	{
+		allow_f80_surface = prev;
+		throw;
+	}
+	allow_f80_surface = prev;
 }
 
 }  // namespace lowir2cy86

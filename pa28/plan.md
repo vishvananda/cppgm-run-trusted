@@ -61,13 +61,6 @@ only the assignment contract, harness, and oracle data.
   register/branch/value forms.
 - Shared parser fixes now accept byte spans such as `copyobj 4`, negative CY86
   immediates, and LowIR floating exponent signs.
-- Current validation:
-  - `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 39 / 106 PA28 tests pass.
-  - `make test-report-through-pa28`: PA1-PA27 pass; PA28 remains failing,
-    2460 / 2527 total.
-  - `perl scripts/cppgm_file_audit.pl --stage pa28 --paths dev/src`: pass
-    with the existing 24 warnings.
-
 - Added native/MIR support for `bswap`, explicit integer/floating conversion
   MIR spellings, narrow integer normalization, and the PA28 atomic operation
   family: load/store, exchange, add-fetch, seq-cst store via `xchg`, and
@@ -80,7 +73,45 @@ only the assignment contract, harness, and oracle data.
   `rax`, and direct return-value load handling.
 - Added canonical indirect-call materialization through `r10` and made
   signal fences compile-time-only in the MIR dump.
+- Added PA28-owned f80 validation/lowering/native emission, including f80
+  parameter homes, memory-based f80 arithmetic, f80 direct calls/returns, f80
+  structured global data, and x87 truncating integer conversion control-word
+  handling.
+- Added trivial parameter-slot promotion and call pass-mode address
+  materialization so slot-backed object/reference arguments are represented
+  from typed LowIR metadata rather than recovered from MIR text.
+- Added PA28-owned native bridge sanitization for indirect narrow-load aliases,
+  direct scalar-pointer global call targets, thread-local MIR load/store address
+  materialization, large integer ALU immediates, compact scalar stack homes, and
+  caller result materialization.
 
-Remaining work is concentrated in strict raw-MIR parity, f80 native execution,
-richer call ABI/liveness, object-slot alias cases, and larger register-pressure
-structural cases.
+Current validation:
+
+- `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 105 / 106 PA28 tests pass.
+- Passing checkpoints now include direct small-object copy/zero/return,
+  f80 direct calls, stack arguments beyond six, mixed GPR/XMM direct and
+  indirect calls, object parameter/result slot aliasing, direct temporary
+  store-back cleanup, runtime zero-only global alignment, switch call-case
+  liveness, forwarded parameter identity, single-use index call arguments,
+  full-register indirect calls, late indirect-call argument preservation, and
+  thread-local store pressure.
+- `make test-report-through-pa28`: must be rerun after the remaining PA28
+  structural backend work.
+- `perl scripts/cppgm_file_audit.pl --stage pa28 --paths dev/src`: must be
+  rerun after the PA28 backend split/compaction work because
+  `lowir2native_support.cpp` is temporarily over the line-count limit.
+
+Remaining work is concentrated in the structural SRET/index-base case. The next
+implementation pass should:
+
+- preserve indirect-result and reference parameters across calls without
+  destructively reusing their derived address temps for later stores;
+- use typed frame homes for pointer/index temps when a call boundary and
+  branch edge make rematerialization unclear or ABI-clobber-prone;
+- keep large-object stack setup compact where temps are single-use, so the
+  conservative SRET path does not regress the already-passing PA28 store and
+  call fixtures;
+- keep direct compare-to-branch lowering direct while folding slot/global loads
+  only when that does not hide a required reload or address materialization;
+- keep MIR dumping and native emission driven by the same typed PA28 lowering
+  state, then split or compact backend helpers enough for file audit to pass.

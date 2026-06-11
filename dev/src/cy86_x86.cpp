@@ -312,6 +312,16 @@ void emit_store_x87(Emitter& e, int width, const MemRef& mem)
 		emit_x87_mem(e, 0xdb, 7, mem);
 }
 
+void emit_fnstcw(Emitter& e, const MemRef& mem)
+{
+	emit_x87_mem(e, 0xd9, 7, mem);
+}
+
+void emit_fldcw(Emitter& e, const MemRef& mem)
+{
+	emit_x87_mem(e, 0xd9, 5, mem);
+}
+
 int cyreg_x86(const RegisterRef& reg)
 {
 	return register_family_x86_code(reg.base);
@@ -870,6 +880,12 @@ void emit_f80_to_int(Emitter& e, const Statement& stmt, int width,
                      bool unsign, const Context& ctx)
 {
 	MemRef temp(RSP, -16);
+	MemRef saved_cw(RSP, -24);
+	MemRef trunc_cw(RSP, -32);
+	emit_fnstcw(e, saved_cw);
+	emit_mov_imm_reg(e, 16, RAX, 0x0f7f);
+	emit_mov_mem_reg(e, 16, trunc_cw, RAX);
+	emit_fldcw(e, trunc_cw);
 	if (unsign && width == 64)
 	{
 		emit_fld_operand(e, stmt.operands[1], 80, 32, ctx);
@@ -902,6 +918,7 @@ void emit_f80_to_int(Emitter& e, const Statement& stmt, int width,
 		const int fist_width = width == 8 ? 16 : (width < 64 ? 64 : 64);
 		emit_fistp_mem(e, fist_width, temp);
 	}
+	emit_fldcw(e, saved_cw);
 	emit_temp_to_operand(e, temp, stmt.operands[0], width, ctx);
 }
 
@@ -1018,11 +1035,26 @@ size_t data_align(const Statement& stmt, const OpcodeDesc* desc)
 	return static_cast<size_t>(width_bytes(desc->data_width_bits));
 }
 
+bool is_align_opcode(const OpcodeDesc* desc)
+{
+	return desc != NULL && desc->name.size() > 5 &&
+	       desc->name.compare(0, 5, "align") == 0;
+}
+
+size_t align_opcode_value(const OpcodeDesc* desc)
+{
+	if (!is_align_opcode(desc))
+		return 1;
+	return static_cast<size_t>(stoul(desc->name.substr(5)));
+}
+
 size_t statement_payload_size(const Statement& stmt, const OpcodeDesc* desc,
                               map<string, uint64_t>& labels)
 {
 	if (stmt.kind == StatementKind::LiteralData)
 		return stmt.literal.bytes.size();
+	if (is_align_opcode(desc))
+		return 0;
 	if (desc->data_opcode)
 		return static_cast<size_t>(width_bytes(desc->data_width_bits));
 	Emitter e;
@@ -1057,9 +1089,13 @@ size_t layout_program(Program& program)
 		const OpcodeDesc* desc = NULL;
 		if (stmt.kind == StatementKind::Instruction)
 			desc = &checked_opcode(stmt);
-		const bool data = stmt.kind == StatementKind::LiteralData || desc->data_opcode;
+		const bool data =
+		    stmt.kind == StatementKind::LiteralData || desc->data_opcode ||
+		    is_align_opcode(desc);
 		if (data)
-			offset = align_up(offset, data_align(stmt, desc));
+			offset = align_up(offset, is_align_opcode(desc)
+			                              ? align_opcode_value(desc)
+			                              : data_align(stmt, desc));
 		stmt.offset = offset;
 		for (size_t j = 0; j < stmt.labels.size(); ++j)
 			program.labels[stmt.labels[j]] = kCodeBase + stmt.offset;
@@ -1130,11 +1166,15 @@ vector<unsigned char> build_elf_image(Program& program)
 		const OpcodeDesc* desc = NULL;
 		if (stmt.kind == StatementKind::Instruction)
 			desc = find_opcode(stmt.opcode);
-		const bool data = stmt.kind == StatementKind::LiteralData || desc->data_opcode;
+		const bool data =
+		    stmt.kind == StatementKind::LiteralData || desc->data_opcode ||
+		    is_align_opcode(desc);
 		if (data)
 		{
 			body.resize(stmt.offset, 0);
-			vector<unsigned char> bytes = data_bytes(stmt, desc, ctx);
+			vector<unsigned char> bytes =
+			    is_align_opcode(desc) ? vector<unsigned char>()
+			                          : data_bytes(stmt, desc, ctx);
 			body.insert(body.end(), bytes.begin(), bytes.end());
 		}
 		else

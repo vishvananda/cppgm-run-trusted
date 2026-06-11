@@ -43,9 +43,21 @@ string addend_label(const string& label, int addend)
 	return label + to_string(addend);
 }
 
+string f80_return_mem()
+{
+	return "[g____cppgm_f80_return]";
+}
+
 bool is_scalar_int_like(const Type& type)
 {
 	return is_integer_type(type) || is_ptr_type(type);
+}
+
+int register_value_width_bits(const Type& type)
+{
+	if (is_direct_object_abi(type))
+		return direct_object_abi_width_bits(type);
+	return cy86_width_bits(type);
 }
 
 struct CyEmitter
@@ -53,8 +65,11 @@ struct CyEmitter
 	const Program& program;
 	ostringstream out;
 	int eh_label_counter;
+	bool safe_call_argument_order;
 
-	explicit CyEmitter(const Program& p) : program(p), eh_label_counter(0) {}
+	explicit CyEmitter(const Program& p, bool safe_order)
+	    : program(p), eh_label_counter(0),
+	      safe_call_argument_order(safe_order) {}
 
 	void line(const string& text) { out << '\t' << text << ";\n"; }
 	void label(const string& text) { out << text << ":\n"; }
@@ -74,6 +89,8 @@ struct CyEmitter
 			if (!program.globals[i].declaration)
 				emit_global_section(program.globals[i]);
 		}
+		if (needs_f80_return_global())
+			emit_f80_return_global();
 		if (program.needs_eh_runtime)
 			emit_eh_runtime_globals();
 		return out.str();
@@ -125,23 +142,32 @@ struct CyEmitter
 	void emit_parameter_saves(const Function& fn)
 	{
 		size_t reg_index = 0;
+		size_t f80_index = 0;
 		if (fn.hidden_result_offset != 0)
 		{
 			line("move64 " + stack_mem(fn.hidden_result_offset) + " x64");
 			++reg_index;
 		}
-		for (size_t i = 0; i < fn.params.size(); ++i, ++reg_index)
+		for (size_t i = 0; i < fn.params.size(); ++i)
 		{
 			const string dst = stack_mem(fn.params[i].offset);
+			if (is_f80_type(fn.params[i].type))
+			{
+				line("move80 " + dst + " " + stack_arg_mem(f80_index * 2));
+				++f80_index;
+				continue;
+			}
+			const int width = register_value_width_bits(fn.params[i].type);
 			if (reg_index < 4)
-				line("move" + to_string(cy86_width_bits(fn.params[i].type)) +
-				     " " + dst + " " + reg_name(arg_reg(reg_index),
-				                                  cy86_width_bits(fn.params[i].type)));
+				line("move" + to_string(width) + " " + dst + " " +
+				     reg_name(arg_reg(reg_index), width));
 			else
 			{
 				line("move64 x64 " + stack_arg_mem(reg_index - 4));
-				line("move64 " + dst + " x64");
+				line("move" + to_string(width) + " " + dst + " " +
+				     reg_name("x", width));
 			}
+			++reg_index;
 		}
 	}
 
@@ -287,6 +313,12 @@ struct CyEmitter
 
 	void emit_const(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			line("move80 " + stack_mem(fn.temp_offsets.find(ins.dest)->second) +
+			     " " + ins.a.text);
+			return;
+		}
 		emit_literal_to_reg(ins.type, ins.a.text, "x");
 		emit_store_reg_to_temp(fn, ins.dest, ins.type, "x");
 	}
@@ -305,6 +337,11 @@ struct CyEmitter
 
 	void emit_load(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			emit_f80_load(fn, ins);
+			return;
+		}
 		if (ins.kind == InstrKind::AtomicLoad)
 		{
 			emit_value_to_reg(fn, ins.a, parse_type_text("ptr"), "y");
@@ -327,6 +364,11 @@ struct CyEmitter
 
 	void emit_store(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			emit_f80_store(fn, ins);
+			return;
+		}
 		if (ins.kind == InstrKind::AtomicStore)
 		{
 			emit_value_to_reg(fn, ins.b, parse_type_text("ptr"), "y");
@@ -346,6 +388,34 @@ struct CyEmitter
 		}
 	}
 
+	void emit_f80_load(const Function& fn, const Instruction& ins)
+	{
+		const string dst = stack_mem(fn.temp_offsets.find(ins.dest)->second);
+		if (ins.a.kind == ValueKind::Global)
+			line("move80 " + dst + " " + global_mem(ins.a.text));
+		else if (ins.a.kind == ValueKind::Slot)
+			line("move80 " + dst + " " + stack_mem(lookup_offset(fn, ins.a)));
+		else
+		{
+			emit_value_to_reg(fn, ins.a, parse_type_text("ptr"), "x");
+			line("move80 " + dst + " [x64]");
+		}
+	}
+
+	void emit_f80_store(const Function& fn, const Instruction& ins)
+	{
+		const string src = f80_value_mem(fn, ins.a);
+		if (ins.b.kind == ValueKind::Global)
+			line("move80 " + global_mem(ins.b.text) + " " + src);
+		else if (ins.b.kind == ValueKind::Slot)
+			line("move80 " + stack_mem(lookup_offset(fn, ins.b)) + " " + src);
+		else
+		{
+			emit_value_to_reg(fn, ins.b, parse_type_text("ptr"), "x");
+			line("move80 [x64] " + src);
+		}
+	}
+
 	void emit_index(const Function& fn, const Instruction& ins)
 	{
 		emit_value_to_reg(fn, ins.a, parse_type_text("ptr"), "y");
@@ -362,14 +432,14 @@ struct CyEmitter
 
 	void emit_copyobj(const Function& fn, const Instruction& ins)
 	{
-		emit_pointer_value_to_reg(fn, ins.b, "x");
+		emit_pointer_or_slot_destination_to_reg(fn, ins.b, ins.span, "x");
 		emit_object_source_to_reg(fn, ins.a, "y");
 		emit_copy_qwords(ins.span.bytes, "y", "x");
 	}
 
 	void emit_zeroinit(const Function& fn, const Instruction& ins)
 	{
-		emit_pointer_value_to_reg(fn, ins.a, "x");
+		emit_pointer_or_slot_destination_to_reg(fn, ins.a, ins.span, "x");
 		line("move64 z64 0");
 		if (ins.span.bytes % 8 == 0)
 		{
@@ -386,6 +456,14 @@ struct CyEmitter
 
 	void emit_unary(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			if (ins.op != "neg")
+				throw runtime_error("unsupported f80 unary op");
+			line("fsub80 " + stack_mem(fn.temp_offsets.find(ins.dest)->second) +
+			     " 0.0L " + f80_value_mem(fn, ins.a));
+			return;
+		}
 		emit_value_to_reg(fn, ins.a, ins.type, "x");
 		if (ins.op == "neg")
 		{
@@ -412,6 +490,13 @@ struct CyEmitter
 
 	void emit_binary(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			line(binary_opcode(ins) + " " +
+			     stack_mem(fn.temp_offsets.find(ins.dest)->second) + " " +
+			     f80_value_mem(fn, ins.a) + " " + f80_value_mem(fn, ins.b));
+			return;
+		}
 		emit_value_to_reg(fn, ins.a, ins.type, "y");
 		emit_value_to_reg(fn, ins.b, ins.type, "x");
 		if (ins.op == "shl" || ins.op == "shr" || ins.op == "ushr")
@@ -471,6 +556,15 @@ struct CyEmitter
 
 	void emit_cmp(const Function& fn, const Instruction& ins)
 	{
+		if (is_f80_type(ins.type))
+		{
+			line(cmp_opcode(ins) + " z8 " + f80_value_mem(fn, ins.a) +
+			     " " + f80_value_mem(fn, ins.b));
+			line("move64 x64 0");
+			line("move8 x8 z8");
+			emit_store_reg_to_temp(fn, ins.dest, parse_type_text("i64"), "x");
+			return;
+		}
 		emit_value_to_reg(fn, ins.a, ins.type, "y");
 		emit_value_to_reg(fn, ins.b, ins.type, "x");
 		line(cmp_opcode(ins) + " z8 " + reg_name("y", cy86_width_bits(ins.type)) +
@@ -526,12 +620,16 @@ struct CyEmitter
 
 	void emit_return(const Function& fn, const Instruction& ins)
 	{
-		if (is_obj_type(ins.type))
+		if (is_direct_object_abi(ins.type))
+			emit_direct_object_value_to_reg(fn, ins.a, ins.type, "x");
+		else if (is_obj_type(ins.type))
 		{
 			emit_object_source_to_reg(fn, ins.a, "x");
 			line("move64 y64 " + stack_mem(fn.hidden_result_offset));
 			emit_copy_qwords_offset(ins.type.obj_size, "x", "y");
 		}
+		else if (is_f80_type(ins.type))
+			line("move80 " + f80_return_mem() + " " + f80_value_mem(fn, ins.a));
 		else if (!is_void_type(ins.type))
 			emit_value_to_reg(fn, ins.a, ins.type, "x");
 		line("jump " + function_label(fn.name) + "__epilogue");
@@ -541,21 +639,59 @@ struct CyEmitter
 	{
 		vector<Value> args = ins.args;
 		vector<Type> arg_types = call_arg_types(ins);
-		const bool returns_obj = is_obj_type(ins.type);
+		const bool returns_direct_obj = is_direct_object_abi(ins.type);
+		const bool returns_hidden_obj =
+		    is_obj_type(ins.type) && !returns_direct_obj;
+		const bool returns_f80 = is_f80_type(ins.type);
 		const bool indirect = ins.a.kind != ValueKind::Function;
-		size_t extra_stack = (args.size() + (returns_obj ? 1 : 0) > 4)
-		                         ? args.size() + (returns_obj ? 1 : 0) - 4
+		const size_t f80_stack = f80_call_stack_bytes(arg_types);
+		size_t extra_stack = (args.size() + (returns_hidden_obj ? 1 : 0) > 4)
+		                         ? args.size() + (returns_hidden_obj ? 1 : 0) - 4
 		                         : 0;
 		if (indirect)
 			emit_indirect_callee_save(fn, ins.a);
-		if (extra_stack != 0)
-			line("isub64 sp sp " + to_string(extra_stack * 8));
-		emit_call_arguments(fn, ins, args, arg_types, returns_obj);
-		line(string("call ") + (indirect ? "[sp]" : function_label(ins.a.text)));
-		if (extra_stack != 0 || indirect)
-			line("iadd64 sp sp " + to_string(extra_stack * 8 + (indirect ? 8 : 0)));
-		if (ins.has_dest && !returns_obj && !is_void_type(ins.type))
+		if (extra_stack != 0 || f80_stack != 0)
+			line("isub64 sp sp " + to_string(extra_stack * 8 + f80_stack));
+		if (f80_stack != 0)
+			emit_f80_call_arguments(fn, args, arg_types, extra_stack * 8);
+		emit_call_arguments(fn, ins, args, arg_types, returns_hidden_obj);
+		line(string("call ") + (indirect ? indirect_callee_mem(extra_stack * 8 + f80_stack)
+		                                  : function_label(ins.a.text)));
+		if (extra_stack != 0 || f80_stack != 0 || indirect)
+			line("iadd64 sp sp " +
+			     to_string(extra_stack * 8 + f80_stack + (indirect ? 8 : 0)));
+		if (ins.has_dest && returns_f80)
+			line("move80 " + stack_mem(fn.temp_offsets.find(ins.dest)->second) +
+			     " " + f80_return_mem());
+		else if (ins.has_dest && returns_direct_obj)
+			emit_store_direct_object_reg_to_temp(fn, ins.dest, ins.type, "x");
+		else if (ins.has_dest && !returns_hidden_obj && !is_void_type(ins.type))
 			emit_store_reg_to_temp(fn, ins.dest, ins.type, "x");
+	}
+
+	size_t f80_call_stack_bytes(const vector<Type>& arg_types) const
+	{
+		size_t bytes = 0;
+		for (size_t i = 0; i < arg_types.size(); ++i)
+			if (is_f80_type(arg_types[i]))
+				bytes += 16;
+		return bytes;
+	}
+
+	void emit_f80_call_arguments(const Function& fn,
+	                             const vector<Value>& args,
+	                             const vector<Type>& arg_types,
+	                             size_t base_offset)
+	{
+		size_t offset = base_offset;
+		for (size_t i = 0; i < args.size() && i < arg_types.size(); ++i)
+		{
+			if (!is_f80_type(arg_types[i]))
+				continue;
+			const string mem = offset == 0 ? "[sp]" : "[sp+" + to_string(offset) + "]";
+			line("move80 " + mem + " " + f80_value_mem(fn, args[i]));
+			offset += 16;
+		}
 	}
 
 	void emit_indirect_callee_save(const Function& fn, const Value& callee)
@@ -563,6 +699,11 @@ struct CyEmitter
 		emit_value_to_reg(fn, callee, parse_type_text("ptr"), "x");
 		line("isub64 sp sp 8");
 		line("move64 [sp] x64");
+	}
+
+	string indirect_callee_mem(size_t offset) const
+	{
+		return offset == 0 ? "[sp]" : "[sp+" + to_string(offset) + "]";
 	}
 
 	vector<Type> call_arg_types(const Instruction& ins) const
@@ -590,34 +731,130 @@ struct CyEmitter
 	                         const vector<Type>& arg_types,
 	                         bool returns_obj)
 	{
+		struct ArgItem
+		{
+			size_t arg;
+			size_t reg;
+			Type type;
+		};
+		vector<ArgItem> items;
 		size_t reg_index = 0;
+		if (returns_obj)
+		{
+			if (!safe_call_argument_order)
+			{
+				emit_temp_address_to_reg(fn, ins.dest, "x");
+				line("move64 x64 x64");
+			}
+			reg_index = 1;
+		}
+		for (size_t i = 0; i < args.size(); ++i)
+		{
+			const Type expected =
+			    i < arg_types.size() ? arg_types[i] : lookup_value_type(fn, args[i]);
+			if (is_f80_type(expected))
+				continue;
+			ArgItem item;
+			item.arg = i;
+			item.reg = reg_index;
+			item.type = expected;
+			if (!safe_call_argument_order)
+				emit_call_argument_item(fn, ins, args, item);
+			else
+				items.push_back(item);
+			++reg_index;
+		}
+		if (!safe_call_argument_order)
+			return;
+		for (size_t i = 0; i < items.size(); ++i)
+			if (items[i].reg >= 4)
+				emit_call_argument_item(fn, ins, args, items[i]);
+		for (size_t i = 0; i < items.size(); ++i)
+			if (items[i].reg > 0 && items[i].reg < 4)
+				emit_call_argument_item(fn, ins, args, items[i]);
 		if (returns_obj)
 		{
 			emit_temp_address_to_reg(fn, ins.dest, "x");
 			line("move64 x64 x64");
-			reg_index = 1;
 		}
-		for (size_t i = 0; i < args.size(); ++i, ++reg_index)
+		for (size_t i = 0; i < items.size(); ++i)
+			if (items[i].reg == 0)
+				emit_call_argument_item(fn, ins, args, items[i]);
+	}
+
+	template <class ArgItem>
+	void emit_call_argument_item(const Function& fn,
+	                             const Instruction& ins,
+	                             const vector<Value>& args,
+	                             const ArgItem& item)
+	{
+		if (item.reg < 4)
 		{
-			const Type expected =
-			    i < arg_types.size() ? arg_types[i] : lookup_value_type(fn, args[i]);
-			if (reg_index < 4)
+			emit_call_arg_value_to_reg(fn, ins, item.arg, item.type,
+			                           arg_reg(item.reg));
+			if (item.reg == 0 && args[item.arg].kind == ValueKind::Slot &&
+			    is_ptr_type(item.type))
+				line("move64 x64 x64");
+			return;
+		}
+		emit_call_arg_value_to_reg(fn, ins, item.arg, item.type, "x");
+		const size_t stack_index = item.reg - 4;
+		const string mem = stack_index == 0 ? "[sp]" :
+		                   "[sp+" + to_string(stack_index * 8) + "]";
+		line("move64 " + mem + " 0");
+		line("move64 " + mem + " x64");
+	}
+
+	void emit_call_arg_value_to_reg(const Function& fn,
+	                                const Instruction& ins,
+	                                size_t index,
+	                                const Type& expected,
+	                                const string& base)
+	{
+		const Value& arg = ins.args[index];
+		if (call_arg_needs_address(ins, index))
+		{
+			const Type actual = lookup_value_type(fn, arg);
+			if (arg.kind == ValueKind::Temp && !is_ptr_type(actual))
 			{
-				emit_value_to_reg(fn, args[i], expected, arg_reg(reg_index));
-				if (reg_index == 0 && args[i].kind == ValueKind::Slot &&
-				    is_ptr_type(expected))
-					line("move64 x64 x64");
+				emit_temp_address_to_reg(fn, arg.text, "x");
+				if (base != "x")
+					line("move64 " + reg_name(base, 64) + " x64");
+				return;
 			}
-			else
+			if (arg.kind == ValueKind::Slot || arg.kind == ValueKind::Global)
 			{
-				emit_value_to_reg(fn, args[i], expected, "x");
-				const size_t stack_index = reg_index - 4;
-				const string mem = stack_index == 0 ? "[sp]" :
-				                   "[sp+" + to_string(stack_index * 8) + "]";
-				line("move64 " + mem + " 0");
-				line("move64 " + mem + " x64");
+				emit_address_to_reg(fn, arg, "x");
+				if (base != "x")
+					line("move64 " + reg_name(base, 64) + " x64");
+				return;
 			}
 		}
+		emit_value_to_reg(fn, arg, expected, base);
+	}
+
+	bool call_arg_needs_address(const Instruction& ins, size_t index) const
+	{
+		const Parameter* param = call_param(ins, index);
+		if (param == nullptr || !is_ptr_type(param->type))
+			return false;
+		const string pass = metadata_value(param->metadata, "pass");
+		return pass == "reference" || pass == "indirect_result" ||
+		       pass == "by_address" || pass == "decay";
+	}
+
+	const Parameter* call_param(const Instruction& ins, size_t index) const
+	{
+		if (ins.signature.present && index < ins.signature.params.size())
+			return &ins.signature.params[index];
+		if (ins.a.kind != ValueKind::Function)
+			return nullptr;
+		map<string, size_t>::const_iterator it =
+		    program.function_by_name.find(ins.a.text);
+		if (it == program.function_by_name.end())
+			return nullptr;
+		const Function& callee = program.functions[it->second];
+		return index < callee.params.size() ? &callee.params[index] : nullptr;
 	}
 
 	void emit_atomic_exchange(const Function& fn, const Instruction& ins)
@@ -748,6 +985,30 @@ struct CyEmitter
 		out << "\n";
 	}
 
+	void emit_f80_return_global()
+	{
+		label("g____cppgm_f80_return");
+		line("data64 0");
+		line("data64 0");
+		out << "\n";
+	}
+
+	bool needs_f80_return_global() const
+	{
+		for (size_t i = 0; i < program.functions.size(); ++i)
+		{
+			const Function& fn = program.functions[i];
+			if (is_f80_type(fn.ret))
+				return true;
+			for (size_t b = 0; b < fn.blocks.size(); ++b)
+				for (size_t j = 0; j < fn.blocks[b].instructions.size(); ++j)
+					if (fn.blocks[b].instructions[j].kind == InstrKind::Call &&
+					    is_f80_type(fn.blocks[b].instructions[j].type))
+						return true;
+		}
+		return false;
+	}
+
 	void emit_convert(const Function& fn, const Instruction& ins)
 	{
 		if (ins.op == "sext" || ins.op == "zext" || ins.op == "trunc")
@@ -850,11 +1111,27 @@ struct CyEmitter
 			line("move64 " + reg_name(base, 64) + " " + literal);
 	}
 
+	string f80_value_mem(const Function& fn, const Value& value) const
+	{
+		if (value.kind == ValueKind::Literal)
+			return value.text;
+		if (value.kind == ValueKind::Global)
+			return global_mem(value.text);
+		if (value.kind == ValueKind::Temp || value.kind == ValueKind::Slot)
+			return stack_mem(lookup_offset(fn, value));
+		throw runtime_error("invalid f80 value");
+	}
+
 	void emit_value_to_reg(const Function& fn,
 	                       const Value& value,
 	                       const Type& desired,
 	                       const string& base)
 	{
+		if (is_direct_object_abi(desired))
+		{
+			emit_direct_object_value_to_reg(fn, value, desired, base);
+			return;
+		}
 		if (value.kind == ValueKind::Literal)
 			emit_literal_to_reg(desired, value.text, base);
 		else if (value.kind == ValueKind::Function)
@@ -862,15 +1139,30 @@ struct CyEmitter
 		else if (value.kind == ValueKind::Global)
 			emit_load_mem_to_reg(global_mem(value.text), lookup_value_type(fn, value),
 			                     desired, base);
-		else if (value.kind == ValueKind::Slot && is_ptr_type(desired))
-		{
-			emit_address_to_reg(fn, value, "x");
-			if (base != "x")
-				line("move64 " + reg_name(base, 64) + " x64");
-		}
 		else
 			emit_load_mem_to_reg(stack_mem(lookup_offset(fn, value)),
 			                     lookup_value_type(fn, value), desired, base);
+	}
+
+	void emit_direct_object_value_to_reg(const Function& fn,
+	                                     const Value& value,
+	                                     const Type& type,
+	                                     const string& base)
+	{
+		const int width = direct_object_abi_width_bits(type);
+		if (value.kind == ValueKind::Global)
+		{
+			line("move" + to_string(width) + " " + reg_name(base, width) +
+			     " " + global_mem(value.text));
+			return;
+		}
+		if (value.kind == ValueKind::Temp || value.kind == ValueKind::Slot)
+		{
+			line("move" + to_string(width) + " " + reg_name(base, width) +
+			     " " + stack_mem(lookup_offset(fn, value)));
+			return;
+		}
+		throw runtime_error("invalid direct object value");
 	}
 
 	void emit_pointer_value_to_reg(const Function& fn, const Value& value, const string& base)
@@ -879,6 +1171,21 @@ struct CyEmitter
 			emit_address_to_reg(fn, value, base);
 		else
 			emit_value_to_reg(fn, value, parse_type_text("ptr"), base);
+	}
+
+	void emit_pointer_or_slot_destination_to_reg(const Function& fn,
+	                                             const Value& value,
+	                                             const Span& span,
+	                                             const string& base)
+	{
+		const Type type = lookup_value_type(fn, value);
+		if (value.kind == ValueKind::Slot && !is_ptr_type(type) &&
+		    stack_storage_size(type) >= span.bytes)
+		{
+			emit_address_to_reg(fn, value, base);
+			return;
+		}
+		emit_pointer_value_to_reg(fn, value, base);
 	}
 
 	void emit_object_source_to_reg(const Function& fn, const Value& value, const string& base)
@@ -916,8 +1223,11 @@ struct CyEmitter
 
 	void emit_temp_address_to_reg(const Function& fn, const string& temp, const string& base)
 	{
+		Value value;
+		value.kind = ValueKind::Temp;
+		value.text = temp;
 		line("isub64 " + reg_name(base, 64) + " bp " +
-		     to_string(fn.temp_offsets.find(temp)->second));
+		     to_string(lookup_offset(fn, value)));
 	}
 
 	string global_mem(const string& name) const
@@ -971,9 +1281,20 @@ struct CyEmitter
 		emit_store_reg_to_mem(stack_mem(fn.temp_offsets.find(temp)->second), type, base);
 	}
 
+	void emit_store_direct_object_reg_to_temp(const Function& fn,
+	                                          const string& temp,
+	                                          const Type& type,
+	                                          const string& base)
+	{
+		const int width = direct_object_abi_width_bits(type);
+		line("move" + to_string(width) + " " +
+		     stack_mem(fn.temp_offsets.find(temp)->second) + " " +
+		     reg_name(base, width));
+	}
+
 	void emit_store_reg_to_mem(const string& mem, const Type& type, const string& base)
 	{
-		const int width = cy86_width_bits(type);
+		const int width = register_value_width_bits(type);
 		line("move" + to_string(width) + " " + mem + " " + reg_name(base, width));
 	}
 
@@ -1123,14 +1444,24 @@ struct CyEmitter
 
 }  // namespace
 
-string emit_cy86(const Program& program)
+string finish_cy86_text(const Program& program, bool safe_call_argument_order)
 {
-	CyEmitter emitter(program);
+	CyEmitter emitter(program, safe_call_argument_order);
 	string text = emitter.finish();
 	if (text.size() >= 2 && text[text.size() - 1] == '\n' &&
 	    text[text.size() - 2] == '\n')
 		text.erase(text.size() - 1);
 	return text;
+}
+
+string emit_cy86(const Program& program)
+{
+	return finish_cy86_text(program, false);
+}
+
+string emit_cy86_for_native(const Program& program)
+{
+	return finish_cy86_text(program, true);
 }
 
 }  // namespace lowir2cy86

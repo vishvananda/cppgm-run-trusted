@@ -204,7 +204,8 @@ OpcodeDesc make_opcode(const string& line)
 const vector<OpcodeDesc>& opcode_table()
 {
 	static const char* const lines[] = {
-		"data8 rI8", "data16 rI16", "data32 rI32", "data64 rI64",
+		"data8 rI8", "data16 rI16", "data32 rI32", "data64 rI64", "data80 rI80",
+		"align16",
 		"move8 w8 r8", "move16 w16 r16", "move32 w32 r32",
 		"move64 w64 r64", "move80 w80 r80",
 		"jump ar64", "jumpif br8 ar64", "call ar64", "ret",

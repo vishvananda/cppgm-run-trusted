@@ -263,6 +263,8 @@ bool is_f80_type(const Type& type);
 bool is_integer_type(const Type& type);
 bool is_signed_integer_type(const Type& type);
 bool is_scalar_runtime_type(const Type& type);
+bool is_direct_object_abi(const Type& type);
+int direct_object_abi_width_bits(const Type& type);
 size_t storage_size(const Type& type);
 size_t stack_storage_size(const Type& type);
 int cy86_width_bits(const Type& type);
@@ -275,7 +277,9 @@ string global_label(const string& name);
 
 Program parse_files(const vector<string>& srcfiles);
 void validate_and_layout(Program& program);
+void validate_and_layout_allow_f80(Program& program);
 string emit_cy86(const Program& program);
+string emit_cy86_for_native(const Program& program);
 void compile_to_file(const vector<string>& srcfiles, const string& outfile);
 
 }  // namespace lowir2cy86
