@@ -62,9 +62,9 @@ only the assignment contract, harness, and oracle data.
 - Shared parser fixes now accept byte spans such as `copyobj 4`, negative CY86
   immediates, and LowIR floating exponent signs.
 - Current validation:
-  - `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 36 / 106 PA28 tests pass.
+  - `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 39 / 106 PA28 tests pass.
   - `make test-report-through-pa28`: PA1-PA27 pass; PA28 remains failing,
-    2458 / 2527 total.
+    2460 / 2527 total.
   - `perl scripts/cppgm_file_audit.pl --stage pa28 --paths dev/src`: pass
     with the existing 24 warnings.
 
@@ -78,6 +78,8 @@ only the assignment contract, harness, and oracle data.
 - Added block-boundary register reuse, ABI-scratch object copy/zero MIR,
   destructive last-use index lowering, compare/branch materialization through
   `rax`, and direct return-value load handling.
+- Added canonical indirect-call materialization through `r10` and made
+  signal fences compile-time-only in the MIR dump.
 
 Remaining work is concentrated in strict raw-MIR parity, f80 native execution,
 richer call ABI/liveness, object-slot alias cases, and larger register-pressure

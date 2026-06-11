@@ -1,6 +1,5 @@
 #include "lowir2native.h"
 #include "lowir2cy86.h"
-
 #include <algorithm>
 #include <map>
 #include <set>
@@ -9,9 +8,7 @@
 #include <string>
 #include <vector>
 using namespace std;
-
 namespace lowir2native {
-
 string effective_target(const Options& options);
 void write_text_file(const string& path, const string& text);
 void write_native_file(const lowir2cy86::Program& program,
@@ -35,9 +32,7 @@ string condition_word(const string& op);
 string condition_suffix(const string& op);
 string branch_suffix(const string& op);
 string float_branch_suffix(const string& op);
-
 namespace {
-
 class MirDumper
 {
 public:
@@ -445,8 +440,9 @@ private:
 			dump_atomic(fn, ins);
 			break;
 		case lowir2cy86::InstrKind::AtomicThreadFence:
-		case lowir2cy86::InstrKind::AtomicSignalFence:
 			out_ << "    mfence\n";
+			break;
+		case lowir2cy86::InstrKind::AtomicSignalFence:
 			break;
 		case lowir2cy86::InstrKind::Jump:
 			out_ << "    jmp " << ins.target << "\n";
@@ -1343,7 +1339,10 @@ private:
 		if (ins.a.kind == lowir2cy86::ValueKind::Function)
 			out_ << "    call " << ins.a.text << "\n";
 		else
-			out_ << "    call *" << value_reg(fn, ins.a) << "\n";
+		{
+			out_ << "    mov r10, " << value_reg(fn, ins.a) << "\n";
+			out_ << "    call *r10\n";
+		}
 		if (ins.has_dest && !lowir2cy86::is_void_type(ins.type))
 		{
 			if (single_use_temp(ins.dest))
