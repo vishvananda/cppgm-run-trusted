@@ -1229,7 +1229,6 @@ void FuncGen::emit(FunctionInfo& info)
 	const size_t base = x.pos();
 	info.start = base;
 	info.symbol = host_function_symbol(fn);
-	unit.obj.symbol(info.symbol, symbol_bind(fn.metadata), 2, ".text", base, 0);
 	x.u8(0x55);
 	x.rex(true); x.u8(0x89); x.modrm(3, RSP, RBP);
 	x.sub_rsp(frame_size);
@@ -1435,7 +1434,7 @@ void Unit::emit_eh_frame()
 	}
 }
 }  // namespace
-void write_host_object(lowir2cy86::Program program, const string& outfile)
+void write_host_object(lowir2cy86::Program& program, const string& outfile)
 {
 	if (program.function_by_name.empty())
 	{
