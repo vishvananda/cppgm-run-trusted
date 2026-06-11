@@ -50,6 +50,7 @@ struct FunctionOut
 	const Binding* binding;
 	string name;
 	string header;
+	vector<string> parameter_names;
 	bool has_range_for_state;
 	bool strong_binding;
 	bool returns_pointer_result;

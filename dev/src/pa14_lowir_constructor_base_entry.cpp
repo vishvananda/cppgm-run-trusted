@@ -10,33 +10,6 @@ namespace pa14 {
 namespace internal {
 namespace {
 
-vector<string> function_header_parameter_names(const string& header,
-                                               size_t count)
-{
-	vector<string> names;
-	size_t open = header.find('(');
-	size_t close = header.find(") ->", open);
-	if (open == string::npos || close == string::npos)
-		return names;
-	size_t pos = open + 1;
-	while (pos < close && names.size() < count)
-	{
-		while (pos < close && (header[pos] == ' ' || header[pos] == ','))
-			++pos;
-		if (pos >= close || header[pos] != '%')
-			break;
-		size_t name_start = pos + 1;
-		size_t name_end = header.find(" :", name_start);
-		if (name_end == string::npos || name_end > close)
-			break;
-		names.push_back(header.substr(name_start, name_end - name_start));
-		pos = header.find(',', name_end);
-		if (pos == string::npos || pos > close)
-			break;
-	}
-	return names;
-}
-
 void remove_hidden_pvb_parameters(string& header)
 {
 	for (;;)
@@ -615,10 +588,7 @@ FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
 {
 	FunctionOut base_entry = lowered;
 	base_entry.name = name + "__base_entry";
-	vector<string> param_names = function_header_parameter_names(
-		base_entry.header,
-		lowered.binding != NULL && lowered.binding->type.get() != NULL
-		? lowered.binding->type->parameters.size() : 0);
+	vector<string> param_names = lowered.parameter_names;
 	string from = "function @" + name + "(";
 	string to = "function @" + name + "__base_entry(";
 	size_t pos = base_entry.header.find(from);

@@ -43,6 +43,41 @@ LowIR lowering code so later assignments inherit the same object model.
   `dev/frontend_source_sets.mk`, without changing generated IR semantics.
 - No PA27 test files or reference files are implementation targets.
 
+## Architecture Review
+
+- Base graph ownership is upstream in the typed PA11 model. `Type` stores
+  `direct_bases`, `direct_base_virtuals`, direct-base offsets, collected virtual
+  bases, and virtual-base offsets, and `layout_record_type` computes those once
+  behind `layout_valid`.
+- PA12 populates those fields while parsing class base-specifiers, including
+  `virtual` on each base edge, then constructor action nodes refer to typed base
+  records rather than emitted names or fixture text.
+- PA14 lowering uses shared helpers for base-subobject membership, offsets,
+  hidden virtual-base parameters, vtable/VTT symbol construction, RTTI emission,
+  `dynamic_cast`, `typeid`, virtual dispatch, and member/field address
+  calculation. The PA27 paths are source-driven by typed record facts.
+- Constructor base entries are produced from the lowered `FunctionOut` because
+  this stage stores LowIR as text blocks, but the rewrite decisions are driven
+  by typed constructor bindings, record virtual-base lists, VTT slots, and
+  explicit rewrite pairs produced while lowering constructor calls.
+
+## Final Architecture Review
+
+- The audit removed a duplicated hidden-virtual-base member-address scan in
+  `pa14_lowir_value_addr.cpp`; member access through forwarded virtual-base
+  parameters now reuses `emit_hidden_virtual_base_addr_for_lvalue`, the same
+  helper used by casts and hidden member-call argument lowering.
+- Constructor base-entry generation no longer reparses source parameter names
+  from the LowIR header. `FunctionOut` now carries structured
+  `parameter_names` from function lowering, and base-entry construction uses
+  those names for hidden virtual-base slot rewrites.
+- No PA27 handout, harness, test, reference, comparator, or unchecked path is
+  part of the implementation. New implementation files remain registered in
+  `dev/frontend_source_sets.mk`.
+- No interpreter, VM, trampoline, embedded output payload, reference-binary
+  shell-out, fixture gate, timeout workaround, or host compiler output path was
+  found in the PA27 implementation surface.
+
 ## Validation
 
 - Use `make test-report ACTIVE_TEST_REPORT_PAS='pa27'` for focused diagnosis.
@@ -52,7 +87,7 @@ LowIR lowering code so later assignments inherit the same object model.
 
 ## Final Results
 
-- `make test-report ACTIVE_TEST_REPORT_PAS='pa27'`: pass, 26 / 26.
+- `make test-pa27`: pass, 26 / 26.
 - `make test-report-through-pa27`: pass, 2421 / 2421.
 - `perl scripts/cppgm_file_audit.pl --stage pa27 --paths dev/src`: pass
-  with warnings only.
+  with 24 warnings.
