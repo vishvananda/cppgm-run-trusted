@@ -5,7 +5,7 @@
 
 FRONTEND_SOURCE_SET_TARGETS := abimangle pptoken posttoken ctrlexpr macro preproc recog nsdecl nsinit cy86 cppgm++ lowiropt lowir2cy86 lowir2native
 
-FRONTEND_OBJ_BASENAMES_abimangle :=
+FRONTEND_OBJ_BASENAMES_abimangle := abi_mangle
 FRONTEND_OBJ_BASENAMES_pptoken := pptoken_lib
 FRONTEND_OBJ_BASENAMES_posttoken := pptoken_lib pp_token posttoken_support posttoken_pipeline
 FRONTEND_OBJ_BASENAMES_ctrlexpr := pptoken_lib pp_token posttoken_support ctrlexpr_support
