@@ -7,12 +7,8 @@
 #include <sstream>
 #include <stdexcept>
 using namespace std;
-namespace abi_mangle {
-namespace {
-bool starts_with(const string& text, const string& prefix)
-{
-	return text.compare(0, prefix.size(), prefix) == 0;
-}
+namespace abi_mangle { namespace {
+bool starts_with(const string& text, const string& prefix) { return text.compare(0, prefix.size(), prefix) == 0; }
 string trim(const string& text)
 {
 	size_t first = 0;
@@ -28,32 +24,27 @@ vector<string> split_words(const string& text)
 	istringstream in(text);
 	vector<string> out;
 	string word;
-	while (in >> word)
-		out.push_back(word);
+	while (in >> word) out.push_back(word);
 	return out;
 }
 long long parse_ll(const string& text)
 {
 	char* end = NULL;
 	long long value = strtoll(text.c_str(), &end, 10);
-	if (end == text.c_str() || *end != '\0')
-		throw logic_error("invalid integer '" + text + "'");
+	if (end == text.c_str() || *end != '\0') throw logic_error("invalid integer '" + text + "'");
 	return value;
 }
 unsigned long long parse_ull(const string& text)
 {
 	char* end = NULL;
 	unsigned long long value = strtoull(text.c_str(), &end, 10);
-	if (end == text.c_str() || *end != '\0')
-		throw logic_error("invalid unsigned integer '" + text + "'");
+	if (end == text.c_str() || *end != '\0') throw logic_error("invalid unsigned integer '" + text + "'");
 	return value;
 }
 bool parse_bool_word(const string& text)
 {
-	if (text == "yes" || text == "true")
-		return true;
-	if (text == "no" || text == "false")
-		return false;
+	if (text == "yes" || text == "true") return true;
+	if (text == "no" || text == "false") return false;
 	throw logic_error("invalid boolean '" + text + "'");
 }
 bool is_builtin_name(const string& name)
@@ -63,31 +54,21 @@ bool is_builtin_name(const string& name)
 		"int", "uint", "long", "ulong", "longlong", "ulonglong",
 		"float", "double"
 	};
-	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
-		if (name == names[i])
-			return true;
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (name == names[i]) return true;
 	return false;
 }
 AbiType make_ref_type(const string& name)
 {
 	AbiType type;
-	if (is_builtin_name(name)) {
-		type.kind = ABI_TYPE_BUILTIN;
-		type.name = name;
-	} else {
-		type.kind = ABI_TYPE_NAME_OR_REFERENCE;
-		type.name = name;
-	}
+	type.kind = is_builtin_name(name) ? ABI_TYPE_BUILTIN : ABI_TYPE_NAME_OR_REFERENCE;
+	type.name = name;
 	return type;
 }
 AbiType parse_type_spec(const vector<string>& words, size_t first);
 AbiType parse_type_token(const string& token);
 AbiType unary_type(AbiTypeKind kind, const AbiType& base)
 {
-	AbiType type;
-	type.kind = kind;
-	type.types.push_back(base);
-	return type;
+	AbiType type; type.kind = kind; type.types.push_back(base); return type;
 }
 AbiType parse_type_token(const string& token)
 {
@@ -139,8 +120,7 @@ AbiType parse_type_token(const string& token)
 }
 void append_arg_refs(AbiType& type, const vector<string>& words, size_t first)
 {
-	for (size_t i = first; i < words.size(); ++i)
-		type.argument_refs.push_back(words[i]);
+	for (size_t i = first; i < words.size(); ++i) type.argument_refs.push_back(words[i]);
 }
 AbiType parse_word_type(const vector<string>& words, size_t first)
 {
@@ -208,15 +188,13 @@ AbiType parse_word_type(const vector<string>& words, size_t first)
 		for (size_t i = first + 1; i < words.size(); ++i)
 			type.types.push_back(parse_type_token(words[i]));
 	} else {
-		type = parse_type_token(words[first]);
+		throw logic_error("unknown type kind '" + kind + "'");
 	}
 	return type;
 }
 AbiType parse_type_spec(const vector<string>& words, size_t first)
 {
-	if (first + 1 == words.size())
-		return parse_type_token(words[first]);
-	return parse_word_type(words, first);
+	return first + 1 == words.size() ? parse_type_token(words[first]) : parse_word_type(words, first);
 }
 AbiTemplateArgument parse_template_argument(const vector<string>& words, size_t first)
 {
@@ -255,6 +233,9 @@ AbiTemplateArgument parse_template_argument(const vector<string>& words, size_t 
 		arg.owner_type = parse_type_token(words.at(first + 2));
 		arg.name = words.at(first + 3);
 		arg.member_is_function = parse_bool_word(words.at(first + 4));
+		arg.member_function_const = parse_bool_word(words.at(first + 5)); arg.member_function_volatile = parse_bool_word(words.at(first + 6));
+		arg.member_function_lvalue_ref = parse_bool_word(words.at(first + 7)); arg.member_function_rvalue_ref = parse_bool_word(words.at(first + 8));
+		arg.member_function_variadic = parse_bool_word(words.at(first + 9));
 		for (size_t i = first + 10; i < words.size(); ++i)
 			arg.parameter_types.push_back(parse_type_token(words[i]));
 	} else {
@@ -445,6 +426,10 @@ AbiFactRecord parse_function_record(const vector<string>& words, const string& l
 			record.function.qualifiers.push_back(ABI_FUNCTION_QUALIFIER_CONST);
 		else if (words.at(1) == "volatile")
 			record.function.qualifiers.push_back(ABI_FUNCTION_QUALIFIER_VOLATILE);
+		else if (words.at(1) == "lvalue-ref" || words.at(1) == "ref") record.function.qualifiers.push_back(ABI_FUNCTION_QUALIFIER_LVALUE_REFERENCE);
+		else if (words.at(1) == "rvalue-ref" || words.at(1) == "rref") record.function.qualifiers.push_back(ABI_FUNCTION_QUALIFIER_RVALUE_REFERENCE);
+		else
+			throw logic_error("unknown function qualifier '" + words.at(1) + "'");
 	}
 	return record;
 }
@@ -468,10 +453,11 @@ AbiFactRecord parse_definition_record(const vector<string>& words)
 		if (words.at(2) == "raw") {
 			record.definition.context.kind = ABI_CONTEXT_RAW;
 			record.definition.context.fragment = words.at(3);
-		} else {
+		} else if (words.at(2) == "function") {
 			record.definition.context.kind = ABI_CONTEXT_FUNCTION;
 			record.definition.context.function = parse_function_target(words, 3);
-		}
+		} else
+			throw logic_error("unknown context kind '" + words.at(2) + "'");
 	} else if (words[0] == "let-entity") {
 		record.definition.kind = ABI_DEFINITION_ENTITY;
 		if (words.at(2) == "symbol") {
@@ -480,11 +466,13 @@ AbiFactRecord parse_definition_record(const vector<string>& words)
 		} else if (words.at(2) == "function") {
 			record.definition.entity.kind = ABI_ENTITY_FACT_FUNCTION;
 			record.definition.entity.function = parse_function_target(words, 3);
-		} else {
+		} else if (words.at(2) == "variable") {
 			record.definition.entity.kind = ABI_ENTITY_FACT_VARIABLE;
 			record.definition.entity.qualified_name = words.at(3);
-		}
-	}
+		} else
+			throw logic_error("unknown entity kind '" + words.at(2) + "'");
+	} else
+		throw logic_error("unknown definition kind '" + words[0] + "'");
 	return record;
 }
 AbiFactRecord parse_target_record(const vector<string>& words)
@@ -511,6 +499,7 @@ AbiFactRecord parse_target_record(const vector<string>& words)
 		record.target.base_offset = parse_ull(words.at(2));
 		record.target.base_type = parse_type_token(words.at(3));
 	} else if (words[0] == "tls-wrapper") {
+		if (words.at(1) != "variable") throw logic_error("tls-wrapper target must name a variable");
 		record.target.kind = ABI_TARGET_FACT_THREAD_LOCAL_WRAPPER;
 		record.target.qualified_name = words.at(2);
 	} else if (words[0] == "thunk" || words[0] == "virtual-base-thunk") {
@@ -523,9 +512,11 @@ AbiFactRecord parse_target_record(const vector<string>& words)
 			record.target.result_adjust = parse_ll(words.at(2));
 			fn_pos = 3;
 		}
+		if (words.at(fn_pos) != "function") throw logic_error("thunk target must name a function");
 		vector<string> rest(words.begin() + fn_pos + 1, words.end());
 		record.target.function = parse_function_target(rest, 0);
-	}
+	} else
+		throw logic_error("unknown target kind '" + words[0] + "'");
 	return record;
 }
 bool is_function_record_keyword(const string& word)
@@ -576,10 +567,7 @@ string base36(size_t value)
 {
 	const char* digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 	string out;
-	do {
-		out.push_back(digits[value % 36]);
-		value /= 36;
-	} while (value != 0);
+	do { out.push_back(digits[value % 36]); value /= 36; } while (value != 0);
 	reverse(out.begin(), out.end());
 	return out;
 }
@@ -598,13 +586,17 @@ struct Component
 	vector<string> abi_tags;
 	bool is_std = false;
 	bool is_operator = false;
-	bool is_literal = false;
 	bool is_conversion = false;
 	bool is_ctor_dtor = false;
+	bool unary_operator = false;
 	AbiType conversion_type;
 	string terminal;
 	string literal_suffix;
 };
+size_t explicit_parameter_count(const vector<AbiFunctionRecord>& records)
+{
+	size_t count = 0; for (size_t i = 0; i < records.size(); ++i) if (records[i].kind == ABI_FUNCTION_RECORD_PARAMETER) ++count; return count;
+}
 class Mangler
 {
 public:
@@ -643,7 +635,7 @@ private:
 	string encode_qualified_name(const string& qname);
 	string type_key(const AbiType& type) const;
 	string arg_key(const AbiTemplateArgument& arg) const;
-	string operator_code(const string& name) const;
+	string operator_code(const string& name, bool unary) const;
 	string terminal_code(const string& name) const;
 	string builtin_code(const string& name) const;
 	string substitution_code(size_t index) const;
@@ -673,9 +665,11 @@ string Mangler::mangle_case()
 	const AbiTargetRecord* target = NULL;
 	vector<AbiFunctionRecord> fn_records;
 	for (size_t i = 0; i < records.size(); ++i) {
-		if (records[i].kind == ABI_FACT_RECORD_TARGET)
+		if (records[i].kind == ABI_FACT_RECORD_TARGET) {
+			if (target != NULL)
+				throw logic_error("case has multiple targets");
 			target = &records[i].target;
-		else if (records[i].kind == ABI_FACT_RECORD_FUNCTION)
+		} else if (records[i].kind == ABI_FACT_RECORD_FUNCTION)
 			fn_records.push_back(records[i].function);
 	}
 	if (target == NULL)
@@ -717,16 +711,20 @@ string Mangler::builtin_code(const string& name) const
 			return codes[i].code;
 	throw logic_error("unknown builtin type '" + name + "'");
 }
-string Mangler::operator_code(const string& name) const
+string Mangler::operator_code(const string& name, bool unary) const
 {
+	if (name == "plus") return unary ? "ps" : "pl";
+	if (name == "minus") return unary ? "ng" : "mi";
 	struct Code { const char* name; const char* code; };
 	static const Code codes[] = {
-		{"call", "cl"}, {"operator-call", "cl"}, {"plus", "pl"}, {"binary-plus", "pl"},
-		{"unary-plus", "ps"}, {"minus", "mi"}, {"binary-minus", "mi"}, {"unary-minus", "ng"},
-		{"address-of", "ad"}, {"bit-and", "ad"}, {"deref", "ml"}, {"multiply", "ml"},
-		{"divide", "dv"}, {"remainder", "rm"}, {"bit-or", "or"}, {"bit-xor", "eo"},
-		{"assign", "aS"}, {"equal", "eq"}, {"not-equal", "ne"}, {"less", "lt"},
-		{"greater", "gt"}, {"less-equal", "le"}, {"greater-equal", "ge"},
+		{"new", "nw"}, {"new-array", "na"}, {"delete", "dl"}, {"delete-array", "da"},
+		{"call", "cl"}, {"operator-call", "cl"}, {"binary-plus", "pl"}, {"unary-plus", "ps"},
+		{"binary-minus", "mi"}, {"unary-minus", "ng"}, {"address-of", "ad"}, {"bit-and", "an"},
+		{"deref", "de"}, {"multiply", "ml"}, {"divide", "dv"}, {"remainder", "rm"},
+		{"bit-or", "or"}, {"bit-xor", "eo"}, {"assign", "aS"}, {"plus-assign", "pL"}, {"minus-assign", "mI"}, {"multiply-assign", "mL"},
+		{"divide-assign", "dV"}, {"remainder-assign", "rM"}, {"bit-and-assign", "aN"}, {"bit-or-assign", "oR"}, {"bit-xor-assign", "eO"},
+		{"left-shift", "ls"}, {"right-shift", "rs"}, {"left-shift-assign", "lS"}, {"right-shift-assign", "rS"}, {"equal", "eq"},
+		{"not-equal", "ne"}, {"less", "lt"}, {"greater", "gt"}, {"less-equal", "le"}, {"greater-equal", "ge"}, {"three-way", "ss"},
 		{"logical-and", "aa"}, {"logical-or", "oo"}, {"logical-not", "nt"},
 		{"increment", "pp"}, {"decrement", "mm"}, {"comma", "cm"},
 		{"member-pointer", "pm"}, {"arrow", "pt"}, {"index", "ix"}
@@ -734,8 +732,7 @@ string Mangler::operator_code(const string& name) const
 	for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i)
 		if (name == codes[i].name)
 			return codes[i].code;
-	if (starts_with(name, "operator-name:")) return name.substr(14);
-	return name;
+	throw logic_error("unknown operator terminal '" + name + "'");
 }
 string Mangler::terminal_code(const string& name) const
 {
@@ -748,7 +745,7 @@ string Mangler::terminal_code(const string& name) const
 	for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i)
 		if (name == codes[i].name)
 			return codes[i].code;
-	return source_name(name);
+	throw logic_error("unknown special terminal '" + name + "'");
 }
 string Mangler::type_key(const AbiType& type) const
 {
@@ -830,7 +827,7 @@ string Mangler::encode_component(const Component& comp)
 	if (comp.is_operator && comp.terminal == "literal")
 		base = "li" + source_name(comp.literal_suffix);
 	else if (comp.is_operator)
-		base = operator_code(comp.terminal);
+		base = operator_code(comp.terminal, comp.unary_operator);
 	else if (comp.is_conversion)
 		base = "cv" + encode_type(comp.conversion_type);
 	else if (comp.is_ctor_dtor)
@@ -964,7 +961,8 @@ string Mangler::encode_type(const AbiType& type)
 			if (type.kind == ABI_TYPE_STD_TEMPLATE_SPECIALIZATION &&
 			    !type.standard_substitution.empty() &&
 			    type.standard_substitution != "-")
-				return type.standard_substitution + encode_template_args(type.argument_refs);
+				return type.standard_substitution +
+					(type.standard_substitution_includes_arguments ? "" : encode_template_args(type.argument_refs));
 			map<string, size_t>::const_iterator primary =
 				substitution_index.find("name:" + type.name);
 			if (primary != substitution_index.end() && !type.argument_refs.empty()) {
@@ -1082,8 +1080,6 @@ string Mangler::encode_entity_symbol(const string& ref)
 {
 	if (ref.empty())
 		return "";
-	if (!ref.empty() && ref[0] == '_')
-		return ref;
 	map<string, AbiEntityFact>::const_iterator found = env.entities.find(ref);
 	if (found == env.entities.end())
 		throw logic_error("unknown entity '" + ref + "'");
@@ -1186,6 +1182,7 @@ string Mangler::encode_path_name(const string& qname, const vector<AbiFunctionPa
 			terminal.is_operator = true;
 			terminal.terminal = rec.terminal;
 			terminal.literal_suffix = rec.literal_suffix;
+			terminal.unary_operator = explicit_parameter_count(fn_records) + (parts.size() > 1 ? 1 : 0) == 1;
 			has_terminal = true;
 		} else if (rec.kind == ABI_FUNCTION_RECORD_CONVERSION_TERMINAL) {
 			terminal.is_conversion = true;
@@ -1237,6 +1234,9 @@ string Mangler::encode_encoding_name(const vector<AbiFunctionRecord>& fn_records
 			for (size_t q = 0; q < rec.qualifiers.size(); ++q)
 				if (rec.qualifiers[q] == ABI_FUNCTION_QUALIFIER_CONST)
 					qualifier_prefix += "K";
+				else if (rec.qualifiers[q] == ABI_FUNCTION_QUALIFIER_VOLATILE) qualifier_prefix += "V";
+				else if (rec.qualifiers[q] == ABI_FUNCTION_QUALIFIER_LVALUE_REFERENCE) qualifier_prefix += "R";
+				else if (rec.qualifiers[q] == ABI_FUNCTION_QUALIFIER_RVALUE_REFERENCE) qualifier_prefix += "O";
 		}
 	}
 	if (has_local_context || has_lambda_context) {
@@ -1257,16 +1257,17 @@ string Mangler::encode_encoding_name(const vector<AbiFunctionRecord>& fn_records
 		}
 		for (size_t i = 0; i < fn_records.size(); ++i) {
 			const AbiFunctionRecord& rec = fn_records[i];
-			Component comp;
-			if (rec.kind == ABI_FUNCTION_RECORD_TERMINAL_SOURCE) {
-				comp.name = rec.terminal;
-			} else if (rec.kind == ABI_FUNCTION_RECORD_OPERATOR_TERMINAL) {
-				comp.is_operator = true;
-				comp.terminal = rec.terminal;
-				comp.literal_suffix = rec.literal_suffix;
-			} else {
-				continue;
-			}
+				Component comp;
+				if (rec.kind == ABI_FUNCTION_RECORD_TERMINAL_SOURCE) {
+					comp.name = rec.terminal;
+				} else if (rec.kind == ABI_FUNCTION_RECORD_OPERATOR_TERMINAL) {
+					comp.is_operator = true;
+					comp.terminal = rec.terminal;
+					comp.literal_suffix = rec.literal_suffix;
+					comp.unary_operator = explicit_parameter_count(fn_records) + (inner.empty() ? 0 : 1) == 1;
+				} else {
+					continue;
+				}
 			inner.push_back(comp);
 		}
 		string entity = "N";
@@ -1295,15 +1296,16 @@ string Mangler::encode_encoding_name(const vector<AbiFunctionRecord>& fn_records
 		} else if (rec.kind == ABI_FUNCTION_RECORD_TERMINAL) {
 			comp.is_ctor_dtor = true;
 			comp.terminal = rec.terminal;
-		} else if (rec.kind == ABI_FUNCTION_RECORD_TERMINAL_SOURCE) {
-			comp.name = rec.terminal;
-		} else if (rec.kind == ABI_FUNCTION_RECORD_OPERATOR_TERMINAL) {
-			comp.is_operator = true;
-			comp.terminal = rec.terminal;
-			comp.literal_suffix = rec.literal_suffix;
-		} else if (rec.kind == ABI_FUNCTION_RECORD_CONVERSION_TERMINAL) {
-			comp.is_conversion = true;
-			comp.conversion_type = rec.type;
+			} else if (rec.kind == ABI_FUNCTION_RECORD_TERMINAL_SOURCE) {
+				comp.name = rec.terminal;
+			} else if (rec.kind == ABI_FUNCTION_RECORD_OPERATOR_TERMINAL) {
+				comp.is_operator = true;
+				comp.terminal = rec.terminal;
+				comp.literal_suffix = rec.literal_suffix;
+				comp.unary_operator = explicit_parameter_count(fn_records) + (comps.empty() ? 0 : 1) == 1;
+			} else if (rec.kind == ABI_FUNCTION_RECORD_CONVERSION_TERMINAL) {
+				comp.is_conversion = true;
+				comp.conversion_type = rec.type;
 		} else {
 			continue;
 		}
@@ -1322,7 +1324,7 @@ string Mangler::encode_function_name(const AbiFunctionTarget& target,
 	if (target.kind == ABI_FUNCTION_TARGET_ENCODING)
 		return encode_encoding_name(fn_records, allow_name_prefix);
 	if (target.kind == ABI_FUNCTION_TARGET_LOCAL) {
-		string entity = "N" + source_name(target.source_name) + operator_code(target.terminal) + "E";
+		string entity = "N" + source_name(target.source_name) + operator_code(target.terminal, false) + "E";
 		return encode_local_name(target.context_ref, entity, target.discriminator);
 	}
 	if (target.kind == ABI_FUNCTION_TARGET_LAMBDA) {
@@ -1332,7 +1334,7 @@ string Mangler::encode_function_name(const AbiFunctionTarget& target,
 		if (target.signature_parameter_types.empty())
 			lambda += "v";
 		lambda += "E" + target.discriminator + "_";
-		return encode_local_name(target.context_ref, "N" + lambda + operator_code(target.terminal) + "E",
+		return encode_local_name(target.context_ref, "N" + lambda + operator_code(target.terminal, false) + "E",
 			target.discriminator);
 	}
 	return encode_path_name(target.qualified_name, target.path_operands, fn_records,
@@ -1443,8 +1445,7 @@ string Mangler::encode_target(const AbiTargetRecord& target, const vector<AbiFun
 AbiFactRecord parse_fact_record_words(const vector<string>& words)
 {
 	ostringstream line;
-	for (size_t i = 0; i < words.size(); ++i)
-		line << (i == 0 ? "" : " ") << words[i];
+	for (size_t i = 0; i < words.size(); ++i) line << (i == 0 ? "" : " ") << words[i];
 	return parse_fact_record_line(line.str());
 }
 AbiFactFile parse_fact_text(const string& text)
