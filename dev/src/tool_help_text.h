@@ -66,8 +66,7 @@ inline const char * lowir2native_help_text()
       "  -O0 / -O1 / -O2\n"
       "  -o <outfile>\n"
       "  --target <target>\n"
-      "  --dump-machine-ir <mirfile>\n"
-      "  --dump-native-plan <mirfile>\n";
+      "  --dump-machine-ir <mirfile>\n";
 }
 
 inline const char * lowiropt_help_text()

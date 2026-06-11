@@ -123,7 +123,7 @@ LowIR2NativeInvocation parse_lowir2native_invocation(const vector<string> & args
       invocation.output_target = args[++i];
       continue;
     }
-    if(args[i] == "--dump-machine-ir" || args[i] == "--dump-native-plan") {
+    if(args[i] == "--dump-machine-ir") {
       if(i + 1 >= args.size()) {
         throw logic_error("missing output file after --dump-machine-ir");
       }

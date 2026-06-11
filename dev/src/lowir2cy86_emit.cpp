@@ -1,4 +1,5 @@
 #include "lowir2cy86.h"
+#include "lowir2cy86_emit_helpers.h"
 
 #include <sstream>
 #include <stdexcept>
@@ -66,10 +67,11 @@ struct CyEmitter
 	ostringstream out;
 	int eh_label_counter;
 	bool safe_call_argument_order;
+	bool native_output;
 
-	explicit CyEmitter(const Program& p, bool safe_order)
+	explicit CyEmitter(const Program& p, bool safe_order, bool native)
 	    : program(p), eh_label_counter(0),
-	      safe_call_argument_order(safe_order) {}
+	      safe_call_argument_order(safe_order), native_output(native) {}
 
 	void line(const string& text) { out << '\t' << text << ";\n"; }
 	void label(const string& text) { out << text << ":\n"; }
@@ -356,8 +358,12 @@ struct CyEmitter
 			                     lookup_value_type(fn, ins.a), ins.type, "x");
 		else
 		{
-			emit_value_to_reg(fn, ins.a, parse_type_text("ptr"), "x");
-			emit_load_mem_to_reg(mem_reg("x", 0), ins.type, ins.type, "x");
+			const string base = native_output && is_scalar_int_like(ins.type) &&
+			                            cy86_width_bits(ins.type) < 32
+			                        ? "y"
+			                        : "x";
+			emit_value_to_reg(fn, ins.a, parse_type_text("ptr"), base);
+			emit_load_mem_to_reg(mem_reg(base, 0), ins.type, ins.type, "x");
 		}
 		emit_store_reg_to_temp(fn, ins.dest, ins.type, "x");
 	}
@@ -1103,12 +1109,13 @@ struct CyEmitter
 
 	void emit_literal_to_reg(const Type& type, const string& literal, const string& base)
 	{
+		const string source = native_cy86_literal(type, literal, native_output);
 		if (is_float_type(type) && type.bits == 32)
-			line("move32 " + reg_name(base, 32) + " " + literal);
+			line("move32 " + reg_name(base, 32) + " " + source);
 		else if (is_float_type(type) && type.bits == 64)
-			line("move64 " + reg_name(base, 64) + " " + literal);
+			line("move64 " + reg_name(base, 64) + " " + source);
 		else
-			line("move64 " + reg_name(base, 64) + " " + literal);
+			line("move64 " + reg_name(base, 64) + " " + source);
 	}
 
 	string f80_value_mem(const Function& fn, const Value& value) const
@@ -1373,6 +1380,8 @@ struct CyEmitter
 
 	void emit_global_section(const Global& global)
 	{
+		if (native_output && native_global_alignment(global) >= 16)
+			line("align16");
 		label(global_label(global.name));
 		if (global.data.empty())
 			emit_scalar_global(global);
@@ -1389,7 +1398,8 @@ struct CyEmitter
 			line("data64 " + address_target_label(global.init.target, global.init.addend));
 		else
 			line("data" + to_string(cy86_width_bits(global.type)) + " " +
-			     global.init.literal);
+			     native_cy86_literal(global.type, global.init.literal,
+			                         native_output));
 	}
 
 	void emit_structured_global(const Global& global)
@@ -1410,7 +1420,8 @@ struct CyEmitter
 			{
 				emit_padding(offset, item.type.align);
 				line("data" + to_string(cy86_width_bits(item.type)) + " " +
-				     item.literal);
+				     native_cy86_literal(item.type, item.literal,
+				                         native_output));
 				offset += storage_size(item.type);
 			}
 		}
@@ -1444,9 +1455,11 @@ struct CyEmitter
 
 }  // namespace
 
-string finish_cy86_text(const Program& program, bool safe_call_argument_order)
+string finish_cy86_text(const Program& program,
+                        bool safe_call_argument_order,
+                        bool native_output)
 {
-	CyEmitter emitter(program, safe_call_argument_order);
+	CyEmitter emitter(program, safe_call_argument_order, native_output);
 	string text = emitter.finish();
 	if (text.size() >= 2 && text[text.size() - 1] == '\n' &&
 	    text[text.size() - 2] == '\n')
@@ -1456,12 +1469,12 @@ string finish_cy86_text(const Program& program, bool safe_call_argument_order)
 
 string emit_cy86(const Program& program)
 {
-	return finish_cy86_text(program, false);
+	return finish_cy86_text(program, false, false);
 }
 
 string emit_cy86_for_native(const Program& program)
 {
-	return finish_cy86_text(program, true);
+	return finish_cy86_text(program, true, true);
 }
 
 }  // namespace lowir2cy86

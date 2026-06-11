@@ -139,8 +139,7 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 		dump_return(fn, ins);
 		break;
 	default:
-		out_ << "    ; unsupported\n";
-		break;
+		throw runtime_error("unsupported LowIR instruction for machine IR");
 	}
 		consume_instruction_uses(ins); }
 
@@ -188,18 +187,18 @@ void MirDumper::simulate_instruction(const lowir2cy86::Function& fn,
 			}
 		}
 		break;
-		case lowir2cy86::InstrKind::Addr:
-			if (is_dead_dest(ins.dest)) {
-				if (ins.a.kind == lowir2cy86::ValueKind::Slot)
-					used_preserves_.insert("rbx");
-				break;
-			}
-			if (inline_call_arg_addrs_.find(ins.dest) != inline_call_arg_addrs_.end())
-				break;
-			if (store_source_addrs_.find(ins.dest) != store_source_addrs_.end())
-				break;
-			if (inline_copy_addrs_.find(ins.dest) != inline_copy_addrs_.end())
-				break;
+	case lowir2cy86::InstrKind::Addr:
+		if (is_dead_dest(ins.dest)) {
+			if (ins.a.kind == lowir2cy86::ValueKind::Slot)
+				used_preserves_.insert("rbx");
+			break;
+		}
+		if (inline_call_arg_addrs_.find(ins.dest) != inline_call_arg_addrs_.end())
+			break;
+		if (store_source_addrs_.find(ins.dest) != store_source_addrs_.end())
+			break;
+		if (inline_copy_addrs_.find(ins.dest) != inline_copy_addrs_.end())
+			break;
 		if (promoted_addr_params_.find(ins.dest) !=
 		    promoted_addr_params_.end())
 			break;
@@ -211,17 +210,17 @@ void MirDumper::simulate_instruction(const lowir2cy86::Function& fn,
 		if (inline_atomic_expected_addrs_.find(ins.dest) !=
 		    inline_atomic_expected_addrs_.end())
 			break;
-			if (direct_branch_addr_regs_.find(ins.dest) !=
-			    direct_branch_addr_regs_.end())
-				remember_fixed_temp_reg(
-				    ins.dest, direct_branch_addr_regs_.find(ins.dest)->second);
-			else if (!fixed_addr_dest_reg(ins).empty())
-				remember_fixed_temp_reg(ins.dest, fixed_addr_dest_reg(ins));
-			else if (addr_prefers_rcx(ins))
-				remember_fixed_temp_reg(ins.dest, "rcx");
-			else
-				temp_reg(ins.dest);
-			value_reg(fn, ins.a);
+		if (direct_branch_addr_regs_.find(ins.dest) !=
+		    direct_branch_addr_regs_.end())
+			remember_fixed_temp_reg(
+			    ins.dest, direct_branch_addr_regs_.find(ins.dest)->second);
+		else if (!fixed_addr_dest_reg(ins).empty())
+			remember_fixed_temp_reg(ins.dest, fixed_addr_dest_reg(ins));
+		else if (addr_prefers_rcx(ins))
+			remember_fixed_temp_reg(ins.dest, "rcx");
+		else
+			temp_reg(ins.dest);
+		value_reg(fn, ins.a);
 		break;
 	case lowir2cy86::InstrKind::Load:
 	case lowir2cy86::InstrKind::AtomicLoad: {
@@ -378,6 +377,10 @@ void MirDumper::simulate_instruction(const lowir2cy86::Function& fn,
 	case lowir2cy86::InstrKind::AtomicAddFetch:
 		simulate_atomic(fn, ins);
 		break;
+	case lowir2cy86::InstrKind::AtomicThreadFence:
+	case lowir2cy86::InstrKind::AtomicSignalFence:
+	case lowir2cy86::InstrKind::Jump:
+		break;
 	case lowir2cy86::InstrKind::Branch:
 		if (ins.a.kind == lowir2cy86::ValueKind::Temp &&
 		    direct_branch_cmp_.find(ins.a.text) != direct_branch_cmp_.end()) {
@@ -399,7 +402,7 @@ void MirDumper::simulate_instruction(const lowir2cy86::Function& fn,
 		value_reg(fn, ins.a);
 		break;
 	default:
-		break;
+		throw runtime_error("unsupported LowIR instruction for machine IR");
 	}
 		consume_instruction_uses(ins); }
 
@@ -448,20 +451,23 @@ bool MirDumper::temp_is_live(const string& name) const {
 	map<string, int>::const_iterator it = remaining_uses_.find(name); return it != remaining_uses_.end() && it->second > 0; }
 
 bool MirDumper::reg_is_live(const string& reg) const {
-	for (size_t i = 0; i < temp_names_.size(); ++i)
+	for (size_t i = 0; i < temp_names_.size(); ++i) {
 		if (temp_regs_[i] == reg && temp_is_live(temp_names_[i]))
 			return true;
-		for (map<string, string>::const_iterator it = fixed_temp_regs_.begin();
-		     it != fixed_temp_regs_.end(); ++it)
-			if (it->second == reg && temp_is_live(it->first))
-				return true;
-		for (map<string, string>::const_iterator it = entry_param_regs_.begin();
-		     it != entry_param_regs_.end(); ++it)
-			if (it->second == reg && entry_param_reg_available(it->first) &&
-			    temp_is_live(it->first))
-				return true;
-		for (map<string, string>::const_iterator it = promoted_loads_.begin();
-		     it != promoted_loads_.end(); ++it) {
+	}
+	for (map<string, string>::const_iterator it = fixed_temp_regs_.begin();
+	     it != fixed_temp_regs_.end(); ++it) {
+		if (it->second == reg && temp_is_live(it->first))
+			return true;
+	}
+	for (map<string, string>::const_iterator it = entry_param_regs_.begin();
+	     it != entry_param_regs_.end(); ++it) {
+		if (it->second == reg && entry_param_reg_available(it->first) &&
+		    temp_is_live(it->first))
+			return true;
+	}
+	for (map<string, string>::const_iterator it = promoted_loads_.begin();
+	     it != promoted_loads_.end(); ++it) {
 		map<string, string>::const_iterator eit =
 		    entry_param_regs_.find(it->second);
 		if (eit != entry_param_regs_.end() && eit->second == reg &&

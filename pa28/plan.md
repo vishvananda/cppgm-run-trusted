@@ -30,6 +30,39 @@ only the assignment contract, harness, and oracle data.
   the direct operation families required by the strict and structural PA28
   oracles.
 
+## Architecture Review
+
+- The current `lowir2native` driver parses PA28 command-line forms in
+  `dev/lowir2native.cpp`, builds `lowir2native::Options`, and delegates all
+  compiler work to `dev/src/lowir2native_support.cpp`. The driver now exposes
+  only the PA28 contract surface for MIR dumping: `--dump-machine-ir`.
+- `lowir2native_support.cpp` parses all LowIR sources through the shared
+  PA13/LowIR model in `lowir2cy86::parse_files`, then runs
+  `validate_and_layout_allow_f80`. That preserves typed facts for values,
+  slots, globals, call signatures, metadata, f80 storage, and stack layout
+  before either output path runs.
+- `--dump-machine-ir` is owned by `MirDumper` and helper modules under
+  `dev/src/lowir2native_mir_dumper*` plus
+  `dev/src/lowir2native_mir_helpers.*`. The dumper works from the typed
+  `lowir2cy86::Program` object, performs per-function definition/use/liveness
+  analysis, and emits direct machine-IR operations for startup calls, globals,
+  scalar/floating operations, branches, direct and indirect calls, bulk memory,
+  f80, atomics, and ABI/frame metadata. Unsupported instruction kinds now fail
+  instead of producing placeholder MIR.
+- Native executable writing is in `dev/src/lowir2native_native.cpp`. It makes a
+  native-owned copy of the validated LowIR program for the scalar-pointer global
+  call-target rewrite, emits native-safe CY86 through
+  `lowir2cy86::emit_cy86_for_native`, and invokes the existing PA9 CY86 ELF
+  writer in-process through `cy86::compile_to_file`. No reference binaries,
+  host compilers, subprocesses, interpreters, VM loops, runtime payloads, or
+  template executables are used.
+- The CY86 handoff remains the executable container/emission bridge, but the
+  audit removed the native-side text repair passes. Floating literal bit
+  materialization, native global alignment, and narrow indirect-load register
+  safety now happen in `lowir2cy86_emit.cpp` and
+  `lowir2cy86_emit_helpers.cpp` from typed `Type`, `Global`, and instruction
+  data before CY86 parsing.
+
 ## Ownership Boundaries
 
 - `dev/lowir2native.cpp` owns command-line parsing, batch handling, and calls
@@ -42,6 +75,27 @@ only the assignment contract, harness, and oracle data.
   both backends. Existing PA1-PA27 behavior must remain unchanged.
 - PA28 tests, refs, scripts, grammar, and harness files are not implementation
   targets.
+
+## Final Architecture Review
+
+- The PA28 stage now has a clear owned boundary for tested backend shape:
+  validated LowIR is lowered by `MirDumper` into deterministic x86-64 machine
+  IR, and every in-scope PA28 instruction either emits/simulates explicit MIR
+  or fails compilation. The previous catch-all `; unsupported` MIR row is gone.
+- The executable path still reuses the PA9 CY86-to-ELF implementation as the
+  final native image writer, but no longer depends on downstream text scanning
+  to recover float, alignment, or narrow-load facts. Those facts are represented
+  while the LowIR `Program` is still typed and are emitted directly by the
+  native CY86 handoff.
+- Source ownership matches the intended split: the driver is small, PA28 MIR
+  behavior is in responsibility-named dumper modules, shared LowIR parsing and
+  validation extensions stay in the `lowir2cy86` model/parser/validator, and
+  `dev/frontend_source_sets.mk` registers every PA28 backend source used by
+  `lowir2native`.
+- The audit found no test-name gates, source-path gates, fixture-specific
+  output bypasses, timeout workarounds, reference-tool calls, host-compiler
+  calls, copied runtime payloads, or file-audit bypasses in the PA28
+  implementation.
 
 ## Validation
 
@@ -80,10 +134,17 @@ only the assignment contract, harness, and oracle data.
 - Added trivial parameter-slot promotion and call pass-mode address
   materialization so slot-backed object/reference arguments are represented
   from typed LowIR metadata rather than recovered from MIR text.
-- Added PA28-owned native bridge sanitization for indirect narrow-load aliases,
+- Added PA28-owned native bridge support for indirect narrow-load aliases,
   direct scalar-pointer global call targets, thread-local MIR load/store address
   materialization, large integer ALU immediates, compact scalar stack homes, and
   caller result materialization.
+- Audit cleanup removed the native-side CY86 text repair passes by moving
+  native float literal bit emission, global alignment, and narrow indirect-load
+  safety into typed emission in `lowir2cy86_emit.cpp` and
+  `lowir2cy86_emit_helpers.cpp`; removed the non-contract
+  `--dump-native-plan` alias; and changed unsupported MIR lowering from a
+  placeholder comment to a hard error with explicit no-op simulation for valid
+  jump/fence forms.
 
 Final validation:
 
