@@ -85,33 +85,22 @@ only the assignment contract, harness, and oracle data.
   materialization, large integer ALU immediates, compact scalar stack homes, and
   caller result materialization.
 
-Current validation:
+Final validation:
 
-- `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 105 / 106 PA28 tests pass.
-- Passing checkpoints now include direct small-object copy/zero/return,
-  f80 direct calls, stack arguments beyond six, mixed GPR/XMM direct and
-  indirect calls, object parameter/result slot aliasing, direct temporary
-  store-back cleanup, runtime zero-only global alignment, switch call-case
-  liveness, forwarded parameter identity, single-use index call arguments,
-  full-register indirect calls, late indirect-call argument preservation, and
-  thread-local store pressure.
-- `make test-report-through-pa28`: must be rerun after the remaining PA28
-  structural backend work.
-- `perl scripts/cppgm_file_audit.pl --stage pa28 --paths dev/src`: must be
-  rerun after the PA28 backend split/compaction work because
-  `lowir2native_support.cpp` is temporarily over the line-count limit.
+- `make test-report ACTIVE_TEST_REPORT_PAS='pa28'`: 106 / 106 PA28 tests pass.
+- `make test-report-through-pa28`: 2527 / 2527 tests pass through PA28.
+- `perl scripts/cppgm_file_audit.pl --stage pa28 --paths dev/src`: passes
+  with warnings only.
 
-Remaining work is concentrated in the structural SRET/index-base case. The next
-implementation pass should:
+Final PA28 coverage includes direct small-object copy/zero/return, f80 direct
+calls, stack arguments beyond six, mixed GPR/XMM direct and indirect calls,
+object parameter/result slot aliasing, direct temporary store-back cleanup,
+runtime zero-only global alignment, switch call-case liveness, forwarded
+parameter identity, single-use index call arguments, full-register indirect
+calls, late indirect-call argument preservation, thread-local store pressure,
+direct-call index-base preservation across SRET-like constructor paths, and
+call pass-mode address materialization from typed LowIR metadata.
 
-- preserve indirect-result and reference parameters across calls without
-  destructively reusing their derived address temps for later stores;
-- use typed frame homes for pointer/index temps when a call boundary and
-  branch edge make rematerialization unclear or ABI-clobber-prone;
-- keep large-object stack setup compact where temps are single-use, so the
-  conservative SRET path does not regress the already-passing PA28 store and
-  call fixtures;
-- keep direct compare-to-branch lowering direct while folding slot/global loads
-  only when that does not hide a required reload or address materialization;
-- keep MIR dumping and native emission driven by the same typed PA28 lowering
-  state, then split or compact backend helpers enough for file audit to pass.
+The PA28 backend is split into responsibility-named MIR dumper modules plus
+shared MIR helper/op-name modules so file-size and function-size audit limits
+are satisfied without include-as-implementation splitting.
