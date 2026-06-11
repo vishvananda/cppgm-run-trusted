@@ -571,7 +571,8 @@ void emit_param_store(X86& x,
                       const Function& fn,
                       size_t index,
                       size_t& reg,
-                      size_t& fp);
+                      size_t& fp,
+                      size_t& stack);
 
 }  // namespace host
 }  // namespace pa31

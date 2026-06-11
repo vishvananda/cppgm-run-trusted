@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -86,12 +87,14 @@ bool MakeCharacterLiteral(const string& source, ExprValue& out)
 	return true;
 }
 
+bool is_identifier_like_operator_name(const string& data);
+
 Token MakeInvalidToken(const string& source)
 {
 	Token token;
 	token.kind = TokenKind::Invalid;
 	token.simple = OP_LPAREN;
-	token.source = source;
+	(void)source;
 	token.from_identifier = false;
 	token.literal = MakeSigned(0, false);
 	return token;
@@ -102,7 +105,8 @@ Token MakeSimpleToken(const string& source, ETokenType simple, bool from_identif
 	Token token;
 	token.kind = TokenKind::Simple;
 	token.simple = simple;
-	token.source = source;
+	if (from_identifier || is_identifier_like_operator_name(source))
+		token.source = source;
 	token.from_identifier = from_identifier;
 	token.literal = MakeSigned(0, false);
 	return token;
@@ -124,7 +128,7 @@ Token MakeLiteralToken(const string& source, const ExprValue& literal)
 	Token token;
 	token.kind = TokenKind::Literal;
 	token.simple = OP_LPAREN;
-	token.source = source;
+	(void)source;
 	token.from_identifier = false;
 	token.literal = literal;
 	return token;
@@ -638,7 +642,11 @@ class CtrlExprTokenStream : public IPPTokenStream
 {
 public:
 	CtrlExprTokenStream(ostream& out, const ctrlexpr::DefinedPredicate& is_defined)
-		: out_(out), is_defined_(is_defined) {}
+		: out_(out), is_defined_(is_defined)
+	{
+		line_.reserve(16);
+		output_.reserve(4096);
+	}
 
 	void emit_whitespace_sequence() {}
 
@@ -658,25 +666,17 @@ public:
 		if (it != StringToTokenTypeMap.end() && IsOperatorToken(it->second))
 			line_.push_back(MakeSimpleToken(data, it->second, true));
 		else
-			line_.push_back(MakeIdentifierToken(data));
+			line_.push_back(cached_identifier(data));
 	}
 
 	void emit_pp_number(const string& data)
 	{
-		ExprValue literal;
-		if (MakeIntegerLiteral(data, literal))
-			line_.push_back(MakeLiteralToken(data, literal));
-		else
-			line_.push_back(MakeInvalidToken(data));
+		line_.push_back(cached_literal(data, true));
 	}
 
 	void emit_character_literal(const string& data)
 	{
-		ExprValue literal;
-		if (MakeCharacterLiteral(data, literal))
-			line_.push_back(MakeLiteralToken(data, literal));
-		else
-			line_.push_back(MakeInvalidToken(data));
+		line_.push_back(cached_literal(data, false));
 	}
 
 	void emit_user_defined_character_literal(const string& data)
@@ -716,7 +716,8 @@ public:
 	void emit_eof()
 	{
 		finish_line();
-		out_ << "eof\n";
+		output_ += "eof\n";
+		out_ << output_;
 	}
 
 private:
@@ -728,7 +729,7 @@ private:
 		if (EvaluateTokens(line_, is_defined_, value))
 			write_value(value);
 		else
-			out_ << "error\n";
+			output_ += "error\n";
 		line_.clear();
 	}
 
@@ -736,17 +737,47 @@ private:
 	{
 		if (value.is_unsigned)
 		{
-			out_ << value.bits << "u\n";
+			output_ += to_string(value.bits);
+			output_ += "u\n";
 		}
 		else
 		{
-			out_ << ToSigned(value.bits) << '\n';
+			output_ += to_string(ToSigned(value.bits));
+			output_ += '\n';
 		}
+	}
+
+	const Token& cached_identifier(const string& data)
+	{
+		pair<unordered_map<string, Token>::iterator, bool> inserted =
+			identifier_cache_.insert(make_pair(data, Token()));
+		if (inserted.second)
+			inserted.first->second = MakeIdentifierToken(data);
+		return inserted.first->second;
+	}
+
+	const Token& cached_literal(const string& data, bool pp_number)
+	{
+		pair<unordered_map<string, Token>::iterator, bool> inserted =
+			literal_cache_.insert(make_pair(data, Token()));
+		if (inserted.second)
+		{
+			ExprValue literal;
+			if ((pp_number && MakeIntegerLiteral(data, literal)) ||
+			    (!pp_number && MakeCharacterLiteral(data, literal)))
+				inserted.first->second = MakeLiteralToken(data, literal);
+			else
+				inserted.first->second = MakeInvalidToken(data);
+		}
+		return inserted.first->second;
 	}
 
 	ostream& out_;
 	ctrlexpr::DefinedPredicate is_defined_;
 	vector<Token> line_;
+	string output_;
+	unordered_map<string, Token> identifier_cache_;
+	unordered_map<string, Token> literal_cache_;
 };
 
 void AppendPPTokenAsCtrlExprToken(const PPToken& token, vector<Token>& out)

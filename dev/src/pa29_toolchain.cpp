@@ -430,7 +430,7 @@ void compile_source_to_object(const string& srcfile,
                               const Options& options)
 {
 	normalize_target(options.target);
-	if (ends_with(objfile, ".o"))
+	if (!ends_with(objfile, ".obj"))
 	{
 		TempFiles temps;
 		const string tmp = temp_object_path(objfile, temps.paths.size());

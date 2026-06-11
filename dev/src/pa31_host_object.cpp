@@ -1083,29 +1083,63 @@ void FuncGen::patch_jumps(size_t base)
 	}
 }
 void emit_param_store(X86& x, const Function& fn, size_t index,
-                      size_t& reg, size_t& fp)
+                      size_t& reg, size_t& fp, size_t& stack)
 {
 	static const int regs[] = {RDI, RSI, RDX, RCX, R8, R9};
 	const Parameter& p = fn.params[index];
 	const size_t off = fn.param_offsets.find(p.name)->second;
 	if (lowir2cy86::is_float_type(p.type) && p.type.bits <= 64)
 	{
-		if (fp >= 8) throw runtime_error("stack float params unsupported");
-		if (p.type.bits == 32)
-			x.sse_mr(0xf3, 0x11, Mem(RBP, -static_cast<int32_t>(off)),
-			         static_cast<int>(fp++));
+		if (fp < 8)
+		{
+			if (p.type.bits == 32)
+				x.sse_mr(0xf3, 0x11, Mem(RBP, -static_cast<int32_t>(off)),
+				         static_cast<int>(fp++));
+			else
+				x.sse_mr(0xf2, 0x11, Mem(RBP, -static_cast<int32_t>(off)),
+				         static_cast<int>(fp++));
+		}
 		else
-			x.sse_mr(0xf2, 0x11, Mem(RBP, -static_cast<int32_t>(off)),
-			         static_cast<int>(fp++));
+		{
+			const int width = p.type.bits == 32 ? 32 : 64;
+			x.mov_rm(width, RAX, Mem(RBP, static_cast<int32_t>(stack)));
+			x.mov_mr(width, Mem(RBP, -static_cast<int32_t>(off)), RAX);
+			stack += 8;
+		}
 	}
 	else if (lowir2cy86::is_obj_type(p.type) && lowir2cy86::is_direct_object_abi(p.type))
 	{
-		for (size_t c = 0; c < lowir2cy86::direct_object_abi_slots(p.type); ++c)
-			x.mov_mr(lowir2cy86::direct_object_abi_chunk_width_bits(p.type, c),
-			         frame_object_mem(off, c * 8), regs[reg++]);
+		const size_t slots = lowir2cy86::direct_object_abi_slots(p.type);
+		const bool in_registers = reg + slots <= 6;
+		for (size_t c = 0; c < slots; ++c)
+		{
+			const int width =
+				lowir2cy86::direct_object_abi_chunk_width_bits(p.type, c);
+			if (in_registers)
+				x.mov_mr(width, frame_object_mem(off, c * 8), regs[reg + c]);
+			else
+			{
+				x.mov_rm(width, RAX,
+				         Mem(RBP, static_cast<int32_t>(stack + c * 8)));
+				x.mov_mr(width, frame_object_mem(off, c * 8), RAX);
+			}
+		}
+		if (in_registers)
+			reg += slots;
+		else
+			stack += slots * 8;
 	}
 	else
-		x.mov_mr(width_for(p.type), Mem(RBP, -static_cast<int32_t>(off)), regs[reg++]);
+	{
+		if (reg < 6)
+			x.mov_mr(width_for(p.type), Mem(RBP, -static_cast<int32_t>(off)), regs[reg++]);
+		else
+		{
+			x.mov_rm(width_for(p.type), RAX, Mem(RBP, static_cast<int32_t>(stack)));
+			x.mov_mr(width_for(p.type), Mem(RBP, -static_cast<int32_t>(off)), RAX);
+			stack += 8;
+		}
+	}
 }
 void FuncGen::emit(FunctionInfo& info)
 {
@@ -1133,8 +1167,9 @@ void FuncGen::emit(FunctionInfo& info)
 	x.sub_rsp(frame_size);
 	size_t reg = 0;
 	size_t fp = 0;
+	size_t stack = 16;
 	for (size_t i = 0; i < fn.params.size(); ++i)
-		emit_param_store(x, fn, i, reg, fp);
+		emit_param_store(x, fn, i, reg, fp, stack);
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
 	{
 		block_offsets[fn.blocks[b].name] = x.pos() - base;
