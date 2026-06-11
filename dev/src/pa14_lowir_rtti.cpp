@@ -598,7 +598,9 @@ void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
 		declared_functions.insert("operator_delete");
 		declares.push_back(
 			"declare function @operator_delete(%arg0 : ptr) -> void "
-			"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete]");
+			"[unwind=no, binding=strong, object=" +
+			string(native_lowering
+			       ? "_ZdlPv" : "cppgm_builtin_operator_delete") + "]");
 	}
 	string name = symbol_for(dtor) + "__deleting_entry";
 	if (defined_functions.find(name) != defined_functions.end())
@@ -705,58 +707,58 @@ block.instrs.push_back("    " + vt + " = addr @" +
 				" = index i8 [projection=base_subobject] " +
 				reload + ", " +
 				to_string(base_subobject_offset(record, base)));
-			vector<string> args;
-			args.push_back(base_addr);
-			if (base.get() != NULL &&
-			    base->kind == TypeKind::Record &&
-			    base->is_polymorphic &&
-			    record_uses_virtual_base_vtt(base))
-			{
-				size_t vtt_slot =
-					construction_vtt_slot_for_direct_base(record, base);
-				if (vtt_slot != static_cast<size_t>(-1))
+				vector<string> args;
+				args.push_back(base_addr);
+				if (!native_lowering &&
+				    base->is_polymorphic &&
+				    record_uses_virtual_base_vtt(base))
 				{
-					string vtt_base = "%t" + to_string(temp++);
-					block.instrs.push_back(
-						"    " + vtt_base + " = addr @" +
-						vtt_symbol_for_record(record));
-					string vtt_arg = vtt_base;
-					if (vtt_slot != 0)
+					size_t vtt_slot =
+						construction_vtt_slot_for_direct_base(record, base);
+					if (vtt_slot != static_cast<size_t>(-1))
 					{
-						vtt_arg = "%t" + to_string(temp++);
+						string vtt_base = "%t" + to_string(temp++);
 						block.instrs.push_back(
-							"    " + vtt_arg +
-							" = index i8 " + vtt_base +
-							", " + to_string(vtt_slot * 8));
+							"    " + vtt_base + " = addr @" +
+							vtt_symbol_for_record(record));
+						string vtt_arg = vtt_base;
+						if (vtt_slot != 0)
+						{
+							vtt_arg = "%t" + to_string(temp++);
+							block.instrs.push_back(
+								"    " + vtt_arg + " = index i8 " +
+								vtt_base + ", " + to_string(vtt_slot * 8));
+						}
+						args.push_back(vtt_arg);
 					}
-					args.push_back(vtt_arg);
-				}
-			}
-			vector<TypePtr> vbases = hidden_virtual_bases_for_record(base);
-			for (size_t v = 0; v < vbases.size(); ++v)
-			{
-				string hidden = "0";
-				if (record_has_base_subobject(record, vbases[v]))
-				{
-					string this_ptr = "%t" + to_string(temp++);
-					block.instrs.push_back("    " + this_ptr +
-					                       " = load ptr $this");
-					uint64_t offset = base_subobject_offset(record,
-					                                        vbases[v]);
-					if (offset == 0)
-						hidden = this_ptr;
-					else
+					vector<TypePtr> vbases =
+						hidden_virtual_bases_for_record(base);
+					for (size_t v = 0; v < vbases.size(); ++v)
 					{
-						hidden = "%t" + to_string(temp++);
-						block.instrs.push_back("    " + hidden +
-						                       " = index i8 " +
-						                       this_ptr + ", " +
-						                       to_string(offset));
+						string hidden;
+						if (record_has_base_subobject(record, vbases[v]))
+						{
+							string this_ptr = "%t" + to_string(temp++);
+							block.instrs.push_back(
+								"    " + this_ptr + " = load ptr $this");
+							uint64_t offset =
+								base_subobject_offset(record, vbases[v]);
+							if (offset == 0)
+								hidden = this_ptr;
+							else
+							{
+								hidden = "%t" + to_string(temp++);
+								block.instrs.push_back(
+									"    " + hidden + " = index i8 " +
+									this_ptr + ", " + to_string(offset));
+							}
+						}
+						if (hidden.empty())
+							hidden = "0";
+						args.push_back(hidden);
 					}
 				}
-				args.push_back(hidden);
-			}
-			ostringstream call;
+				ostringstream call;
 			call << "    call void @" << base_callee << "(";
 			for (size_t a = 0; a < args.size(); ++a)
 			{
@@ -978,6 +980,8 @@ bool entry_owner_is_virtual_base_slot(TypePtr record,
 	return false;
 }
 
+bool record_is_virtual_base_of(TypePtr record, TypePtr base);
+
 void emit_vtable_entries(ProgramLowerer& program,
                          ostringstream& out,
                          TypePtr dispatch_record,
@@ -998,9 +1002,15 @@ void emit_vtable_entries(ProgramLowerer& program,
 			                                view_base->virtual_entries[i]);
 		if (skip_virtual_base_slot)
 			continue;
+		/*
+		 * Native object lowering uses the host ABI's dense function-pointer
+		 * slots.  Earlier LowIR stages expose the course model's sidecar
+		 * adjustment word after each vtable entry.
+		 */
 		bool separate_adjustment_word =
+			!program.native_lowering &&
 			virtual_base_shape &&
-			!pa11::record_virtual_bases(view_base).empty();
+			!record_is_virtual_base_of(dispatch_record, view_base);
 		string entry = vtable_entry_symbol(program,
 		                                   dispatch_record,
 		                                   view_base,
@@ -1310,7 +1320,7 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		ostringstream view;
 		view << "global @"
 		     << vtable_view_symbol_for_record(bare, view_base, view_offset)
-		     << " [storage=readonly, binding=weak, object=@"
+		     << " [storage=readonly, binding=weak, object="
 		     << vtable_view_symbol_for_record(bare, view_base, view_offset)
 		     << "] = {\n";
 		if (virtual_base_shape)

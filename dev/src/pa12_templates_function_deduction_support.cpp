@@ -455,6 +455,16 @@ bool class_template_member_function_template_symbol(
 	       !declaration->outer_type_substitutions.empty();
 }
 
+bool constructor_template_function_template_symbol(
+	const TemplateDeclaration* declaration)
+{
+	return declaration != NULL &&
+	       declaration->constructor_template &&
+	       (!declaration->class_template_member ||
+	        !declaration->outer_type_substitutions.empty() ||
+	        !declaration->outer_value_substitutions.empty());
+}
+
 TypePtr remove_pattern_cv_from_argument(TypePtr argument, unsigned cv)
 {
 	if (argument.get() == NULL || cv == pa11::CV_NONE)

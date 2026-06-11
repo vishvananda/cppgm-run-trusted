@@ -168,6 +168,40 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 		program.collect_node(node);
 }
 
+bool referenced_extra_function(const Node& node,
+                               const set<const Binding*>& direct_calls)
+{
+	if (!starts_with(node.line, "function-definition ") ||
+	    node.binding == NULL ||
+	    node.binding->is_inline_definition)
+		return false;
+	if (node.binding->is_object_root)
+		return true;
+	for (set<const Binding*>::const_iterator it = direct_calls.begin();
+	     it != direct_calls.end(); ++it)
+		if (same_binding_or_alias(node.binding, *it))
+			return true;
+	return false;
+}
+
+void collect_referenced_extra_functions(ProgramLowerer& program,
+                                        const vector<Node>& extra,
+                                        const set<const Binding*>& direct_calls)
+{
+	set<string> collected;
+	for (size_t i = 0; i < extra.size(); ++i)
+	{
+		if (!referenced_extra_function(extra[i], direct_calls))
+			continue;
+		string name = program.symbol_for(extra[i].binding);
+		if (program.defined_functions.find(name) !=
+		        program.defined_functions.end() ||
+		    !collected.insert(name).second)
+			continue;
+		program.collect_node(extra[i]);
+	}
+}
+
 void demand_object_roots(ProgramLowerer& program, const vector<Node>& extra)
 {
 	for (size_t i = 0; i < extra.size(); ++i)
@@ -291,6 +325,7 @@ void collect_parser_output(ProgramLowerer& program,
 	demand_object_roots(program, extra);
 	demand_early_hidden_friends(program, extra, direct_calls);
 	program.collect_translation_unit(parser.root());
+	collect_referenced_extra_functions(program, extra, direct_calls);
 	demand_noop_generated_default_dependencies(program, extra, direct_calls);
 	demand_generated_copy_move_dependencies(program, extra);
 	program.emit_pending_inline_definitions();

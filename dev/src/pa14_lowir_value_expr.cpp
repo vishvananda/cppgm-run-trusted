@@ -133,7 +133,10 @@ Value FunctionLowerer::emit_rvalue(const Node& expr) {
 			if (program_.declared_functions.insert("operator_new__").second)
 				program_.declares.push_back(
 					"declare function @operator_new__(%arg0 : i64) -> ptr "
-					"[binding=strong, object=cppgm_builtin_operator_new_array]");
+					"[binding=strong, object=" +
+					string(program_.native_lowering
+					       ? "_Znam"
+					       : "cppgm_builtin_operator_new_array") + "]");
 			bool record_array = object->kind == TypeKind::Record;
 			bool constant_record_bound = record_array && expr.children[0].has_constant_value;
 			uint64_t constant_count = expr.children[0].constant_value;
@@ -285,7 +288,10 @@ Value FunctionLowerer::emit_rvalue(const Node& expr) {
 			if (program_.declared_functions.insert("operator_new").second)
 				program_.declares.push_back(
 					"declare function @operator_new(%arg0 : i64) -> ptr "
-					"[binding=strong, object=cppgm_builtin_operator_new]");
+					"[binding=strong, object=" +
+					string(program_.native_lowering
+					       ? "_Znwm"
+					       : "cppgm_builtin_operator_new") + "]");
 			string size_tmp = fresh_temp();
 			instr(size_tmp + " = convert sext i64 i32 " + to_string(pa11::type_size(object)));
 			string call_tmp = fresh_temp();

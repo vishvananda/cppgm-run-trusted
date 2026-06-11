@@ -635,5 +635,54 @@ FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
 	return base_entry;
 }
 
+FunctionOut make_destructor_base_entry(const FunctionOut& lowered,
+                                       const string& name,
+                                       bool native_lowering)
+{
+	FunctionOut base_entry = lowered;
+	base_entry.name = name + "__base_entry";
+	string from = "function @" + name + "(";
+	string to = "function @" + name + "__base_entry(";
+	size_t pos = base_entry.header.find(from);
+	if (pos != string::npos)
+		base_entry.header.replace(pos, from.size(), to);
+	TypePtr record = class_record_for_member(lowered.binding);
+	TypePtr bare_record = record.get() != NULL
+		? pa11::strip_cv(record) : TypePtr();
+	if (!native_lowering &&
+	    bare_record.get() != NULL &&
+	    bare_record->kind == TypeKind::Record &&
+	    bare_record->is_polymorphic &&
+	    record_uses_virtual_base_vtt(bare_record))
+	{
+		insert_constructor_base_entry_vtt_parameter(base_entry);
+		rewrite_constructor_base_entry_vptr_stores(base_entry,
+		                                           bare_record);
+		rewrite_constructor_base_entry_vtt_references(base_entry,
+		                                              bare_record);
+		vector<TypePtr> vbases = hidden_virtual_bases_for_record(bare_record);
+		if (!vbases.empty())
+		{
+			size_t close = base_entry.header.find(") ->");
+			if (close != string::npos)
+			{
+				ostringstream hidden;
+				for (size_t i = 0; i < vbases.size(); ++i)
+					hidden << ", %__vbptr" << i << " : ptr";
+				base_entry.header.insert(close, hidden.str());
+			}
+		}
+		renumber_function_temps(base_entry);
+	}
+	size_t object_pos = base_entry.header.find("object=");
+	if (object_pos != string::npos)
+	{
+		size_t dtor_pos = base_entry.header.find("D1", object_pos);
+		if (dtor_pos != string::npos)
+			base_entry.header.replace(dtor_pos, 2, "D2");
+	}
+	return base_entry;
+}
+
 }  // namespace internal
 }  // namespace pa14

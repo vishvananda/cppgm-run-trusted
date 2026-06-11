@@ -86,6 +86,27 @@ TypePtr param = ctor->type->parameters[1]; if (!pa11::same_type(pa11::strip_cv(p
 if (ctor->is_defaulted && !ctor->is_inline_definition && ((init_category == ValueCategory::XValue && param->kind == pa11::TypeKind::RValueReference) ||
 (init_category != ValueCategory::XValue && param->kind == pa11::TypeKind::LValueReference))) trivial_defaulted_match = true; else
 declared_copy_or_move = true; } return declared_copy_or_move && !trivial_defaulted_match; }
+bool Parser::parse_trailing_declarator_initializer(TypePtr declared_type,
+                                                   Expr& init) {
+if (consume(OP_ASS)) {
+init = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
+init.copy_initialization = true; return true; }
+if (consume(OP_LBRACE)) { --pos_; init = parse_braced_init_list(); return true; }
+if (!at(OP_LPAREN) || declared_type->kind == pa11::TypeKind::Function) return false;
+expect(OP_LPAREN); if (at(OP_RPAREN)) { expect(OP_RPAREN); return false; }
+vector<Expr> args = parse_argument_list();
+if (pa11::strip_cv(declared_type)->kind == pa11::TypeKind::Record) {
+try { init = make_constructor_init_expr(declared_type, args, false); }
+catch (const runtime_error& err) {
+if (string(err.what()) != "no matching constructor" || args.size() != 1) throw;
+TypePtr src_record = pa11::strip_cv(expression_object_type(args[0].type));
+TypePtr dst_record = pa11::strip_cv(declared_type);
+if (src_record->kind != pa11::TypeKind::Record || !pa11::same_type(src_record, dst_record)) throw;
+ensure_copy_move_constructor(dst_record, args[0].category == ValueCategory::XValue);
+init = args[0]; } }
+else if (args.size() == 1) init = args[0];
+else throw runtime_error("unsupported direct initializer");
+expect(OP_RPAREN); return true; }
 void Parser::apply_record_variable_initializer(Scope* target, Binding* variable, TypePtr type, const Expr& init,
 Node& var) { Expr constructed; TypePtr src_record = pa11::strip_cv(expression_object_type(init.type));
 TypePtr dst_record = pa11::strip_cv(type); bool same_record = src_record->kind == pa11::TypeKind::Record && (pa11::same_type(src_record, dst_record) ||

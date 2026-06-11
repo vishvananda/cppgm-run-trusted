@@ -1386,7 +1386,11 @@ struct CyEmitter {
 		if (global.init.kind == "zero")
 			line("data" + to_string(cy86_width_bits(global.type)) + " 0");
 		else if (global.init.kind == "addr")
+		{
 			line("data64 " + address_target_label(global.init.target, global.init.addend));
+			for (size_t n = 8; n < storage_size(global.type); ++n)
+				line("data8 0");
+		}
 		else
 			line("data" + to_string(cy86_width_bits(global.type)) + " " +
 			     native_cy86_literal(global.type, global.init.literal,

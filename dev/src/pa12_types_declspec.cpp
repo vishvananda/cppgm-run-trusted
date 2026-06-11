@@ -106,6 +106,24 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 			skip_balanced(OP_LPAREN, OP_RPAREN);
 			saw_any = true;
 		}
+		else if (!type_id_context &&
+		         at_identifier() &&
+		         current().source == "__attribute__")
+		{
+			++pos_;
+			if (at(OP_LPAREN))
+				skip_balanced(OP_LPAREN, OP_RPAREN);
+			saw_any = true;
+		}
+		else if (!type_id_context &&
+		         at(OP_LSQUARE) &&
+		         lookahead(OP_LSQUARE, 1))
+		{
+			++pos_;
+			skip_balanced(OP_LSQUARE, OP_RSQUARE);
+			expect(OP_RSQUARE);
+			saw_any = true;
+		}
 		else if (!type_id_context && at_simple_ignored_specifier())
 		{
 			if (at(KW_STATIC))

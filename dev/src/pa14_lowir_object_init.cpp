@@ -397,8 +397,11 @@ bool FunctionLowerer::lower_braced_direct_constructor_init(
 	     init.direct_call->is_defaulted))
 	{
 		Value addr = addr_for();
+		const bool noop_generated =
+			init.direct_call->is_generated_default_constructor &&
+			no_op_generated_default_constructor(init.direct_call, type);
 		if (((init.direct_call->is_generated_default_constructor &&
-		      !no_op_generated_default_constructor(init.direct_call, type)) ||
+		      !noop_generated) ||
 		     init.direct_call->is_defaulted) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));
@@ -448,8 +451,11 @@ bool FunctionLowerer::lower_braced_record_constructor_init(
 	    (ctor->is_generated_default_constructor || ctor->is_defaulted))
 	{
 		Value addr = addr_for();
+		const bool noop_generated =
+			ctor->is_generated_default_constructor &&
+			no_op_generated_default_constructor(ctor, type);
 		if (((ctor->is_generated_default_constructor &&
-		      !no_op_generated_default_constructor(ctor, type)) ||
+		      !noop_generated) ||
 		     ctor->is_defaulted) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));

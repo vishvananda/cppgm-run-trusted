@@ -1,3 +1,4 @@
+#include "pa12_templates_function_support.h"
 #include "pa12_templates_instance_support.h"
 
 #include <algorithm>
@@ -28,14 +29,22 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 		? outer->second : NULL;
 	map<const void*, vector<TemplateArgument> >::iterator args_it =
 		record_template_arguments_.find(bare.get());
-	vector<TemplateArgument> owner_arguments;
-	if (args_it != record_template_arguments_.end())
-		owner_arguments = args_it->second;
-	else if (!bare->template_arguments.empty())
-		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
-			owner_arguments.push_back(
-				template_argument_from_instance_argument(
-					bare->template_arguments[i]));
+		vector<TemplateArgument> owner_arguments;
+		if (args_it != record_template_arguments_.end())
+			owner_arguments = args_it->second;
+		else if (!bare->template_arguments.empty())
+			for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+				owner_arguments.push_back(
+					template_argument_from_instance_argument(
+						bare->template_arguments[i]));
+		vector<TemplateArgument> primary_owner_arguments;
+		if (!bare->template_arguments.empty())
+			for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+				primary_owner_arguments.push_back(
+					template_argument_from_instance_argument(
+						bare->template_arguments[i]));
+		if (primary_owner_arguments.empty())
+			primary_owner_arguments = owner_arguments;
 	if (owner_declaration == NULL &&
 	    bare->is_template_specialization &&
 	    !bare->template_primary_name.empty())
@@ -51,6 +60,18 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 			record_template_declarations_[bare.get()] = owner_declaration;
 			record_template_arguments_[bare.get()] = owner_arguments;
 		}
+	}
+	TemplateDeclaration* primary_owner_declaration = owner_declaration;
+	if (owner_declaration != NULL &&
+	    owner_declaration->class_specialization &&
+	    bare->is_template_specialization &&
+	    !bare->template_primary_name.empty())
+	{
+		TemplateDeclaration* primary =
+			find_class_template(owner_declaration->owner,
+			                    bare->template_primary_name);
+		if (primary != NULL)
+			primary_owner_declaration = primary;
 	}
 		if (owner_declaration == NULL ||
 		    (owner_arguments.empty() && !owner_declaration->parameters.empty()))
@@ -194,13 +215,35 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 			     member_function_templates_.begin();
 		     it != member_function_templates_.end();
 		     ++it)
-	{
-		if (it->first.first != owner_declaration)
-			continue;
-		for (size_t i = 0; i < it->second.size(); ++i)
 		{
-			TemplateDeclaration* declaration = it->second[i];
-			bool dependent_qualified_conversion_definition =
+			if (it->first.first != owner_declaration &&
+			    it->first.first != primary_owner_declaration)
+				continue;
+			bool have_matching_member_class_specialization =
+				member_template_set_has_class_specialization(
+					this,
+					primary_owner_declaration,
+					it->second,
+					primary_owner_arguments,
+					record_template_arguments_);
+			for (size_t i = 0; i < it->second.size(); ++i)
+			{
+				TemplateDeclaration* declaration = it->second[i];
+				if (!declaration->class_specialization &&
+				    have_matching_member_class_specialization)
+					continue;
+				bool matching_owner_definition =
+					member_template_definition_matches_owner(
+						this,
+						it->first.first,
+						owner_declaration,
+						primary_owner_declaration,
+						declaration,
+						primary_owner_arguments,
+						record_template_arguments_);
+				if (!matching_owner_definition)
+					continue;
+				bool dependent_qualified_conversion_definition =
 				declaration->name == "operator " &&
 				declaration->has_definition &&
 					(!declaration->outer_type_substitutions.empty() ||
@@ -212,19 +255,26 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 				declaration->generic_function_type->kind ==
 					pa11::TypeKind::Function &&
 				declaration->generic_function_type->parameters.empty();
+			bool substituted_class_template_member_definition =
+				declaration->has_definition &&
+				declaration->class_template_member &&
+				(!declaration->outer_type_substitutions.empty() ||
+				 !declaration->outer_value_substitutions.empty());
 				bool out_of_class_member_template =
 					(!declaration->outer_type_substitutions.empty() ||
 					 !declaration->outer_value_substitutions.empty() ||
 					 dependent_qualified_member_definition) &&
 					(declaration->lexical_scope != declaration->owner ||
 					 dependent_qualified_conversion_definition ||
-					 dependent_qualified_member_definition);
+					 dependent_qualified_member_definition ||
+					 substituted_class_template_member_definition);
 					if (out_of_class_member_template &&
 					    declaration->has_definition &&
 					    bare->scope != NULL &&
 				    !declaration->constructor_template)
 				{
 					bool rebound_out_of_class_member_template = false;
+					bool handled_ordinary_member_definition = false;
 					vector<Binding*> candidate_placeholders;
 					if (declaration->name == "operator ")
 					{
@@ -250,14 +300,27 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 						Binding* placeholder = candidate_placeholders[j];
 						map<Binding*, TemplateDeclaration*>::iterator existing =
 							function_template_placeholders_.find(placeholder);
-							if (existing == function_template_placeholders_.end() ||
-							    existing->second == declaration ||
+							bool ordinary_member_definition =
+								existing == function_template_placeholders_.end() &&
+								declaration->has_definition &&
+								declaration->generic_function_type.get() != NULL &&
+								declaration->generic_function_type->kind ==
+									pa11::TypeKind::Function &&
+								declaration->generic_function_type->parameters.empty() &&
+								placeholder != NULL &&
+								placeholder->kind == BindingKind::Function;
+							if ((!ordinary_member_definition &&
+							     existing == function_template_placeholders_.end()) ||
+							    (!ordinary_member_definition &&
+							     existing->second == declaration) ||
+							    (!ordinary_member_definition &&
 							    (existing->second->decl_begin ==
 							         declaration->decl_begin &&
-							     existing->second->owner == bare->scope) ||
-							    !template_parameter_lists_match(
-								    existing->second->parameters,
-								    declaration->parameters))
+							     existing->second->owner == bare->scope)) ||
+							    (!ordinary_member_definition &&
+								    !template_parameter_lists_match(
+									    existing->second->parameters,
+									    declaration->parameters)))
 								continue;
 							map<string, TypePtr> subst;
 							map<string, TemplateArgument> value_subst;
@@ -290,6 +353,158 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							else
 									value_subst[parameter.name] =
 										owner_arguments[k];
+							}
+							if (ordinary_member_definition)
+							{
+								size_t body_pos =
+									function_body_start(tokens_,
+									                    declaration->decl_begin,
+									                    declaration->decl_end);
+								if (body_pos == declaration->decl_end)
+									continue;
+								bool active_equivalent_body = false;
+								for (set<Binding*>::const_iterator active =
+									     active_function_body_replays_.begin();
+								     active != active_function_body_replays_.end();
+								     ++active)
+								{
+									Binding* replay = *active;
+									if (replay == placeholder ||
+									    (replay != NULL &&
+									     placeholder != NULL &&
+									     replay->aliased_binding == placeholder) ||
+									    (replay != NULL &&
+									     placeholder != NULL &&
+									     placeholder->aliased_binding == replay))
+									{
+										active_equivalent_body = true;
+										break;
+									}
+									if (replay == NULL ||
+									    placeholder == NULL ||
+									    replay->owner != placeholder->owner ||
+									    replay->name != placeholder->name ||
+									    replay->type.get() == NULL ||
+									    placeholder->type.get() == NULL ||
+									    !pa11::same_type(replay->type,
+									                     placeholder->type))
+										continue;
+									active_equivalent_body = true;
+									break;
+								}
+								if (active_equivalent_body)
+								{
+									handled_ordinary_member_definition = true;
+									continue;
+								}
+								map<Binding*, Node>::iterator existing_body =
+									function_bodies_.find(placeholder);
+								if (existing_body != function_bodies_.end() &&
+								    !function_body_signature_matches(
+									    placeholder,
+									    existing_body->second))
+								{
+									function_bodies_.erase(existing_body);
+									for (size_t extra = 0;
+									     extra < extra_lowir_nodes_.size();
+									     )
+									{
+										if (extra_lowir_nodes_[extra].binding ==
+										    placeholder)
+											extra_lowir_nodes_.erase(
+												extra_lowir_nodes_.begin() +
+												extra);
+										else
+											++extra;
+									}
+								}
+								bool already_have_body =
+									function_bodies_.find(placeholder) !=
+									function_bodies_.end() ||
+									active_function_body_replays_.count(
+										placeholder) != 0;
+								for (size_t extra = 0;
+								     !already_have_body &&
+								     extra < extra_lowir_nodes_.size();
+								     ++extra)
+									already_have_body =
+										extra_lowir_nodes_[extra].binding ==
+										placeholder;
+								if (already_have_body &&
+								    declaration->class_specialization)
+								{
+									function_bodies_.erase(placeholder);
+									for (size_t extra = 0;
+									     extra < extra_lowir_nodes_.size();
+									     )
+									{
+										if (extra_lowir_nodes_[extra].binding ==
+										    placeholder)
+											extra_lowir_nodes_.erase(
+												extra_lowir_nodes_.begin() +
+												extra);
+										else
+											++extra;
+									}
+									already_have_body = false;
+								}
+								if (already_have_body)
+								{
+									if (object_root)
+									{
+										placeholder->is_object_root = true;
+										ensure_function_body_extra_node(placeholder);
+									}
+									handled_ordinary_member_definition = true;
+									continue;
+								}
+								PendingFunctionBody pending;
+								pending.function = placeholder;
+								pending.node = Node(
+									"function-definition " +
+									qualified_decl_name(placeholder) + " " +
+									pa11::describe_type(placeholder->type));
+								pending.node.binding = placeholder;
+								pending.node.type = placeholder->type;
+								pending.parameters =
+									concrete_member_body_parameters(
+										placeholder,
+										function_parameter_names_);
+								pending.body_pos = body_pos;
+								pending.class_type =
+									pa11::record_type_for_scope(bare->scope);
+								pending.scopes.clear();
+								pending.scopes.push_back(
+									declaration->lexical_scope != NULL
+									? declaration->lexical_scope
+									: owner_declaration->owner);
+								pending.friend_class_scopes =
+									active_friend_class_scopes_;
+								pending.type_substitutions =
+									template_type_substitutions_;
+								pending.value_substitutions =
+									template_value_substitutions_;
+								pending.pack_substitutions =
+									template_type_parameter_packs_;
+								pending.type_substitutions.push_back(subst);
+								pending.value_substitutions.push_back(
+									value_subst);
+								pending.pack_substitutions.push_back(
+									pack_subst);
+								try
+								{
+									parse_pending_member_body_now(pending);
+									if (object_root)
+									{
+										placeholder->is_object_root = true;
+										ensure_function_body_extra_node(placeholder);
+									}
+									handled_ordinary_member_definition = true;
+								}
+								catch (const exception&)
+								{
+								}
+								continue;
 							}
 							TypePtr matched_type;
 							bool dependent_definition_placeholder =
@@ -378,6 +593,10 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 						{
 							clone->name = placeholder->name;
 							clone->generic_function_type = generic_for_match;
+							if (previous_placeholder_declaration != NULL &&
+							    previous_placeholder_declaration->
+								    constructor_template)
+								clone->constructor_template = true;
 						}
 							clone->function_specializations.clear();
 						clone->completing_specializations.clear();
@@ -438,7 +657,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							}
 						}
 						}
-					if (rebound_out_of_class_member_template)
+					if (rebound_out_of_class_member_template ||
+					    handled_ordinary_member_definition)
 						continue;
 					}
 				if (declaration->constructor_template &&
@@ -951,20 +1171,27 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					    binding_args != record_template_arguments_.end() &&
 					    template_argument_key(binding_args->second) == key)
 					{
-						Binding* alias =
-							add_value(bare->scope,
-							          BindingKind::Function,
-							          declaration->name,
-							          binding->type);
-						alias->aliased_binding = binding;
-						alias->is_inline_definition =
-							binding->is_inline_definition;
-						alias->is_explicit = binding->is_explicit;
-						alias->is_constexpr = binding->is_constexpr;
-						alias->unwind_no = binding->unwind_no;
-						alias->ref_qualifier = binding->ref_qualifier;
-						map<Binding*, vector<string> >::iterator names =
-							function_parameter_names_.find(binding);
+							Binding* alias =
+								add_value(bare->scope,
+								          BindingKind::Function,
+								          declaration->name,
+								          binding->type);
+							alias->is_inline_definition =
+								binding->is_inline_definition;
+							alias->is_explicit = binding->is_explicit;
+							alias->is_constexpr = binding->is_constexpr;
+							alias->unwind_no = binding->unwind_no;
+							alias->ref_qualifier = binding->ref_qualifier;
+							string concrete_symbol =
+								abi_binding_symbol(alias,
+								                   map<string, size_t>());
+							alias->function_specialization_symbol =
+								concrete_symbol;
+							binding->function_specialization_symbol =
+								concrete_symbol;
+							alias->aliased_binding = binding;
+							map<Binding*, vector<string> >::iterator names =
+								function_parameter_names_.find(binding);
 						if (names != function_parameter_names_.end())
 							function_parameter_names_[alias] = names->second;
 					}
@@ -1025,6 +1252,14 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 				parse_pending_function_body(binding);
 				parse_pending_member_body(binding);
 				binding->is_object_root = true;
+				ensure_function_body_extra_node(binding);
+				if (binding->aliased_binding != NULL)
+				{
+					parse_pending_function_body(binding->aliased_binding);
+					parse_pending_member_body(binding->aliased_binding);
+					binding->aliased_binding->is_object_root = true;
+					ensure_function_body_extra_node(binding->aliased_binding);
+				}
 				}
 			}
 		}

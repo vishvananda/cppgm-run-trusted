@@ -450,8 +450,11 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		size_t saved_pos = pos_;
 		vector<Scope*> saved_scopes = scopes_;
 		complete_template_record(qualifier_type);
-		instantiate_member_function_templates(qualifier_type);
-		instantiate_member_variable_templates(qualifier_type);
+		if (suppress_qualifier_template_member_instantiation_depth_ == 0)
+		{
+			instantiate_member_function_templates(qualifier_type);
+			instantiate_member_variable_templates(qualifier_type);
+		}
 		scopes_ = saved_scopes;
 		pos_ = saved_pos;
 	};

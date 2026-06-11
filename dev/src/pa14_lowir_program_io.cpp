@@ -1,8 +1,10 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <set>
 
 namespace pa14 {
 namespace internal {
@@ -111,25 +113,33 @@ bool demand_builtin_declaration(ProgramLowerer& program,
 	         binding->type->parameters.size() == 1)
 		declaration =
 			"declare function @operator_new(%arg0 : i64) -> ptr "
-			"[binding=strong, object=cppgm_builtin_operator_new]";
+			"[binding=strong, object=" +
+			string(program.native_lowering
+			       ? "_Znwm" : "cppgm_builtin_operator_new") + "]";
 	else if (binding->owner != NULL && binding->owner->parent == NULL &&
 	         binding->name == "operatordelete" &&
 	         binding->type->parameters.size() == 1)
 		declaration =
 			"declare function @operator_delete(%arg0 : ptr) -> void "
-			"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete]";
+			"[unwind=no, binding=strong, object=" +
+			string(program.native_lowering
+			       ? "_ZdlPv" : "cppgm_builtin_operator_delete") + "]";
 	else if (binding->owner != NULL && binding->owner->parent == NULL &&
 	         binding->name == "operatornew[]" &&
 	         binding->type->parameters.size() == 1)
 		declaration =
 			"declare function @operator_new__(%arg0 : i64) -> ptr "
-			"[binding=strong, object=cppgm_builtin_operator_new_array]";
+			"[binding=strong, object=" +
+			string(program.native_lowering
+			       ? "_Znam" : "cppgm_builtin_operator_new_array") + "]";
 	else if (binding->owner != NULL && binding->owner->parent == NULL &&
 	         binding->name == "operatordelete[]" &&
 	         binding->type->parameters.size() == 1)
 		declaration =
 			"declare function @operator_delete__(%arg0 : ptr) -> void "
-			"[unwind=no, binding=strong, object=cppgm_builtin_operator_delete_array]";
+			"[unwind=no, binding=strong, object=" +
+			string(program.native_lowering
+			       ? "_ZdaPv" : "cppgm_builtin_operator_delete_array") + "]";
 	else
 		return false;
 	program.declared_functions.insert(name);
@@ -219,7 +229,16 @@ string ordinary_function_declaration(ProgramLowerer& program,
 		metadata.push_back("linkage=c");
 	if (binding->unwind_no)
 		metadata.push_back("unwind=no");
-	metadata.push_back("binding=strong");
+	metadata.push_back(binding_has_internal_linkage(binding)
+	                   ? "binding=internal" : "binding=strong");
+	if (binding->name != "main")
+	{
+		string object_symbol = binding->language_linkage == "c"
+			? binding->name
+			: pa12::internal::abi_binding_symbol(
+				binding, map<string, size_t>());
+		metadata.push_back("object=" + object_symbol);
+	}
 	out << metadata_suffix(metadata);
 	return out.str();
 }
@@ -282,22 +301,112 @@ bool output_references_function(const ProgramLowerer& program,
 	return false;
 }
 
+bool output_uses_record_as_base(const ProgramLowerer& program,
+                                TypePtr base_record)
+{
+	base_record = base_record.get() != NULL
+		? pa11::strip_cv(base_record) : TypePtr();
+	if (base_record.get() == NULL || base_record->kind != TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < program.functions.size(); ++i)
+	{
+		TypePtr owner = class_record_for_member(program.functions[i].binding);
+		owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+		if (owner.get() == NULL ||
+		    owner->kind != TypeKind::Record ||
+		    pa11::same_type(owner, base_record))
+			continue;
+		if (record_has_base_subobject(owner, base_record))
+			return true;
+	}
+	return false;
+}
+
 bool skip_unreferenced_base_entry(const ProgramLowerer& program,
                                   size_t function_index)
 {
 	if (function_index >= program.functions.size())
 		return false;
 	const FunctionOut& fn = program.functions[function_index];
-	TypePtr record = class_record_for_member(fn.binding);
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 	const string& name = fn.name;
+	bool generated_lifecycle =
+		fn.binding != NULL &&
+		(fn.binding->is_generated_default_constructor ||
+		 fn.binding->is_generated_aggregate_constructor ||
+		 fn.binding->is_generated_default_destructor);
+	bool reference_constructor = false;
+	if (fn.binding != NULL &&
+	    fn.binding->type.get() != NULL &&
+	    fn.binding->type->kind == TypeKind::Function)
+		for (size_t i = 1; i < fn.binding->type->parameters.size(); ++i)
+			if (is_reference(fn.binding->type->parameters[i]))
+				reference_constructor = true;
+	TypePtr base_constructor_record =
+		fn.binding != NULL ? class_record_for_member(fn.binding) : TypePtr();
+	base_constructor_record = base_constructor_record.get() != NULL
+		? pa11::strip_cv(base_constructor_record) : TypePtr();
+	bool template_base_constructor =
+		base_constructor_record.get() != NULL &&
+		base_constructor_record->kind == TypeKind::Record &&
+		base_constructor_record->is_template_specialization;
+	bool default_base_constructor =
+		fn.binding != NULL &&
+		fn.binding->type.get() != NULL &&
+		fn.binding->type->kind == TypeKind::Function &&
+		fn.binding->type->parameters.size() == 1;
+	bool reference_base_constructor =
+		reference_constructor && !template_base_constructor;
+	bool preserve_base_constructor =
+		fn.binding != NULL &&
+		is_class_constructor_binding(fn.binding) &&
+		fn.binding->type.get() != NULL &&
+		fn.binding->type->kind == TypeKind::Function &&
+		(!generated_lifecycle ||
+		 fn.binding->type->parameters.size() > 1) &&
+		((default_base_constructor &&
+		  (program.native_lowering || template_base_constructor)) ||
+		 reference_base_constructor) &&
+		output_uses_record_as_base(program, base_constructor_record);
 	return name.find("__base_entry") != string::npos &&
 	       fn.binding != NULL &&
-	       (fn.binding->is_generated_default_constructor ||
-	        fn.binding->is_generated_aggregate_constructor) &&
-	       record.get() != NULL &&
-	       record->is_polymorphic &&
+	       fn.header.find("binding=weak") != string::npos &&
+	       !preserve_base_constructor &&
 	       !output_references_function(program, name, function_index);
+}
+
+string function_object_symbol(const string& header)
+{
+	size_t pos = header.find("object=");
+	if (pos == string::npos)
+		return "";
+	pos += 7;
+	size_t end = pos;
+	while (end < header.size() &&
+	       header[end] != ',' &&
+	       header[end] != ']')
+		++end;
+	return header.substr(pos, end - pos);
+}
+
+string complete_lifecycle_alias_object(const FunctionOut& fn)
+{
+	if (fn.name.find("__base_entry") != string::npos ||
+	    fn.name.find("__noop_entry") != string::npos ||
+	    fn.binding == NULL)
+		return "";
+	bool ctor = is_class_constructor_binding(fn.binding);
+	bool dtor = is_class_destructor_binding(fn.binding);
+	if (!ctor && !dtor)
+		return "";
+	string object = function_object_symbol(fn.header);
+	string alias = object;
+	string from = ctor ? "C1" : "D1";
+	string to = ctor ? "C2" : "D2";
+	size_t pos = alias.find(from);
+	if (pos == string::npos)
+		return "";
+	alias.replace(pos, from.size(), to);
+	return alias == object ? string() : alias;
 }
 
 bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
@@ -486,6 +595,8 @@ void ProgramLowerer::write(const string& outfile) const
 		out << globals[i] << "\n\n";
 	vector<size_t> function_order = ordered_function_indices(*this);
 	bool wrote_function = false;
+	vector<string> object_aliases;
+	set<string> emitted_object_aliases;
 	for (size_t order_i = 0; order_i < function_order.size(); ++order_i)
 	{
 		if (skip_unreferenced_base_entry(*this, function_order[order_i]))
@@ -497,10 +608,16 @@ void ProgramLowerer::write(const string& outfile) const
 			out << "\n\n";
 		const FunctionOut& fn = functions[function_order[order_i]];
 		write_function_out(out, fn);
+		string alias = complete_lifecycle_alias_object(fn);
+		if (!alias.empty() && emitted_object_aliases.insert(alias).second)
+			object_aliases.push_back("alias object " + alias +
+			                         " = @" + fn.name);
 		wrote_function = true;
 	}
 	if (wrote_function)
 		out << "\n";
+	for (size_t i = 0; i < object_aliases.size(); ++i)
+		out << object_aliases[i] << "\n";
 	if ((needs_empty_init_function || !init_actions.empty()) &&
 	    defined_functions.find("__cppgm_init") == defined_functions.end())
 	{

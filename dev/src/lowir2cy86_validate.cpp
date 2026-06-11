@@ -83,6 +83,8 @@ void validate_function_metadata(const Metadata& metadata)
 		if ((key == "keep_alias" || key == "prefer_local") &&
 		    one_of(value, {"yes", "no"}))
 			continue;
+		if (key == "object_root" && one_of(value, {"yes", "no"}))
+			continue;
 		if (key == "arity" &&
 		    one_of(value, {"fixed", "variadic", "prototype_relaxed"}))
 			continue;

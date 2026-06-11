@@ -794,15 +794,10 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	{
 		size_t next_begin = pos_;
 		Declarator next = parse_declarator(false);
+		TypePtr next_declared_type = apply_declarator(next, probe_base);
 		Expr next_init;
-		bool next_has_init = false;
-		if (consume(OP_ASS))
-		{
-			next_has_init = true;
-			next_init = at(OP_LBRACE) ? parse_braced_init_list() :
-				parse_expression();
-			next_init.copy_initialization = true;
-		}
+		bool next_has_init =
+			parse_trailing_declarator_initializer(next_declared_type, next_init);
 		Binding* next_binding =
 			declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
 		if (next_binding != NULL && next_binding->is_local_static)
@@ -1263,12 +1258,41 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			target->kind == ScopeKind::Class && !nonstatic_member_function;
 		type = substitute_template_type(type);
 		Binding* function = NULL;
+	const bool namespace_function = target->kind == ScopeKind::Namespace;
+	const bool current_c_linkage = current_language_linkage() == "c";
+	const bool current_namespace_static =
+		specs.static_decl && namespace_function;
 	map<string, vector<Binding*> >::iterator found = target->members.find(name);
 	if (!force_new_function_binding_ && found != target->members.end())
 	{
 		for (size_t i = 0; i < found->second.size(); ++i)
 		{
 			Binding* candidate = found->second[i];
+			if (namespace_function &&
+			    (current_c_linkage ||
+			     (current_namespace_static &&
+			      candidate->language_linkage == "c") ||
+			     (current_c_linkage && candidate->is_namespace_static)))
+			{
+				if (candidate->kind == BindingKind::Variable &&
+				    (candidate->language_linkage == "c" ||
+				     candidate->is_namespace_static))
+					throw runtime_error("conflicting C linkage declaration");
+				if (candidate->kind == BindingKind::Function &&
+				    (candidate->language_linkage == "c" ||
+				     candidate->is_namespace_static))
+				{
+					bool same_function =
+						candidate->language_linkage == "c" &&
+						pa11::same_type(candidate->type, type) &&
+						candidate->ref_qualifier == ref_qualifier &&
+						candidate->is_static_member == is_static_member &&
+						!candidate->is_namespace_static &&
+						!current_namespace_static;
+					if (!same_function)
+						throw runtime_error("conflicting C linkage declaration");
+				}
+			}
 			if (candidate->kind == BindingKind::Function &&
 			    pa11::same_type(candidate->type, type) &&
 			    candidate->ref_qualifier == ref_qualifier &&
@@ -1283,16 +1307,23 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			function = hidden_friend
 				? add_function_binding(target, name, type, true)
 				: add_value(target, BindingKind::Function, name, type);
+	if (!hidden_friend)
+		function->is_hidden_friend = false;
 	function->language_linkage = current_language_linkage();
 	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
 	function->is_namespace_static =
 		function->is_namespace_static ||
 		(specs.static_decl && target->kind == ScopeKind::Namespace);
 	function->is_static_member = is_static_member;
+	function->is_declared_inline =
+		function->is_declared_inline ||
+		specs.inline_decl ||
+		specs.constexpr_decl;
 	function->is_inline_definition =
 		function->is_inline_definition ||
 		(function_definition &&
 		 (current_scope()->kind == ScopeKind::Class ||
+		  function->is_declared_inline ||
 		  specs.inline_decl ||
 		  specs.constexpr_decl));
 	function->is_private =

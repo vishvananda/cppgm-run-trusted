@@ -344,7 +344,12 @@ void Parser::parse_linkage_specification(Node& out)
 		return;
 	}
 	language_linkages_.push_back(language);
+	bool saved_single_linkage_specification_declaration =
+		single_linkage_specification_declaration_;
+	single_linkage_specification_declaration_ = true;
 	parse_simple_or_function_declaration(out, true);
+	single_linkage_specification_declaration_ =
+		saved_single_linkage_specification_declaration;
 	language_linkages_.pop_back();
 }
 

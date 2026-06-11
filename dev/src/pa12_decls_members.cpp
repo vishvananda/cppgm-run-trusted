@@ -3,6 +3,45 @@
 using namespace std;
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool append_anonymous_storage_member_initializers(
+	Node& body,
+	Binding* storage,
+	const map<Binding*, Node>& explicit_member_initializers)
+{
+	if (storage == NULL ||
+	    pa11::strip_cv(storage->type)->kind != pa11::TypeKind::Record ||
+	    pa11::strip_cv(storage->type)->scope == NULL)
+		return false;
+	Scope* target = pa11::strip_cv(storage->type)->scope;
+	bool emitted = false;
+	for (size_t i = 0; i < target->binding_order.size(); ++i)
+	{
+		Binding* member = target->binding_order[i];
+		if (member->kind != BindingKind::Variable)
+			continue;
+		for (map<Binding*, Node>::const_iterator it =
+			     explicit_member_initializers.begin();
+		     it != explicit_member_initializers.end();
+		     ++it)
+		{
+			Binding* injected = it->first;
+			if (injected != NULL &&
+			    injected->aliased_binding == storage &&
+			    injected->target_scope == target &&
+			    injected->name == member->name)
+			{
+				add_child(body, it->second);
+				emitted = true;
+				break;
+			}
+		}
+	}
+	return emitted;
+}
+
+}  // namespace
 bool record_has_reference_field(TypePtr type) {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
@@ -253,7 +292,22 @@ void Parser::parse_constructor_body_from_parameters(
 		string node_name = pname;
 		map<Binding*, vector<string> >::const_iterator saved_names =
 			function_parameter_names_.find(function);
-		if (node_name.empty() &&
+		bool force_saved_name =
+			override_function_parameter_name_bindings_.count(function) != 0;
+		bool saved_name_reused_later = false;
+		bool later_parameter_has_name = false;
+		for (size_t j = i + 1; j < parameters.size(); ++j)
+			if (!parameters[j].name.empty())
+				later_parameter_has_name = true;
+		if (saved_names != function_parameter_names_.end() &&
+		    i + 1 < saved_names->second.size())
+			for (size_t j = i + 2; j < saved_names->second.size(); ++j)
+				if (!saved_names->second[i + 1].empty() &&
+				    saved_names->second[i + 1] == saved_names->second[j])
+					saved_name_reused_later = true;
+		if ((force_saved_name ||
+		     (node_name.empty() && !saved_name_reused_later &&
+		      !later_parameter_has_name)) &&
 		    saved_names != function_parameter_names_.end() &&
 		    i + 1 < saved_names->second.size())
 			node_name = saved_names->second[i + 1];
@@ -489,19 +543,22 @@ void Parser::parse_constructor_body_from_parameters(
 		if (explicit_init != explicit_member_initializers.end()) {
 			add_child(body, explicit_init->second);
 			continue; }
-			map<Binding*, Node>::const_iterator init =
-				default_member_initializers_.find(field);
-			if (init != default_member_initializers_.end())
-				add_child(body, make_member_init_action(field, &init->second));
-			else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
-				try {
-					if (ensure_default_constructor(field->type) != NULL)
-						add_child(body, make_member_init_action(field, NULL)); }
-				catch (const runtime_error& err) {
-					if (string(err.what()) !=
-					    "member has no default constructor")
-						throw; }
-			} }
+		if (append_anonymous_storage_member_initializers(
+			    body, field, explicit_member_initializers))
+			continue;
+		map<Binding*, Node>::const_iterator init =
+			default_member_initializers_.find(field);
+		if (init != default_member_initializers_.end())
+			add_child(body, make_member_init_action(field, &init->second));
+		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
+			try {
+				if (ensure_default_constructor(field->type) != NULL)
+					add_child(body, make_member_init_action(field, NULL)); }
+			catch (const runtime_error& err) {
+				if (string(err.what()) !=
+				    "member has no default constructor")
+					throw; }
+		} }
 	Node parsed_body = parse_compound_statement();
 	for (size_t i = 0; i < parsed_body.children.size(); ++i)
 		add_child(body, parsed_body.children[i]);
@@ -939,19 +996,22 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		if (explicit_init != explicit_member_initializers.end()) {
 			add_child(body, explicit_init->second);
 			continue; }
-			map<Binding*, Node>::const_iterator init =
-				default_member_initializers_.find(field);
-			if (init != default_member_initializers_.end())
-				add_child(body, make_member_init_action(field, &init->second));
-			else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
-				try {
-					if (ensure_default_constructor(field->type) != NULL)
-						add_child(body, make_member_init_action(field, NULL)); }
-				catch (const runtime_error& err) {
-					if (string(err.what()) !=
-					    "member has no default constructor")
-						throw; }
-			} }
+		if (append_anonymous_storage_member_initializers(
+			    body, field, explicit_member_initializers))
+			continue;
+		map<Binding*, Node>::const_iterator init =
+			default_member_initializers_.find(field);
+		if (init != default_member_initializers_.end())
+			add_child(body, make_member_init_action(field, &init->second));
+		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
+			try {
+				if (ensure_default_constructor(field->type) != NULL)
+					add_child(body, make_member_init_action(field, NULL)); }
+			catch (const runtime_error& err) {
+				if (string(err.what()) !=
+				    "member has no default constructor")
+					throw; }
+		} }
 	if (!defaulted) {
 		Node parsed_body = parse_compound_statement();
 		for (size_t i = 0; i < parsed_body.children.size(); ++i)

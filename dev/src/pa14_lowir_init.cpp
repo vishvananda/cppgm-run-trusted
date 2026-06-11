@@ -169,8 +169,11 @@ instr(initialized + " = cmp ne i64 " + loaded + ", 0"); terminate("branch " + in
 lower_global_variable_init(var); instr("store i64 1, @" + guard); terminate("jump ^" + ready_block); start_block(ready_block);
 } void FunctionLowerer::register_cleanup(Binding* binding, TypePtr type) { if (cleanups_.empty() || binding == NULL)
 return; TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record && bare->kind != TypeKind::Array) return;
-if (!type_needs_destructor(type)) return; program_.ensure_eh_declarations(); TypePtr cleanup_type = bare;
+TypePtr cleanup_type = bare;
 while (cleanup_type->kind == TypeKind::Array) cleanup_type = pa11::strip_cv(cleanup_type->base); if (cleanup_type->kind == TypeKind::Record) {
+Binding* dtor = find_destructor(cleanup_type); if (dtor != NULL && dtor->is_noop_destructor && !dtor->is_generated_default_destructor)
+{ if (program_.native_lowering) program_.demand_inline_function(dtor); } }
+if (!type_needs_destructor(type)) return; program_.ensure_eh_declarations(); if (cleanup_type->kind == TypeKind::Record) {
 Binding* dtor = find_destructor(cleanup_type); if (dtor != NULL && !dtor->is_noop_destructor) program_.demand_inline_function(dtor); }
 cleanups_.back().push_back(Cleanup(binding, type)); active_unwind_dispatch_.clear(); } void FunctionLowerer::emit_scope_cleanups(vector<Cleanup>& scope)
 { for (size_t n = 0; n < scope.size(); ++n) { size_t i = scope.size() - 1 - n;
@@ -192,7 +195,14 @@ for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 
 	} } void FunctionLowerer::emit_active_catch_clause(const ActiveCatchContext& ctx) {
 	if (ctx.catch_all) instr("eh_catch_all, " + to_string(ctx.selector));
 	else instr("eh_catch @" + ctx.rtti + ", " + to_string(ctx.selector));
-	} void FunctionLowerer::emit_unwind_object_cleanups() {
+		} void FunctionLowerer::emit_active_catch_clauses() {
+		if (active_catches_.empty()) return; string entry = active_catches_.back().entry;
+		size_t first = active_catches_.size(); while (first > 0 && active_catches_[first - 1].entry == entry) --first;
+		for (size_t i = first; i < active_catches_.size(); ++i) emit_active_catch_clause(active_catches_[i]);
+		} void FunctionLowerer::terminate_unwind_or_active_catch() {
+		if (!active_catches_.empty()) terminate("jump ^" + active_catches_.back().entry);
+		else terminate("resume");
+		} void FunctionLowerer::emit_unwind_object_cleanups() {
 	for (size_t n = 0; n < cleanups_.size(); ++n) { size_t i = cleanups_.size() - 1 - n; vector<Cleanup> objects;
 	for (size_t j = 0; j < cleanups_[i].size(); ++j) if (cleanups_[i][j].instruction.empty()) objects.push_back(cleanups_[i][j]);
 	if (!objects.empty()) emit_scope_cleanups(objects); }
@@ -295,45 +305,67 @@ string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + thi
 }; lower_destructor_for_object(member_addr, node.binding->type); } void FunctionLowerer::lower_base_fini(const Node& node)
 { if (node.type.get() == NULL) return; TypePtr source = class_record_for_member(fn_.binding);
 function<Value()> base_addr = [this, source, &node]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this"); string addr = fresh_temp(); instr(addr + " = index i8 [projection=base_subobject] " + this_ptr + ", " + to_string(base_subobject_offset(source, node.type))); return Value("ptr", addr); }; Binding* dtor = find_destructor(node.type);
-if (dtor != NULL && dtor->is_virtual) { program_.demand_function_declaration(dtor); string callee = program_.destructor_symbol_for(dtor, true);
-program_.demand_inline_function(dtor, false); Value target = base_addr(); vector<string> args; args.push_back(target.text);
-TypePtr destroyed = class_record_for_member(dtor); TypePtr destroyed_bare = destroyed.get() != NULL ? pa11::strip_cv(destroyed) : TypePtr();
-TypePtr current_record = class_record_for_member(fn_.binding); TypePtr current_bare = current_record.get() != NULL ? pa11::strip_cv(current_record) : TypePtr();
-if (destroyed_bare.get() != NULL && destroyed_bare->kind == TypeKind::Record && destroyed_bare->is_polymorphic && record_uses_virtual_base_vtt(destroyed_bare) && current_bare.get() != NULL && current_bare->kind == TypeKind::Record) { size_t vtt_slot = construction_vtt_slot_for_direct_base(current_bare, destroyed_bare); if (vtt_slot != static_cast<size_t>(-1)) { string vtt_base = fresh_temp(); instr(vtt_base + " = addr @" + vtt_symbol_for_record(current_bare)); string vtt_arg = vtt_base; if (vtt_slot != 0) { vtt_arg = fresh_temp(); instr(vtt_arg + " = index i8 " + vtt_base + ", " + to_string(vtt_slot * 8)); } args.push_back(vtt_arg); } }
-vector<TypePtr> vbases = hidden_virtual_bases_for_record(destroyed_bare);
-vector<TypePtr> current_vbases = hidden_virtual_bases_for_record(current_bare);
-for (size_t v = 0; v < vbases.size(); ++v)
-{
-	string hidden;
-	if (current_bare.get() != NULL &&
-	    current_bare->kind == TypeKind::Record &&
-	    record_has_base_subobject(current_bare, vbases[v]))
-	{
-		string this_ptr = fresh_temp();
-		instr(this_ptr + " = load ptr $this");
-		uint64_t offset = base_subobject_offset(current_bare, vbases[v]);
-		if (offset == 0)
-			hidden = this_ptr;
-		else
-		{
-			hidden = fresh_temp();
-			instr(hidden + " = index i8 " + this_ptr + ", " +
-			      to_string(offset));
+	if (dtor != NULL && dtor->is_virtual) { program_.demand_function_declaration(dtor); string callee = program_.destructor_symbol_for(dtor, true);
+	program_.demand_inline_function(dtor, false); Value target = base_addr(); vector<string> args; args.push_back(target.text);
+	if (!program_.native_lowering) {
+		TypePtr current = source.get() != NULL ? pa11::strip_cv(source) : TypePtr();
+		TypePtr base = node.type.get() != NULL ? pa11::strip_cv(node.type) : TypePtr();
+		if (current.get() != NULL && current->kind == TypeKind::Record &&
+		    base.get() != NULL && base->kind == TypeKind::Record &&
+		    base->is_polymorphic && record_uses_virtual_base_vtt(base)) {
+			size_t vtt_slot = construction_vtt_slot_for_direct_base(current, base);
+			if (vtt_slot != static_cast<size_t>(-1)) {
+				string vtt_arg;
+				if (destructor_base_entry_) {
+					vtt_arg = "%__vtt";
+					if (vtt_slot != 0) {
+						vtt_arg = fresh_temp();
+						instr(vtt_arg + " = index i8 %__vtt, " +
+						      to_string(vtt_slot * 8));
+					}
+				} else {
+					string vtt_base = fresh_temp();
+					instr(vtt_base + " = addr @" + vtt_symbol_for_record(current));
+					vtt_arg = vtt_base;
+					if (vtt_slot != 0) {
+						vtt_arg = fresh_temp();
+						instr(vtt_arg + " = index i8 " + vtt_base + ", " +
+						      to_string(vtt_slot * 8));
+					}
+				}
+				args.push_back(vtt_arg);
+			}
+			vector<TypePtr> vbases = hidden_virtual_bases_for_record(base);
+			vector<TypePtr> current_vbases = hidden_virtual_bases_for_record(current);
+			for (size_t v = 0; v < vbases.size(); ++v) {
+				string hidden;
+				if (destructor_base_entry_) {
+					for (size_t cv = 0; cv < current_vbases.size(); ++cv)
+						if (pa11::same_type(pa11::strip_cv(current_vbases[cv]),
+						                    pa11::strip_cv(vbases[v]))) {
+							hidden = "%__vbptr" + to_string(cv);
+							break;
+						}
+				}
+				if (hidden.empty() && record_has_base_subobject(current, vbases[v])) {
+					string this_ptr = fresh_temp();
+					instr(this_ptr + " = load ptr $this");
+					uint64_t offset = base_subobject_offset(current, vbases[v]);
+					if (offset == 0)
+						hidden = this_ptr;
+					else {
+						hidden = fresh_temp();
+						instr(hidden + " = index i8 " + this_ptr + ", " +
+						      to_string(offset));
+					}
+				}
+				if (hidden.empty())
+					hidden = "0";
+				args.push_back(hidden);
+			}
 		}
 	}
-	else
-		hidden = "%__vbptr" + to_string(v);
-	for (size_t cv = 0; cv < current_vbases.size(); ++cv)
-		if (pa11::same_type(pa11::strip_cv(current_vbases[cv]),
-		                    pa11::strip_cv(vbases[v])))
-		{
-			out_.constructor_base_entry_arg_rewrites.push_back(
-				make_pair(hidden, "%__vbptr" + to_string(cv)));
-			break;
-		}
-	args.push_back(hidden);
-}
-ostringstream call; call << "call void @" << callee << "("; for (size_t i = 0; i < args.size(); ++i) { if (i != 0) call << ", "; call << args[i]; } call << ")"; instr(call.str()); return;
-} lower_destructor_for_object(base_addr, node.type); }
+	ostringstream call; call << "call void @" << callee << "("; for (size_t i = 0; i < args.size(); ++i) { if (i != 0) call << ", "; call << args[i]; } call << ")"; instr(call.str()); return;
+	} lower_destructor_for_object(base_addr, node.type); }
 }  // namespace internal
 }  // namespace pa14

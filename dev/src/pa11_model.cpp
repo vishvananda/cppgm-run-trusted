@@ -177,9 +177,10 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_static_member(false),
 	  is_local_static(false),
 	  is_namespace_static(false),
-	  local_static_function_owner(NULL),
-	  is_inline_definition(false),
-	  is_generated_default_constructor(false),
+		  local_static_function_owner(NULL),
+		  is_inline_definition(false),
+		  is_declared_inline(false),
+		  is_generated_default_constructor(false),
 	  is_generated_aggregate_constructor(false),
 	  is_generated_copy_move_constructor(false),
 	  is_generated_copy_move_assignment(false),
@@ -1195,9 +1196,10 @@ Binding* add_using_declaration(Scope* scope,
 	binding->local_static_discriminator = target->local_static_discriminator;
 	binding->local_static_function_owner =
 		target->local_static_function_owner;
-	binding->function_specialization_symbol =
-		target->function_specialization_symbol;
-	binding->is_generated_default_constructor =
+		binding->function_specialization_symbol =
+			target->function_specialization_symbol;
+		binding->is_declared_inline = target->is_declared_inline;
+		binding->is_generated_default_constructor =
 		target->is_generated_default_constructor;
 	binding->is_generated_aggregate_constructor =
 		target->is_generated_aggregate_constructor;

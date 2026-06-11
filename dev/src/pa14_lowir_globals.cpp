@@ -154,7 +154,9 @@ vector<string> global_metadata(const Binding* binding, bool weak_constexpr)
 		items.push_back("storage=thread_local");
 	if (binding->language_linkage == "c")
 		items.push_back("linkage=c");
-	if (binding->is_static_member &&
+	if (binding_has_internal_linkage(binding))
+		items.push_back("binding=internal");
+	else if (binding->is_static_member &&
 	    (binding->is_template_static_member_definition ||
 	     binding_has_template_specialization_context(binding)))
 		items.push_back("binding=weak");
@@ -163,9 +165,7 @@ vector<string> global_metadata(const Binding* binding, bool weak_constexpr)
 	         binding->is_constexpr)
 		items.push_back("binding=weak");
 	else
-		items.push_back(binding->is_local_static ||
-		                binding->is_namespace_static ||
-		                binding->is_constexpr
+		items.push_back(binding->is_constexpr
 		                ? "binding=internal" : "binding=strong");
 	string object = global_object_symbol(binding);
 	if (!object.empty())

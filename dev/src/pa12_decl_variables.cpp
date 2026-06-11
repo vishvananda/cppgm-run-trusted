@@ -100,7 +100,9 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 	Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
 	var.type = type;
-	if (specs.extern_decl && target->kind == ScopeKind::Namespace && init == NULL)
+	if ((specs.extern_decl || single_linkage_specification_declaration_) &&
+	    target->kind == ScopeKind::Namespace &&
+	    init == NULL)
 		return variable;
 	apply_variable_initializer(specs, target, variable, type, init, var);
 	if (target->kind == ScopeKind::Class && variable->is_static_member)

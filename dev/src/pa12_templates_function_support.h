@@ -41,7 +41,40 @@ bool template_parameter_lists_equivalent(
 	const std::vector<TemplateParameterInfo>& right);
 bool class_template_member_function_template_symbol(
 	const TemplateDeclaration* declaration);
+bool constructor_template_function_template_symbol(
+	const TemplateDeclaration* declaration);
 TypePtr remove_pattern_cv_from_argument(TypePtr argument, unsigned cv);
+size_t function_body_start(const std::vector<Token>& tokens,
+                           size_t begin,
+                           size_t end);
+std::vector<ParameterInfo> concrete_member_body_parameters(
+	Binding* function,
+	const std::map<Binding*, std::vector<std::string> >&
+		function_parameter_names);
+bool function_body_signature_matches(Binding* function, const Node& body);
+bool matching_member_template_class_specialization(
+	Parser* parser,
+	TemplateDeclaration* primary,
+	TemplateDeclaration* specialization,
+	const std::vector<TemplateArgument>& primary_args,
+	const std::map<const void*, std::vector<TemplateArgument> >&
+		record_arguments);
+bool member_template_set_has_class_specialization(
+	Parser* parser,
+	TemplateDeclaration* primary,
+	const std::vector<TemplateDeclaration*>& declarations,
+	const std::vector<TemplateArgument>& primary_args,
+	const std::map<const void*, std::vector<TemplateArgument> >&
+		record_arguments);
+bool member_template_definition_matches_owner(
+	Parser* parser,
+	TemplateDeclaration* declared_owner,
+	TemplateDeclaration* owner,
+	TemplateDeclaration* primary,
+	TemplateDeclaration* declaration,
+	const std::vector<TemplateArgument>& primary_args,
+	const std::map<const void*, std::vector<TemplateArgument> >&
+		record_arguments);
 std::string abi_binding_symbol(
 	const Binding* binding,
 	const std::map<std::string, size_t>& template_parameters);

@@ -669,10 +669,13 @@ void FunctionLowerer::finish_setup_only_protection(CallEmissionState& call)
 		return;
 	string end = fresh_block("call_unwind_end");
 	terminate("jump ^" + end);
-	active_unwind_dispatch_ = call.protected_dispatch;
-	start_block(call.protected_dispatch);
-	emit_unwind_cleanups();
-	terminate("resume");
+		active_unwind_dispatch_ = call.protected_dispatch;
+		start_block(call.protected_dispatch);
+		emit_active_catch_clauses();
+		if (program_.native_lowering || !active_catches_.empty())
+			instr("eh_cleanup");
+		emit_unwind_cleanups();
+	terminate_unwind_or_active_catch();
 	start_block(end);
 }
 
@@ -826,13 +829,16 @@ bool FunctionLowerer::emit_record_return_call(CallEmissionState& call,
 		++eh_try_depth_;
 		instr(indirect_call.str());
 		--eh_try_depth_;
-		instr("eh_end");
-		terminate("jump ^" + end);
-		start_block(dispatch);
-		emit_temporary_cleanups(call.temp_cleanups);
-		emit_unwind_cleanups();
-		terminate("resume");
-		start_block(end);
+			instr("eh_end");
+			terminate("jump ^" + end);
+				start_block(dispatch);
+				emit_active_catch_clauses();
+		if (program_.native_lowering || !active_catches_.empty())
+			instr("eh_cleanup");
+				emit_temporary_cleanups(call.temp_cleanups);
+			emit_unwind_cleanups();
+			terminate_unwind_or_active_catch();
+			start_block(end);
 		for (size_t i = 0; i < call.temp_cleanups.size(); ++i)
 			add_pending_temp_cleanup(call.temp_cleanups[i].first,
 			                         call.temp_cleanups[i].second);
@@ -976,12 +982,15 @@ bool FunctionLowerer::emit_protected_setup_scalar_call(
 	}
 	string end = fresh_block("call_unwind_end");
 	terminate("jump ^" + end);
-	active_unwind_dispatch_ = call.protected_dispatch;
-	start_block(call.protected_dispatch);
-	if (!call.temp_cleanups.empty())
+		active_unwind_dispatch_ = call.protected_dispatch;
+		start_block(call.protected_dispatch);
+		emit_active_catch_clauses();
+		if (program_.native_lowering || !active_catches_.empty())
+			instr("eh_cleanup");
+		if (!call.temp_cleanups.empty())
 		emit_temporary_cleanups(call.temp_cleanups);
 	emit_unwind_cleanups();
-	terminate("resume");
+	terminate_unwind_or_active_catch();
 	start_block(end);
 	out = spill_result ? Value(call.ret, loaded) : Value(call.ret, call.tmp);
 	return true;
@@ -1043,11 +1052,14 @@ bool FunctionLowerer::emit_temp_cleanup_scalar_call(CallEmissionState& call,
 		emit_temporary_cleanups(call.temp_cleanups);
 	--eh_try_depth_;
 	instr("eh_end");
-	terminate("jump ^" + end);
-	start_block(dispatch);
-	emit_temporary_cleanups(call.temp_cleanups);
+		terminate("jump ^" + end);
+		start_block(dispatch);
+		emit_active_catch_clauses();
+		if (program_.native_lowering || !active_catches_.empty())
+			instr("eh_cleanup");
+		emit_temporary_cleanups(call.temp_cleanups);
 	emit_unwind_cleanups();
-	terminate("resume");
+	terminate_unwind_or_active_catch();
 	start_block(end);
 	if (!normal_temp_cleanup)
 		for (size_t i = 0; i < call.temp_cleanups.size(); ++i)
@@ -1110,10 +1122,13 @@ bool FunctionLowerer::emit_active_cleanup_scalar_call(CallEmissionState& call,
 	}
 	string end = fresh_block("call_unwind_end");
 	terminate("jump ^" + end);
-	active_unwind_dispatch_ = dispatch;
-	start_block(dispatch);
-	emit_unwind_cleanups();
-	terminate("resume");
+		active_unwind_dispatch_ = dispatch;
+		start_block(dispatch);
+		emit_active_catch_clauses();
+		if (program_.native_lowering || !active_catches_.empty())
+			instr("eh_cleanup");
+		emit_unwind_cleanups();
+	terminate_unwind_or_active_catch();
 	start_block(end);
 	out = spill_result ? Value(call.ret, loaded) : Value(call.ret, call.tmp);
 	return true;

@@ -41,6 +41,7 @@ TypePtr member_function_pointer_argument_type(Binding* binding)
 	    pa11::strip_cv(this_type)->kind == pa11::TypeKind::Pointer)
 		member_fn->cv = pa11::strip_cv(this_type)->base->kind ==
 			pa11::TypeKind::Cv ? this_type->base->cv : pa11::CV_NONE;
+	member_fn->ref_qualifier = binding->ref_qualifier;
 	return pa11::make_member_pointer(class_type, member_fn);
 }
 

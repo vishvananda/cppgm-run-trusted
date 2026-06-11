@@ -1,4 +1,5 @@
 #include "pa12_templates_function_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <functional>
@@ -8,6 +9,168 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
+namespace {
+
+size_t function_template_body_start(const vector<Token>& tokens,
+                                    size_t begin,
+                                    size_t end)
+{
+	for (size_t i = begin; i < end && i < tokens.size(); ++i)
+		if (tokens[i].kind == posttoken::TokenKind::Simple &&
+		    tokens[i].type == OP_LBRACE)
+			return i;
+	return end;
+}
+
+vector<ParameterInfo> function_body_parameters_from_type(
+	Binding* function,
+	const vector<string>& names)
+{
+	vector<ParameterInfo> parameters;
+	if (function == NULL || function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function)
+		return parameters;
+	size_t first = function->owner != NULL &&
+	               function->owner->kind == ScopeKind::Class &&
+	               !function->is_static_member ? 1 : 0;
+	for (size_t i = first; i < function->type->parameters.size(); ++i)
+	{
+		ParameterInfo parameter;
+		parameter.type = function->type->parameters[i];
+		size_t name_index = i;
+		if (first != 0 &&
+		    (names.size() + first == function->type->parameters.size() ||
+		     (names.size() == function->type->parameters.size() &&
+		      !names.empty() &&
+		      !names[0].empty() &&
+		      names[0] != "this")))
+			name_index = i - first;
+		if (name_index < names.size())
+			parameter.name = names[name_index];
+		parameters.push_back(parameter);
+	}
+	for (size_t i = 0; i < parameters.size(); ++i)
+	{
+		size_t pack_pos = parameters[i].name.find("__pack");
+		if (pack_pos == string::npos || pack_pos == 0)
+			continue;
+		string base_name = parameters[i].name.substr(0, pack_pos);
+		parameters[i].pack_expression_name = base_name;
+		for (size_t j = 0; j < parameters.size(); ++j)
+			if (parameters[j].name == base_name ||
+			    parameters[j].name.compare(0, base_name.size() + 6,
+			                               base_name + "__pack") == 0)
+				parameters[j].pack_expression_name = base_name;
+	}
+	return parameters;
+}
+
+void normalize_member_function_parameter_names(Binding* function,
+                                               vector<string>& names)
+{
+	if (function == NULL || function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function ||
+	    function->owner == NULL ||
+	    function->owner->kind != ScopeKind::Class ||
+	    function->is_static_member)
+		return;
+	size_t parameter_count = function->type->parameters.size();
+	if (parameter_count == 0)
+		return;
+	if (names.empty())
+	{
+		names.push_back("this");
+		return;
+	}
+	if (names[0] == "this")
+		return;
+	if (names.size() < parameter_count)
+	{
+		names.insert(names.begin(), "this");
+		return;
+	}
+	if (names.size() == parameter_count && names.back().empty())
+	{
+		names.insert(names.begin(), "this");
+		names.pop_back();
+	}
+}
+
+void expand_function_template_pack_parameter_names(
+	TemplateDeclaration* declaration,
+	Binding* function,
+	vector<string>& names)
+{
+	if (declaration == NULL || function == NULL ||
+	    declaration->generic_function_type.get() == NULL ||
+	    declaration->generic_function_type->kind != pa11::TypeKind::Function ||
+	    function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function ||
+	    names.size() >= function->type->parameters.size())
+		return;
+	bool has_function_parameter_pack = false;
+	for (size_t i = 0;
+	     i < declaration->generic_function_type->parameters.size();
+	     ++i)
+	{
+		string pack_name;
+		if (function_parameter_pack_name(
+			    declaration,
+			    declaration->generic_function_type->parameters[i],
+			    pack_name))
+			has_function_parameter_pack = true;
+	}
+	if (!has_function_parameter_pack)
+		return;
+	size_t concrete_count = function->type->parameters.size();
+	size_t generic_count =
+		declaration->generic_function_type->parameters.size();
+	bool generic_has_owner_parameter =
+		function->owner != NULL &&
+		function->owner->kind == ScopeKind::Class &&
+		!function->is_static_member &&
+		generic_count != 0;
+	bool saved_names_have_owner =
+		!names.empty() && names[0] == "this";
+	vector<string> expanded;
+	for (size_t i = 0; i < generic_count; ++i)
+	{
+		size_t name_index = i;
+		if (generic_has_owner_parameter && !saved_names_have_owner)
+			name_index = i == 0 ? names.size() : i - 1;
+		string source_name =
+			name_index < names.size() ? names[name_index] : string();
+		string pack_name;
+		bool pack_parameter =
+			function_parameter_pack_name(
+				declaration,
+				declaration->generic_function_type->parameters[i],
+				pack_name);
+		size_t repeat = 1;
+		if (pack_parameter)
+		{
+			size_t remaining_patterns = generic_count - i - 1;
+			repeat = concrete_count > expanded.size() + remaining_patterns
+				? concrete_count - expanded.size() - remaining_patterns
+				: 0;
+		}
+		for (size_t p = 0; p < repeat; ++p)
+		{
+			if (source_name.empty())
+				expanded.push_back(string());
+			else if (p == 0)
+				expanded.push_back(source_name);
+			else
+				expanded.push_back(
+					source_name + "__pack" + to_string(p + 1));
+		}
+	}
+	if (expanded.size() == concrete_count)
+		names = expanded;
+}
+
+}  // namespace
 
 Binding* Parser::instantiate_function_template(
 	TemplateDeclaration* declaration,
@@ -51,12 +214,18 @@ Binding* Parser::instantiate_function_template(
 		--function_template_candidate_instantiation_depth_;
 	string key = template_argument_key(full_args);
 	validate_function_template_definition(declaration);
+	bool full_args_dependent = template_arguments_dependent(full_args);
 	map<string, Binding*>::iterator existing =
 		declaration->function_specializations.find(key);
 	Binding* replaced_specialization = NULL;
 	if (existing != declaration->function_specializations.end())
 	{
-		if (function_template_candidate_instantiation_depth_ != 0)
+		bool existing_still_dependent =
+			type_structurally_dependent(existing->second->type);
+		bool existing_usable =
+			full_args_dependent || !existing_still_dependent;
+		if (function_template_candidate_instantiation_depth_ != 0 &&
+		    existing_usable)
 			return existing->second;
 		bool existing_has_body =
 			function_bodies_.find(existing->second) != function_bodies_.end();
@@ -64,10 +233,12 @@ Binding* Parser::instantiate_function_template(
 			existing->second->type.get() != NULL &&
 			existing->second->type->kind == pa11::TypeKind::Function &&
 			type_is_template_dependent(existing->second->type->base);
-		if (!declaration->has_definition && !existing_dependent_return)
+		if (!declaration->has_definition && !existing_dependent_return &&
+		    existing_usable)
 			return existing->second;
-		if ((existing->second->is_inline_definition && existing_has_body) ||
-		    existing->second->is_object_root)
+		if (existing_usable &&
+		    ((existing->second->is_inline_definition && existing_has_body) ||
+		     existing->second->is_object_root))
 			return existing->second;
 		replaced_specialization = existing->second;
 		declaration->function_specializations.erase(existing);
@@ -254,7 +425,7 @@ Binding* Parser::instantiate_function_template(
 		}
 		if (declaration->class_template_member)
 			binding->function_specialization_symbol =
-				declaration->constructor_template ||
+				constructor_template_function_template_symbol(declaration) ||
 				class_template_member_function_template_symbol(declaration)
 				? abi_function_template_specialization_symbol(
 					declaration,
@@ -265,12 +436,8 @@ Binding* Parser::instantiate_function_template(
 		declaration->function_specializations[key] = binding;
 		if (declaration->friend_class_scope != NULL)
 			add_friend_function(declaration->friend_class_scope, binding);
-		if (!declaration->class_template_member ||
-		    function_template_candidate_instantiation_depth_ != 0)
-			{
-				function_template_placeholders_[binding] = declaration;
-				function_template_specialization_arguments_[binding] = full_args;
-			}
+		function_template_placeholders_[binding] = declaration;
+		function_template_specialization_arguments_[binding] = full_args;
 		declaration->completing_specializations.erase(key);
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
@@ -466,7 +633,7 @@ Binding* Parser::instantiate_function_template(
 			replaced_specialization->aliased_binding = binding;
 		if (declaration->class_template_member)
 			binding->function_specialization_symbol =
-				declaration->constructor_template ||
+				constructor_template_function_template_symbol(declaration) ||
 				class_template_member_function_template_symbol(declaration)
 				? abi_function_template_specialization_symbol(
 					declaration,
@@ -561,7 +728,7 @@ Binding* Parser::instantiate_function_template(
 			replaced_specialization->aliased_binding = binding;
 		if (declaration->class_template_member)
 			binding->function_specialization_symbol =
-				declaration->constructor_template ||
+				constructor_template_function_template_symbol(declaration) ||
 				class_template_member_function_template_symbol(declaration)
 				? abi_function_template_specialization_symbol(
 					declaration,
@@ -592,6 +759,224 @@ Binding* Parser::instantiate_function_template(
 		suppress_implicit_template_base_init_ =
 			save_suppress_implicit_template_base_init;
 		return binding;
+	}
+	if (!declaration->constructor_template &&
+	    declaration->has_definition &&
+	    declaration->placeholder != NULL &&
+	    declaration->owner != NULL &&
+	    declaration->owner->kind == ScopeKind::Class &&
+	    function_template_candidate_instantiation_depth_ == 0)
+	{
+		TypePtr owner_record = pa11::record_type_for_scope(
+			declaration->owner);
+		owner_record = owner_record.get() != NULL
+			? pa11::strip_cv(owner_record) : TypePtr();
+		map<const void*, TemplateDeclaration*>::iterator owner_template =
+			owner_record.get() != NULL
+			? record_template_declarations_.find(owner_record.get())
+			: record_template_declarations_.end();
+		bool ordinary_class_template_member =
+			declaration->class_template_member &&
+			declaration->outer_type_substitutions.empty() &&
+			((owner_template != record_template_declarations_.end() &&
+			 template_parameter_lists_equivalent(
+				 declaration->parameters,
+				 owner_template->second->parameters)) ||
+			(!declaration->name.empty() &&
+			 (declaration->name[0] == '~' ||
+			  declaration->name.compare(0, 8, "operator") == 0)));
+		size_t body_pos =
+			function_template_body_start(tokens_,
+			                             declaration->decl_begin,
+			                             declaration->decl_end);
+		if (ordinary_class_template_member &&
+		    body_pos != declaration->decl_end)
+		{
+			Binding* binding = declaration->placeholder;
+			vector<string> names;
+				map<Binding*, vector<string> >::const_iterator saved_names =
+					function_parameter_names_.find(binding);
+				if (saved_names != function_parameter_names_.end())
+					names = saved_names->second;
+				normalize_member_function_parameter_names(binding, names);
+				expand_function_template_pack_parameter_names(
+					declaration,
+					binding,
+					names);
+				if (binding->type.get() != NULL &&
+				    binding->type->kind == pa11::TypeKind::Function &&
+				    names.size() < binding->type->parameters.size())
+					names.resize(binding->type->parameters.size());
+			function_parameter_names_[binding] = names;
+			declaration->function_specializations[key] = binding;
+			function_template_placeholders_[binding] = declaration;
+			function_template_specialization_arguments_[binding] =
+				full_args;
+			PendingFunctionBody pending;
+			pending.function = binding;
+			pending.node = Node("function-definition " +
+			                    qualified_decl_name(binding) + " " +
+			                    pa11::describe_type(binding->type));
+			pending.node.binding = binding;
+			pending.node.type = binding->type;
+			pending.parameters =
+				function_body_parameters_from_type(binding, names);
+			pending.body_pos = body_pos;
+			pending.class_type =
+				binding->owner != NULL
+				? pa11::record_type_for_scope(binding->owner)
+				: TypePtr();
+			pending.scopes.clear();
+			pending.scopes.push_back(
+				declaration->lexical_scope != NULL
+				? declaration->lexical_scope
+				: declaration->owner);
+			pending.friend_class_scopes = active_friend_class_scopes_;
+			pending.type_substitutions = template_type_substitutions_;
+			pending.value_substitutions = template_value_substitutions_;
+			pending.pack_substitutions = template_type_parameter_packs_;
+			try
+			{
+				parse_pending_member_body_now(pending);
+			}
+			catch (...)
+			{
+				restore_instantiation_state();
+				throw;
+			}
+			restore_instantiation_state();
+			return binding;
+		}
+		if (!ordinary_class_template_member &&
+		    body_pos != declaration->decl_end)
+		{
+			TypePtr type;
+			try
+			{
+				type = substitute_function_template_type(
+					declaration,
+					declaration->generic_function_type);
+			}
+			catch (...)
+			{
+				restore_instantiation_state();
+				throw;
+			}
+			if (!substituted_type_is_valid(type))
+			{
+				restore_instantiation_state();
+				throw runtime_error("invalid substituted function type");
+			}
+			Binding* binding =
+				add_value(declaration->owner,
+				          BindingKind::Function,
+				          declaration->name,
+				          type);
+			binding->is_hidden_friend = declaration->hidden_friend;
+			vector<string> names;
+			if (declaration->placeholder != NULL)
+			{
+				binding->is_static_member =
+					declaration->placeholder->is_static_member;
+				binding->is_constexpr =
+					declaration->placeholder->is_constexpr;
+				binding->is_explicit =
+					declaration->placeholder->is_explicit;
+				binding->is_private =
+					declaration->placeholder->is_private;
+				binding->is_protected_member =
+					declaration->placeholder->is_protected_member;
+				binding->ref_qualifier =
+					declaration->placeholder->ref_qualifier;
+				binding->unwind_no =
+					declaration->placeholder->unwind_no;
+				if (declaration->placeholder->
+				    reserve_primary_function_symbol)
+					binding->reserve_primary_function_symbol = true;
+				map<Binding*, vector<string> >::const_iterator saved_names =
+					function_parameter_names_.find(
+						declaration->placeholder);
+				if (saved_names != function_parameter_names_.end())
+					names = saved_names->second;
+				map<Binding*, vector<Expr> >::const_iterator defaults =
+					default_arguments_.find(declaration->placeholder);
+					if (defaults != default_arguments_.end())
+						default_arguments_[binding] = defaults->second;
+				}
+				normalize_member_function_parameter_names(binding, names);
+				expand_function_template_pack_parameter_names(
+					declaration,
+					binding,
+					names);
+				if (type.get() != NULL &&
+				    type->kind == pa11::TypeKind::Function &&
+				    names.size() < type->parameters.size())
+					names.resize(type->parameters.size());
+			function_parameter_names_[binding] = names;
+			if (replaced_specialization != NULL &&
+			    replaced_specialization != binding)
+				replaced_specialization->aliased_binding = binding;
+			if (declaration->class_template_member)
+				binding->function_specialization_symbol =
+					constructor_template_function_template_symbol(declaration) ||
+					class_template_member_function_template_symbol(
+						declaration)
+					? abi_function_template_specialization_symbol(
+						declaration,
+						full_args,
+						binding,
+						&declaration_tokens_)
+					: abi_binding_symbol(binding,
+					                     map<string, size_t>());
+			else
+				binding->function_specialization_symbol =
+					abi_function_template_specialization_symbol(
+						declaration,
+						full_args,
+						binding,
+						&declaration_tokens_);
+			declaration->function_specializations[key] = binding;
+			if (declaration->friend_class_scope != NULL)
+				add_friend_function(declaration->friend_class_scope,
+				                    binding);
+			function_template_placeholders_[binding] = declaration;
+			function_template_specialization_arguments_[binding] =
+				full_args;
+			PendingFunctionBody pending;
+			pending.function = binding;
+			pending.node = Node("function-definition " +
+			                    qualified_decl_name(binding) + " " +
+			                    pa11::describe_type(binding->type));
+			pending.node.binding = binding;
+			pending.node.type = binding->type;
+			pending.parameters =
+				function_body_parameters_from_type(binding, names);
+			pending.body_pos = body_pos;
+			pending.class_type =
+				binding->owner != NULL
+				? pa11::record_type_for_scope(binding->owner)
+				: TypePtr();
+			pending.scopes.clear();
+			pending.scopes.push_back(
+				declaration->lexical_scope != NULL
+				? declaration->lexical_scope
+				: declaration->owner);
+			pending.friend_class_scopes = active_friend_class_scopes_;
+			pending.type_substitutions = template_type_substitutions_;
+			pending.value_substitutions = template_value_substitutions_;
+			pending.pack_substitutions = template_type_parameter_packs_;
+			try
+			{
+				parse_pending_member_body_now(pending);
+			}
+			catch (...)
+			{
+				restore_instantiation_state();
+				throw;
+			}
+			restore_instantiation_state();
+			return binding;
+		}
 	}
 	scopes_.clear();
 	scopes_.push_back(declaration->lexical_scope != NULL
@@ -729,6 +1114,7 @@ Binding* Parser::instantiate_function_template(
 				active_friend_class_scopes_.push_back(it->first);
 	size_t replay_extra_begin = extra_lowir_nodes_.size();
 	Node node;
+	++suppress_qualifier_template_member_instantiation_depth_;
 	try
 	{
 		if (declaration->inherited_constructor_base != NULL)
@@ -879,6 +1265,7 @@ Binding* Parser::instantiate_function_template(
 	}
 	catch (const exception&)
 	{
+		--suppress_qualifier_template_member_instantiation_depth_;
 		active_friend_class_scopes_.resize(friend_scope_depth);
 		declaration->completing_specializations.erase(key);
 		template_type_substitutions_ = save_subst;
@@ -897,6 +1284,7 @@ Binding* Parser::instantiate_function_template(
 			save_function_parameter_name_override;
 		throw;
 	}
+	--suppress_qualifier_template_member_instantiation_depth_;
 	active_friend_class_scopes_.resize(friend_scope_depth);
 	template_type_substitutions_ = save_subst;
 	template_value_substitutions_ = save_value_subst;
@@ -927,6 +1315,22 @@ Binding* Parser::instantiate_function_template(
 	}
 	if (declaration->placeholder != NULL)
 	{
+		fn.binding->is_static_member =
+			declaration->placeholder->is_static_member;
+		fn.binding->is_constexpr =
+			declaration->placeholder->is_constexpr;
+		fn.binding->is_explicit =
+			declaration->placeholder->is_explicit;
+		fn.binding->is_private =
+			declaration->placeholder->is_private;
+		fn.binding->is_protected_member =
+			declaration->placeholder->is_protected_member;
+		fn.binding->ref_qualifier =
+			declaration->placeholder->ref_qualifier;
+		fn.binding->unwind_no =
+			declaration->placeholder->unwind_no;
+		if (declaration->placeholder->reserve_primary_function_symbol)
+			fn.binding->reserve_primary_function_symbol = true;
 		map<Binding*, vector<string> >::const_iterator placeholder_names =
 			function_parameter_names_.find(declaration->placeholder);
 		map<Binding*, vector<string> >::iterator binding_names =
@@ -954,12 +1358,17 @@ Binding* Parser::instantiate_function_template(
 				if (generated && !old_generated)
 					names[i] = old_names[old_index];
 			}
+			declaration->function_parameter_names = names;
 		}
+		else if (binding_names != function_parameter_names_.end())
+			declaration->function_parameter_names = binding_names->second;
+		else if (placeholder_names != function_parameter_names_.end())
+			declaration->function_parameter_names = placeholder_names->second;
 	}
 	if (declaration->class_template_member)
 	{
 		fn.binding->function_specialization_symbol =
-			declaration->constructor_template ||
+			constructor_template_function_template_symbol(declaration) ||
 			class_template_member_function_template_symbol(declaration)
 			? abi_function_template_specialization_symbol(
 				declaration,
@@ -969,7 +1378,7 @@ Binding* Parser::instantiate_function_template(
 			: abi_binding_symbol(fn.binding, map<string, size_t>());
 		if (fn.binding->aliased_binding != NULL)
 			fn.binding->aliased_binding->function_specialization_symbol =
-				declaration->constructor_template ||
+				constructor_template_function_template_symbol(declaration) ||
 				class_template_member_function_template_symbol(declaration)
 				? abi_function_template_specialization_symbol(
 					declaration,

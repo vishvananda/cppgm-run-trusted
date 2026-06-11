@@ -163,9 +163,10 @@ struct Binding
 	bool is_namespace_static;
 	string local_static_discriminator;
 	Binding* local_static_function_owner;
-	string function_specialization_symbol;
-	bool is_inline_definition;
-	bool is_generated_default_constructor;
+		string function_specialization_symbol;
+		bool is_inline_definition;
+		bool is_declared_inline;
+		bool is_generated_default_constructor;
 	bool is_generated_aggregate_constructor;
 	bool is_generated_copy_move_constructor;
 	bool is_generated_copy_move_assignment;

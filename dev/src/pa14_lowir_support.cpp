@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 #include <cctype>
 namespace pa14 { namespace internal { bool starts_with(const string& text, const string& prefix) {
 return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0; } TypePtr object_type(TypePtr type)
@@ -179,20 +180,30 @@ if (!binding->local_static_discriminator.empty()) out << "__" << sanitized_symbo
 for (size_t i = 0; i < parts.size(); ++i) { if (i != 0) out << "__";
 out << sanitized_symbol_part(parts[i]); } return out.str(); }
 string global_object_symbol(const Binding* binding) { if (binding == NULL) return string();
-if (binding->language_linkage == "c") return binding->name; vector<string> reversed; for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
-{ if (scope->kind == ScopeKind::Namespace && !scope->name.empty() && scope->name != "<unnamed>")
-reversed.push_back(abi_source_name(scope->name)); else if (scope->kind == ScopeKind::Class && !scope->name.empty() && scope->name != "<unnamed>")
-{ TypePtr record = pa11::record_type_for_scope(scope); record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (record.get() != NULL &&
-record->kind == TypeKind::Record && record_is_template_specialization(record)) reversed.push_back(template_abi_component_for_type(record)); else
-reversed.push_back(abi_source_name(scope->name)); } } string leaf = abi_source_name(binding->name);
-if (reversed.empty()) return "_Z" + leaf; string out = "_ZN"; for (size_t i = reversed.size(); i > 0; --i)
-out += reversed[i - 1]; out += leaf; out += "E"; return out;
-} bool is_class_constructor_binding(const Binding* binding) { return binding != NULL &&
+if (binding->language_linkage == "c") return binding->name; if (binding->is_local_static) {
+const Binding* owner = binding->local_static_function_owner; if (owner != NULL) {
+string fn = owner->function_specialization_symbol.empty() ?
+pa12::internal::abi_binding_symbol(owner, map<string, size_t>()) :
+owner->function_specialization_symbol; string leaf = abi_source_name(binding->name);
+if (!binding->local_static_discriminator.empty()) leaf += abi_source_name(binding->local_static_discriminator);
+return "_ZZ" + fn.substr(2) + "E" + leaf; } }
+return pa12::internal::abi_binding_symbol(binding, map<string, size_t>());
+} bool binding_has_internal_linkage(const Binding* binding) { if (binding == NULL) return false;
+if (binding->is_local_static || binding->is_namespace_static) return true;
+for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+if (scope->kind == ScopeKind::Namespace && scope->name == "<unnamed>") return true;
+return false; } bool is_class_constructor_binding(const Binding* binding) { return binding != NULL &&
 binding->owner != NULL && binding->owner->kind == ScopeKind::Class && binding->name == binding->owner->name; }
 bool is_class_destructor_binding(const Binding* binding) { return binding != NULL && binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class && !binding->name.empty() && binding->name[0] == '~'; }
 TypePtr class_record_for_member(const Binding* binding) { if (binding == NULL || binding->owner == NULL || binding->owner->kind != ScopeKind::Class)
-return TypePtr(); return pa11::record_type_for_scope(binding->owner); } bool record_is_template_specialization(TypePtr record)
+return TypePtr(); return pa11::record_type_for_scope(binding->owner); } Binding* anonymous_storage_member_target(Binding* binding) {
+if (binding == NULL || binding->aliased_binding == NULL || binding->target_scope == NULL) return NULL;
+map<string, vector<Binding*> >::iterator found = binding->target_scope->members.find(binding->name);
+if (found == binding->target_scope->members.end()) return NULL;
+for (size_t i = 0; i < found->second.size(); ++i)
+if (found->second[i]->kind == BindingKind::Variable && !found->second[i]->is_static_member) return found->second[i];
+return NULL; } bool record_is_template_specialization(TypePtr record)
 { record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); return record.get() != NULL && record->kind == TypeKind::Record &&
 record->is_template_specialization; } bool binding_has_template_specialization_context(const Binding* binding) {
 if (binding == NULL) return false; for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent) if (scope->kind == ScopeKind::Class &&

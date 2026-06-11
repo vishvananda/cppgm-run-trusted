@@ -580,6 +580,29 @@ void ProgramLowerer::place_constructor_after_pending_record_operator(
 	}
 }
 
+void ProgramLowerer::place_operator_before_pending_constructor(
+	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
+{
+	if (binding == NULL ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    is_class_constructor(binding) ||
+	    binding->name.compare(0, 8, "operator") != 0)
+		return;
+	for (PendingInlineIterator it = pending_inline_definitions.begin();
+	     it != pending_inline_definitions.end();
+	     ++it)
+	{
+		if ((*it)->owner != binding->owner ||
+		    !is_class_constructor(*it) ||
+		    (*it)->is_generated_default_constructor)
+			continue;
+		if (pos == pending_inline_definitions.end() || it < pos)
+			pos = it;
+		break;
+	}
+}
+
 void ProgramLowerer::place_local_constructor_after_shorter_overload(
 	const Binding* binding, ProgramLowerer::PendingInlineIterator& pos)
 {
@@ -1240,6 +1263,7 @@ void ProgramLowerer::insert_pending_inline_definition(const Binding* binding)
 	place_record_return_before_owner_scalar_member(binding, pos);
 	place_record_return_before_pending_operator(binding, pos);
 	place_constructor_after_pending_record_operator(binding, pos);
+	place_operator_before_pending_constructor(binding, pos);
 	place_local_constructor_after_shorter_overload(binding, pos);
 	place_constructor_inline_definition(binding, pos);
 	place_destructor_inline_definition(binding, pos);
@@ -1334,13 +1358,13 @@ if (class_ctor && need_base && !need_complete &&
     defined_functions.find(name) == defined_functions.end())
 	need_complete = true;
 if (class_ctor && need_complete && binding->is_generated_copy_move_constructor) { TypePtr owner_record = class_record_for_member(binding);
-owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL && owner_record->kind == TypeKind::Record && !pa11::record_virtual_bases(owner_record).empty()) need_complete = false; } if (!need_complete && !need_base) continue; if (need_complete)
+owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL && owner_record->kind == TypeKind::Record && !pa11::record_virtual_bases(owner_record).empty()) need_complete = false; } if ((class_ctor || class_dtor) && need_complete && defined_functions.find(name + "__base_entry") == defined_functions.end()) need_base = true; if (!need_complete && !need_base) continue; if (need_complete)
 defined_functions.insert(name); if (need_base) defined_functions.insert(name + "__base_entry"); const Binding* saved_active = active_inline_definition; size_t saved_dependency_insert_count =
 active_inline_dependency_insert_count; active_inline_definition = binding; active_inline_dependency_insert_count = 0; FunctionLowerer lowerer(*this, *found->second); if (binding->is_generated_copy_move_assignment)
-++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; active_inline_definition = saved_active;
+++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; FunctionOut destructor_base_lowered; if (class_dtor && need_base) { FunctionLowerer base_lowerer(*this, *found->second, true); destructor_base_lowered = base_lowerer.lower(); } active_inline_definition = saved_active;
 active_inline_dependency_insert_count = saved_dependency_insert_count; if (!binding->name.empty() && binding->name[0] == '~' && !binding_has_template_specialization_context(binding)) emit_pending_inline_definitions();
 if (class_ctor && need_complete) { TypePtr active_record = first_this_record(binding); bool emit_member_ctor_dependencies = false; for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { if (!is_class_constructor(*it)) continue; TypePtr pending_record = first_this_record(*it); if (active_record.get() != NULL && pending_record.get() != NULL && record_has_base(active_record, pending_record)) continue; emit_member_ctor_dependencies = true; break; } if (emit_member_ctor_dependencies) emit_pending_inline_definitions(); }
-if (need_base) functions.push_back(make_constructor_base_entry(lowered, name)); if (need_complete) { bool inserted = false; if (class_ctor && constructor_has_no_explicit_parameters(binding) && class_member_of_local_class(binding)) { for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending != NULL && pending->owner == binding->owner && is_class_constructor(pending) && pending->type.get() != NULL && pending->type->kind == TypeKind::Function && pending->type->parameters.size() > binding->type->parameters.size()) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted) functions.push_back(lowered); } emit_pending_synthetic_assignment_functions(); } }
+if (need_base) functions.push_back(class_dtor ? make_destructor_base_entry(destructor_base_lowered, name, native_lowering) : make_constructor_base_entry(lowered, name)); if (need_complete) { bool inserted = false; if (class_ctor && constructor_has_no_explicit_parameters(binding) && class_member_of_local_class(binding)) { for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending != NULL && pending->owner == binding->owner && is_class_constructor(pending) && pending->type.get() != NULL && pending->type->kind == TypeKind::Function && pending->type->parameters.size() > binding->type->parameters.size()) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted) functions.push_back(lowered); } emit_pending_synthetic_assignment_functions(); } }
 
 }  // namespace internal
 

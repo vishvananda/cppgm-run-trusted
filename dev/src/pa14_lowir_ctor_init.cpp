@@ -171,9 +171,12 @@ args.push_back(&init->children[i]); lower_constructor_call(this_addr, ctor, args
 { if (!node.has_constant_value || node.constant_value == 0 || node.children.empty()) return;
 string self = fresh_temp(); instr(self + " = load ptr $this"); Value source = ensure_pointer(emit_lvalue_addr(node.children[0])); instr("copyobj " + to_string(node.constant_value) + "x" +
 to_string(pa11::type_align(node.type)) + " " + source.text + ", " + self); } void FunctionLowerer::lower_member_init(const Node& node)
-{ if (node.binding == NULL) return; function<Value()> member_addr = [this, &node]() {
+{ if (node.binding == NULL) return; Binding* alias_member = anonymous_storage_member_target(node.binding);
+Binding* storage_member = alias_member != NULL ? node.binding->aliased_binding : node.binding;
+uint64_t member_offset = storage_member->member_offset + (alias_member != NULL ? alias_member->member_offset : 0);
+function<Value()> member_addr = [this, member_offset]() {
 string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this"); string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + this_ptr +
-", " + to_string(node.binding->member_offset)); return Value("ptr", addr); }; if (!node.children.empty() &&
+", " + to_string(member_offset)); return Value("ptr", addr); }; if (!node.children.empty() &&
 starts_with(node.children[0].line, "braced-init-list")) { if (node.direct_call != NULL) {
 if (pa11::strip_cv(node.binding->type)->kind != TypeKind::Record) { lower_object_init(member_addr,
 node.binding->type, node.children[0]); return; }

@@ -77,7 +77,7 @@ string FunctionLowerer::ensure_exception_object_global(TypePtr object)
 	if (program_.defined_globals.insert(ehobj).second)
 	{
 		ostringstream out;
-		out << "global @" << ehobj << " [binding=weak, object=@"
+		out << "global @" << ehobj << " [binding=weak, object="
 		    << ehobj << "] = {\n";
 		out << "  zero " << pa11::type_size(object) << "\n";
 		out << "}";
@@ -111,12 +111,13 @@ string FunctionLowerer::emit_exception_allocation(TypePtr object,
 	instr("eh_end");
 	terminate("jump ^" + throw_alloc_end);
 	start_block(throw_dispatch);
-	emit_active_catch_clause(active_catches_.back());
-	instr("eh_cleanup");
+	emit_active_catch_clauses();
+	if (program_.native_lowering || !active_catches_.empty())
+		instr("eh_cleanup");
 	emit_unwind_cleanups();
 	if (!program_.native_lowering)
 		instr("eh_end");
-	terminate("jump ^" + active_catches_.back().entry);
+	terminate_unwind_or_active_catch();
 	start_block(throw_alloc_end);
 	string loaded_alloc = fresh_temp();
 	instr(loaded_alloc + " = load ptr $" + throw_alloc_slot);
@@ -223,10 +224,13 @@ Value FunctionLowerer::emit_throw(const Node& expr)
 		{
 			string end = fresh_block("call_unwind_end");
 			terminate("jump ^" + end);
-			active_unwind_dispatch_ = dispatch;
-			start_block(dispatch);
-			emit_unwind_cleanups();
-			terminate("resume");
+				active_unwind_dispatch_ = dispatch;
+				start_block(dispatch);
+				emit_active_catch_clauses();
+				if (program_.native_lowering || !active_catches_.empty())
+					instr("eh_cleanup");
+				emit_unwind_cleanups();
+			terminate_unwind_or_active_catch();
 			start_block(end);
 		}
 		return Value("void", "");

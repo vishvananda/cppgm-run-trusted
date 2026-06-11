@@ -442,6 +442,66 @@ for (size_t j = i + 1; j < order.size(); ++j) { const Binding* helper = function
 continue; size_t fn_index = order[j]; order.erase(order.begin() + j); order.insert(order.begin() + i, fn_index);
 changed = true; break; } if (changed)
 break; } } }
+bool output_scalar_template_helper_for_value_constructor(const FunctionOut& helper,
+                                                         const Binding* ctor,
+                                                         TypePtr ctor_param)
+{
+	const Binding* binding = helper.binding;
+	if (binding == NULL ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    output_constructor_like_binding(binding) ||
+	    is_class_destructor_binding(binding) ||
+	    output_function_out_returns_record(helper) ||
+	    output_function_out_returns_pointer(helper) ||
+	    !output_template_or_local_order_function(helper))
+		return false;
+	TypePtr result =
+		binding->type.get() != NULL && binding->type->kind == TypeKind::Function
+		? pa11::strip_cv(binding->type->base) : TypePtr();
+	if (result.get() == NULL || result->kind != TypeKind::Fundamental)
+		return false;
+	TypePtr helper_owner = output_owner_record(binding);
+	return output_same_record_or_template_family(helper_owner, ctor_param) ||
+	       output_type_mentions_record(binding->type, ctor_param);
+}
+
+void order_value_constructors_after_scalar_template_helpers(
+	const vector<FunctionOut>& functions,
+	vector<size_t>& order)
+{
+	bool changed = true;
+	for (size_t guard = 0; changed && guard < order.size() * order.size() + 1;
+	     ++guard)
+	{
+		changed = false;
+		for (size_t i = 0; i < order.size(); ++i)
+		{
+			const Binding* ctor = functions[order[i]].binding;
+			if (!output_constructor_like_binding(ctor) ||
+			    output_has_reference_parameter(ctor) ||
+			    !output_owner_template_specialization(ctor))
+				continue;
+			TypePtr ctor_param = output_constructor_record_parameter(ctor, true);
+			if (ctor_param.get() == NULL)
+				continue;
+			for (size_t j = i + 1; j < order.size(); ++j)
+			{
+				if (!output_scalar_template_helper_for_value_constructor(
+					    functions[order[j]], ctor, ctor_param))
+					continue;
+				size_t fn_index = order[i];
+				order.erase(order.begin() + i);
+				order.insert(order.begin() + j, fn_index);
+				changed = true;
+				break;
+			}
+			if (changed)
+				break;
+		}
+	}
+}
+
 size_t output_function_parameter_count(const Binding* binding) { return binding != NULL && binding->type.get() != NULL &&
 binding->type->kind == TypeKind::Function ? binding->type->parameters.size() : 0; } void order_class_pointer_helpers_by_arity(const vector<FunctionOut>& functions,
 vector<size_t>& order) { vector<size_t> positions; for (size_t i = 0; i < order.size(); ++i)
@@ -810,7 +870,7 @@ order_class_pointer_helpers_before_value_pointer_constructors(program.functions,
 order_class_pointer_helpers_before_value_pointer_constructors(program.functions, order); order_class_pointer_helpers_by_arity(program.functions, order); order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_scalar_members_before_assignments(program.functions, order);
 order_conversion_after_compound_assignment(program.functions, order); order_template_owner_call_operator_callees_after_callers(program.functions, order); order_template_reference_constructors_before_foreign_call_operators(program.functions, order); order_lambda_call_operators_by_rank(program, order);
 order_lambda_callees_after_callers(program.functions, order); order_pointer_reference_helpers_before_lambda_callers(program.functions, order); order_range_for_operator_functions_by_key(program.functions, order); order_template_reference_constructors_before_foreign_call_operators(program.functions, order);
-order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_dependency_flow_functions(program.functions, order); order_same_owner_constructor_before_assignment_operator(program.functions, order); order_same_owner_call_operator_before_unreferenced_zero_constructor(program.functions, order); order_local_constructor_before_same_owner_call_operator(program.functions, order); if (has_abi_template_vtable && has_template_record_function)
+order_assignment_operator_before_owner_zero_constructor(program.functions, order); order_template_dependency_flow_functions(program.functions, order); order_same_owner_constructor_before_assignment_operator(program.functions, order); order_same_owner_call_operator_before_unreferenced_zero_constructor(program.functions, order); order_local_constructor_before_same_owner_call_operator(program.functions, order); order_value_constructors_after_scalar_template_helpers(program.functions, order); if (has_abi_template_vtable && has_template_record_function)
 stable_sort(order.begin(), order.end(), [&program, has_abi_template_vtable](size_t lhs, size_t rhs) { int lkey = emitted_template_member_order_key(
 program.functions[lhs], has_abi_template_vtable); int rkey = emitted_template_member_order_key( program.functions[rhs],
 has_abi_template_vtable); return lkey != rkey ? lkey < rkey : lhs < rhs; }); size_t run = 0;

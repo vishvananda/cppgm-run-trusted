@@ -289,6 +289,12 @@ pa11::same_type(candidate->type, substituted_type)) || (qname.qualifier != NULL 
 break; } } } bool nonstatic_member_function = target->kind == ScopeKind::Class && type->kind == pa11::TypeKind::Function && !specs.static_decl && !existing_static_member_function; if (nonstatic_member_function)
 type = make_member_function_type(target, type); if (type->kind == pa11::TypeKind::Function || function_definition) { Binding* function = declare_function_entity(specs, target, qname.name, type, declarator,
 function_definition, nonstatic_member_function, hidden_friend, out); if (specs.friend_decl && friend_class_scope != NULL) add_friend_function(friend_class_scope, function); return function; } Binding* variable = NULL;
+if (target->kind == ScopeKind::Namespace) { bool current_c_linkage = current_language_linkage() == "c"; bool current_namespace_static = specs.static_decl;
+map<string, vector<Binding*> >::iterator found = target->members.find(qname.name); if (found != target->members.end()) for (size_t i = 0; i < found->second.size(); ++i) { Binding* candidate = found->second[i];
+if ((current_c_linkage || (current_namespace_static && candidate->language_linkage == "c") || (current_c_linkage && candidate->is_namespace_static)) &&
+(candidate->language_linkage == "c" || candidate->is_namespace_static)) { if (candidate->kind == BindingKind::Function) throw runtime_error("conflicting C linkage declaration");
+if (candidate->kind == BindingKind::Variable) { bool same_variable = candidate->language_linkage == "c" && current_c_linkage && !current_namespace_static && !candidate->is_namespace_static &&
+(pa11::same_type(candidate->type, type) || array_redeclaration_compatible(candidate->type, type)); if (!same_variable) throw runtime_error("conflicting C linkage declaration"); } } } }
 if ((target->kind == ScopeKind::Namespace || target->kind == ScopeKind::Class) && (qname.qualifier != NULL || target->kind == ScopeKind::Namespace)) { Binding* existing =
 pa11::find_owned_binding(target, qname.name, BindingKind::Variable); if (existing != NULL && (pa11::same_type(existing->type, type) || array_redeclaration_compatible(existing->type, type))) { variable = existing;
 type = existing->type; } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))

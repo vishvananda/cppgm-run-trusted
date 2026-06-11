@@ -292,8 +292,9 @@ struct TemplateDeclaration
 			bool class_specialization;
 			bool hidden_friend;
 			bool function_definition_validated;
-			Scope* friend_class_scope;
+	Scope* friend_class_scope;
 	TypePtr generic_function_type;
+	vector<string> function_parameter_names;
 	Binding* placeholder;
 	Binding* inherited_constructor_base;
 	TypePtr inherited_constructor_base_type;
@@ -405,11 +406,13 @@ public:
 	bool override_function_parameter_names_;
 	bool replaying_dependent_decltype_;
 	bool parsing_default_template_argument_;
+	bool single_linkage_specification_declaration_;
 	int defer_class_template_completion_depth_;
-		int function_template_candidate_instantiation_depth_;
-		int template_argument_expression_depth_;
-		int unevaluated_expression_depth_;
-		int short_circuit_static_member_demand_depth_;
+	int function_template_candidate_instantiation_depth_;
+	int template_argument_expression_depth_;
+	int unevaluated_expression_depth_;
+	int suppress_qualifier_template_member_instantiation_depth_;
+	int short_circuit_static_member_demand_depth_;
 		set<const void*> generated_default_ctors_;
 	set<pair<const void*, size_t> > generated_aggregate_ctors_;
 	set<const void*> generated_copy_ctors_;
@@ -442,6 +445,7 @@ public:
 		map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> > member_variable_templates_;
 	map<Binding*, TemplateDeclaration*> function_template_placeholders_;
 	map<Binding*, vector<TemplateArgument> > function_template_specialization_arguments_;
+	set<Binding*> active_function_body_replays_;
 	map<Binding*, TypePtr> lambda_closure_types_;
 	map<Binding*, Binding*> lambda_call_operators_;
 	map<Binding*, size_t> lambda_ordinals_;
@@ -591,6 +595,8 @@ public:
 		bool parse_destructor_like_member();
 		bool parse_friend_declaration();
 		void parse_class_body(Scope* class_scope, bool default_private);
+		bool parse_trailing_declarator_initializer(TypePtr declared_type,
+		                                           Expr& init);
 
 	DeclSpecs parse_decl_specifier_seq(bool type_id_context);
 	TypePtr type_from_decl_specs(const DeclSpecs& specs);

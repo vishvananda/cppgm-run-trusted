@@ -66,6 +66,9 @@ struct FunctionOut
 };
 FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
                                         const string& name);
+FunctionOut make_destructor_base_entry(const FunctionOut& lowered,
+                                       const string& name,
+                                       bool native_lowering = false);
 
 struct InitAction
 {
@@ -125,6 +128,7 @@ string metadata_suffix(const vector<string>& items);
 vector<string> qualified_parts(const Binding* binding);
 string source_symbol_base(const Binding* binding);
 string global_object_symbol(const Binding* binding);
+bool binding_has_internal_linkage(const Binding* binding);
 bool node_contains_call_expression(const Node& node);
 bool record_has_default_constructor_for_array(TypePtr type);
 bool record_has_base_subobject(TypePtr source, TypePtr target);
@@ -153,6 +157,7 @@ bool record_has_base(TypePtr source, TypePtr target);
 bool is_class_constructor_binding(const Binding* binding);
 bool is_class_destructor_binding(const Binding* binding);
 TypePtr class_record_for_member(const Binding* binding);
+Binding* anonymous_storage_member_target(Binding* binding);
 bool record_is_template_specialization(TypePtr record);
 bool binding_has_template_specialization_context(const Binding* binding);
 bool template_static_member_definition_matches(const Binding* use,
@@ -287,6 +292,8 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_after_pending_record_operator(
 			const Binding* binding, PendingInlineIterator& pos);
+		void place_operator_before_pending_constructor(
+			const Binding* binding, PendingInlineIterator& pos);
 		void place_local_constructor_after_shorter_overload(
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_inline_definition(
@@ -363,7 +370,9 @@ struct ProgramLowerer
 	class FunctionLowerer
 	{
 public:
-	FunctionLowerer(ProgramLowerer& program, const Node& fn);
+	FunctionLowerer(ProgramLowerer& program,
+	                const Node& fn,
+	                bool destructor_base_entry = false);
 
 	FunctionOut lower();
 	FunctionOut lower_deleting_destructor_entry(const string& name,
@@ -413,6 +422,7 @@ private:
 
 	ProgramLowerer& program_;
 	const Node& fn_;
+	bool destructor_base_entry_;
 	FunctionOut out_;
 	vector<unique_ptr<Block> > blocks_;
 	Block* current_;
@@ -423,10 +433,11 @@ private:
 	vector<vector<Cleanup> > cleanups_;
 	set<const Binding*> by_address_parameters_;
 	set<const Binding*> return_slot_variables_;
-	set<uint64_t> initialized_bitfield_storage_;
-	vector<pair<Value, TypePtr> > pending_temp_cleanups_;
-	map<string, string> labels_;
-	map<const Node*, string> switch_labels_;
+		set<uint64_t> initialized_bitfield_storage_;
+		vector<pair<Value, TypePtr> > pending_temp_cleanups_;
+		map<string, string> labels_;
+		map<string, size_t> label_cleanup_depths_;
+		map<const Node*, string> switch_labels_;
 	int temp_counter_;
 	int block_counter_;
 	int aux_slot_counter_;
@@ -452,11 +463,13 @@ private:
 	string fresh_temp();
 	string fresh_block(const string& prefix);
 	string fresh_aux_slot(const string& prefix, const string& type);
-	void start_block(const string& name);
-	void instr(const string& text);
-	void terminate(const string& text);
+		void start_block(const string& name);
+		void instr(const string& text);
+		void terminate(const string& text);
+		void collect_label_cleanup_depths(const Node& node, size_t depth);
+		void emit_goto_cleanups(const string& label);
 
-	void lower_params();
+		void lower_params();
 	void lower_param_stores();
 	bool lower_defaulted_storage_special_member();
 	void lower_stmt(const Node& node);
@@ -604,9 +617,11 @@ private:
 	void emit_constructor_unwind_cleanups();
 	void lower_return(const Node& node);
 	void register_cleanup(Binding* binding, TypePtr type);
-	void emit_scope_cleanups(vector<Cleanup>& scope);
-	void emit_all_cleanups();
-	void lower_vptr_store(TypePtr record);
+		void emit_scope_cleanups(vector<Cleanup>& scope);
+		void emit_all_cleanups();
+		void emit_active_catch_clauses();
+		void terminate_unwind_or_active_catch();
+		void lower_vptr_store(TypePtr record);
 	void maybe_lower_constructor_vptr(size_t index, size_t total);
 	void maybe_lower_destructor_epilogue(bool& emitted);
 	bool has_active_cleanups() const;

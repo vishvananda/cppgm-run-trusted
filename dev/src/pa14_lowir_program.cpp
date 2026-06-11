@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 
 #include <algorithm>
 #include <cctype>
@@ -769,12 +770,22 @@ void ProgramLowerer::collect_node(const Node& node)
 			string name = symbol_for(node.binding);
 			functions.push_back(make_constructor_base_entry(lowered, name));
 		}
+		if (is_class_destructor_binding(node.binding))
+		{
+			string name = symbol_for(node.binding);
+			FunctionLowerer base_lowerer(*this, node, true);
+			FunctionOut base_lowered = base_lowerer.lower();
+			functions.push_back(make_destructor_base_entry(base_lowered,
+			                                               name,
+			                                               native_lowering));
+		}
 		if (node.binding != NULL &&
 		    node.binding->owner != NULL &&
 		    node.binding->owner->kind == ScopeKind::Class &&
 		    !node.binding->name.empty() &&
 		    node.binding->name[0] == '~' &&
-		    node.binding->is_noop_destructor)
+		    node.binding->is_noop_destructor &&
+		    native_lowering)
 		{
 			FunctionOut noop_entry = lowered;
 			string name = symbol_for(node.binding);
@@ -863,10 +874,19 @@ void ProgramLowerer::register_function_declaration(const Node& node)
 		metadata.push_back("arity=variadic");
 	if (binding->language_linkage == "c")
 		metadata.push_back("linkage=c");
-	if (binding->unwind_no)
-		metadata.push_back("unwind=no");
-	metadata.push_back("binding=strong");
-	out << metadata_suffix(metadata);
+		if (binding->unwind_no)
+			metadata.push_back("unwind=no");
+		metadata.push_back(binding_has_internal_linkage(binding)
+		                   ? "binding=internal" : "binding=strong");
+		if (binding->name != "main")
+		{
+			string object_symbol = binding->language_linkage == "c"
+				? binding->name
+				: pa12::internal::abi_binding_symbol(
+					binding, map<string, size_t>());
+			metadata.push_back("object=" + object_symbol);
+		}
+		out << metadata_suffix(metadata);
 	function_declarations_by_binding[binding] = out.str();
 }
 

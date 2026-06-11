@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 #include <algorithm>
 #include <utility>
 namespace pa14 { namespace internal { bool node_contains_call_expression(const Node& node) {
@@ -74,11 +75,35 @@ for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->se
 binding->type->kind != TypeKind::Function || binding->type->parameters.size() != 2 || !is_reference(binding->type->parameters[1])) continue;
 TypePtr param = binding->type->parameters[1]; if (move && param->kind != TypeKind::RValueReference) continue; if (!move && param->kind != TypeKind::LValueReference)
 continue; if (pa11::same_type(pa11::strip_cv(param->base), bare)) return binding; }
-return NULL; } FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn) : program_(program),
-fn_(fn), current_(NULL), temp_counter_(0), block_counter_(0),
+return NULL; } void FunctionLowerer::collect_label_cleanup_depths(const Node& node, size_t depth) {
+if (starts_with(node.line, "labeled-statement ")) {
+string label = node.line.substr(18);
+label_cleanup_depths_[label] = depth;
+if (!node.children.empty()) collect_label_cleanup_depths(node.children[0], depth);
+return; }
+if (starts_with(node.line, "compound-statement")) {
+for (size_t i = 0; i < node.children.size(); ++i)
+collect_label_cleanup_depths(node.children[i], depth + 1);
+return; }
+if (starts_with(node.line, "try-statement")) {
+if (!node.children.empty() && !node.children[0].children.empty())
+collect_label_cleanup_depths(node.children[0].children[0], depth + 1);
+for (size_t i = 1; i < node.children.size(); ++i)
+if (!node.children[i].children.empty()) collect_label_cleanup_depths(node.children[i].children[0], depth + 1);
+return; }
+for (size_t i = 0; i < node.children.size(); ++i)
+collect_label_cleanup_depths(node.children[i], depth);
+} void FunctionLowerer::emit_goto_cleanups(const string& label) {
+map<string, size_t>::const_iterator found = label_cleanup_depths_.find(label);
+if (found == label_cleanup_depths_.end() || found->second >= cleanups_.size())
+return;
+for (size_t i = cleanups_.size(); i > found->second; --i)
+emit_scope_cleanups(cleanups_[i - 1]);
+} FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn, bool destructor_base_entry) : program_(program),
+fn_(fn), destructor_base_entry_(destructor_base_entry), current_(NULL), temp_counter_(0), block_counter_(0),
 aux_slot_counter_(0), eh_try_depth_(0), call_temp_cleanup_defer_depth_(0), logical_call_result_consumed_(false),
 call_result_store_addr_(), call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
-constructor_destination_before_protected_try_(false) { } void FunctionLowerer::add_slot(const string& name, const string& type)
+constructor_destination_before_protected_try_(false) { collect_label_cleanup_depths(fn_, 1); } void FunctionLowerer::add_slot(const string& name, const string& type)
 { if (starts_with(name, "__begin") || starts_with(name, "__end")) out_.has_range_for_state = true; out_.slots.push_back("  slot $" + name + " : " + type); } string FunctionLowerer::slot_for(const Binding* binding)
 { map<const Binding*, string>::const_iterator found = slots_.find(binding); if (found != slots_.end()) return found->second;
 string base = binding != NULL && !binding->name.empty() ? binding->name : "__param" + to_string(slots_.size()); int& count = slot_names_[base]; ++count;
@@ -272,22 +297,40 @@ pa11::layout_record_type(bare); for (size_t n = 0; n < bare->fields.size(); ++n)
 Binding* field = bare->fields[i]; function<Value()> field_addr = [this, field]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this");
 string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + this_ptr + ", " + to_string(field->member_offset)); return Value("ptr", addr);
 }; lower_destructor_for_object(field_addr, field->type); emitted = true; }
-vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t n = 0; n < bases.size(); ++n) { size_t i = bases.size() - 1 - n; TypePtr base = pa11::strip_cv(bases[i]); Node action("base-fini-action " + base->name); action.type = base; lower_base_fini(action); emitted = true; } }
+vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t n = 0; n < bases.size(); ++n) { size_t i = bases.size() - 1 - n; TypePtr base = pa11::strip_cv(bases[i]); if (destructor_base_entry_ && target_is_virtual_base_subobject(bare, base)) continue; Node action("base-fini-action " + base->name); action.type = base; lower_base_fini(action); emitted = true; } }
 FunctionOut FunctionLowerer::lower() { Binding* binding = fn_.binding; if (binding == NULL)
 throw runtime_error("missing function binding"); out_.binding = binding; string name = program_.symbol_for(binding); out_.name = name; TypePtr fn_type = binding->type;
 bool indirect_result = pa11::strip_cv(fn_type->base)->kind == TypeKind::Record && record_return_by_address(fn_type->base); ostringstream header;
 out_.returns_pointer_result = !indirect_result && scalar_lowir_type(fn_type->base) == "ptr";
-header << "function @" << name << "("; if (indirect_result) header << "%ret : ptr [pass=indirect_result]"; for (size_t i = 0; i < fn_type->parameters.size(); ++i)
-{ if (i != 0 || indirect_result) header << ", "; string pname = i < fn_.children.size() &&
-starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : ""; size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space);
-if (pname.empty()) pname = "__param" + to_string(i); out_.parameter_names.push_back(pname); TypePtr ptype = fn_type->parameters[i]; header << "%" << pname << " : " << lowir_parameter(ptype);
+	vector<string> raw_parameter_names;
+	map<string, int> raw_parameter_counts;
+	for (size_t i = 0; i < fn_type->parameters.size(); ++i)
+	{
+		string pname = i < fn_.children.size() &&
+		starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : "";
+		size_t space = pname.find(' ');
+		pname = space == string::npos ? pname : pname.substr(0, space);
+		raw_parameter_names.push_back(pname);
+		if (!pname.empty())
+			++raw_parameter_counts[pname];
+	}
+	map<string, int> parameter_name_counts;
+	map<string, int> raw_parameter_seen;
+	header << "function @" << name << "("; if (indirect_result) { header << "%ret : ptr [pass=indirect_result]"; parameter_name_counts["ret"] = 1; } for (size_t i = 0; i < fn_type->parameters.size(); ++i)
+	{ if (i != 0 || indirect_result) header << ", "; string pname = raw_parameter_names[i]; if (!pname.empty()) ++raw_parameter_seen[pname];
+	if (pname.empty() || raw_parameter_seen[pname] < raw_parameter_counts[pname]) pname = "__param" + to_string(i); int& count = parameter_name_counts[pname]; ++count; if (count > 1) pname += "__shadow" + to_string(count); out_.parameter_names.push_back(pname); TypePtr ptype = fn_type->parameters[i]; header << "%" << pname << " : " << lowir_parameter(ptype);
 } size_t hidden_pvb_index = 0; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && !fn_type->parameters.empty(); for (size_t i = member_this_param ? 1 : 0; i < fn_type->parameters.size(); ++i) { vector<TypePtr> vbases = program_.hidden_virtual_bases_for_function_parameter(fn_.binding, i, fn_type->parameters[i]); for (size_t v = 0; v < vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result) header << ", "; header << "%__pvbptr" << hidden_pvb_index++ << " : ptr"; } } vector<TypePtr> this_vbases = member_this_param && !is_class_constructor_binding(fn_.binding) && !is_class_destructor_binding(fn_.binding) ? (fn_.binding->is_virtual ? program_.hidden_virtual_bases_for_function_parameter(fn_.binding, 0, fn_type->parameters[0]) : hidden_virtual_bases_for_record(class_record_for_member(fn_.binding))) : vector<TypePtr>(); for (size_t v = 0; v < this_vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result || v != 0) header << ", "; header << "%__vbptr" << v << " : ptr"; } header << ") -> " << (indirect_result ? "void" : scalar_lowir_type(fn_type->base)); vector<string> metadata;
 if (fn_type->variadic) metadata.push_back("arity=variadic"); if (binding->language_linkage == "c") metadata.push_back("linkage=c");
 if (binding->unwind_no) metadata.push_back("unwind=no"); if (binding->name == "__cppgm_init") metadata.push_back("role=init");
 else if (binding->name == "__cppgm_fini") metadata.push_back("role=fini"); else if (binding->name == "main") {
 metadata.push_back("role=entry"); metadata.push_back("binding=strong"); out_.strong_binding = true; metadata.push_back("keep_alias=yes"); }
-else if (binding->name.compare(0, 8, "__lambda") == 0) metadata.push_back("binding=internal"); else if (binding->is_inline_definition) metadata.push_back("binding=weak");
+else if (binding->name.compare(0, 8, "__lambda") == 0 || binding_has_internal_linkage(binding)) metadata.push_back("binding=internal"); else if (binding->is_inline_definition) metadata.push_back("binding=weak");
 else { metadata.push_back("binding=strong"); out_.strong_binding = true; } if (!binding->function_specialization_symbol.empty()) metadata.push_back("object=" + binding->function_specialization_symbol);
+else if (binding->name != "main" &&
+         binding->name != "__cppgm_init" &&
+         binding->name != "__cppgm_fini") {
+string object_symbol = binding->language_linkage == "c" ? binding->name : pa12::internal::abi_binding_symbol(binding, map<string, size_t>());
+metadata.push_back("object=" + object_symbol); }
 if (binding->is_object_root) metadata.push_back("object_root=yes"); header << metadata_suffix(metadata); out_.header = header.str();
 if (binding->is_generated_copy_move_assignment && fn_type->parameters.size() == 2 && fn_type->parameters[1]->kind == TypeKind::RValueReference && binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class) { TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() != NULL)
@@ -382,47 +425,50 @@ void FunctionLowerer::lower_deleting_destructor_nonvirtual_bases(TypePtr record)
 		string base_addr = fresh_temp();
 		instr(base_addr + " = index i8 [projection=base_subobject] " +
 		      reload + ", " + to_string(base_subobject_offset(bare, base)));
-		vector<string> args;
-		args.push_back(base_addr);
-		if (base->is_polymorphic && record_uses_virtual_base_vtt(base))
-		{
-			size_t vtt_slot = construction_vtt_slot_for_direct_base(bare,
-			                                                        base);
-			if (vtt_slot != static_cast<size_t>(-1))
+			vector<string> args;
+			args.push_back(base_addr);
+			if (!program_.native_lowering &&
+			    base->is_polymorphic &&
+			    record_uses_virtual_base_vtt(base))
 			{
-				string vtt_base = fresh_temp();
-				instr(vtt_base + " = addr @" + vtt_symbol_for_record(bare));
-				string vtt_arg = vtt_base;
-				if (vtt_slot != 0)
+				size_t vtt_slot = construction_vtt_slot_for_direct_base(bare, base);
+				if (vtt_slot != static_cast<size_t>(-1))
 				{
-					vtt_arg = fresh_temp();
-					instr(vtt_arg + " = index i8 " + vtt_base + ", " +
-					      to_string(vtt_slot * 8));
+					string vtt_base = fresh_temp();
+					instr(vtt_base + " = addr @" + vtt_symbol_for_record(bare));
+					string vtt_arg = vtt_base;
+					if (vtt_slot != 0)
+					{
+						vtt_arg = fresh_temp();
+						instr(vtt_arg + " = index i8 " + vtt_base + ", " +
+						      to_string(vtt_slot * 8));
+					}
+					args.push_back(vtt_arg);
 				}
-				args.push_back(vtt_arg);
-			}
-		}
-		vector<TypePtr> vbases = hidden_virtual_bases_for_record(base);
-		for (size_t v = 0; v < vbases.size(); ++v)
-		{
-			string hidden = "0";
-			if (record_has_base_subobject(bare, vbases[v]))
-			{
-				string this_ptr = fresh_temp();
-				instr(this_ptr + " = load ptr $this");
-				uint64_t offset = base_subobject_offset(bare, vbases[v]);
-				if (offset == 0)
-					hidden = this_ptr;
-				else
+				vector<TypePtr> vbases = hidden_virtual_bases_for_record(base);
+				for (size_t v = 0; v < vbases.size(); ++v)
 				{
-					hidden = fresh_temp();
-					instr(hidden + " = index i8 " + this_ptr + ", " +
-					      to_string(offset));
+					string hidden;
+					if (record_has_base_subobject(bare, vbases[v]))
+					{
+						string this_ptr = fresh_temp();
+						instr(this_ptr + " = load ptr $this");
+						uint64_t offset = base_subobject_offset(bare, vbases[v]);
+						if (offset == 0)
+							hidden = this_ptr;
+						else
+						{
+							hidden = fresh_temp();
+							instr(hidden + " = index i8 " + this_ptr + ", " +
+							      to_string(offset));
+						}
+					}
+					if (hidden.empty())
+						hidden = "0";
+					args.push_back(hidden);
 				}
 			}
-			args.push_back(hidden);
-		}
-		ostringstream call;
+			ostringstream call;
 		call << "call void @" << base_callee << "(";
 		for (size_t a = 0; a < args.size(); ++a)
 		{
@@ -437,14 +483,16 @@ void FunctionLowerer::lower_deleting_destructor_nonvirtual_bases(TypePtr record)
 
 void FunctionLowerer::lower_params()
 { TypePtr fn_type = fn_.binding->type; size_t param_index = 0; for (size_t i = 0; i < fn_.children.size(); ++i)
-{ if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10);
-size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space); if (pname.empty()) pname = "__param" + to_string(param_index);
-if (pname.size() > 1 && pname[0] == 't') { int n = 0; bool digits = true;
+	{ if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10);
+	size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space); string source_name = pname; if (pname.empty()) pname = "__param" + to_string(param_index);
+	if (param_index < out_.parameter_names.size()) pname = out_.parameter_names[param_index];
+	if (pname.size() > 1 && pname[0] == 't') { int n = 0; bool digits = true;
 for (size_t j = 1; j < pname.size(); ++j) if (pname[j] >= '0' && pname[j] <= '9') n = n * 10 + (pname[j] - '0'); else
 digits = false; if (digits && n > temp_counter_) temp_counter_ = n; }
 Binding* binding = fn_.children[i].binding; TypePtr ptype = fn_type->parameters[param_index]; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && param_index == 0; TypePtr ptype_bare = pa11::strip_cv(ptype); bool pvb_slots = !member_this_param && (ptype_bare->kind == TypeKind::LValueReference || ptype_bare->kind == TypeKind::RValueReference) && pa11::strip_cv(ptype_bare->base)->kind == TypeKind::Record; vector<TypePtr> param_vbases = pvb_slots ? hidden_virtual_bases_for_record(pa11::strip_cv(ptype_bare->base)) : vector<TypePtr>(); if (binding == NULL) {
 if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(ptype)); for (size_t v = 0; v < param_vbases.size(); ++v) add_slot(pname + "__pvb" + to_string(v), "ptr"); ++param_index;
 } else { slots_[binding] = pname;
+if (!source_name.empty() && pname.compare(0, 7, "__param") == 0) { bool duplicate_later = false; size_t later_index = 0; for (size_t j = 0; j < fn_.children.size(); ++j) { if (!starts_with(fn_.children[j].line, "parameter ")) continue; string later_name = fn_.children[j].line.substr(10); size_t later_space = later_name.find(' '); later_name = later_space == string::npos ? later_name : later_name.substr(0, later_space); if (later_index > param_index && later_name == source_name) duplicate_later = true; ++later_index; } if (duplicate_later) slots_[binding] = source_name; }
 if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(binding->type)); for (size_t v = 0; v < param_vbases.size(); ++v) add_slot(pname + "__pvb" + to_string(v), "ptr"); if (pa11::strip_cv(ptype)->kind == TypeKind::Record &&
 record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_index; }
 } } void FunctionLowerer::lower_param_stores()
@@ -459,9 +507,11 @@ record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_i
 		string pname = fn_.children[i].line.substr(10);
 		size_t space = pname.find(' ');
 		pname = space == string::npos ? pname : pname.substr(0, space);
-		if (pname.empty())
-			pname = "__param" + to_string(param_index);
-		TypePtr ptype = fn_type->parameters[param_index];
+			if (pname.empty())
+				pname = "__param" + to_string(param_index);
+			if (param_index < out_.parameter_names.size())
+				pname = out_.parameter_names[param_index];
+			TypePtr ptype = fn_type->parameters[param_index];
 		bool member_this_param =
 			fn_.binding->owner != NULL &&
 			fn_.binding->owner->kind == ScopeKind::Class &&
@@ -597,7 +647,7 @@ for (size_t i = 0; i < last; ++i) if (node_contains_return_statement(node.childr
 for (size_t i = 0; i < node.children.size(); ++i) { if (top_function_body && is_class_constructor_binding(fn_.binding) && !constructor_vptr_written &&
 !starts_with(node.children[i].line, "base-init-action")) { TypePtr record = class_record_for_member(fn_.binding); if (record.get() != NULL)
 lower_vptr_store(record); constructor_vptr_written = true; } if (starts_with(node.children[i].line, "base-fini-action") ||
-starts_with(node.children[i].line, "member-fini-action")) destructor_has_fini_actions = true; bool returns_declared_variable = false; if (starts_with(node.children[i].line, "simple-declaration") &&
+starts_with(node.children[i].line, "member-fini-action")) destructor_has_fini_actions = true; if (top_function_body && destructor_base_entry_ && starts_with(node.children[i].line, "base-fini-action")) { TypePtr record = class_record_for_member(fn_.binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr base = node.children[i].type.get() != NULL ? pa11::strip_cv(node.children[i].type) : TypePtr(); if (bare.get() != NULL && base.get() != NULL && target_is_virtual_base_subobject(bare, base)) continue; } bool returns_declared_variable = false; if (starts_with(node.children[i].line, "simple-declaration") &&
 i + 1 < node.children.size() && starts_with(node.children[i + 1].line, "return-statement") && node.children[i].children.size() == 1 && starts_with(node.children[i].children[0].line, "variable ") &&
 node.children[i].children[0].binding != NULL && !node.children[i + 1].children.empty()) { const Node& ret_expr = node.children[i + 1].children[0];
 Binding* binding = node.children[i].children[0].binding; string suffix = " " + binding->name; returns_declared_variable = ret_expr.binding == binding ||
@@ -612,7 +662,7 @@ if (!child_terminated) { instr("eh_end"); terminate("jump ^" + end); } start_blo
 } else lower_stmt(node.children[i]);
 if (constructor_init_compound && current_ != NULL && !current_->terminated && constructor_init_action_needs_cleanup(node.children[i]))
 constructor_unwind_actions_.push_back(&node.children[i]); } if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions);
-if (top_function_body && is_class_destructor_binding(fn_.binding) && destructor_has_fini_actions)
+if (top_function_body && is_class_destructor_binding(fn_.binding) && destructor_has_fini_actions && !destructor_base_entry_)
 { TypePtr record = class_record_for_member(fn_.binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 if (bare.get() != NULL && bare->kind == TypeKind::Record) { vector<TypePtr> vbases = hidden_virtual_bases_for_record(bare);
 for (size_t n = 0; n < vbases.size(); ++n) { size_t i = vbases.size() - 1 - n; TypePtr vbase = vbases[i].get() != NULL ? pa11::strip_cv(vbases[i]) : TypePtr();
@@ -637,10 +687,10 @@ lower_while(node); else if (starts_with(node.line, "do-statement")) lower_do(nod
 lower_for(node); else if (starts_with(node.line, "range-for-statement")) lower_range_for(node); else if (starts_with(node.line, "try-statement"))
 lower_try(node); else if (starts_with(node.line, "break-statement")) { if (break_targets_.empty())
 throw runtime_error("break outside loop or switch"); terminate("jump ^" + break_targets_.back()); } else if (starts_with(node.line, "continue-statement"))
-{ if (continue_targets_.empty()) throw runtime_error("continue outside loop"); terminate("jump ^" + continue_targets_.back());
-} else if (starts_with(node.line, "goto-statement ")) { string label = node.line.substr(15);
-string block = labels_[label]; if (block.empty()) block = labels_[label] = fresh_block("goto"); terminate("jump ^" + block);
-} else if (starts_with(node.line, "switch-statement")) lower_switch(node); else if (starts_with(node.line, "case-statement"))
+	{ if (continue_targets_.empty()) throw runtime_error("continue outside loop"); terminate("jump ^" + continue_targets_.back());
+	} else if (starts_with(node.line, "goto-statement ")) { string label = node.line.substr(15);
+	emit_goto_cleanups(label); string block = labels_[label]; if (block.empty()) block = labels_[label] = fresh_block("goto"); terminate("jump ^" + block);
+	} else if (starts_with(node.line, "switch-statement")) lower_switch(node); else if (starts_with(node.line, "case-statement"))
 { map<const Node*, string>::const_iterator found = switch_labels_.find(&node); if (found == switch_labels_.end()) throw runtime_error("case outside switch");
 if (!current_->terminated) terminate("jump ^" + found->second); start_block(found->second); if (node.children.size() > 1)
 lower_stmt(node.children[1]); } else if (starts_with(node.line, "default-statement")) {
@@ -987,7 +1037,8 @@ terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.p
 		catches[i].next = fresh_block("catch_next");
 		catches[i].cleanup = fresh_block("catch_cleanup");
 	}
-	active_catches_.push_back(catches.front().ctx);
+	for (size_t i = 0; i < catches.size(); ++i)
+		active_catches_.push_back(catches[i].ctx);
 	instr("eh_try ^" + dispatch);
 	++eh_try_depth_;
 	cleanups_.push_back(vector<Cleanup>());
@@ -995,7 +1046,8 @@ terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.p
 	lower_stmt(protected_body);
 	cleanups_.pop_back();
 	--eh_try_depth_;
-	active_catches_.pop_back();
+	for (size_t i = 0; i < catches.size(); ++i)
+		active_catches_.pop_back();
 	if (!current_->terminated) {
 		bool ended_with_throw = false;
 		for (size_t n = 0; n < current_->instrs.size(); ++n) {

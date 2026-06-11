@@ -1,9 +1,21 @@
 #include "pa12_internal.h"
 #include <stdexcept>
 using namespace std; namespace pa12 { namespace internal { static void mark_empty_destructor(Binding* function, const Node& fn);
+static bool same_return_template_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right);
+static bool same_return_template_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{ size_t common = min(left.size(), right.size()); for (size_t i = 0; i < common; ++i) if (!same_return_template_argument(left[i], right[i])) return false; return common == left.size() || common == right.size(); }
+static bool same_return_record_type(TypePtr left, TypePtr right);
+static bool same_return_template_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{ if (left.kind != right.kind) return false; if (left.kind == pa11::TemplateInstanceArgumentKind::Type) return same_return_record_type(left.type, right.type); if (left.kind == pa11::TemplateInstanceArgumentKind::Value) return left.dependent == right.dependent && left.value_negated == right.value_negated && left.value == right.value && left.value_name == right.value_name && same_return_record_type(left.type, right.type); if (left.kind == pa11::TemplateInstanceArgumentKind::Template) return left.template_name == right.template_name && left.dependent == right.dependent; return same_return_template_arguments(left.pack, right.pack); }
 static bool same_return_record_type(TypePtr left, TypePtr right) { TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right);
 if (pa11::same_type(l, r)) return true; return l->kind == pa11::TypeKind::Record && r->kind == pa11::TypeKind::Record &&
-l->is_template_specialization && r->is_template_specialization && l->name == r->name; }
+l->is_template_specialization && r->is_template_specialization && !l->template_primary_name.empty() && l->template_primary_name == r->template_primary_name && same_return_template_arguments(l->template_arguments, r->template_arguments); }
 static Expr expr_from_node(const Node& node) { Expr out; out.valid = true;
 out.node = node; out.type = node.type; out.category = node.category; out.binding = node.binding;
 out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_template_arguments;
@@ -36,8 +48,16 @@ subst.kind == TemplateArgumentKind::Pack && subst.pack.empty()) { parameter_pack
 continue; } } TypePtr parameter_type = parameters[i].type.get() != NULL
 ? substitute_template_type(parameters[i].type) : TypePtr(); if (parameter_type.get() == NULL) { if (!parameters[i].pack_expression_name.empty())
 parameter_packs[parameters[i].pack_expression_name]; continue; } string name = parameters[i].name;
-string node_name = name; size_t saved_name_index = saved_name_offset + i; bool force_saved_name = override_function_parameter_name_bindings_.count(function) != 0;
-if ((force_saved_name || node_name.empty()) && saved_names != function_parameter_names_.end() && saved_name_index < saved_names->second.size() && !saved_names->second[saved_name_index].empty() &&
+string node_name = name; size_t saved_name_index = saved_name_offset + i; bool force_saved_name = override_function_parameter_name_bindings_.count(function) != 0; bool saved_name_reused_later = false; bool later_parameter_has_name = false;
+for (size_t j = i + 1; j < parameters.size(); ++j)
+	if (!parameters[j].name.empty())
+		later_parameter_has_name = true;
+if (saved_names != function_parameter_names_.end() && saved_name_index < saved_names->second.size())
+	for (size_t j = saved_name_index + 1; j < saved_names->second.size(); ++j)
+		if (!saved_names->second[saved_name_index].empty() &&
+		    saved_names->second[saved_name_index] == saved_names->second[j])
+			saved_name_reused_later = true;
+if ((force_saved_name || (node_name.empty() && !saved_name_reused_later && !later_parameter_has_name)) && saved_names != function_parameter_names_.end() && saved_name_index < saved_names->second.size() && !saved_names->second[saved_name_index].empty() &&
 !(function->is_static_member && saved_name_index == 0 && saved_names->second[saved_name_index] == "this")) node_name = saved_names->second[saved_name_index];
 string binding_name = !name.empty() ? name : node_name; if (!binding_name.empty()) { Binding* param =
 pa11::add_binding(function_scope, BindingKind::Parameter, binding_name, parameter_type);
@@ -89,13 +109,16 @@ vector<map<string, TemplateArgument> > saved_value_substitutions = template_valu
 pos_ = pending.body_pos; scopes_ = pending.scopes; active_friend_class_scopes_ = pending.friend_class_scopes; template_type_substitutions_ = pending.type_substitutions;
 template_value_substitutions_ = pending.value_substitutions; template_type_parameter_packs_ = pending.pack_substitutions; push_pending_owner_template_substitutions(pending); push_pending_function_template_substitutions(pending);
 Node wrapper; add_child(wrapper, pending.node); if (pending.function != NULL && pending.node.line.compare(0, 19, "function-definition") == 0)
-pending.function->is_inline_definition = true; try { if (pending.constructor_body)
+pending.function->is_inline_definition = true; if (pending.function != NULL)
+active_function_body_replays_.insert(pending.function); try { if (pending.constructor_body)
 parse_constructor_body_from_parameters(pending.function, pending.class_type, pending.parameters, wrapper);
 else parse_function_body_from_parameters(pending.function, pending.parameters, wrapper);
-} catch (...) { template_value_substitutions_ = saved_value_substitutions;
+} catch (...) { if (pending.function != NULL)
+active_function_body_replays_.erase(pending.function); template_value_substitutions_ = saved_value_substitutions;
 template_type_substitutions_ = saved_type_substitutions; template_type_parameter_packs_ = saved_pack_substitutions; active_friend_class_scopes_ = saved_friend_class_scopes; scopes_ = saved_scopes;
 pos_ = saved_pos; throw; } if (!wrapper.children.empty())
-mark_empty_destructor(pending.function, wrapper.children.back()); if (!wrapper.children.empty()) extra_lowir_nodes_.push_back(wrapper.children.back()); template_value_substitutions_ = saved_value_substitutions;
+mark_empty_destructor(pending.function, wrapper.children.back()); if (pending.function != NULL)
+active_function_body_replays_.erase(pending.function); if (!wrapper.children.empty()) extra_lowir_nodes_.push_back(wrapper.children.back()); template_value_substitutions_ = saved_value_substitutions;
 template_type_substitutions_ = saved_type_substitutions; template_type_parameter_packs_ = saved_pack_substitutions; active_friend_class_scopes_ = saved_friend_class_scopes; scopes_ = saved_scopes;
 pos_ = saved_pos; } bool Parser::parse_pending_function_body(Binding* function) {
 if (function == NULL) return false; if (function_template_candidate_instantiation_depth_ != 0) return false;
@@ -292,7 +315,7 @@ child.binding = child.node.binding; child.braced_init_list = child.node.line.com
 return child; } return expr; }
 if (expr.braced_init_list && (expr_record.get() == NULL || same_return_record_type(result_record, expr_record))) return convert_aggregate_return_expression(expr,
 result, result_record); if (expr_record.get() == NULL || expr_record->kind != pa11::TypeKind::Record ||
-!same_return_record_type(result_record, expr_record)) return convert_record_constructor_return_expression(expr, result); validate_same_record_return_expression(expr, result); if (expr.binding != NULL &&
+!same_return_record_type(result_record, expr_record)) return convert_record_constructor_return_expression(expr, result); if (!pa11::same_type(result_record, expr_record)) return expr; validate_same_record_return_expression(expr, result); if (expr.binding != NULL &&
 expr.binding->kind == BindingKind::Variable && expr.binding->owner != NULL && expr.binding->owner->kind != ScopeKind::Namespace && expr.binding->owner->kind != ScopeKind::Class &&
 copy_move_constructor_available(result, true)) { expr.category = ValueCategory::XValue; expr.type = pa11::make_rvalue_reference(result);
 expr.node = Node("id-expression xvalue " + pa11::describe_type(expr.type) + " " + expr.binding->name); expr.node.binding = expr.binding;

@@ -558,6 +558,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 	validating_template_definition_ = true;
 
 	Node node;
+	++suppress_qualifier_template_member_instantiation_depth_;
 	try
 	{
 		parse_simple_or_function_declaration(node, true);
@@ -565,6 +566,7 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 	catch (const runtime_error& err)
 	{
 		string message = err.what();
+		--suppress_qualifier_template_member_instantiation_depth_;
 		saved.restore(*this, declaration);
 		if (message == "missing template disambiguator")
 			throw;
@@ -573,9 +575,11 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 	}
 	catch (const exception&)
 	{
+		--suppress_qualifier_template_member_instantiation_depth_;
 		saved.restore(*this, declaration);
 		throw;
 	}
+	--suppress_qualifier_template_member_instantiation_depth_;
 	saved.restore(*this, declaration);
 	declaration->function_definition_validated = true;
 }

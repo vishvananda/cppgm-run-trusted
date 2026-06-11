@@ -1,0 +1,15 @@
+#include <exception>
+
+namespace std {
+
+class runtime_error : public exception {
+  const char* message_;
+
+public:
+  explicit runtime_error(const char* message) : message_(message) {}
+  runtime_error(const runtime_error& other) : exception(other), message_(other.message_) {}
+  virtual ~runtime_error() {}
+  virtual const char* what() const { return message_; }
+};
+
+}

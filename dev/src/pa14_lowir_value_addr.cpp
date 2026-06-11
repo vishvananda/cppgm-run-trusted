@@ -581,9 +581,8 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 
 Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 {
-	Binding* member =
-		expr.binding->aliased_binding != NULL &&
-		expr.binding->target_scope != NULL
+	Binding* alias_member = anonymous_storage_member_target(expr.binding);
+	Binding* member = alias_member != NULL
 		? expr.binding->aliased_binding : expr.binding;
 	if (member->is_static_member)
 	{
@@ -689,6 +688,12 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 		base = Value("ptr", projected);
 	}
 	string tmp = fresh_temp();
+	uint64_t member_offset = member->member_offset;
+	if (alias_member != NULL)
+	{
+		member_offset += alias_member->member_offset;
+		member = alias_member;
+	}
 	TypePtr member_bare = pa11::strip_cv(member->type);
 	TypePtr expr_bare = pa11::strip_cv(expr.type);
 	bool reference_member =
@@ -700,7 +705,7 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	string projection = reference_member
 		? "reference_field" : "field";
 	instr(tmp + " = index i8 [projection=" + projection + "] " + base.text +
-	      ", " + to_string(member->member_offset));
+	      ", " + to_string(member_offset));
 	if (reference_member)
 	{
 		string ref = fresh_temp();

@@ -127,6 +127,7 @@ TypePtr member_function_pointer_type(Binding* binding)
 	    pa11::strip_cv(this_type)->kind == pa11::TypeKind::Pointer)
 		member_fn->cv = pa11::strip_cv(this_type)->base->kind ==
 			pa11::TypeKind::Cv ? this_type->base->cv : pa11::CV_NONE;
+	member_fn->ref_qualifier = binding->ref_qualifier;
 	return pa11::make_member_pointer(class_type, member_fn);
 }
 
@@ -360,6 +361,7 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 
 	Binding* found = NULL;
 	vector<Binding*> considered;
+	TypePtr wanted_member_pointer = target_member_function_pointer ? pa11::strip_cv(target_object) : TypePtr();
 	for (size_t i = 0; i < expr.overloads.size(); ++i)
 	{
 		TypePtr candidate_wanted = target_member_function_pointer
@@ -403,7 +405,8 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 			? member_function_pointer_type(candidate) : TypePtr();
 		bool matches = target_member_function_pointer
 			? (candidate_member_pointer.get() != NULL &&
-			   pa11::same_type(candidate_member_pointer, target_object))
+			   pa11::same_type(candidate_member_pointer,
+			                   wanted_member_pointer))
 			: pa11::same_type(candidate->type, wanted);
 		if (matches)
 		{

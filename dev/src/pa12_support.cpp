@@ -320,11 +320,13 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  override_function_parameter_names_(false),
 	  replaying_dependent_decltype_(false),
 	  parsing_default_template_argument_(false),
+	  single_linkage_specification_declaration_(false),
 		  defer_class_template_completion_depth_(0),
-		  function_template_candidate_instantiation_depth_(0),
-		  template_argument_expression_depth_(0),
-		  unevaluated_expression_depth_(0),
-		  short_circuit_static_member_demand_depth_(0)
+	  function_template_candidate_instantiation_depth_(0),
+	  template_argument_expression_depth_(0),
+	  unevaluated_expression_depth_(0),
+	  suppress_qualifier_template_member_instantiation_depth_(0),
+	  short_circuit_static_member_demand_depth_(0)
 		{
 		pa10::Options pa10_options;
 		pa10_options.preprocess = options.preprocess;

@@ -1,4 +1,5 @@
-#include "pa12_templates_function_support.h"
+#include "pa12_templates_function_abi_internal.h"
+#include "pa12_templates_instance_support.h"
 
 #include <algorithm>
 #include <functional>
@@ -19,13 +20,103 @@ string abi_source_name(const string& name)
 		return "ix";
 	if (unqualified == "operator=")
 		return "aS";
+	if (unqualified == "operator+")
+		return "pl";
+	if (unqualified == "operator-")
+		return "mi";
+	if (unqualified == "operator*")
+		return "ml";
+	if (unqualified == "operator/")
+		return "dv";
+	if (unqualified == "operator%")
+		return "rm";
+	if (unqualified == "operator&")
+		return "ad";
 	if (unqualified == "operator&=")
 		return "aN";
+	if (unqualified == "operator|")
+		return "or";
+	if (unqualified == "operator^")
+		return "eo";
+	if (unqualified == "operator<<")
+		return "ls";
+	if (unqualified == "operator>>")
+		return "rs";
+	if (unqualified == "operator==")
+		return "eq";
+	if (unqualified == "operator!=")
+		return "ne";
+	if (unqualified == "operator<")
+		return "lt";
+	if (unqualified == "operator>")
+		return "gt";
+	if (unqualified == "operator<=")
+		return "le";
+	if (unqualified == "operator>=")
+		return "ge";
 	if (unqualified == "operator()")
 		return "cl";
 	if (unqualified == "operator," || unqualified == "operator ,")
 		return "cm";
-	return to_string(unqualified.size()) + unqualified;
+	string safe;
+	static const char hex[] = "0123456789ABCDEF";
+	for (size_t i = 0; i < unqualified.size(); ++i)
+	{
+		unsigned char c =
+			static_cast<unsigned char>(unqualified[i]);
+		if ((c >= 'A' && c <= 'Z') ||
+		    (c >= 'a' && c <= 'z') ||
+		    (c >= '0' && c <= '9') ||
+		    c == '_')
+			safe += static_cast<char>(c);
+		else
+		{
+			safe += '_';
+			safe += hex[(c >> 4) & 0xf];
+			safe += hex[c & 0xf];
+		}
+	}
+	if (safe.empty())
+		safe = "v";
+	return to_string(safe.size()) + safe;
+}
+
+string abi_binding_source_name(const Binding* binding)
+{
+	if (binding == NULL)
+		return abi_source_name("v");
+	string name = binding->name;
+	if (name == "operator+" || name == "operator-" ||
+	    name == "operator*" || name == "operator&")
+	{
+		size_t first_param =
+			binding->owner != NULL &&
+			binding->owner->kind == ScopeKind::Class &&
+			!binding->is_static_member ? 1 : 0;
+		size_t arity =
+			binding->type.get() != NULL &&
+			binding->type->kind == pa11::TypeKind::Function &&
+			binding->type->parameters.size() >= first_param
+			? binding->type->parameters.size() - first_param : 0;
+		if (arity <= 1)
+		{
+			if (name == "operator+")
+				return "ps";
+			if (name == "operator-")
+				return "ng";
+			if (name == "operator*")
+				return "de";
+			if (name == "operator&")
+				return "ad";
+		}
+		if (name == "operator&")
+			return "an";
+	}
+	if (name == "operator++")
+		return "pp";
+	if (name == "operator--")
+		return "mm";
+	return abi_source_name(name);
 }
 
 string abi_fundamental_type(EFundamentalType type)
@@ -60,6 +151,14 @@ string abi_record_type(TypePtr type,
                        const map<string, size_t>& template_parameters,
                        const vector<Token>* expression_tokens = NULL,
                        bool include_namespace = true);
+string abi_binding_symbol_with_substitutions(
+	const Binding* binding,
+	const map<string, size_t>& template_parameters);
+string abi_function_template_specialization_symbol_with_substitutions(
+	TemplateDeclaration* declaration,
+	const vector<TemplateArgument>& full_args,
+	Binding* binding,
+	const vector<Token>* expression_tokens);
 
 string abi_encode_name_path(const vector<string>& scopes,
                             const string& name)
@@ -84,9 +183,12 @@ string abi_encode_binding_name(
 	     scope = scope->parent)
 	{
 		if (scope->kind == ScopeKind::Namespace &&
-		    !scope->name.empty() &&
-		    scope->name != "<unnamed>")
-			reversed.push_back(abi_source_name(scope->name));
+		    !scope->name.empty())
+		{
+			string name = scope->name == "<unnamed>"
+				? string("_GLOBAL__N_1") : scope->name;
+			reversed.push_back(abi_source_name(name));
+		}
 		else if (scope->kind == ScopeKind::Class &&
 		         !scope->name.empty() &&
 		         scope->name != "<unnamed>")
@@ -107,6 +209,29 @@ string abi_encode_binding_name(
 	if (reversed.empty())
 		return leaf;
 	string out = "N";
+	if (binding != NULL &&
+	    binding->kind == BindingKind::Function &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    !binding->is_static_member &&
+	    binding->type.get() != NULL &&
+	    binding->type->kind == pa11::TypeKind::Function)
+	{
+		bool const_member = (binding->type->cv & pa11::CV_CONST) != 0;
+		bool volatile_member = (binding->type->cv & pa11::CV_VOLATILE) != 0;
+		if (!binding->type->parameters.empty() &&
+		    pa11::strip_cv(binding->type->parameters[0])->kind ==
+			    pa11::TypeKind::Pointer)
+		{
+			TypePtr self =
+				pa11::strip_cv(binding->type->parameters[0])->base;
+			const_member = const_member || pa11::type_has_const(self);
+		}
+		if (const_member)
+			out += "K";
+		if (volatile_member)
+			out += "V";
+	}
 	for (size_t i = reversed.size(); i > 0; --i)
 		out += reversed[i - 1];
 	out += leaf;
@@ -117,92 +242,8 @@ string abi_encode_binding_name(
 string abi_binding_symbol(const Binding* binding,
                           const map<string, size_t>& template_parameters)
 {
-	if (binding == NULL)
-		return "_Z0v";
-	if (binding->aliased_binding != NULL)
-		binding = binding->aliased_binding;
-	if (binding->kind == BindingKind::Function &&
-	    !binding->function_specialization_symbol.empty())
-		return binding->function_specialization_symbol;
-	if (binding->kind == BindingKind::Function &&
-	    binding->owner != NULL &&
-	    binding->owner->kind == ScopeKind::Class &&
-	    binding->type.get() != NULL &&
-	    binding->type->kind == pa11::TypeKind::Function)
-	{
-		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
-		owner_record = owner_record.get() != NULL
-			? pa11::strip_cv(owner_record) : TypePtr();
-		bool constructor =
-			binding->name == binding->owner->name ||
-			(owner_record.get() != NULL &&
-			 owner_record->is_template_specialization &&
-			 !owner_record->template_primary_name.empty() &&
-			 binding->name == owner_record->template_primary_name);
-		bool destructor =
-			!binding->name.empty() && binding->name[0] == '~';
-		if (owner_record.get() != NULL &&
-		    (constructor || destructor))
-		{
-			string encoded_name = "N" +
-				abi_record_type(owner_record,
-				                template_parameters,
-				                NULL,
-				                false) +
-				(constructor ? "C1" : "D1") + "E";
-			string bare;
-			for (size_t i = 1; i < binding->type->parameters.size(); ++i)
-				bare += abi_type(binding->type->parameters[i],
-				                 template_parameters);
-			if (binding->type->parameters.size() == 1)
-				bare += "v";
-			return "_Z" + encoded_name + bare;
-		}
-	}
-	string encoded_name =
-		abi_encode_binding_name(binding, template_parameters);
-	if (binding->kind != BindingKind::Function ||
-	    binding->type.get() == NULL ||
-	    binding->type->kind != pa11::TypeKind::Function)
-		return "_Z" + encoded_name;
-	if (binding->name.compare(0, 9, "operator ") == 0)
-	{
-		if (binding->owner != NULL &&
-		    binding->owner->kind == ScopeKind::Class)
-		{
-			TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
-			encoded_name = "N";
-			if (!binding->type->parameters.empty() &&
-			    pa11::strip_cv(binding->type->parameters[0])->kind ==
-				    pa11::TypeKind::Pointer &&
-			    pa11::type_has_const(
-				    pa11::strip_cv(binding->type->parameters[0])->base))
-				encoded_name += "K";
-			encoded_name += abi_record_type(owner_record,
-			                                template_parameters,
-			                                NULL,
-			                                false);
-			encoded_name += "cv" + abi_type(binding->type->base,
-			                                template_parameters,
-			                                NULL);
-			encoded_name += "E";
-		}
-		else
-			encoded_name = "cv" + abi_type(binding->type->base,
-			                               template_parameters,
-			                               NULL);
-	}
-	string bare;
-	size_t first_param =
-		binding->owner != NULL &&
-		binding->owner->kind == ScopeKind::Class &&
-		!binding->is_static_member ? 1 : 0;
-	for (size_t i = first_param; i < binding->type->parameters.size(); ++i)
-		bare += abi_type(binding->type->parameters[i],
-		                 template_parameters);
-	if (binding->type->parameters.size() == first_param)
-		bare += "v";
-	return "_Z" + encoded_name + bare;
+	return abi_binding_symbol_with_substitutions(binding,
+	                                             template_parameters);
 }
 
 string abi_encoded_stable_value_name(const string& name)
@@ -410,19 +451,88 @@ string abi_binary_operator_code(ETokenType type)
 	}
 }
 
-struct AbiTokenType
-{
-	string encoded;
-	bool dependent;
-	bool concrete;
-	TypePtr concrete_type;
-
-	AbiTokenType() : dependent(false), concrete(false) {}
-};
 
 bool abi_type_keyword(const Token& token, ETokenType type)
 {
 	return token.kind == posttoken::TokenKind::Simple && token.type == type;
+}
+
+AbiTokenType abi_encode_fundamental_type_tokens(const vector<Token>& tokens,
+                                                size_t begin,
+                                                size_t end)
+{
+	AbiTokenType out;
+	bool saw_signed = false;
+	bool saw_unsigned = false;
+	bool saw_short = false;
+	size_t longs = 0;
+	bool saw_char = false;
+	bool saw_bool = false;
+	bool saw_void = false;
+	bool saw_float = false;
+	bool saw_double = false;
+	for (size_t i = begin; i < end; ++i)
+	{
+		if (tokens[i].kind != posttoken::TokenKind::Simple)
+			return out;
+		if (abi_type_keyword(tokens[i], KW_SIGNED))
+			saw_signed = true;
+		else if (abi_type_keyword(tokens[i], KW_UNSIGNED))
+			saw_unsigned = true;
+		else if (abi_type_keyword(tokens[i], KW_SHORT))
+			saw_short = true;
+		else if (abi_type_keyword(tokens[i], KW_LONG))
+			++longs;
+		else if (abi_type_keyword(tokens[i], KW_INT))
+			continue;
+		else if (abi_type_keyword(tokens[i], KW_CHAR))
+			saw_char = true;
+		else if (abi_type_keyword(tokens[i], KW_BOOL))
+			saw_bool = true;
+		else if (abi_type_keyword(tokens[i], KW_VOID))
+			saw_void = true;
+		else if (abi_type_keyword(tokens[i], KW_FLOAT))
+			saw_float = true;
+		else if (abi_type_keyword(tokens[i], KW_DOUBLE))
+			saw_double = true;
+		else
+			return out;
+	}
+	EFundamentalType type = FT_INT;
+	if (saw_void)
+		type = FT_VOID;
+	else if (saw_bool)
+		type = FT_BOOL;
+	else if (saw_float)
+		type = FT_FLOAT;
+	else if (saw_double && longs != 0)
+		type = FT_LONG_DOUBLE;
+	else if (saw_double)
+		type = FT_DOUBLE;
+	else if (saw_char && saw_unsigned)
+		type = FT_UNSIGNED_CHAR;
+	else if (saw_char && saw_signed)
+		type = FT_SIGNED_CHAR;
+	else if (saw_char)
+		type = FT_CHAR;
+	else if (saw_short && saw_unsigned)
+		type = FT_UNSIGNED_SHORT_INT;
+	else if (saw_short)
+		type = FT_SHORT_INT;
+	else if (longs >= 2 && saw_unsigned)
+		type = FT_UNSIGNED_LONG_LONG_INT;
+	else if (longs >= 2)
+		type = FT_LONG_LONG_INT;
+	else if (longs == 1 && saw_unsigned)
+		type = FT_UNSIGNED_LONG_INT;
+	else if (longs == 1)
+		type = FT_LONG_INT;
+	else if (saw_unsigned)
+		type = FT_UNSIGNED_INT;
+	out.encoded = abi_fundamental_type(type);
+	out.concrete = true;
+	out.concrete_type = pa11::make_fundamental(type);
+	return out;
 }
 
 AbiTokenType abi_encode_type_tokens(const vector<Token>& tokens,
@@ -511,87 +621,7 @@ AbiTokenType abi_encode_type_tokens(const vector<Token>& tokens,
 		}
 	}
 	else
-	{
-		bool saw_signed = false;
-		bool saw_unsigned = false;
-		bool saw_short = false;
-		size_t longs = 0;
-		bool saw_char = false;
-		bool saw_bool = false;
-		bool saw_void = false;
-		bool saw_float = false;
-		bool saw_double = false;
-		bool valid = true;
-		for (size_t i = begin; i < end; ++i)
-		{
-			if (tokens[i].kind != posttoken::TokenKind::Simple)
-			{
-				valid = false;
-				break;
-			}
-			if (abi_type_keyword(tokens[i], KW_SIGNED))
-				saw_signed = true;
-			else if (abi_type_keyword(tokens[i], KW_UNSIGNED))
-				saw_unsigned = true;
-			else if (abi_type_keyword(tokens[i], KW_SHORT))
-				saw_short = true;
-			else if (abi_type_keyword(tokens[i], KW_LONG))
-				++longs;
-			else if (abi_type_keyword(tokens[i], KW_INT))
-				continue;
-			else if (abi_type_keyword(tokens[i], KW_CHAR))
-				saw_char = true;
-			else if (abi_type_keyword(tokens[i], KW_BOOL))
-				saw_bool = true;
-			else if (abi_type_keyword(tokens[i], KW_VOID))
-				saw_void = true;
-			else if (abi_type_keyword(tokens[i], KW_FLOAT))
-				saw_float = true;
-			else if (abi_type_keyword(tokens[i], KW_DOUBLE))
-				saw_double = true;
-			else
-			{
-				valid = false;
-				break;
-			}
-		}
-		if (!valid)
-			return out;
-		EFundamentalType type = FT_INT;
-		if (saw_void)
-			type = FT_VOID;
-		else if (saw_bool)
-			type = FT_BOOL;
-		else if (saw_float)
-			type = FT_FLOAT;
-		else if (saw_double && longs != 0)
-			type = FT_LONG_DOUBLE;
-		else if (saw_double)
-			type = FT_DOUBLE;
-		else if (saw_char && saw_unsigned)
-			type = FT_UNSIGNED_CHAR;
-		else if (saw_char && saw_signed)
-			type = FT_SIGNED_CHAR;
-		else if (saw_char)
-			type = FT_CHAR;
-		else if (saw_short && saw_unsigned)
-			type = FT_UNSIGNED_SHORT_INT;
-		else if (saw_short)
-			type = FT_SHORT_INT;
-		else if (longs >= 2 && saw_unsigned)
-			type = FT_UNSIGNED_LONG_LONG_INT;
-		else if (longs >= 2)
-			type = FT_LONG_LONG_INT;
-		else if (longs == 1 && saw_unsigned)
-			type = FT_UNSIGNED_LONG_INT;
-		else if (longs == 1)
-			type = FT_LONG_INT;
-		else if (saw_unsigned)
-			type = FT_UNSIGNED_INT;
-		out.encoded = abi_fundamental_type(type);
-		out.concrete = true;
-		out.concrete_type = pa11::make_fundamental(type);
-	}
+		out = abi_encode_fundamental_type_tokens(tokens, begin, end);
 	if (!out.encoded.empty() && (leading_const || trailing_const))
 		out.encoded = "K" + out.encoded;
 	if (!out.encoded.empty() && (leading_volatile || trailing_volatile))
@@ -1047,9 +1077,10 @@ string abi_record_type(TypePtr type,
 		     scope = scope->parent)
 		{
 			if (scope->kind == ScopeKind::Namespace &&
-			    !scope->name.empty() &&
-			    scope->name != "<unnamed>")
-				reversed_namespaces.push_back(scope->name);
+			    !scope->name.empty())
+				reversed_namespaces.push_back(
+					scope->name == "<unnamed>"
+					? string("_GLOBAL__N_1") : scope->name);
 			else if (scope->kind == ScopeKind::Class)
 				break;
 		}
@@ -1208,172 +1239,6 @@ string abi_function_return_type(
 		                                   false);
 	return abi_type(type, template_parameters, expression_tokens);
 }
-
-string abi_function_template_specialization_symbol(
-	TemplateDeclaration* declaration,
-	const vector<TemplateArgument>& full_args,
-	Binding* binding,
-	const vector<Token>* expression_tokens)
-{
-	map<string, size_t> template_parameters;
-	for (size_t i = 0; i < declaration->parameters.size(); ++i)
-		if (!declaration->parameters[i].name.empty())
-			template_parameters[declaration->parameters[i].name] = i;
-	string encoded_name;
-	TypePtr fn_type = declaration->generic_function_type;
-	if (fn_type.get() != NULL &&
-	    fn_type->kind == pa11::TypeKind::Function &&
-	    binding != NULL &&
-	    binding->type.get() != NULL &&
-	    binding->type->kind == pa11::TypeKind::Function)
-	{
-		TypePtr generic_return = fn_type->base.get() != NULL
-			? pa11::strip_cv(fn_type->base) : TypePtr();
-		if (generic_return.get() != NULL &&
-		    generic_return->is_dependent_typename &&
-		    generic_return->dependent_typename_decltype &&
-		    binding->type->base.get() != NULL)
-		{
-			TypePtr adjusted =
-				pa11::make_function(binding->type->base,
-				                    fn_type->parameters,
-				                    fn_type->variadic);
-			adjusted->cv = fn_type->cv;
-			adjusted->ref_qualifier = fn_type->ref_qualifier;
-			fn_type = adjusted;
-		}
-	}
-	bool nested_template_name = false;
-	if (binding->owner != NULL && binding->owner->kind == ScopeKind::Class)
-	{
-		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
-		encoded_name = "N";
-		nested_template_name = true;
-		if (fn_type.get() != NULL &&
-		    fn_type->kind == pa11::TypeKind::Function &&
-		    !fn_type->parameters.empty() &&
-			    pa11::strip_cv(fn_type->parameters[0])->kind ==
-				    pa11::TypeKind::Pointer &&
-				    pa11::type_has_const(pa11::strip_cv(fn_type->parameters[0])->base))
-			encoded_name += "K";
-		encoded_name += abi_record_type(owner_record,
-		                                template_parameters,
-		                                expression_tokens,
-		                                false);
-	}
-	else
-	{
-		vector<string> reversed_namespaces;
-		for (Scope* scope = binding != NULL ? binding->owner : NULL;
-		     scope != NULL;
-		     scope = scope->parent)
-		{
-			if (scope->kind == ScopeKind::Namespace &&
-			    !scope->name.empty() &&
-			    scope->name != "<unnamed>")
-				reversed_namespaces.push_back(scope->name);
-		}
-		if (!reversed_namespaces.empty())
-		{
-			encoded_name = "N";
-			nested_template_name = true;
-			for (size_t i = reversed_namespaces.size(); i > 0; --i)
-				encoded_name +=
-					abi_source_name(reversed_namespaces[i - 1]);
-		}
-	}
-	bool constructor_template =
-		binding->owner != NULL &&
-		binding->owner->kind == ScopeKind::Class &&
-		binding->name == binding->owner->name;
-	bool conversion_operator_template =
-		declaration->name.compare(0, 9, "operator ") == 0 &&
-		fn_type.get() != NULL &&
-		fn_type->kind == pa11::TypeKind::Function;
-	if (constructor_template)
-	{
-		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
-		bool emit_template_args =
-			!template_arguments_match_owner_record(owner_record, full_args);
-		encoded_name += "C1";
-		if (emit_template_args)
-			{
-				encoded_name += "I";
-				for (size_t i = 0; i < full_args.size(); ++i)
-				{
-					if (i < declaration->parameters.size())
-						encoded_name +=
-							abi_template_argument_for_parameter(
-								declaration->parameters[i],
-								full_args[i],
-								template_parameters,
-								expression_tokens);
-					else
-						encoded_name += abi_template_argument(
-							full_args[i],
-							template_parameters,
-							expression_tokens);
-				}
-				encoded_name += "E";
-			}
-		if (binding->owner != NULL &&
-		    binding->owner->kind == ScopeKind::Class)
-			encoded_name += "E";
-		string bare;
-		TypePtr bare_fn_type =
-			declaration->constructor_template &&
-			binding->owner != NULL &&
-			binding->owner->kind == ScopeKind::Class &&
-			binding->type.get() != NULL &&
-			binding->type->kind == pa11::TypeKind::Function
-			? binding->type : fn_type;
-		size_t first_param = 1;
-		for (size_t i = first_param; i < bare_fn_type->parameters.size(); ++i)
-			bare += abi_type(bare_fn_type->parameters[i],
-			                 template_parameters,
-			                 expression_tokens);
-		if (bare_fn_type->parameters.size() == first_param)
-			bare += "v";
-		return "_Z" + encoded_name + bare;
-	}
-	if (conversion_operator_template)
-		encoded_name += "cv" + abi_type(fn_type->base,
-		                                template_parameters,
-		                                expression_tokens) + "I";
-	else
-		encoded_name += abi_source_name(declaration->name) + "I";
-	for (size_t i = 0; i < full_args.size(); ++i)
-	{
-		if (i < declaration->parameters.size())
-			encoded_name += abi_template_argument_for_parameter(
-				declaration->parameters[i],
-				full_args[i],
-				template_parameters,
-				expression_tokens);
-		else
-			encoded_name += abi_template_argument(full_args[i],
-			                                      template_parameters,
-			                                      expression_tokens);
-	}
-		encoded_name += "E";
-		if (nested_template_name)
-			encoded_name += "E";
-	string bare = abi_function_return_type(fn_type->base,
-	                                       template_parameters,
-	                                       expression_tokens);
-	size_t first_param =
-		binding->owner != NULL &&
-		binding->owner->kind == ScopeKind::Class &&
-		!binding->is_static_member ? 1 : 0;
-	for (size_t i = first_param; i < fn_type->parameters.size(); ++i)
-		bare += abi_type(fn_type->parameters[i],
-		                 template_parameters,
-		                 expression_tokens);
-	if (fn_type->parameters.size() == first_param)
-		bare += "v";
-	return "_Z" + encoded_name + bare;
-}
-
 
 }  // namespace internal
 }  // namespace pa12

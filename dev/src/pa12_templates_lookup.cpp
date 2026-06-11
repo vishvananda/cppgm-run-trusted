@@ -131,6 +131,18 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 			}
 		}
 	}
+	if (replaying_dependent_decltype_)
+	{
+		map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
+			function_templates_.find(global_scope());
+		if (sit != function_templates_.end())
+		{
+			map<string, vector<TemplateDeclaration*> >::iterator it =
+				sit->second.find(name.name);
+			if (it != sit->second.end())
+				return it->second;
+		}
+	}
 	return out;
 }
 
