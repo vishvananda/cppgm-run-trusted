@@ -14,7 +14,7 @@ for (size_t i = 0; i < node.children.size(); ++i) rewrite_bindings(node.children
 { switch (type) { case FT_VOID: return "v";
 case FT_BOOL: return "b"; case FT_CHAR: return "c"; case FT_SIGNED_CHAR: return "a"; case FT_UNSIGNED_CHAR: return "h";
 case FT_SHORT_INT: return "s"; case FT_UNSIGNED_SHORT_INT: return "t"; case FT_INT: return "i"; case FT_UNSIGNED_INT: return "j";
-case FT_LONG_INT: return "l"; case FT_UNSIGNED_LONG_INT: return "m"; case FT_LONG_LONG_INT: return "x"; case FT_UNSIGNED_LONG_LONG_INT: return "y";
+case FT_LONG_INT: return "l"; case FT_UNSIGNED_LONG_INT: return "m"; case FT_LONG_LONG_INT: return "x"; case FT_UNSIGNED_LONG_LONG_INT: return "y"; case FT_INT128: return "n"; case FT_UNSIGNED_INT128: return "o";
 case FT_FLOAT: return "f"; case FT_DOUBLE: return "d"; default: return "i"; }
 } string lambda_abi_source_name(const string& name) { return to_string(name.size()) + name;
 } string lambda_abi_type(TypePtr type) { if (type.get() == NULL)
@@ -100,6 +100,12 @@ if (binding == NULL) throw runtime_error("this outside member function"); Expr o
 out.type = binding->type; out.category = ValueCategory::LValue; out.valid = true; out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 " this"); annotate_expr_node(out); return out; }
 if (at_literal()) return parse_literal_expression(); if (consume(OP_LPAREN)) {
+if (at(OP_LBRACE)) { Node body = parse_compound_statement(); expect(OP_RPAREN); Expr out;
+out.valid = true; out.type = pa11::make_fundamental(FT_VOID); out.category = ValueCategory::PRValue;
+if (!body.children.empty() && node_starts_with(body.children.back(), "expression-statement") && !body.children.back().children.empty()) {
+const Node& result = body.children.back().children[0]; out.type = result.type; out.category = result.category; }
+out.node = Node("statement-expression " + value_category_name(out.category) + " " + pa11::describe_type(out.type));
+out.node.type = out.type; out.node.category = out.category; add_child(out.node, body); annotate_expr_node(out); return out; }
 Expr inner = parse_expression(); expect(OP_RPAREN); return inner; }
 { size_t save = pos_; TemplateArgument dependent; if (try_parse_dependent_qualified_non_type_template_argument(dependent))
 { Expr out; out.valid = true; out.type = dependent.type.get() != NULL
@@ -315,6 +321,12 @@ value = is_sizeof ? pa11::type_size(object_type) : pa11::type_align(object_type)
 throw; value = 8; } }
 return make_sizeof_expr(value); } Expr Parser::parse_c_style_cast_or_parenthesized() {
 size_t save = pos_; expect(OP_LPAREN); TypePtr target; bool parsed_type_id = false;
+if (at(OP_LBRACE)) { Node body = parse_compound_statement(); expect(OP_RPAREN); Expr out;
+out.valid = true; out.type = pa11::make_fundamental(FT_VOID); out.category = ValueCategory::PRValue;
+if (!body.children.empty() && node_starts_with(body.children.back(), "expression-statement") && !body.children.back().children.empty()) {
+const Node& result = body.children.back().children[0]; out.type = result.type; out.category = result.category; }
+out.node = Node("statement-expression " + value_category_name(out.category) + " " + pa11::describe_type(out.type));
+out.node.type = out.type; out.node.category = out.category; add_child(out.node, body); annotate_expr_node(out); return parse_postfix_suffixes(out); }
 try { target = parse_type_id(); expect(OP_RPAREN);
 parsed_type_id = true; } catch (const exception&) {
 } if (!parsed_type_id || at(OP_RPAREN) || at(OP_COMMA) ||

@@ -293,7 +293,7 @@ Type instruction_result_type(const Instruction& ins)
 		return parse_type_text("ptr");
 	if (ins.kind == InstrKind::Cmp)
 		return ins.type;
-	if (ins.kind == InstrKind::Exception)
+	if (ins.kind == InstrKind::Exception || ins.kind == InstrKind::ExceptionSelector)
 		return ins.type;
 	if (ins.kind == InstrKind::Call || ins.kind == InstrKind::Convert ||
 	    ins.kind == InstrKind::Const || ins.kind == InstrKind::Copy ||
@@ -376,7 +376,7 @@ void validate_instruction(Function& fn,
 	if (ins.kind == InstrKind::Addr)
 		validate_addressable(fn, program, ins.a);
 	else if (ins.kind == InstrKind::Jump || ins.kind == InstrKind::EhTry ||
-	         ins.kind == InstrKind::EhCleanup)
+	         (ins.kind == InstrKind::EhCleanup && !ins.target.empty()))
 		require_block(blocks, ins.target);
 	else
 		validate_instruction_operands(fn, program, ins, blocks);
@@ -410,6 +410,7 @@ void validate_instruction_operands(Function& fn,
 	case InstrKind::AtomicLoad:
 	case InstrKind::Unary:
 	case InstrKind::Exception:
+	case InstrKind::ExceptionSelector:
 	case InstrKind::Throw:
 	case InstrKind::Return:
 		validate_symbol_value(fn, program, ins.a);
@@ -459,8 +460,12 @@ void validate_instruction_operands(Function& fn,
 		break;
 	case InstrKind::AtomicThreadFence:
 	case InstrKind::AtomicSignalFence:
+	case InstrKind::EhCatchAll:
 	case InstrKind::EhEnd:
 	case InstrKind::Resume:
+		break;
+	case InstrKind::EhCatch:
+		validate_addressable(fn, program, ins.a);
 		break;
 	case InstrKind::Addr:
 	case InstrKind::Jump:
@@ -537,7 +542,9 @@ void validate_block(Function& fn,
 void assign_layout(Function& fn)
 {
 	size_t offset = 0;
-	if (is_obj_type(fn.ret) && !is_direct_object_abi(fn.ret) && !fn.declaration)
+	if (is_obj_type(fn.ret) &&
+	    !(allow_f80_surface && is_direct_object_abi(fn.ret)) &&
+	    !fn.declaration)
 		fn.hidden_result_offset = allocate_stack_slot(offset, parse_type_text("ptr"));
 	for (size_t i = 0; i < fn.params.size(); ++i)
 	{
@@ -675,11 +682,25 @@ bool function_uses_eh(const Function& fn)
 	{
 		for (size_t j = 0; j < fn.blocks[i].instructions.size(); ++j)
 		{
-			const InstrKind kind = fn.blocks[i].instructions[j].kind;
+			const Instruction& ins = fn.blocks[i].instructions[j];
+			const InstrKind kind = ins.kind;
 			if (kind == InstrKind::EhTry || kind == InstrKind::EhCleanup ||
+			    kind == InstrKind::EhCatch || kind == InstrKind::EhCatchAll ||
 			    kind == InstrKind::EhEnd || kind == InstrKind::Throw ||
-			    kind == InstrKind::Exception || kind == InstrKind::Resume)
+			    kind == InstrKind::Exception ||
+			    kind == InstrKind::ExceptionSelector || kind == InstrKind::Resume)
 				return true;
+			if (kind == InstrKind::Call && ins.a.kind == ValueKind::Function)
+			{
+				const string role = ins.a.text;
+				if (role == "@__external_runtime____cxa_allocate_exception" ||
+				    role == "@__external_runtime____cxa_throw" ||
+				    role == "@__external_runtime____cxa_begin_catch" ||
+				    role == "@__external_runtime____cxa_end_catch" ||
+				    role == "@__external_runtime____cxa_rethrow" ||
+				    role == "@__external_runtime___Unwind_Resume")
+					return true;
+			}
 		}
 	}
 	return false;

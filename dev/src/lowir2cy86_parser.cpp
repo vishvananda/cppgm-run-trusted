@@ -524,6 +524,10 @@ private:
 			parse_zeroinit(ins);
 		else if (kw == "eh_try" || kw == "eh_cleanup")
 			parse_eh_push(ins, kw);
+		else if (kw == "eh_catch")
+			parse_eh_catch(ins);
+		else if (kw == "eh_catch_all")
+			parse_eh_catch_all(ins);
 		else if (kw == "eh_end")
 			ins.kind = InstrKind::EhEnd;
 		else if (kw == "throw")
@@ -703,7 +707,10 @@ private:
 
 	void parse_exception_value(Instruction& ins)
 	{
-		ins.kind = InstrKind::Exception;
+		if (tokens_[pos_ - 1].text == "exception_selector")
+			ins.kind = InstrKind::ExceptionSelector;
+		else
+			ins.kind = InstrKind::Exception;
 		ins.type = parse_type();
 	}
 
@@ -752,7 +759,27 @@ private:
 	void parse_eh_push(Instruction& ins, const string& kw)
 	{
 		ins.kind = kw == "eh_try" ? InstrKind::EhTry : InstrKind::EhCleanup;
-		ins.target = parse_block_name();
+		if (!check(",") && !check("<eof>") &&
+		    !(peek().text.compare(0, 5, "!dbg(") == 0) &&
+		    !peek().text.empty() && peek().text[0] == '^')
+			ins.target = parse_block_name();
+	}
+
+	void parse_eh_catch(Instruction& ins)
+	{
+		ins.kind = InstrKind::EhCatch;
+		ins.a = named_value(ValueKind::Global, parse_symbol_name());
+		ins.order_a = 1;
+		if (match(","))
+			ins.order_a = parse_int_literal();
+	}
+
+	void parse_eh_catch_all(Instruction& ins)
+	{
+		ins.kind = InstrKind::EhCatchAll;
+		ins.order_a = 1;
+		if (match(","))
+			ins.order_a = parse_int_literal();
 	}
 
 	void parse_throw(Instruction& ins)

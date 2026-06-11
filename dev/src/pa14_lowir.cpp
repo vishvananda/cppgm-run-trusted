@@ -568,8 +568,20 @@ return true; } } if (record_has_storage_copy(record))
 instr(other + " = load ptr $" + other_name); instr("copyobj " + to_string(pa11::type_size(record)) + "x" + to_string(pa11::type_align(record)) + " " + other + ", " + self); }
 if (binding->name == "operator=") { string ret = fresh_temp(); instr(ret + " = load ptr $this");
 terminate("return ptr " + ret); } else terminate("return void");
-return true; } void FunctionLowerer::lower_compound(const Node& node) {
+return true; } bool FunctionLowerer::compound_has_constructor_init_action(const Node& node) const {
+for (size_t i = 0; i < node.children.size(); ++i) if (starts_with(node.children[i].line, "base-init-action") ||
+starts_with(node.children[i].line, "member-init-action") || starts_with(node.children[i].line, "delegating-init-action")) return true;
+return false; } bool FunctionLowerer::constructor_init_action_needs_cleanup(const Node& node) const {
+if (starts_with(node.line, "member-init-action")) return node.binding != NULL && type_needs_destructor(node.binding->type);
+if (starts_with(node.line, "base-init-action")) return node.type.get() != NULL && type_needs_destructor(node.type);
+return false; } void FunctionLowerer::emit_constructor_unwind_cleanups() {
+for (size_t n = 0; n < constructor_unwind_actions_.size(); ++n) { const Node& action = *constructor_unwind_actions_[constructor_unwind_actions_.size() - 1 - n];
+if (starts_with(action.line, "member-init-action")) { Node fini("member-fini-action"); fini.binding = action.binding; lower_member_fini(fini); }
+else if (starts_with(action.line, "base-init-action")) { Node fini("base-fini-action"); fini.type = action.type; lower_base_fini(fini); } }
+} void FunctionLowerer::lower_compound(const Node& node) {
 cleanups_.push_back(vector<Cleanup>()); bool top_function_body = cleanups_.size() == 2; bool constructor_vptr_written = false; bool destructor_has_fini_actions = false;
+bool constructor_init_compound = program_.native_lowering && is_class_constructor_binding(fn_.binding) && compound_has_constructor_init_action(node);
+size_t saved_constructor_unwind_actions = constructor_unwind_actions_.size();
 if (top_function_body && is_class_destructor_binding(fn_.binding) && fn_.binding->is_virtual) { TypePtr record = class_record_for_member(fn_.binding);
 if (record.get() != NULL) lower_vptr_store(record); } if (top_function_body && is_class_constructor_binding(fn_.binding))
 { TypePtr record = class_record_for_member(fn_.binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr direct_base =
@@ -593,7 +605,13 @@ Binding* binding = node.children[i].children[0].binding; string suffix = " " + b
 suffix) == 0); } if (pa11::strip_cv(fn_.binding->type->base)->kind == TypeKind::Record && record_return_by_address(fn_.binding->type->base) &&
 (returns_declared_variable || (starts_with(node.children[i].line, "simple-declaration") && node.children[i].children.size() == 1 && starts_with(node.children[i].children[0].line, "variable ") &&
 node.children[i].children[0].binding != NULL && !earlier_return && node.children[i].children[0].binding == final_return_binding))) return_slot_variables_.insert(node.children[i].children[0].binding);
-lower_stmt(node.children[i]); } if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions);
+bool protect_constructor_child = constructor_init_compound && !constructor_unwind_actions_.empty();
+if (protect_constructor_child) { string dispatch = fresh_block("ctor_unwind_dispatch"); string end = fresh_block("ctor_unwind_end");
+instr("eh_try ^" + dispatch); ++eh_try_depth_; lower_stmt(node.children[i]); --eh_try_depth_; bool child_terminated = current_ == NULL || current_->terminated;
+if (!child_terminated) { instr("eh_end"); terminate("jump ^" + end); } start_block(dispatch); emit_constructor_unwind_cleanups(); terminate("resume"); if (!child_terminated) start_block(end);
+} else lower_stmt(node.children[i]);
+if (constructor_init_compound && current_ != NULL && !current_->terminated && constructor_init_action_needs_cleanup(node.children[i]))
+constructor_unwind_actions_.push_back(&node.children[i]); } if (top_function_body && !destructor_has_fini_actions) maybe_lower_destructor_epilogue(destructor_has_fini_actions);
 if (top_function_body && is_class_destructor_binding(fn_.binding) && destructor_has_fini_actions)
 { TypePtr record = class_record_for_member(fn_.binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 if (bare.get() != NULL && bare->kind == TypeKind::Record) { vector<TypePtr> vbases = hidden_virtual_bases_for_record(bare);
@@ -604,6 +622,7 @@ if (direct_virtual_base) continue; Node action("base-fini-action " + vbase->name
 if (top_function_body && is_class_constructor_binding(fn_.binding) && !constructor_vptr_written)
 { TypePtr record = class_record_for_member(fn_.binding); if (record.get() != NULL) lower_vptr_store(record);
 	} if (current_ != NULL && !current_->terminated) { bool ended_with_throw = false; for (size_t n = 0; n < current_->instrs.size(); ++n) { const string& inst = current_->instrs[current_->instrs.size() - 1 - n]; if (inst.find("@__external_runtime____cxa_throw") != string::npos) { ended_with_throw = true; break; } if (inst.find("eh_end") == string::npos) break; } if (!ended_with_throw) emit_scope_cleanups(cleanups_.back()); }
+if (constructor_init_compound) constructor_unwind_actions_.resize(saved_constructor_unwind_actions);
 cleanups_.pop_back(); } void FunctionLowerer::lower_stmt(const Node& node)
 { if (starts_with(node.line, "compound-statement")) lower_compound(node); else if (starts_with(node.line, "base-init-action"))
 lower_base_init(node); else if (starts_with(node.line, "member-init-action")) lower_member_init(node); else if (starts_with(node.line, "delegating-init-action"))
@@ -670,7 +689,7 @@ return; } if (starts_with(expr.line, "binary-expression") && expr.has_op && expr
 ? "discardarr" : "discard", slot_lowir_type(object)); string addr_name = fresh_temp(); instr(addr_name + " = addr $" + slot);
 Value addr("ptr", addr_name); function<Value()> addr_for = [addr]() { return addr; };
 if (object->kind == TypeKind::Array && starts_with(expr.line, "braced-init-list")) lower_direct_array_init(addr, object, expr); else
-lower_object_init(addr_for, object, expr); return; } if (expr.category == ValueCategory::LValue &&
+lower_object_init(addr_for, object, expr); if (type_needs_destructor(object)) add_pending_temp_cleanup(addr, object); return; } if (expr.category == ValueCategory::LValue &&
 object->kind == TypeKind::Array) { ensure_pointer(emit_lvalue_addr(expr)); return;
 } emit_rvalue(expr); } void FunctionLowerer::lower_if(const Node& node)
 { string then_block = fresh_block("if_then"); string else_block = fresh_block("if_else"); string end_block = fresh_block("if_end");
@@ -738,7 +757,53 @@ instr("store " + scalar_lowir_type(loop_type) + " " + value.text + ", $" + loop_
 if (!current_->terminated) terminate("jump ^" + iter_block); start_block(iter_block); string iter_loaded = fresh_temp();
 instr(iter_loaded + " = load i32 $" + slot_for(idx_var.binding)); string incremented = fresh_temp(); instr(incremented + " = binary add i32 " + iter_loaded + ", 1"); instr("store i32 " + incremented + ", $" + slot_for(idx_var.binding));
 terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.pop_back(); start_block(end_block);
+	} void FunctionLowerer::lower_catch_binding(const Node& catch_clause,
+	                                            const string& caught) {
+	Binding* binding = catch_clause.binding;
+	TypePtr catch_type = binding != NULL ? binding->type : catch_clause.type;
+	if (catch_type.get() == NULL)
+		return;
+	if (binding != NULL && is_reference(binding->type)) {
+		string local_slot = slot_for(binding);
+		instr("store ptr " + caught + ", $" + local_slot);
+		return;
+	}
+	TypePtr object = pa11::strip_cv(object_type(catch_type));
+	if (object.get() == NULL)
+		return;
+	if (object->kind == TypeKind::Record) {
+		string local_slot = binding != NULL
+			? slot_for(binding)
+			: fresh_aux_slot("catchobj", slot_lowir_type(object));
+		Value target = ensure_pointer(Value("ptr", "$" + local_slot));
+		Binding* copy = find_copy_move_constructor(object, false);
+		if (copy != NULL) {
+			vector<string> lowered;
+			vector<pair<Value, TypePtr> > temp_cleanups;
+			vector<PendingConstructorConversion> pending_conversions;
+			lowered.push_back(target.text);
+			lowered.push_back(caught);
+			emit_constructor_call_with_cleanups(
+				copy, lowered, temp_cleanups, pending_conversions);
+		} else {
+			instr("copyobj " + to_string(pa11::type_size(object)) +
+			      "x" + to_string(pa11::type_align(object)) + " " +
+			      caught + ", " + target.text);
+		}
+		if (type_needs_destructor(object) && !cleanups_.empty())
+			cleanups_.back().push_back(Cleanup(target.text, object));
+		return;
+	}
+	if (binding != NULL) {
+		string local_slot = slot_for(binding);
+		string loaded = fresh_temp();
+		instr(loaded + " = load " + scalar_lowir_type(binding->type) +
+		      " " + caught);
+		instr("store " + scalar_lowir_type(binding->type) + " " +
+		      loaded + ", $" + local_slot);
+	}
 	} void FunctionLowerer::lower_try(const Node& node) {
+	if (!program_.native_lowering) {
 	if (node.children.size() != 2 ||
 	    node.children[0].children.empty() ||
 	    !starts_with(node.children[1].line, "catch-clause") ||
@@ -870,6 +935,146 @@ terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.p
 	} else
 		terminate("resume");
 	start_block(catch_next);
+	if (!active_catches_.empty()) {
+		emit_unwind_object_cleanups();
+		terminate("jump ^" + active_catches_.back().entry);
+	} else
+		terminate("resume");
+	start_block(try_end);
+	return;
+	}
+	if (node.children.size() < 2 || node.children[0].children.empty())
+		throw runtime_error("unsupported try statement");
+	const Node& protected_body = node.children[0].children[0];
+	bool constructor_function_try =
+		is_class_constructor_binding(fn_.binding) &&
+		compound_has_constructor_init_action(protected_body);
+	struct CatchInfo {
+		const Node* clause;
+		ActiveCatchContext ctx;
+		string body;
+		string next;
+		string cleanup;
+	};
+	vector<CatchInfo> catches;
+	for (size_t i = 1; i < node.children.size(); ++i) {
+		const Node& catch_clause = node.children[i];
+		if (!starts_with(catch_clause.line, "catch-clause") ||
+		    catch_clause.children.empty())
+			throw runtime_error("unsupported try statement");
+		CatchInfo info;
+		info.clause = &catch_clause;
+		info.ctx.catch_all = catch_clause.token_text == "catch-all";
+		info.ctx.selector = static_cast<int>(catches.size() + 1);
+		if (!info.ctx.catch_all) {
+			if (catch_clause.type.get() == NULL)
+				throw runtime_error("unsupported catch clause");
+			TypePtr catch_object = object_type(catch_clause.type);
+			program_.emit_typeinfo(catch_object);
+			info.ctx.rtti = program_.catch_rtti_symbol(catch_object);
+			if (info.ctx.rtti.empty())
+				throw runtime_error("unsupported catch type");
+		}
+		catches.push_back(info);
+	}
+	demand_host_eh_declarations(program_, true);
+	string dispatch = fresh_block("catch_dispatch");
+	string entry = fresh_block("catch_entry");
+	string try_end = fresh_block("try_end");
+	for (size_t i = 0; i < catches.size(); ++i) {
+		catches[i].ctx.entry = entry;
+		catches[i].body = fresh_block("catch_body");
+		catches[i].next = fresh_block("catch_next");
+		catches[i].cleanup = fresh_block("catch_cleanup");
+	}
+	active_catches_.push_back(catches.front().ctx);
+	instr("eh_try ^" + dispatch);
+	++eh_try_depth_;
+	cleanups_.push_back(vector<Cleanup>());
+	cleanups_.back().push_back(Cleanup("eh_end"));
+	lower_stmt(protected_body);
+	cleanups_.pop_back();
+	--eh_try_depth_;
+	active_catches_.pop_back();
+	if (!current_->terminated) {
+		bool ended_with_throw = false;
+		for (size_t n = 0; n < current_->instrs.size(); ++n) {
+			const string& inst =
+				current_->instrs[current_->instrs.size() - 1 - n];
+			if (inst.find("@__external_runtime____cxa_throw") !=
+			    string::npos) {
+				ended_with_throw = true;
+				break;
+			}
+			if (inst.find("eh_end") == string::npos)
+				break;
+		}
+		instr("eh_end");
+		if (ended_with_throw) {
+			TypePtr ret = fn_.binding != NULL && fn_.binding->type.get() != NULL
+				? fn_.binding->type->base : pa11::make_fundamental(FT_VOID);
+			if (pa11::is_void_type(ret) ||
+			    pa11::strip_cv(ret)->kind == TypeKind::Record)
+				terminate("return void");
+			else
+				terminate("return " + scalar_lowir_type(ret) + " 0");
+		} else
+			terminate("jump ^" + try_end);
+	}
+	start_block(dispatch);
+	for (size_t i = 0; i < catches.size(); ++i)
+		emit_active_catch_clause(catches[i].ctx);
+	terminate("jump ^" + entry);
+	start_block(entry);
+	string exception = fresh_temp();
+	instr(exception + " = exception ptr");
+	string selector = fresh_temp();
+	instr(selector + " = exception_selector i32");
+	for (size_t i = 0; i < catches.size(); ++i) {
+		const CatchInfo& info = catches[i];
+		const Node& catch_clause = *info.clause;
+		string selected = fresh_temp();
+		instr(selected + " = cmp eq i32 " + selector + ", " +
+		      to_string(info.ctx.selector));
+		terminate("branch " + selected + ", ^" + info.body + ", ^" +
+		          info.next);
+		start_block(info.body);
+		string caught = fresh_temp();
+		instr(caught +
+		      " = call ptr @__external_runtime____cxa_begin_catch(" +
+		      exception + ")");
+		if (catch_clause.binding != NULL) {
+			string catch_slot = fresh_aux_slot("catch", "ptr");
+			instr("store ptr " + caught + ", $" + catch_slot);
+		}
+		instr("eh_cleanup ^" + info.cleanup);
+		cleanups_.push_back(vector<Cleanup>());
+		cleanups_.back().push_back(
+			Cleanup("call void @__external_runtime____cxa_end_catch()"));
+		cleanups_.back().push_back(Cleanup("eh_end"));
+		lower_catch_binding(catch_clause, caught);
+		lower_stmt(catch_clause.children[0]);
+		vector<Cleanup> catch_scope = cleanups_.back();
+		cleanups_.pop_back();
+		if (!current_->terminated) {
+			emit_scope_cleanups(catch_scope);
+			if (constructor_function_try) {
+				ensure_rethrow_runtime_declaration();
+				emit_rethrow();
+			} else
+				terminate("jump ^" + try_end);
+		}
+		start_block(info.cleanup);
+		if (!active_catches_.empty())
+			emit_active_catch_clause(active_catches_.back());
+		emit_scope_cleanups(catch_scope);
+		if (!active_catches_.empty()) {
+			instr("eh_end");
+			terminate("jump ^" + active_catches_.back().entry);
+		} else
+			terminate("resume");
+		start_block(info.next);
+	}
 	if (!active_catches_.empty()) {
 		emit_unwind_object_cleanups();
 		terminate("jump ^" + active_catches_.back().entry);

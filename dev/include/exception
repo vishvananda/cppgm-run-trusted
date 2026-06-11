@@ -1,0 +1,12 @@
+namespace std {
+
+class exception {
+public:
+  exception() {}
+  exception(const exception &) {}
+  exception &operator=(const exception &) { return *this; }
+  virtual ~exception() {}
+  virtual const char *what() const { return "std::exception"; }
+};
+
+}

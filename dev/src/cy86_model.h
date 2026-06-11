@@ -17,6 +17,7 @@ struct Options
 {
 	preproc::Options preprocess;
 	string target;
+	vector<string> external_objects;
 };
 
 enum class RegisterBase

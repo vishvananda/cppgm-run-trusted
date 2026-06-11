@@ -46,7 +46,7 @@ pa11::describe_type(parameter_type)); param_node.binding = param; param_node.typ
 } else { Node param_node("parameter " + node_name + " " +
 pa11::describe_type(parameter_type)); param_node.type = parameter_type; add_child(fn, param_node); }
 } scopes_.push_back(function_scope); bool auto_return = auto_return_functions_.count(function) != 0; function_returns_.push_back(auto_return ? TypePtr() : function->type->base);
-active_functions_.push_back(function); function_parameter_pack_substitutions_.push_back(parameter_packs); add_child(fn, parse_compound_statement()); if (auto_return)
+active_functions_.push_back(function); function_parameter_pack_substitutions_.push_back(parameter_packs); if (at(KW_TRY)) { Node body("compound-statement"); add_child(body, parse_try_statement()); add_child(fn, body); } else add_child(fn, parse_compound_statement()); if (auto_return)
 { map<Binding*, TypePtr>::const_iterator deduced = auto_return_deduced_.find(function); if (deduced == auto_return_deduced_.end())
 function->type->base = pa11::make_fundamental(FT_VOID); else function->type->base = deduced->second; fn.type = function->type;
 } remember_function_body(function, fn); function_parameter_pack_substitutions_.pop_back(); active_functions_.pop_back();
@@ -155,9 +155,12 @@ at(KW_TYPENAME) || starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT) ||
 { size_t type_save = pos_; TypePtr type_probe; if (try_parse_type_name(type_probe) &&
 (starts_declarator() || at_identifier())) { bool parenthesized_this_argument = at(OP_LPAREN) &&
 pos_ + 2 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple && (tokens_[pos_ + 1].type == OP_STAR || tokens_[pos_ + 1].type == OP_AMP) &&
-tokens_[pos_ + 2].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 2].type == KW_THIS; bool empty_functional_temporary = at(OP_LPAREN) &&
-pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 1].type == OP_RPAREN; if (!parenthesized_this_argument &&
-!empty_functional_temporary) definitely_declaration = true; } pos_ = type_save;
+	tokens_[pos_ + 2].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 2].type == KW_THIS; bool empty_functional_temporary = at(OP_LPAREN) &&
+	pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 1].type == OP_RPAREN; bool parenthesized_non_declarator = false;
+	if (at(OP_LPAREN) && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind != posttoken::TokenKind::Identifier) { parenthesized_non_declarator = true;
+	if (tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple) { ETokenType next = tokens_[pos_ + 1].type;
+	parenthesized_non_declarator = !(next == OP_STAR || next == OP_AMP || next == OP_LAND || next == OP_LPAREN || next == OP_COLON2); } }
+	if (!parenthesized_this_argument && !empty_functional_temporary && !parenthesized_non_declarator) definitely_declaration = true; } pos_ = type_save;
 } try { Node node;
 parse_simple_or_function_declaration(node, true); if (!node.children.empty()) return node.children[0]; return Node();
 } catch (const exception&) { pos_ = save;
@@ -184,8 +187,9 @@ if (pa11::strip_cv(expression_object_type(do_cond.type))->kind == pa11::TypeKind
 convert_to(do_cond, pa11::make_fundamental(FT_BOOL)); if (conv.viable) do_cond = conv.expr; }
 add_child(cond, do_cond.node); add_child(node, cond); expect(OP_RPAREN); expect(OP_SEMICOLON);
 return node; } Node Parser::parse_for_statement() {
-expect(KW_FOR); expect(OP_LPAREN); if (starts_declaration()) {
-size_t save = pos_; try { return parse_range_for_statement();
+expect(KW_FOR); expect(OP_LPAREN); Scope* for_scope = pa11::create_child_scope(current_scope(), ScopeKind::Block, "");
+scopes_.push_back(for_scope); try { if (starts_declaration()) {
+size_t save = pos_; try { Node range_for = parse_range_for_statement(); scopes_.pop_back(); return range_for;
 } catch (const runtime_error& err) { pos_ = save;
 if (string(err.what()) != "not range-for") throw; } }
 Node node("for-statement"); Node init("for-init-statement"); if (starts_declaration()) add_child(init, parse_block_item());
@@ -193,7 +197,7 @@ else { if (!at(OP_SEMICOLON)) add_child(init, parse_expression().node);
 expect(OP_SEMICOLON); } add_child(node, init); if (!at(OP_SEMICOLON))
 add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL))); expect(OP_SEMICOLON); if (!at(OP_RPAREN)) {
 Node iter("iteration"); add_child(iter, parse_expression().node); add_child(node, iter); }
-expect(OP_RPAREN); add_child(node, parse_statement()); return node; }
+expect(OP_RPAREN); add_child(node, parse_statement()); scopes_.pop_back(); return node; } catch (...) { scopes_.pop_back(); throw; } }
 Node Parser::parse_range_for_statement() { DeclSpecs specs = parse_decl_specifier_seq(false); TypePtr base = type_from_decl_specs(specs);
 Declarator declarator = parse_declarator(false); if (!consume(OP_COLON)) throw runtime_error("not range-for"); Expr range = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
 bool hidden_range = false; bool initializer_list_range = false; TypePtr initializer_list_element; Node range_node; TypePtr range_array_type; if (range.braced_init_list && range.type.get() == NULL)

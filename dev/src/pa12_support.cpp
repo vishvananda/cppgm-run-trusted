@@ -338,6 +338,14 @@ Parser::Parser(const string& srcfile, const Options& options)
 	                  BindingKind::Type,
 	                  "nullptr_t",
 	                  pa11::make_fundamental(FT_NULLPTR_T));
+	pa11::add_binding(global_scope(),
+	                  BindingKind::Type,
+	                  "__int128_t",
+	                  pa11::make_fundamental(FT_INT128));
+	pa11::add_binding(global_scope(),
+	                  BindingKind::Type,
+	                  "__uint128_t",
+	                  pa11::make_fundamental(FT_UNSIGNED_INT128));
 }
 
 const Node& Parser::root() const

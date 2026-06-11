@@ -15,6 +15,7 @@ struct Options
 	string author;
 	string build_date;
 	string build_time;
+	vector<string> include_paths;
 };
 
 void run_preproc(const vector<string>& srcfiles,

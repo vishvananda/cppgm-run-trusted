@@ -44,6 +44,43 @@ bool assignment_parameter_is_copy_move(const Binding* binding)
 	       pa11::same_type(param_record, pa11::strip_cv(record));
 }
 
+bool virtual_call_signature_matches(Binding* wanted, Binding* candidate)
+{
+	if (wanted == NULL || candidate == NULL ||
+	    wanted->type.get() == NULL || candidate->type.get() == NULL ||
+	    wanted->type->kind != TypeKind::Function ||
+	    candidate->type->kind != TypeKind::Function ||
+	    wanted->name != candidate->name ||
+	    wanted->type->parameters.size() != candidate->type->parameters.size())
+		return false;
+	for (size_t i = 0; i < wanted->type->parameters.size(); ++i)
+		if (!pa11::same_type(pa11::strip_cv(wanted->type->parameters[i]),
+		                     pa11::strip_cv(candidate->type->parameters[i])))
+			return false;
+	return true;
+}
+
+int resolved_virtual_slot_index(Binding* binding)
+{
+	if (binding == NULL)
+		return -1;
+	if (binding->virtual_slot_index >= 0)
+		return binding->virtual_slot_index;
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return -1;
+	pa11::layout_record_type(record);
+	for (size_t i = 0; i < record->virtual_entries.size(); ++i)
+	{
+		Binding* candidate = record->virtual_entries[i].function;
+		if (candidate == binding ||
+		    virtual_call_signature_matches(binding, candidate))
+			return static_cast<int>(i);
+	}
+	return -1;
+}
+
 }  // namespace
 
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
@@ -424,48 +461,26 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 	    pa11::strip_cv(expr.type)->kind != TypeKind::Record ||
 	    !record_return_by_address(expr.type))
 		return false;
-	Binding* direct = expr.direct_call;
-	TypePtr callee_type;
-	string callee;
-	if (direct != NULL)
-	{
-		callee_type = direct->type;
-		program_.demand_function_declaration(direct);
-		program_.demand_inline_function(direct);
-		callee = "@" + program_.symbol_for(direct);
-	}
-	else
-	{
-		callee_type = strip_for_value(expr.children[0].type);
-		if (pa11::strip_cv(callee_type)->kind == TypeKind::Pointer)
-			callee_type = pa11::strip_cv(callee_type)->base;
-		callee = emit_rvalue(expr.children[0]).text;
-	}
-	vector<string> args;
-	args.push_back(addr_for().text);
+	CallEmissionState call_state;
+	init_call_target(expr, call_state);
+	string result_addr = addr_for().text;
 	for (size_t i = 1; i < expr.children.size(); ++i)
 	{
-		bool variadic_extra = i - 1 >= callee_type->parameters.size();
+		bool variadic_extra =
+			i - 1 >= call_state.callee_type->parameters.size();
 		TypePtr param = !variadic_extra
-			? callee_type->parameters[i - 1] : expr.children[i].type;
+			? call_state.callee_type->parameters[i - 1] : expr.children[i].type;
 		if (variadic_extra && scalar_lowir_type(expr.children[i].type) == "f32")
 			param = pa11::make_fundamental(FT_DOUBLE);
-		lower_call_argument(expr.children[i], param, args);
+		lower_call_argument(expr.children[i], param, call_state.args);
 	}
-	CallEmissionState hidden_call;
-	hidden_call.direct = direct;
-	hidden_call.callee_type = callee_type;
-	hidden_call.arg_start = 1;
-	hidden_call.args.insert(hidden_call.args.end(),
-	                        args.begin() + 1,
-	                        args.end());
-	append_hidden_call_arguments(expr, hidden_call);
-	args.erase(args.begin() + 1, args.end());
-	args.insert(args.end(),
-	            hidden_call.args.begin(),
-	            hidden_call.args.end());
+	append_hidden_call_arguments(expr, call_state);
+	resolve_call_callee(expr, call_state);
+	vector<string> args;
+	args.push_back(result_addr);
+	args.insert(args.end(), call_state.args.begin(), call_state.args.end());
 	ostringstream call;
-	call << "call void " << callee << "(";
+	call << "call void " << call_state.callee << "(";
 	for (size_t i = 0; i < args.size(); ++i)
 	{
 		if (i != 0)
@@ -473,12 +488,12 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 		call << args[i];
 	}
 	call << ")";
-	if (direct == NULL)
+	if (call_state.direct == NULL || call_state.virtual_call)
 	{
 		call << " as (%ret : ptr [pass=indirect_result]";
-		for (size_t i = 0; i < callee_type->parameters.size(); ++i)
+		for (size_t i = 0; i < call_state.callee_type->parameters.size(); ++i)
 			call << ", %arg" << i << " : " <<
-				lowir_parameter(callee_type->parameters[i]);
+				lowir_parameter(call_state.callee_type->parameters[i]);
 		call << ") -> void";
 	}
 	instr(call.str());
@@ -490,8 +505,20 @@ void FunctionLowerer::init_call_target(const Node& expr,
 {
 	call.direct = expr.direct_call;
 	call.arg_start = 1;
-	call.virtual_call = call.direct != NULL && expr.virtual_dispatch &&
-	                    call.direct->virtual_slot_index >= 0;
+	call.virtual_slot_index = resolved_virtual_slot_index(call.direct);
+	bool inferred_virtual_call =
+		call.direct != NULL &&
+		call.virtual_slot_index >= 0 &&
+		call.direct->owner != NULL &&
+		call.direct->owner->kind == ScopeKind::Class &&
+		!call.direct->is_static_member &&
+		!is_class_constructor_binding(call.direct) &&
+		!is_class_destructor_binding(call.direct) &&
+		!expr.suppress_virtual_dispatch &&
+		expr.children.size() > 1;
+	call.virtual_call = call.direct != NULL &&
+	                    (expr.virtual_dispatch || inferred_virtual_call) &&
+	                    call.virtual_slot_index >= 0;
 	call.delay_direct_demand =
 		call.direct != NULL && call.direct->name == "operator=";
 	if (call.direct != NULL)
@@ -710,11 +737,11 @@ void FunctionLowerer::resolve_call_callee(const Node& expr,
 	string vptr = fresh_temp();
 	instr(vptr + " = load ptr " + call.args[0]);
 	string slot_addr = vptr;
-	if (call.direct->virtual_slot_index > 0)
+	if (call.virtual_slot_index > 0)
 	{
 		slot_addr = fresh_temp();
 		instr(slot_addr + " = index i8 " + vptr + ", " +
-		      to_string(call.direct->virtual_slot_index * 8));
+		      to_string(call.virtual_slot_index * 8));
 	}
 	string fnptr = fresh_temp();
 	instr(fnptr + " = load ptr " + slot_addr);

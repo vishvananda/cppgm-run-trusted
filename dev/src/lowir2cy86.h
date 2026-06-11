@@ -123,9 +123,12 @@ enum class InstrKind
 	Call,
 	EhTry,
 	EhCleanup,
+	EhCatch,
+	EhCatchAll,
 	EhEnd,
 	Throw,
 	Exception,
+	ExceptionSelector,
 	Resume,
 	Jump,
 	Branch,
@@ -264,7 +267,9 @@ bool is_integer_type(const Type& type);
 bool is_signed_integer_type(const Type& type);
 bool is_scalar_runtime_type(const Type& type);
 bool is_direct_object_abi(const Type& type);
+size_t direct_object_abi_slots(const Type& type);
 int direct_object_abi_width_bits(const Type& type);
+int direct_object_abi_chunk_width_bits(const Type& type, size_t chunk);
 size_t storage_size(const Type& type);
 size_t stack_storage_size(const Type& type);
 int cy86_width_bits(const Type& type);

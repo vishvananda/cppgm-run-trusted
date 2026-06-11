@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <stdexcept>
 
 using namespace std;
@@ -38,6 +39,13 @@ struct Context
 	uint64_t const_2_63;
 	uint64_t const_2_64;
 	uint64_t instruction_base;
+};
+
+struct ExternalThunk
+{
+	string name;
+	uint64_t target;
+	uint64_t address;
 };
 
 struct Emitter
@@ -95,6 +103,14 @@ size_t align_up(size_t value, size_t align)
 	if (align == 0)
 		return value;
 	const size_t rem = value % align;
+	return rem == 0 ? value : value + align - rem;
+}
+
+uint64_t align_up_u64(uint64_t value, uint64_t align)
+{
+	if (align == 0)
+		return value;
+	const uint64_t rem = value % align;
 	return rem == 0 ? value : value + align - rem;
 }
 
@@ -1148,11 +1164,270 @@ uint64_t entry_address(const Program& program)
 	return kCodeBase;
 }
 
+string external_function_label(const string& name)
+{
+	return "fn__" + name;
+}
+
+string external_global_label(const string& name)
+{
+	return "g__" + name;
+}
+
+void publish_external_raw_symbol_labels(Program& program,
+                                        const string& name,
+                                        uint64_t address)
+{
+	if (name.empty())
+		return;
+	program.labels[name] = address;
+	program.labels[external_global_label(name)] = address;
+}
+
+void seed_external_symbol_labels(Program& program,
+                                 const vector<ExternalObject>& objects)
+{
+	for (size_t o = 0; o < objects.size(); ++o)
+		for (size_t s = 0; s < objects[o].symbols.size(); ++s)
+			if (objects[o].symbols[s].defined &&
+			    objects[o].symbols[s].global &&
+			    !objects[o].symbols[s].name.empty())
+			{
+				publish_external_raw_symbol_labels(program,
+				                                   objects[o].symbols[s].name,
+				                                   0);
+				if (objects[o].symbols[s].function)
+					program.labels[external_function_label(
+						objects[o].symbols[s].name)] = 0;
+			}
+}
+
+void layout_external_objects(vector<ExternalObject>& objects,
+                             Program& program,
+                             uint64_t base,
+                             vector<ExternalThunk>& thunks)
+{
+	uint64_t cursor = base;
+	for (size_t o = 0; o < objects.size(); ++o)
+	{
+		for (size_t s = 0; s < objects[o].sections.size(); ++s)
+		{
+			ExternalSection& section = objects[o].sections[s];
+			cursor = align_up_u64(cursor, section.align);
+			section.address = cursor;
+			cursor += section.size;
+		}
+		for (size_t i = 0; i < objects[o].symbols.size(); ++i)
+		{
+			const ExternalSymbol& sym = objects[o].symbols[i];
+			if (!sym.defined || !sym.global)
+				continue;
+			const uint64_t address =
+				objects[o].sections[sym.section].address + sym.value;
+			publish_external_raw_symbol_labels(program, sym.name, address);
+			if (sym.function && !sym.name.empty())
+			{
+				ExternalThunk thunk;
+				thunk.name = external_function_label(sym.name);
+				thunk.target = address;
+				thunk.address = 0;
+				thunks.push_back(thunk);
+			}
+		}
+	}
+	cursor = align_up_u64(cursor, 16);
+	for (size_t i = 0; i < thunks.size(); ++i)
+	{
+		thunks[i].address = cursor;
+		program.labels[thunks[i].name] = cursor;
+		cursor += 21;
+	}
+}
+
+uint64_t external_symbol_address(const ExternalObject& object,
+                                 const ExternalSymbol& sym,
+                                 const map<string, uint64_t>& labels)
+{
+	if (sym.defined)
+		return object.sections[sym.section].address + sym.value;
+	map<string, uint64_t>::const_iterator it = labels.find(sym.name);
+	if (it == labels.end())
+		it = labels.find(external_function_label(sym.name));
+	if (it == labels.end())
+		it = labels.find(external_global_label(sym.name));
+	if (it == labels.end())
+		throw runtime_error("unresolved external object symbol");
+	return it->second;
+}
+
+void write_u32_at(vector<unsigned char>& data, uint64_t off, uint64_t value)
+{
+	if (off > data.size() || data.size() - off < 4)
+		throw runtime_error("ELF relocation offset out of range");
+	for (int i = 0; i < 4; ++i)
+		data[static_cast<size_t>(off) + i] =
+			static_cast<unsigned char>(value >> (i * 8));
+}
+
+void write_u64_at(vector<unsigned char>& data, uint64_t off, uint64_t value)
+{
+	if (off > data.size() || data.size() - off < 8)
+		throw runtime_error("ELF relocation offset out of range");
+	for (int i = 0; i < 8; ++i)
+		data[static_cast<size_t>(off) + i] =
+			static_cast<unsigned char>(value >> (i * 8));
+}
+
+void apply_external_relocations(vector<ExternalObject>& objects,
+                                const Program& program)
+{
+	for (size_t o = 0; o < objects.size(); ++o)
+	{
+		ExternalObject& object = objects[o];
+		for (size_t r = 0; r < object.relocations.size(); ++r)
+		{
+			const ExternalRelocation& rel = object.relocations[r];
+			if (rel.section >= object.sections.size() ||
+			    rel.symbol >= object.symbols.size())
+				throw runtime_error("invalid ELF relocation");
+			ExternalSection& section = object.sections[rel.section];
+			const uint64_t place = section.address + rel.offset;
+			const uint64_t symbol =
+				external_symbol_address(object, object.symbols[rel.symbol],
+				                        program.labels);
+			if (rel.type == 0)
+				continue;
+			if (rel.type == 1)
+			{
+				write_u64_at(section.data, rel.offset,
+				             symbol + static_cast<uint64_t>(rel.addend));
+				continue;
+			}
+			if (rel.type == 2 || rel.type == 4)
+			{
+				const int64_t value =
+					static_cast<int64_t>(symbol) + rel.addend -
+					static_cast<int64_t>(place);
+				if (value < numeric_limits<int32_t>::min() ||
+				    value > numeric_limits<int32_t>::max())
+					throw runtime_error("ELF PC-relative relocation out of range");
+				write_u32_at(section.data, rel.offset,
+				             static_cast<uint32_t>(value));
+				continue;
+			}
+			if (rel.type == 10 || rel.type == 11)
+			{
+				const int64_t value =
+					static_cast<int64_t>(symbol) + rel.addend;
+				if (rel.type == 10 &&
+				    (value < 0 ||
+				     value > static_cast<int64_t>(numeric_limits<uint32_t>::max())))
+					throw runtime_error("ELF 32-bit relocation out of range");
+				if (rel.type == 11 &&
+				    (value < numeric_limits<int32_t>::min() ||
+				     value > numeric_limits<int32_t>::max()))
+					throw runtime_error("ELF signed 32-bit relocation out of range");
+				write_u32_at(section.data, rel.offset,
+				             static_cast<uint32_t>(value));
+				continue;
+			}
+			throw runtime_error("unsupported ELF relocation");
+		}
+	}
+}
+
+size_t append_external_objects(vector<unsigned char>& body,
+                               const vector<ExternalObject>& objects)
+{
+	size_t end_offset = body.size();
+	for (size_t o = 0; o < objects.size(); ++o)
+	{
+		for (size_t s = 0; s < objects[o].sections.size(); ++s)
+		{
+			const ExternalSection& section = objects[o].sections[s];
+			const size_t offset =
+				static_cast<size_t>(section.address - kCodeBase);
+			body.resize(offset, 0);
+			if (section.nobits)
+				body.resize(offset + static_cast<size_t>(section.size), 0);
+			else
+			{
+				body.insert(body.end(), section.data.begin(), section.data.end());
+				if (section.data.size() < section.size)
+					body.resize(offset + static_cast<size_t>(section.size), 0);
+			}
+			end_offset = max(end_offset,
+			                 offset + static_cast<size_t>(section.size));
+		}
+	}
+	body.resize(end_offset, 0);
+	return end_offset;
+}
+
+void append_u32(vector<unsigned char>& out, uint32_t value)
+{
+	for (int i = 0; i < 4; ++i)
+		out.push_back(static_cast<unsigned char>(value >> (i * 8)));
+}
+
+vector<unsigned char> external_thunk_bytes(const ExternalThunk& thunk)
+{
+	vector<unsigned char> out;
+	const unsigned char prefix[] = {
+		0x4c, 0x89, 0xe7,
+		0x4c, 0x89, 0xee,
+		0x4c, 0x89, 0xf2,
+		0x4c, 0x89, 0xf9,
+		0xe8
+	};
+	out.insert(out.end(), prefix, prefix + sizeof(prefix));
+	const uint64_t next = thunk.address + out.size() + 4;
+	const int64_t rel =
+		static_cast<int64_t>(thunk.target) - static_cast<int64_t>(next);
+	if (rel < numeric_limits<int32_t>::min() ||
+	    rel > numeric_limits<int32_t>::max())
+		throw runtime_error("external object thunk call out of range");
+	append_u32(out, static_cast<uint32_t>(rel));
+	const unsigned char suffix[] = {
+		0x49, 0x89, 0xc4,
+		0xc3
+	};
+	out.insert(out.end(), suffix, suffix + sizeof(suffix));
+	return out;
+}
+
+void append_external_thunks(vector<unsigned char>& body,
+                            const vector<ExternalThunk>& thunks)
+{
+	for (size_t i = 0; i < thunks.size(); ++i)
+	{
+		const size_t offset =
+			static_cast<size_t>(thunks[i].address - kCodeBase);
+		body.resize(offset, 0);
+		vector<unsigned char> bytes = external_thunk_bytes(thunks[i]);
+		body.insert(body.end(), bytes.begin(), bytes.end());
+	}
+}
+
 }  // namespace
 
 vector<unsigned char> build_elf_image(Program& program)
 {
+	vector<ExternalObject> objects;
+	return build_elf_image(program, objects);
+}
+
+vector<unsigned char> build_elf_image(Program& program,
+                                      const vector<ExternalObject>& input_objects)
+{
+	vector<ExternalObject> objects = input_objects;
+	vector<ExternalThunk> thunks;
+	seed_external_symbol_labels(program, objects);
 	const size_t program_size = layout_program(program);
+	layout_external_objects(objects, program,
+	                        kCodeBase + program_size + 20,
+	                        thunks);
+	apply_external_relocations(objects, program);
 	Context ctx = {
 		&program.labels,
 		kCodeBase + program_size,
@@ -1187,6 +1462,8 @@ vector<unsigned char> build_elf_image(Program& program)
 	}
 	body.resize(program_size, 0);
 	append_hidden_constants(body);
+	append_external_objects(body, objects);
+	append_external_thunks(body, thunks);
 	vector<unsigned char> image;
 	write_elf_header(image, entry_address(program), kHeaderSize + body.size());
 	image.insert(image.end(), body.begin(), body.end());

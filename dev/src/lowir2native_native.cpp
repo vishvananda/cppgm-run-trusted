@@ -94,6 +94,7 @@ void write_native_file(const lowir2cy86::Program& program,
 	write_text_file(tmp, lowir2cy86::emit_cy86_for_native(native_program));
 	cy86::Options cy_options;
 	cy_options.target = effective_target(options);
+	cy_options.external_objects = options.external_objects;
 	try
 	{
 		cy86::compile_to_file(vector<string>(1, tmp), cy_options, options.outfile);

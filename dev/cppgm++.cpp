@@ -5,10 +5,12 @@
 #include "pa11_types.h"
 #include "pa12_semantics.h"
 #include "pa14_lowir.h"
+#include "pa29_toolchain.h"
 #include "tool_help_text.h"
 
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +40,12 @@ enum class DriverMode
 struct DriverInvocation
 {
   DriverMode mode;
+  string outfile;
+  string target;
+  vector<string> include_paths;
+  vector<string> library_paths;
+  vector<string> libraries;
+  vector<string> inputs;
 
   DriverInvocation()
       : mode(DriverMode::Link)
@@ -136,14 +144,46 @@ bool consume_joined_or_separate_option(const vector<string> & args,
   return false;
 }
 
-int run_not_implemented_batch_mode()
+bool take_joined_or_separate_option(const vector<string> & args,
+                                    size_t & i,
+                                    const string & option,
+                                    const string & expected,
+                                    string & out)
 {
-  string line;
-  while(getline(cin, line)) {
-    (void)line;
-    cout << "EXIT_NOT_IMPLEMENTED" << endl;
+  if(args[i] == option) {
+    consume_required_option_argument(args, i, option, expected);
+    out = args[i];
+    return true;
   }
-  return EXIT_SUCCESS;
+  if(starts_with(args[i], option) && args[i].size() > option.size()) {
+    out = args[i].substr(option.size());
+    return true;
+  }
+  return false;
+}
+
+vector<string> split_tab_fields(const string & line)
+{
+  vector<string> fields;
+  size_t pos = 0;
+  while(pos <= line.size()) {
+    const size_t next = line.find('\t', pos);
+    if(next == string::npos) {
+      fields.push_back(line.substr(pos));
+      break;
+    }
+    fields.push_back(line.substr(pos, next - pos));
+    pos = next + 1;
+  }
+  return fields;
+}
+
+void truncate_file(const string & path)
+{
+  ofstream out(path.c_str());
+  if(!out) {
+    throw runtime_error("cannot open output capture");
+  }
 }
 
 void consume_emit_flag(vector<string> & args,
@@ -250,6 +290,8 @@ preproc::Options make_preproc_options()
   options.author = "Vishvananda Ishaya";
   options.build_date = stamp.substr(4, 6) + " " + stamp.substr(20, 4);
   options.build_time = stamp.substr(11, 8);
+  options.include_paths.push_back("dev/include");
+  options.include_paths.push_back("../dev/include");
   return options;
 }
 
@@ -358,9 +400,9 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
   bool compile_only = false;
   bool preprocess_only = false;
   bool explicit_outfile = false;
-  vector<string> inputs;
 
   for(size_t i = 0; i < args.size(); ++i) {
+    string value;
     if(is_query_driver_flag(args[i])) {
       throw logic_error("query flag must be used as a direct invocation");
     }
@@ -374,11 +416,45 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
     }
     if(args[i] == "-o") {
       consume_required_option_argument(args, i, "-o", "output file");
+      if(explicit_outfile) {
+        throw logic_error("multiple output files provided");
+      }
+      invocation.outfile = args[i];
       explicit_outfile = true;
       continue;
     }
+    if(take_joined_or_separate_option(args, i, "-I", "path", value) ||
+       take_joined_or_separate_option(args, i, "-isystem", "path", value)) {
+      invocation.include_paths.push_back(value);
+      continue;
+    }
+    if(take_joined_or_separate_option(args, i, "-L", "path", value)) {
+      invocation.library_paths.push_back(value);
+      continue;
+    }
+    if(take_joined_or_separate_option(args, i, "-l", "library name", value)) {
+      invocation.libraries.push_back(value);
+      continue;
+    }
+    if(args[i] == "--target") {
+      consume_required_option_argument(args, i, "--target", "target");
+      if(!invocation.target.empty()) {
+        throw logic_error("multiple --target options provided");
+      }
+      invocation.target = args[i];
+      continue;
+    }
+    if(starts_with(args[i], "--target=")) {
+      if(args[i].size() == string("--target=").size()) {
+        throw missing_option_argument("--target", "target");
+      }
+      if(!invocation.target.empty()) {
+        throw logic_error("multiple --target options provided");
+      }
+      invocation.target = args[i].substr(string("--target=").size());
+      continue;
+    }
     if(consume_preprocess_option(args, i) ||
-       consume_search_option(args, i) ||
        consume_dependency_option(args, i) ||
        consume_toolchain_option(args, i) ||
        is_benign_driver_flag(args[i])) {
@@ -387,16 +463,19 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
     if(starts_with(args[i], "-")) {
       throw logic_error("unsupported driver option: " + args[i]);
     }
-    inputs.push_back(args[i]);
+    invocation.inputs.push_back(args[i]);
   }
 
   if(compile_only && preprocess_only) {
     throw logic_error("cannot combine -c and -E");
   }
-  if(inputs.empty()) {
+  if(invocation.inputs.empty()) {
     throw logic_error("invalid usage");
   }
-  if((compile_only || preprocess_only) && explicit_outfile && inputs.size() != 1) {
+  if(!explicit_outfile) {
+    throw logic_error("missing output file");
+  }
+  if((compile_only || preprocess_only) && invocation.inputs.size() != 1) {
     throw logic_error("cannot specify -o when generating multiple output files");
   }
 
@@ -413,6 +492,19 @@ int run_unimplemented_mode(const char * feature,
   (void)feature;
   (void)owner;
   throw NotImplementedException();
+}
+
+pa29::Options make_pa29_options(const DriverInvocation & invocation)
+{
+  pa29::Options options;
+  options.preprocess = make_preproc_options();
+  options.preprocess.include_paths.insert(options.preprocess.include_paths.end(),
+                                          invocation.include_paths.begin(),
+                                          invocation.include_paths.end());
+  options.target = invocation.target;
+  options.library_paths = invocation.library_paths;
+  options.libraries = invocation.libraries;
+  return options;
 }
 
 int run_emit_ast_mode(const vector<string> & args)
@@ -468,17 +560,81 @@ int run_driver_mode(const vector<string> & args)
   case DriverMode::Preprocess:
     return run_unimplemented_mode("hosted preprocess driver mode (-E)", "PA34");
   case DriverMode::Compile:
-    return run_unimplemented_mode("compile driver mode (-c)", "PA29");
+    pa29::compile_source_to_object(invocation.inputs[0],
+                                   invocation.outfile,
+                                   make_pa29_options(invocation));
+    return EXIT_SUCCESS;
   case DriverMode::Link:
-    return run_unimplemented_mode("link driver mode", "PA29");
+    pa29::link_inputs_to_executable(invocation.inputs,
+                                    invocation.outfile,
+                                    make_pa29_options(invocation));
+    return EXIT_SUCCESS;
   }
   throw logic_error("unreachable driver mode");
+}
+
+int run_cppgm(const vector<string> & raw_args);
+
+const char * batch_status_name(int status)
+{
+  if(status == EXIT_SUCCESS) {
+    return "EXIT_SUCCESS";
+  }
+  if(status == CPPGM_EXIT_NOT_IMPLEMENTED) {
+    return "EXIT_NOT_IMPLEMENTED";
+  }
+  return "EXIT_FAILURE";
+}
+
+int run_one_batch_request(const vector<string> & fields)
+{
+  if(fields.size() < 5) {
+    return EXIT_FAILURE;
+  }
+  truncate_file(fields[0]);
+  if(fields[1] != fields[0]) {
+    truncate_file(fields[1]);
+  }
+
+  ofstream out(fields[0].c_str(), ios::app);
+  ofstream err(fields[1].c_str(), ios::app);
+  if(!out || !err) {
+    return EXIT_FAILURE;
+  }
+  streambuf * old_cout = cout.rdbuf(out.rdbuf());
+  streambuf * old_cerr = cerr.rdbuf(err.rdbuf());
+  int status = EXIT_FAILURE;
+  try {
+    vector<string> args(fields.begin() + 4, fields.end());
+    status = run_cppgm(args);
+  }
+  catch(const NotImplementedException & e) {
+    cerr << "ERROR: " << e.what() << endl;
+    status = CPPGM_EXIT_NOT_IMPLEMENTED;
+  }
+  catch(const exception & e) {
+    cerr << "ERROR: " << e.what() << endl;
+    status = EXIT_FAILURE;
+  }
+  cout.rdbuf(old_cout);
+  cerr.rdbuf(old_cerr);
+  return status;
+}
+
+int run_batch_mode()
+{
+  string line;
+  while(getline(cin, line)) {
+    const int status = run_one_batch_request(split_tab_fields(line));
+    cout << batch_status_name(status) << endl;
+  }
+  return EXIT_SUCCESS;
 }
 
 int run_cppgm(const vector<string> & raw_args)
 {
   if(has_arg(raw_args, "--batch-stdin")) {
-    return run_not_implemented_batch_mode();
+    return run_batch_mode();
   }
 
   if(has_help_arg(raw_args)) {

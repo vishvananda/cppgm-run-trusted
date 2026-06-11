@@ -144,9 +144,10 @@ void collect_template_specialization_records(TypePtr type,
 
 }  // namespace
 
-ProgramLowerer::ProgramLowerer()
+ProgramLowerer::ProgramLowerer(bool native)
 	: active_inline_definition(NULL),
 	  active_inline_dependency_insert_count(0),
+	  native_lowering(native),
 	  needs_empty_init_function(false),
 	  needs_eh_declarations(false),
 	  generated_assignment_emit_depth(0)

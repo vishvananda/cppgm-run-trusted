@@ -71,6 +71,42 @@ bool global_static_scalar_initializer(const Node& init)
 	return init.has_constant_value;
 }
 
+bool is_string_literal_node(const Node& node)
+{
+	return !node.token_text.empty() &&
+	       node.token_text[node.token_text.size() - 1] == '"';
+}
+
+bool write_string_array_global(ostringstream& out, TypePtr type, const Node& init)
+{
+	if (!is_string_literal_node(init))
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != TypeKind::Array)
+		return false;
+	TypePtr elem = pa11::strip_cv(bare->base);
+	if (elem->kind != TypeKind::Fundamental)
+		return false;
+	StringLiteralInfo info;
+	if (!AnalyzeStringLiteral(init.token_text, info) || !info.ud_suffix.empty())
+		return false;
+	if (elem->fundamental != info.type)
+		return false;
+	uint64_t elem_size = pa11::type_size(elem);
+	if (elem_size == 0 || elem_size > 8)
+		return false;
+	uint64_t count = bare->unknown_bound ? info.elements : bare->bound;
+	for (uint64_t i = 0; i < count; ++i)
+	{
+		uint64_t value = 0;
+		uint64_t offset = i * elem_size;
+		for (uint64_t b = 0; b < elem_size && offset + b < info.bytes.size(); ++b)
+			value |= uint64_t(info.bytes[offset + b]) << (8 * b);
+		out << "  " << scalar_lowir_type(elem) << " " << value << "\n";
+	}
+	return true;
+}
+
 bool global_needs_runtime_init(TypePtr type, const Node& init)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -95,6 +131,8 @@ bool global_needs_runtime_init(TypePtr type, const Node& init)
 		}
 		return false;
 	}
+	if (bare->kind == TypeKind::Array && is_string_literal_node(init))
+		return false;
 	if (bare->kind == TypeKind::Record || bare->kind == TypeKind::Array)
 		return true;
 	if (pa11::strip_cv(type)->kind == TypeKind::Pointer &&
@@ -281,6 +319,10 @@ void write_aggregate_global(ProgramLowerer& program,
 	{
 		TypePtr elem = bare->base;
 		if (!node.children.empty() &&
+		    write_string_array_global(out, node.binding->type, node.children[0]))
+		{
+		}
+		else if (!node.children.empty() &&
 		    starts_with(node.children[0].line, "braced-init-list"))
 		{
 			for (size_t i = 0; i < node.children[0].children.size(); ++i)

@@ -236,8 +236,10 @@ Value addr = addr_for(); TypePtr elem = bare->base; uint64_t count = bare->unkno
 }; if (i >= init.children.size()) lower_zero_init(elem_addr_for, elem); else
 lower_object_init(elem_addr_for, elem, init.children[i]); } } bool FunctionLowerer::lower_local_static_global_init(
 const Node& var, const function<Value()>& addr_for, TypePtr bare, const Node& init)
-{ if (!var.binding->is_local_static) return false; if (bare->kind == TypeKind::Array &&
-starts_with(init.line, "braced-init-list")) { lower_local_static_array_global_init(addr_for, bare, init); return true;
+	{ if (!var.binding->is_local_static) return false; if (bare->kind == TypeKind::Array &&
+	is_string_literal_node(init)) { lower_string_array_init(addr_for, var.binding->type, init); return true;
+	} if (bare->kind == TypeKind::Array &&
+	starts_with(init.line, "braced-init-list")) { lower_local_static_array_global_init(addr_for, bare, init); return true;
 } Value addr = addr_for(); if (bare->kind == TypeKind::Record && starts_with(init.line, "braced-init-list")) {
 (void)addr; lower_object_init(addr_for, var.binding->type, init); } else
 { function<Value()> local_static_addr = [addr]() { return addr; };

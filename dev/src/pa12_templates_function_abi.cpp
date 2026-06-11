@@ -45,6 +45,8 @@ string abi_fundamental_type(EFundamentalType type)
 	case FT_UNSIGNED_LONG_INT: return "m";
 	case FT_LONG_LONG_INT: return "x";
 	case FT_UNSIGNED_LONG_LONG_INT: return "y";
+	case FT_INT128: return "n";
+	case FT_UNSIGNED_INT128: return "o";
 	case FT_FLOAT: return "f";
 	case FT_DOUBLE: return "d";
 	default: return "i";

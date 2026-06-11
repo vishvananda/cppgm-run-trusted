@@ -102,6 +102,8 @@ Type parse_type_text(const string& text)
 		return make_scalar(TypeKind::UnsignedInt, text, 32, 4, 4);
 	if (text == "i64")
 		return make_scalar(TypeKind::SignedInt, text, 64, 8, 8);
+	if (text == "i128")
+		return make_scalar(TypeKind::SignedInt, text, 128, 16, 8);
 	if (text == "f32")
 		return make_scalar(TypeKind::Float, text, 32, 4, 4);
 	if (text == "f64")
@@ -193,14 +195,36 @@ bool is_scalar_runtime_type(const Type& type)
 
 bool is_direct_object_abi(const Type& type)
 {
-	return is_obj_type(type) && type.obj_size <= 8;
+	return (is_obj_type(type) && type.obj_size <= 16) ||
+	       (is_integer_type(type) && type.size == 16);
+}
+
+size_t direct_object_abi_slots(const Type& type)
+{
+	if (!is_direct_object_abi(type))
+		throw runtime_error("object is not direct ABI object");
+	const size_t size = is_obj_type(type) ? type.obj_size : type.size;
+	return size <= 8 ? 1 : 2;
 }
 
 int direct_object_abi_width_bits(const Type& type)
 {
 	if (!is_direct_object_abi(type))
 		throw runtime_error("object is not direct ABI object");
+	if (direct_object_abi_slots(type) != 1)
+		throw runtime_error("direct ABI object has multiple register slots");
 	return type.obj_size <= 4 ? 32 : 64;
+}
+
+int direct_object_abi_chunk_width_bits(const Type& type, size_t chunk)
+{
+	if (!is_direct_object_abi(type))
+		throw runtime_error("object is not direct ABI object");
+	if (chunk >= direct_object_abi_slots(type))
+		throw runtime_error("direct ABI object chunk out of range");
+	const size_t size = is_obj_type(type) ? type.obj_size : type.size;
+	const size_t bytes = size > chunk * 8 ? size - chunk * 8 : 0;
+	return bytes <= 4 ? 32 : 64;
 }
 
 size_t storage_size(const Type& type)
@@ -211,7 +235,7 @@ size_t storage_size(const Type& type)
 size_t stack_storage_size(const Type& type)
 {
 	if (is_direct_object_abi(type))
-		return static_cast<size_t>(direct_object_abi_width_bits(type) / 8);
+		return direct_object_abi_slots(type) * 8;
 	if (is_obj_type(type) || is_f80_type(type))
 		return type.size;
 	return type.size < 8 ? 8 : type.size;

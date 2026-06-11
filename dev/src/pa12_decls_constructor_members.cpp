@@ -66,7 +66,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		}
 	if (have_ctor_defaults)
 		default_arguments_[ctor] = ctor_defaults;
-	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) ||
+	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) || at(KW_TRY) ||
 	                             constexpr_ctor;
 	ctor->is_explicit = explicit_ctor;
 	ctor->unwind_no = suffix.noexcept_decl;
@@ -178,6 +178,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		pending.body_pos = pos_;
 		pending.constructor_body = true;
 		pending.class_type = class_type;
+		consume(KW_TRY);
 		if (consume(OP_COLON))
 		{
 			for (;;)
@@ -193,6 +194,12 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 			}
 		}
 		skip_balanced(OP_LBRACE, OP_RBRACE);
+		while (at(KW_CATCH))
+		{
+			consume(KW_CATCH);
+			skip_balanced(OP_LPAREN, OP_RPAREN);
+			skip_balanced(OP_LBRACE, OP_RBRACE);
+		}
 		enqueue_pending_member_body(class_scope, pending);
 		return true;
 	}

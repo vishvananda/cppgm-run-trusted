@@ -818,6 +818,39 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 	}
 	if (callee.builtin_constant_p)
 		return make_builtin_constant_call(args);
+	if (callee.binding != NULL && callee.binding->name == "__builtin_nanl")
+	{
+		if (args.size() != 1)
+			throw runtime_error("wrong argument count");
+		Expr out;
+		out.valid = true;
+		out.type = pa11::make_fundamental(FT_LONG_DOUBLE);
+		out.category = ValueCategory::PRValue;
+		out.constant_expression = true;
+		out.node = Node("builtin-nanl-expression prvalue " +
+		                pa11::describe_type(out.type));
+		out.node.type = out.type;
+		out.node.category = out.category;
+		add_child(out.node, args[0].node);
+		annotate_expr_node(out);
+		return out;
+	}
+	if (callee.binding != NULL && callee.binding->name == "__builtin_isnan" &&
+	    args.size() == 1 &&
+	    args[0].node.line.compare(0, 23, "builtin-nanl-expression") == 0)
+	{
+		Expr out;
+		out.valid = true;
+		out.type = pa11::make_fundamental(FT_INT);
+		out.category = ValueCategory::PRValue;
+		out.constant_expression = true;
+		out.has_constant_value = true;
+		out.constant_value = 1;
+		out.node = Node("literal prvalue int 1");
+		out.node.token_text = "1";
+		annotate_expr_node(out);
+		return out;
+	}
 	if (!callee.overloads.empty() &&
 	    callee.node.line.compare(0, 17, "member-expression") == 0 &&
 	    !callee.node.children.empty())
@@ -894,10 +927,18 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		out.node = Node("call-expression " + value_category_name(out.category) +
 		                " " + pa11::describe_type(out.type));
 		out.node.direct_call = direct;
-			out.node.virtual_dispatch =
-				callee.node.line.compare(0, 17, "member-expression") == 0 &&
-				direct->is_virtual &&
-				!callee.node.suppress_virtual_dispatch;
+		out.node.suppress_virtual_dispatch =
+			callee.node.suppress_virtual_dispatch;
+			{
+				bool member_call =
+					callee.node.line.compare(0, 17, "member-expression") == 0 ||
+					(callee.node.has_op &&
+					 (callee.node.op == OP_DOT || callee.node.op == OP_ARROW));
+				out.node.virtual_dispatch =
+					member_call &&
+					direct->is_virtual &&
+					!callee.node.suppress_virtual_dispatch;
+			}
 			Node callee_node("callee " + qualified_decl_name(direct) +
 			                 " " + pa11::describe_type(direct->type));
 			callee_node.binding = direct;

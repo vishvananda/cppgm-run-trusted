@@ -18,11 +18,13 @@ const map<EFundamentalType, string> FundamentalTypeToStringMap
 	{FT_INT, "int"},
 	{FT_LONG_INT, "long int"},
 	{FT_LONG_LONG_INT, "long long int"},
+	{FT_INT128, "__int128_t"},
 	{FT_UNSIGNED_CHAR, "unsigned char"},
 	{FT_UNSIGNED_SHORT_INT, "unsigned short int"},
 	{FT_UNSIGNED_INT, "unsigned int"},
 	{FT_UNSIGNED_LONG_INT, "unsigned long int"},
 	{FT_UNSIGNED_LONG_LONG_INT, "unsigned long long int"},
+	{FT_UNSIGNED_INT128, "__uint128_t"},
 	{FT_WCHAR_T, "wchar_t"},
 	{FT_CHAR, "char"},
 	{FT_CHAR16_T, "char16_t"},
@@ -888,7 +890,8 @@ bool FundamentalTypeIsUnsigned(EFundamentalType type)
 {
 	return type == FT_UNSIGNED_CHAR || type == FT_UNSIGNED_SHORT_INT ||
 		type == FT_UNSIGNED_INT || type == FT_UNSIGNED_LONG_INT ||
-		type == FT_UNSIGNED_LONG_LONG_INT || type == FT_CHAR16_T ||
+		type == FT_UNSIGNED_LONG_LONG_INT || type == FT_UNSIGNED_INT128 ||
+		type == FT_CHAR16_T ||
 		type == FT_CHAR32_T;
 }
 

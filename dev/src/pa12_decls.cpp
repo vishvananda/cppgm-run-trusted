@@ -449,7 +449,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		bit_field = true;
 		bit_width = width.has_constant_value ? width.constant_value : 0;
 	}
-	if (at(OP_LBRACE) && declares_function)
+	if ((at(OP_LBRACE) || at(KW_TRY)) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
@@ -482,7 +482,18 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			if (suffix != NULL)
 				pending.parameters = suffix->parameters;
 			pending.body_pos = pos_;
-			skip_balanced(OP_LBRACE, OP_RBRACE);
+			if (consume(KW_TRY))
+			{
+				skip_balanced(OP_LBRACE, OP_RBRACE);
+				while (at(KW_CATCH))
+				{
+					consume(KW_CATCH);
+					skip_balanced(OP_LPAREN, OP_RPAREN);
+					skip_balanced(OP_LBRACE, OP_RBRACE);
+				}
+			}
+			else
+				skip_balanced(OP_LBRACE, OP_RBRACE);
 			enqueue_pending_member_body(current_scope(), pending);
 			if (force_new_function_binding_ && emit_node &&
 			    !node.children.empty())
@@ -507,7 +518,18 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			if (suffix != NULL)
 				pending.parameters = suffix->parameters;
 			pending.body_pos = pos_;
-			skip_balanced(OP_LBRACE, OP_RBRACE);
+			if (consume(KW_TRY))
+			{
+				skip_balanced(OP_LBRACE, OP_RBRACE);
+				while (at(KW_CATCH))
+				{
+					consume(KW_CATCH);
+					skip_balanced(OP_LPAREN, OP_RPAREN);
+					skip_balanced(OP_LBRACE, OP_RBRACE);
+				}
+			}
+			else
+				skip_balanced(OP_LBRACE, OP_RBRACE);
 			enqueue_pending_function_body(pending);
 			if (emit_node)
 			{

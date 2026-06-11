@@ -114,7 +114,8 @@ string FunctionLowerer::emit_exception_allocation(TypePtr object,
 	emit_active_catch_clause(active_catches_.back());
 	instr("eh_cleanup");
 	emit_unwind_cleanups();
-	instr("eh_end");
+	if (!program_.native_lowering)
+		instr("eh_end");
 	terminate("jump ^" + active_catches_.back().entry);
 	start_block(throw_alloc_end);
 	string loaded_alloc = fresh_temp();

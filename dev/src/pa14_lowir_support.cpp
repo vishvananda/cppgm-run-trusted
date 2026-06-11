@@ -11,11 +11,11 @@ bool is_float_type(TypePtr type) { TypePtr bare = pa11::strip_cv(strip_for_value
 (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool is_unsigned_type(TypePtr type) { TypePtr bare = pa11::strip_cv(strip_for_value(type)); if (bare->kind == TypeKind::Enum)
 { switch (bare->enum_underlying) { case FT_UNSIGNED_CHAR:
-case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT: case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT:
+case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT: case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: case FT_UNSIGNED_INT128:
 return true; default: return false; }
 } if (bare->kind != TypeKind::Fundamental) return false; switch (bare->fundamental)
 { case FT_UNSIGNED_CHAR: case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT:
-case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: case FT_CHAR16_T: case FT_CHAR32_T:
+case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: case FT_UNSIGNED_INT128: case FT_CHAR16_T: case FT_CHAR32_T:
 case FT_BOOL: return true; default: return false;
 } } bool is_initializer_list_type(TypePtr type, TypePtr* element) {
 if (type.get() == NULL) return false; TypePtr bare = pa11::strip_cv(type);
@@ -38,7 +38,7 @@ case 4: return "i32"; default: return "i64"; } }
 if (bare->kind != TypeKind::Fundamental) throw runtime_error("unsupported PA14 type"); switch (bare->fundamental) {
 case FT_BOOL: return "u8"; case FT_CHAR: case FT_SIGNED_CHAR: return "i8"; case FT_UNSIGNED_CHAR: return "u8"; case FT_SHORT_INT: return "i16";
 case FT_UNSIGNED_SHORT_INT: return "u16"; case FT_INT: return "i32"; case FT_UNSIGNED_INT: return "u32"; case FT_LONG_INT:
-case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return "i64";
+case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return "i64"; case FT_INT128: case FT_UNSIGNED_INT128: return "i128";
 case FT_FLOAT: return "f32"; case FT_DOUBLE: return "f64"; case FT_LONG_DOUBLE: return "f80"; case FT_VOID: return "void";
 case FT_NULLPTR_T: return "i64"; case FT_WCHAR_T: return "i32"; case FT_CHAR16_T: return "u16"; case FT_CHAR32_T: return "u32";
 } throw runtime_error("unknown fundamental type"); } int lowir_arithmetic_rank(TypePtr type)
@@ -46,7 +46,7 @@ case FT_NULLPTR_T: return "i64"; case FT_WCHAR_T: return "i32"; case FT_CHAR16_T
 if (bare->kind != TypeKind::Fundamental) return 0; switch (bare->fundamental) {
 case FT_BOOL: case FT_CHAR: case FT_SIGNED_CHAR: case FT_UNSIGNED_CHAR: return 1; case FT_SHORT_INT: case FT_UNSIGNED_SHORT_INT: return 2; case FT_CHAR16_T: return 2;
 case FT_WCHAR_T: case FT_CHAR32_T: case FT_INT: case FT_UNSIGNED_INT: return 3; case FT_LONG_INT: case FT_UNSIGNED_LONG_INT:
-case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return 4; case FT_FLOAT: return 5; case FT_DOUBLE: return 6; case FT_LONG_DOUBLE: return 7;
+case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return 4; case FT_INT128: case FT_UNSIGNED_INT128: return 5; case FT_FLOAT: return 6; case FT_DOUBLE: return 7; case FT_LONG_DOUBLE: return 8;
 default: return 0; } } TypePtr lowir_integral_promotion(TypePtr type)
 { TypePtr bare = pa11::strip_cv(strip_for_value(type)); if (bare->kind == TypeKind::Enum || (pa11::is_integral_or_bool_type(type) &&
 lowir_arithmetic_rank(type) < 3)) return pa11::make_fundamental(FT_INT); return strip_for_value(type); }
@@ -266,7 +266,7 @@ out += arg; } out += "_"; return out;
 { case FT_VOID: return "v"; case FT_BOOL: return "b"; case FT_CHAR: return "c";
 case FT_SIGNED_CHAR: return "a"; case FT_UNSIGNED_CHAR: return "h"; case FT_SHORT_INT: return "s"; case FT_UNSIGNED_SHORT_INT: return "t";
 case FT_INT: return "i"; case FT_UNSIGNED_INT: return "j"; case FT_LONG_INT: return "l"; case FT_UNSIGNED_LONG_INT: return "m";
-case FT_LONG_LONG_INT: return "x"; case FT_UNSIGNED_LONG_LONG_INT: return "y"; case FT_FLOAT: return "f"; case FT_DOUBLE: return "d";
+case FT_LONG_LONG_INT: return "x"; case FT_UNSIGNED_LONG_LONG_INT: return "y"; case FT_INT128: return "n"; case FT_UNSIGNED_INT128: return "o"; case FT_FLOAT: return "f"; case FT_DOUBLE: return "d";
 default: return "i"; } } string template_abi_component_for_argument(
 const pa11::TemplateInstanceArgument& arg) { if (arg.kind == pa11::TemplateInstanceArgumentKind::Type) return template_abi_component_for_type(arg.type);
 if (arg.kind == pa11::TemplateInstanceArgumentKind::Value) { if (!arg.value_name.empty()) return "L" + template_abi_component_for_type(arg.type) +

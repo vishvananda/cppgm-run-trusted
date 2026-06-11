@@ -4,7 +4,7 @@
 using namespace std; namespace pa12 { namespace internal { namespace {
 bool signed_integral_fundamental(TypePtr type) { TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL || bare->kind != pa11::TypeKind::Fundamental)
 return false; switch (bare->fundamental) { case FT_SIGNED_CHAR:
-case FT_SHORT_INT: case FT_INT: case FT_LONG_INT: case FT_LONG_LONG_INT:
+case FT_SHORT_INT: case FT_INT: case FT_LONG_INT: case FT_LONG_LONG_INT: case FT_INT128:
 return true; default: return false; }
 } bool signed_integral_widening(TypePtr source, TypePtr target) { TypePtr src_object = source;
 if (src_object->kind == pa11::TypeKind::LValueReference || src_object->kind == pa11::TypeKind::RValueReference) src_object = src_object->base; TypePtr dst_object = target;

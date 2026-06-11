@@ -132,7 +132,8 @@ class Preprocessor
 {
 public:
 	explicit Preprocessor(const Options& options)
-		: line_delta_(0)
+		: include_paths_(options.include_paths),
+		  line_delta_(0)
 	{
 		macros_.initialize_predefined_macros(options.author,
 		                                     options.build_date,
@@ -149,6 +150,7 @@ public:
 private:
 	macro::MacroProcessor macros_;
 	set<PA5FileId> once_files_;
+	vector<string> include_paths_;
 	vector<IfFrame> if_stack_;
 	string current_file_;
 	int line_delta_;
@@ -441,6 +443,16 @@ private:
 			PA5FileId id;
 			if (PA5GetFileId(pathrel, id))
 				return pathrel;
+		}
+		for (size_t i = 0; i < include_paths_.size(); ++i)
+		{
+			string path = include_paths_[i];
+			if (!path.empty() && path[path.size() - 1] != '/')
+				path += "/";
+			path += name;
+			PA5FileId id;
+			if (PA5GetFileId(path, id))
+				return path;
 		}
 		PA5FileId id;
 		if (PA5GetFileId(name, id))

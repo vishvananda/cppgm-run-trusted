@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "cy86_x86.h"
+#include "cy86_elf_object.h"
 
 using namespace std;
 
@@ -24,7 +25,10 @@ void compile_to_file(const vector<string>& srcfiles,
                      const string& outfile)
 {
 	Program program = parse_program_files(srcfiles, options);
-	vector<unsigned char> image = build_elf_image(program);
+	vector<ExternalObject> objects;
+	for (size_t i = 0; i < options.external_objects.size(); ++i)
+		objects.push_back(load_elf64_relocatable(options.external_objects[i]));
+	vector<unsigned char> image = build_elf_image(program, objects);
 	ofstream out(outfile.c_str(), ios::binary);
 	if (!out)
 		throw runtime_error("cannot open output file");

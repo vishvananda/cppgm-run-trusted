@@ -110,6 +110,7 @@ bool integral_type_is_unsigned(TypePtr type)
 		case FT_UNSIGNED_INT:
 		case FT_UNSIGNED_LONG_INT:
 		case FT_UNSIGNED_LONG_LONG_INT:
+		case FT_UNSIGNED_INT128:
 			return true;
 		default:
 			return false;
@@ -125,6 +126,7 @@ bool integral_type_is_unsigned(TypePtr type)
 	case FT_UNSIGNED_INT:
 	case FT_UNSIGNED_LONG_INT:
 	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_UNSIGNED_INT128:
 	case FT_CHAR16_T:
 	case FT_CHAR32_T:
 		return true;
@@ -151,6 +153,8 @@ TypePtr unsigned_counterpart(TypePtr type)
 		return pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
 	case FT_LONG_LONG_INT:
 		return pa11::make_fundamental(FT_UNSIGNED_LONG_LONG_INT);
+	case FT_INT128:
+		return pa11::make_fundamental(FT_UNSIGNED_INT128);
 	default:
 		return type;
 	}
@@ -174,9 +178,10 @@ int arithmetic_rank(TypePtr type)
 	case FT_INT: case FT_UNSIGNED_INT: return 3;
 	case FT_LONG_INT: case FT_UNSIGNED_LONG_INT: return 4;
 	case FT_LONG_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return 5;
-	case FT_FLOAT: return 6;
-	case FT_DOUBLE: return 7;
-	case FT_LONG_DOUBLE: return 8;
+	case FT_INT128: case FT_UNSIGNED_INT128: return 6;
+	case FT_FLOAT: return 7;
+	case FT_DOUBLE: return 8;
+	case FT_LONG_DOUBLE: return 9;
 	default: return 0;
 	}
 }

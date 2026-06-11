@@ -177,7 +177,7 @@ string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this"); string ad
 starts_with(node.children[0].line, "braced-init-list")) { if (node.direct_call != NULL) {
 if (pa11::strip_cv(node.binding->type)->kind != TypeKind::Record) { lower_object_init(member_addr,
 node.binding->type, node.children[0]); return; }
-if (no_op_generated_default_constructor(node.direct_call, node.binding->type)) return; if (node.direct_call->is_generated_default_constructor &&
+if (no_op_generated_default_constructor(node.direct_call, node.binding->type)) { Value addr = member_addr(); if (zero_init_has_store(node.binding->type)) lower_storage_zero(addr, pa11::type_size(node.binding->type)); return; } if (node.direct_call->is_generated_default_constructor &&
 node.direct_call->unwind_no && pa11::strip_cv(node.binding->type)->kind == TypeKind::Record && pa11::strip_cv(node.binding->type)->base.get() != NULL) {
 Value addr = member_addr(); if (zero_init_has_store(node.binding->type)) lower_storage_zero(addr, pa11::type_size(node.binding->type));
 return; } Value addr = member_addr(); if (node.direct_call->is_generated_default_constructor)
@@ -204,7 +204,7 @@ lower_scalar_member_init(node, member_addr); } bool FunctionLowerer::lower_direc
 const function<Value()>& member_addr) { if (node.direct_call->type.get() == NULL || node.direct_call->type->kind != TypeKind::Function ||
 node.direct_call->type->parameters.empty()) { if (!node.children.empty()) lower_object_init(member_addr, node.binding->type, node.children[0]);
 else lower_default_init(member_addr, node.binding->type); return true; }
-if (no_op_generated_default_constructor(node.direct_call, node.binding->type)) return true; if (node.direct_call->is_generated_default_constructor &&
+if (no_op_generated_default_constructor(node.direct_call, node.binding->type)) { TypePtr bare_member = pa11::strip_cv(node.binding->type); if ((!node.children.empty() || (bare_member->kind == TypeKind::Record && bare_member->tag == "union")) && zero_init_has_store(node.binding->type)) { Value addr = member_addr(); lower_storage_zero(addr, pa11::type_size(node.binding->type)); } return true; } if (node.direct_call->is_generated_default_constructor &&
 node.direct_call->unwind_no && pa11::strip_cv(node.binding->type)->kind == TypeKind::Record && pa11::strip_cv(node.binding->type)->base.get() != NULL) {
 Value addr = member_addr(); if (zero_init_has_store(node.binding->type)) lower_storage_zero(addr, pa11::type_size(node.binding->type)); return true;
 } if (node.children.size() == 1 && node.children[0].category == ValueCategory::PRValue && pa11::strip_cv(node.binding->type)->kind == TypeKind::Record &&
@@ -220,7 +220,9 @@ node.children[0].category == ValueCategory::XValue)) { member_addr(); return tru
 } } bool needs_common_lowering = false; for (size_t i = 0; i < node.children.size(); ++i)
 { TypePtr param = node.direct_call->type->parameters[i + 1]; if (is_reference(param) && pa11::strip_cv(param->base)->kind == TypeKind::Record)
 needs_common_lowering = true; } if (!needs_common_lowering) {
-program_.demand_function_declaration(node.direct_call); program_.demand_inline_function(node.direct_call); vector<string> lowered; lowered.push_back(member_addr().text);
+program_.demand_function_declaration(node.direct_call); program_.demand_inline_function(node.direct_call); Value member = member_addr();
+if (node.children.empty() && node.direct_call->is_defaulted && node.direct_call->type->parameters.size() == 1 && zero_init_has_store(node.binding->type))
+lower_storage_zero(member, pa11::type_size(node.binding->type)); vector<string> lowered; lowered.push_back(member.text);
 for (size_t i = 0; i < node.children.size(); ++i) { if (i == 0 && starts_with(node.children[i].line, "literal prvalue " +
 pa11::describe_type(node.binding->type))) continue; lowered.push_back(emit_rvalue(node.children[i]).text); }
 ostringstream call; call << "call void @" << program_.symbol_for(node.direct_call) << "("; for (size_t i = 0; i < lowered.size(); ++i) {

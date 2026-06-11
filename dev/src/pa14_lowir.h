@@ -12,6 +12,9 @@ namespace pa14 {
 struct Options
 {
 	preproc::Options preprocess;
+	bool native_lowering;
+
+	Options() : native_lowering(false) {}
 };
 
 void emit_lowir(const vector<string>& srcfiles,

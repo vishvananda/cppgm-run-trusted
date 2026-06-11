@@ -172,6 +172,8 @@ size_t fundamental_size(EFundamentalType type)
 	case FT_DOUBLE:
 	case FT_NULLPTR_T:
 		return 8;
+	case FT_INT128:
+	case FT_UNSIGNED_INT128:
 	case FT_LONG_DOUBLE:
 		return 16;
 	case FT_VOID:
@@ -428,11 +430,13 @@ bool is_integral_or_bool_type(const TypePtr& type)
 	case FT_INT:
 	case FT_LONG_INT:
 	case FT_LONG_LONG_INT:
+	case FT_INT128:
 	case FT_UNSIGNED_CHAR:
 	case FT_UNSIGNED_SHORT_INT:
 	case FT_UNSIGNED_INT:
 	case FT_UNSIGNED_LONG_INT:
 	case FT_UNSIGNED_LONG_LONG_INT:
+	case FT_UNSIGNED_INT128:
 	case FT_WCHAR_T:
 	case FT_CHAR:
 	case FT_CHAR16_T:

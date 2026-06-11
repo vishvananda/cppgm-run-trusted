@@ -229,13 +229,14 @@ struct ProgramLowerer
 	vector<unique_ptr<Binding> > synthetic_bindings;
 	const Binding* active_inline_definition;
 	size_t active_inline_dependency_insert_count;
+	bool native_lowering;
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
 		int generated_assignment_emit_depth;
 
 		typedef vector<const Binding*>::iterator PendingInlineIterator;
 
-		ProgramLowerer();
+		explicit ProgramLowerer(bool native = false);
 	string symbol_for(const Binding* binding);
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
 	string destructor_symbol_for(const Binding* binding, bool base_entry);
@@ -376,6 +377,7 @@ private:
 		string callee;
 		TypePtr callee_type;
 		bool virtual_call;
+		int virtual_slot_index;
 		bool delay_direct_demand;
 		string ret;
 		string preallocated_call_slot;
@@ -397,6 +399,7 @@ private:
 			: direct(NULL),
 			  arg_start(1),
 			  virtual_call(false),
+			  virtual_slot_index(-1),
 			  delay_direct_demand(false),
 			  setup_may_create_temp_cleanup(false),
 			  protect_setup_only(false),
@@ -440,6 +443,7 @@ private:
 	bool lowering_record_return_object_;
 	bool lowering_array_subobject_init_;
 		bool constructor_destination_before_protected_try_;
+		vector<const Node*> constructor_unwind_actions_;
 		string active_unwind_dispatch_;
 		vector<ActiveCatchContext> active_catches_;
 
@@ -593,6 +597,11 @@ private:
 	void lower_for(const Node& node);
 	void lower_range_for(const Node& node);
 	void lower_try(const Node& node);
+	void lower_catch_binding(const Node& catch_clause,
+	                         const string& caught);
+	bool compound_has_constructor_init_action(const Node& node) const;
+	bool constructor_init_action_needs_cleanup(const Node& node) const;
+	void emit_constructor_unwind_cleanups();
 	void lower_return(const Node& node);
 	void register_cleanup(Binding* binding, TypePtr type);
 	void emit_scope_cleanups(vector<Cleanup>& scope);

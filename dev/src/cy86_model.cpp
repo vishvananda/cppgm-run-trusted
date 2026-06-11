@@ -41,6 +41,8 @@ size_t fundamental_size(EFundamentalType type)
 	case FT_UNSIGNED_LONG_LONG_INT:
 	case FT_DOUBLE:
 		return 8;
+	case FT_INT128:
+	case FT_UNSIGNED_INT128:
 	case FT_LONG_DOUBLE:
 		return sizeof(long double);
 	default:
@@ -52,14 +54,16 @@ bool is_signed_integral_type(EFundamentalType type)
 {
 	return type == FT_SIGNED_CHAR || type == FT_SHORT_INT ||
 	       type == FT_INT || type == FT_LONG_INT ||
-	       type == FT_LONG_LONG_INT || type == FT_CHAR;
+	       type == FT_LONG_LONG_INT || type == FT_INT128 ||
+	       type == FT_CHAR;
 }
 
 bool is_unsigned_integral_type(EFundamentalType type)
 {
 	return type == FT_UNSIGNED_CHAR || type == FT_UNSIGNED_SHORT_INT ||
 	       type == FT_UNSIGNED_INT || type == FT_UNSIGNED_LONG_INT ||
-	       type == FT_UNSIGNED_LONG_LONG_INT || type == FT_CHAR16_T ||
+	       type == FT_UNSIGNED_LONG_LONG_INT ||
+	       type == FT_UNSIGNED_INT128 || type == FT_CHAR16_T ||
 	       type == FT_CHAR32_T || type == FT_WCHAR_T || type == FT_BOOL;
 }
 

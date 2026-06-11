@@ -26,6 +26,13 @@ void compile(const vector<string>& srcfiles, const Options& options)
 	if (!options.target.empty() && options.target != "linux")
 		throw runtime_error("unsupported target");
 	lowir2cy86::Program program = lowir2cy86::parse_files(srcfiles);
+	compile_program(program, options);
+}
+
+void compile_program(lowir2cy86::Program program, const Options& options)
+{
+	if (!options.target.empty() && options.target != "linux")
+		throw runtime_error("unsupported target");
 	lowir2cy86::validate_and_layout_allow_f80(program);
 	if (!options.machine_ir_file.empty())
 		write_machine_ir_file(program, options);

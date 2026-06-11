@@ -181,11 +181,11 @@ return bytes >= 8 ? 64 : static_cast<unsigned>(bytes * 8); } uint64_t scalar_con
 return bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1); } bool scalar_constant_unsigned(TypePtr type) {
 TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Enum) { switch (bare->enum_underlying)
 { case FT_UNSIGNED_CHAR: case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT:
-case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: return true; default:
+case FT_UNSIGNED_LONG_INT: case FT_UNSIGNED_LONG_LONG_INT: case FT_UNSIGNED_INT128: return true; default:
 return false; } } if (bare->kind != pa11::TypeKind::Fundamental)
 return false; switch (bare->fundamental) { case FT_BOOL:
 case FT_UNSIGNED_CHAR: case FT_UNSIGNED_SHORT_INT: case FT_UNSIGNED_INT: case FT_UNSIGNED_LONG_INT:
-case FT_UNSIGNED_LONG_LONG_INT: case FT_CHAR16_T: case FT_CHAR32_T: return true;
+case FT_UNSIGNED_LONG_LONG_INT: case FT_UNSIGNED_INT128: case FT_CHAR16_T: case FT_CHAR32_T: return true;
 default: return false; } }
 int64_t scalar_constant_signed(TypePtr type, uint64_t value) { unsigned bits = scalar_constant_bits(type); uint64_t normalized = value & scalar_constant_mask(bits);
 if (bits >= 64) return static_cast<int64_t>(normalized); uint64_t sign = uint64_t(1) << (bits - 1); if ((normalized & sign) == 0)

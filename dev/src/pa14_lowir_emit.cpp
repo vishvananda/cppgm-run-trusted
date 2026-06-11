@@ -304,7 +304,7 @@ void emit_lowir(const vector<string>& srcfiles,
                 const string& outfile,
                 const Options& options)
 {
-	internal::ProgramLowerer program;
+	internal::ProgramLowerer program(options.native_lowering);
 	vector<unique_ptr<pa12::internal::Parser> > parsers;
 	for (size_t i = 0; i < srcfiles.size(); ++i)
 	{

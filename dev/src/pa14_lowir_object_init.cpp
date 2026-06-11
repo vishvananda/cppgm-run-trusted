@@ -397,8 +397,9 @@ bool FunctionLowerer::lower_braced_direct_constructor_init(
 	     init.direct_call->is_defaulted))
 	{
 		Value addr = addr_for();
-		if (init.direct_call->is_generated_default_constructor &&
-		    !no_op_generated_default_constructor(init.direct_call, type) &&
+		if (((init.direct_call->is_generated_default_constructor &&
+		      !no_op_generated_default_constructor(init.direct_call, type)) ||
+		     init.direct_call->is_defaulted) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));
 		function<Value()> same_addr = [addr]() {
@@ -447,8 +448,9 @@ bool FunctionLowerer::lower_braced_record_constructor_init(
 	    (ctor->is_generated_default_constructor || ctor->is_defaulted))
 	{
 		Value addr = addr_for();
-		if (ctor->is_generated_default_constructor &&
-		    !no_op_generated_default_constructor(ctor, type) &&
+		if (((ctor->is_generated_default_constructor &&
+		      !no_op_generated_default_constructor(ctor, type)) ||
+		     ctor->is_defaulted) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));
 		function<Value()> same_addr = [addr]() {
@@ -815,6 +817,28 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
                                         TypePtr type,
                                         const Node& init)
 {
+	if (starts_with(init.line, "statement-expression"))
+	{
+		if (init.children.empty())
+			throw runtime_error("statement expression cannot initialize object");
+		const Node& body = init.children[0];
+		cleanups_.push_back(vector<Cleanup>());
+		size_t result_index = body.children.size();
+		if (!body.children.empty() &&
+		    starts_with(body.children.back().line, "expression-statement") &&
+		    !body.children.back().children.empty())
+			result_index = body.children.size() - 1;
+		for (size_t i = 0; i < result_index; ++i)
+			lower_stmt(body.children[i]);
+		if (result_index == body.children.size())
+			throw runtime_error("statement expression missing result");
+		lower_object_init(addr_for, type,
+		                  body.children[result_index].children[0]);
+		if (current_ != NULL && !current_->terminated)
+			emit_scope_cleanups(cleanups_.back());
+		cleanups_.pop_back();
+		return;
+	}
 	if (starts_with(init.line, "braced-init-list"))
 	{
 		lower_braced_object_init(addr_for, type, init);

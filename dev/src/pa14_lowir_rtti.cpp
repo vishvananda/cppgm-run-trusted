@@ -43,6 +43,10 @@ string typeinfo_builtin_code(EFundamentalType type)
 		return "x";
 	if (type == FT_UNSIGNED_LONG_LONG_INT)
 		return "y";
+	if (type == FT_INT128)
+		return "n";
+	if (type == FT_UNSIGNED_INT128)
+		return "o";
 	if (type == FT_FLOAT)
 		return "f";
 	if (type == FT_DOUBLE)
