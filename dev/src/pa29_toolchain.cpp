@@ -3,6 +3,7 @@
 #include "lowir2cy86.h"
 #include "lowir2native.h"
 #include "pa14_lowir.h"
+#include "pa31_host_object.h"
 
 #include <cstdio>
 #include <fstream>
@@ -429,6 +430,17 @@ void compile_source_to_object(const string& srcfile,
                               const Options& options)
 {
 	normalize_target(options.target);
+	if (ends_with(objfile, ".o"))
+	{
+		TempFiles temps;
+		const string tmp = temp_object_path(objfile, temps.paths.size());
+		temps.paths.push_back(tmp);
+		compile_source_to_lowir(srcfile, tmp, options);
+		lowir2cy86::Program program =
+		    lowir2cy86::parse_files(vector<string>(1, tmp));
+		pa31::write_host_object(program, objfile);
+		return;
+	}
 	compile_source_to_lowir(srcfile, objfile, options);
 }
 

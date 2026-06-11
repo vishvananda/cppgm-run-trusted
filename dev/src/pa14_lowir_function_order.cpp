@@ -109,11 +109,15 @@ if (!has_template_pointer_constructor || !has_template_reference_constructor || 
 return; stable_sort(order.begin(), order.end(), [&functions](size_t lhs, size_t rhs) { int lkey = output_template_dependency_flow_key(
 functions[lhs]); int rkey = output_template_dependency_flow_key( functions[rhs]); return lkey != rkey ? lkey < rkey : lhs < rhs;
 }); } bool output_class_constructor(const Binding* binding) {
-if (binding == NULL || binding->owner == NULL || binding->owner->kind != ScopeKind::Class || binding->type.get() == NULL ||
-binding->type->kind != TypeKind::Function) return false; if (binding->name == binding->owner->name) return true;
-TypePtr record = pa11::record_type_for_scope(binding->owner); record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (record.get() == NULL || record->kind != TypeKind::Record) return false;
-if (!record->template_primary_name.empty() && binding->name == record->template_primary_name) return true; string record_name = record->name;
-size_t args = record_name.find('<'); if (args != string::npos) record_name = record_name.substr(0, args); return record->is_template_specialization && binding->name == record_name;
+static map<const Binding*, bool> cached; if (binding == NULL) return false; map<const Binding*, bool>::const_iterator found = cached.find(binding);
+if (found != cached.end()) return found->second; bool result = false;
+if (binding->owner != NULL && binding->owner->kind == ScopeKind::Class && binding->type.get() != NULL &&
+binding->type->kind == TypeKind::Function) {
+if (binding->name == binding->owner->name) result = true; else {
+TypePtr record = pa11::record_type_for_scope(binding->owner); record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (record.get() != NULL && record->kind == TypeKind::Record) {
+if (!record->template_primary_name.empty() && binding->name == record->template_primary_name) result = true; else { string record_name = record->name;
+size_t args = record_name.find('<'); if (args != string::npos) record_name = record_name.substr(0, args); result = record->is_template_specialization && binding->name == record_name; } } } }
+cached[binding] = result; return result;
 } bool output_class_member_of_local_class(const Binding* binding) { if (binding == NULL || binding->owner == NULL)
 return false; for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent) { if (scope->kind == ScopeKind::Function)
 return true; if (scope->kind == ScopeKind::Namespace) return false; }
@@ -252,7 +256,7 @@ candidate->type->parameters.size() == 1) after_zero_ctor = j + 1; if (first_help
 !output_class_constructor(candidate) && !is_class_destructor_binding(candidate) && (candidate->owner == ctor->owner || output_same_outer_class(candidate, ctor)))
 first_helper = j; } if (first_helper == order.size()) continue;
 size_t insert_pos = first_helper > after_zero_ctor ? first_helper : after_zero_ctor; if (insert_pos >= i) continue;
-size_t fn_index = order[i]; order.erase(order.begin() + i); order.insert(order.begin() + insert_pos, fn_index); i = insert_pos;
+size_t fn_index = order[i]; order.erase(order.begin() + i); order.insert(order.begin() + insert_pos, fn_index);
 } } void order_by_value_constructor_before_record_constructor_dependencies( const vector<FunctionOut>& functions, vector<size_t>& order)
 { bool changed = true; for (size_t guard = 0; changed && guard < order.size() * order.size() + 1; ++guard) {
 changed = false; for (size_t i = 0; i < order.size(); ++i) { const Binding* left = functions[order[i]].binding;

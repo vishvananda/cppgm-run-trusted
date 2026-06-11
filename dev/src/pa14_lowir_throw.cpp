@@ -204,6 +204,33 @@ Value FunctionLowerer::emit_throw(const Node& expr)
 	if (rtti.empty())
 		throw runtime_error("unsupported throw type");
 	ensure_exception_object_global(object);
+	if (eh_try_depth_ == 0 && has_active_cleanups())
+	{
+		string dispatch = active_unwind_dispatch_.empty()
+			? fresh_block("call_unwind_dispatch")
+			: active_unwind_dispatch_;
+		bool define_dispatch = active_unwind_dispatch_.empty();
+		instr("eh_try ^" + dispatch);
+		++eh_try_depth_;
+		string unused_dispatch;
+		string alloc =
+			emit_exception_allocation(object, false, unused_dispatch);
+		lower_throw_operand(Value("ptr", alloc), object, operand);
+		emit_throw_runtime_call(alloc, rtti, object, false, "");
+		--eh_try_depth_;
+		instr("eh_end");
+		if (define_dispatch)
+		{
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = dispatch;
+			start_block(dispatch);
+			emit_unwind_cleanups();
+			terminate("resume");
+			start_block(end);
+		}
+		return Value("void", "");
+	}
 	bool protect_throw =
 		object->kind == TypeKind::Record && !active_catches_.empty() &&
 		eh_try_depth_ > 0 && has_active_cleanups();
