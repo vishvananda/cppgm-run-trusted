@@ -209,6 +209,7 @@ const vector<OpcodeDesc>& opcode_table()
 		"move64 w64 r64", "move80 w80 r80",
 		"jump ar64", "jumpif br8 ar64", "call ar64", "ret",
 		"not8 w8 r8", "not16 w16 r16", "not32 w32 r32", "not64 w64 r64",
+		"bswap8 w8 r8", "bswap16 w16 r16", "bswap32 w32 r32", "bswap64 w64 r64",
 		"and8 w8 r8 r8", "and16 w16 r16 r16", "and32 w32 r32 r32", "and64 w64 r64 r64",
 		"or8 w8 r8 r8", "or16 w16 r16 r16", "or32 w32 r32 r32", "or64 w64 r64 r64",
 		"xor8 w8 r8 r8", "xor16 w16 r16 r16", "xor32 w32 r32 r32", "xor64 w64 r64 r64",

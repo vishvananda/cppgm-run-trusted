@@ -1,14 +1,8 @@
 #include "lowir2native.h"
 
-#include "cy86_model.h"
 #include "lowir2cy86.h"
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cstdint>
-#include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
@@ -19,195 +13,21 @@
 using namespace std;
 
 namespace lowir2native {
-namespace {
 
-string effective_target(const Options& options)
-{
-	return options.target.empty() ? "linux" : options.target;
-}
-
-string temp_cy86_path(const string& outfile)
-{
-	return outfile + ".lowir2native.cy86.tmp";
-}
-
-void write_text_file(const string& path, const string& text)
-{
-	ofstream out(path.c_str(), ios::binary);
-	if (!out)
-		throw runtime_error("cannot open output file");
-	out << text;
-	out.close();
-	if (!out)
-		throw runtime_error("cannot write output file");
-}
-
-bool token_looks_floating(const string& token)
-{
-	for (size_t i = 0; i < token.size(); ++i)
-	{
-		const char c = token[i];
-		if (c == '.' || c == 'e' || c == 'E' || c == 'p' || c == 'P')
-			return true;
-	}
-	return false;
-}
-
-string strip_float_suffix(string token)
-{
-	if (!token.empty())
-	{
-		const char c = token[token.size() - 1];
-		if (c == 'f' || c == 'F' || c == 'l' || c == 'L')
-			token.erase(token.size() - 1);
-	}
-	return token;
-}
-
-template <class T>
-uint64_t float_bits(T value)
-{
-	uint64_t bits = 0;
-	memcpy(&bits, &value, sizeof(value));
-	return bits;
-}
-
-string signed_bits_literal(uint64_t bits, int width)
-{
-	if (width == 32)
-		return to_string(static_cast<int32_t>(static_cast<uint32_t>(bits)));
-	return to_string(static_cast<int64_t>(bits));
-}
-
-bool convert_float_token(const string& token, int width, string& out)
-{
-	if (!token_looks_floating(token))
-		return false;
-	const string source = strip_float_suffix(token);
-	char* end = nullptr;
-	if (width == 32)
-	{
-		const float value = strtof(source.c_str(), &end);
-		if (end == source.c_str() || *end != '\0')
-			return false;
-		out = signed_bits_literal(float_bits(value), 32);
-		return true;
-	}
-	if (width == 64)
-	{
-		const double value = strtod(source.c_str(), &end);
-		if (end == source.c_str() || *end != '\0')
-			return false;
-		out = signed_bits_literal(float_bits(value), 64);
-		return true;
-	}
-	return false;
-}
-
-void sanitize_cy86_line(const vector<string>& parts, string& line);
-
-string sanitize_cy86_floating_literals(const string& text)
-{
-	istringstream in(text);
-	ostringstream out;
-	string line;
-	while (getline(in, line))
-	{
-		string body = line;
-		const size_t semi = body.find(';');
-		if (semi != string::npos)
-			body = body.substr(0, semi);
-		istringstream words(body);
-		vector<string> parts;
-		string word;
-		while (words >> word)
-			parts.push_back(word);
-		if (parts.size() >= 2)
-			sanitize_cy86_line(parts, line);
-		out << line << "\n";
-	}
-	return out.str();
-}
-
-void sanitize_cy86_line(const vector<string>& parts, string& line)
-{
-	int width = 0;
-	if (parts[0] == "move32" || parts[0] == "data32")
-		width = 32;
-	else if (parts[0] == "move64" || parts[0] == "data64")
-		width = 64;
-	if (width == 0)
-		return;
-	string converted;
-	if (!convert_float_token(parts.back(), width, converted))
-		return;
-	const size_t pos = line.rfind(parts.back());
-	if (pos != string::npos)
-		line.replace(pos, parts.back().size(), converted);
-}
-
+string effective_target(const Options& options);
+void write_text_file(const string& path, const string& text);
 void write_native_file(const lowir2cy86::Program& program,
-                       const Options& options)
-{
-	const string tmp = temp_cy86_path(options.outfile);
-	write_text_file(tmp,
-	                sanitize_cy86_floating_literals(lowir2cy86::emit_cy86(program)));
-	cy86::Options cy_options;
-	cy_options.target = effective_target(options);
-	try
-	{
-		cy86::compile_to_file(vector<string>(1, tmp), cy_options, options.outfile);
-	}
-	catch (...)
-	{
-		remove(tmp.c_str());
-		throw;
-	}
-	remove(tmp.c_str());
-}
-
-string storage_suffix(const lowir2cy86::Type& type)
-{
-	return type.text.empty() ? "void" : type.text;
-}
-
-string reg_for_index(size_t index)
-{
-	static const char* const regs[] = {
-		"r8", "r9", "rbx", "r12", "r13", "r14", "r15", "r10", "r11"
-	};
-	return regs[index % (sizeof(regs) / sizeof(regs[0]))];
-}
-
-string abi_gpr(size_t index)
-{
-	static const char* const regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-	if (index < sizeof(regs) / sizeof(regs[0]))
-		return regs[index];
-	return "[rbp+" + to_string(16 + (index - 6) * 8) + "]";
-}
-
+                       const Options& options);
+string storage_suffix(const lowir2cy86::Type& type);
+string reg_for_index(size_t index);
+string abi_gpr(size_t index);
 bool metadata_is(const lowir2cy86::Metadata& md,
                  const string& key,
-                 const string& value)
-{
-	for (size_t i = 0; i < md.size(); ++i)
-	{
-		if (md[i].key == key && md[i].value == value)
-			return true;
-	}
-	return false;
-}
+                 const string& value);
+string value_text(const lowir2cy86::Value& value);
+string mem_for_offset(size_t offset);
 
-string value_text(const lowir2cy86::Value& value)
-{
-	return value.text;
-}
-
-string mem_for_offset(size_t offset)
-{
-	return "[rbp-" + to_string(offset) + "]";
-}
+namespace {
 
 class MirDumper
 {
@@ -232,11 +52,22 @@ private:
 	ostringstream out_;
 	vector<string> temp_names_;
 	vector<string> temp_regs_;
+	map<string, string> fixed_temp_regs_;
 	vector<string> xmm_names_;
 	vector<string> xmm_regs_;
 	map<string, int> use_counts_;
 	map<string, const lowir2cy86::Instruction*> definitions_;
 	set<string> direct_branch_cmp_;
+	set<string> inline_atomic_expected_addrs_;
+	set<string> used_preserves_;
+	string preferred_load_ptr_;
+	string preferred_load_reg_;
+	string preferred_literal_reg_;
+	bool preferred_load_sets_literal_;
+	bool prefer_r8_stack_load_;
+	bool fixed_load_dest_;
+	bool fixed_const_dest_;
+	bool prefer_r8_literal_;
 
 	void dump_startup()
 	{
@@ -325,14 +156,12 @@ private:
 
 	void dump_function(const lowir2cy86::Function& fn)
 	{
-		temp_names_.clear();
-		temp_regs_.clear();
-		xmm_names_.clear();
-		xmm_regs_.clear();
 		analyze_function(fn);
+		const vector<string> preserves = frame_preserves(fn);
+		reset_function_state();
 		out_ << "function " << fn.name << "\n";
 		dump_abi(fn);
-		dump_frame(fn);
+		dump_frame(fn, preserves);
 		out_ << "\n";
 		for (size_t i = 0; i < fn.blocks.size(); ++i)
 		{
@@ -344,11 +173,30 @@ private:
 		}
 	}
 
+	void reset_function_state()
+	{
+		temp_names_.clear();
+		temp_regs_.clear();
+		fixed_temp_regs_.clear();
+		xmm_names_.clear();
+		xmm_regs_.clear();
+		used_preserves_.clear();
+		preferred_load_ptr_.clear();
+		preferred_load_reg_.clear();
+		preferred_literal_reg_.clear();
+		preferred_load_sets_literal_ = false;
+		prefer_r8_stack_load_ = false;
+		fixed_load_dest_ = false;
+		fixed_const_dest_ = false;
+		prefer_r8_literal_ = false;
+	}
+
 	void analyze_function(const lowir2cy86::Function& fn)
 	{
 		use_counts_.clear();
 		definitions_.clear();
 		direct_branch_cmp_.clear();
+		inline_atomic_expected_addrs_.clear();
 		for (size_t i = 0; i < fn.blocks.size(); ++i)
 		{
 			for (size_t j = 0; j < fn.blocks[i].instructions.size(); ++j)
@@ -364,6 +212,16 @@ private:
 			for (size_t j = 0; j < fn.blocks[i].instructions.size(); ++j)
 			{
 				const lowir2cy86::Instruction& ins = fn.blocks[i].instructions[j];
+				if (ins.kind == lowir2cy86::InstrKind::AtomicCompareExchange &&
+				    ins.b.kind == lowir2cy86::ValueKind::Temp &&
+				    use_counts_[ins.b.text] == 1)
+				{
+					map<string, const lowir2cy86::Instruction*>::const_iterator ait =
+					    definitions_.find(ins.b.text);
+					if (ait != definitions_.end() &&
+					    ait->second->kind == lowir2cy86::InstrKind::Addr)
+						inline_atomic_expected_addrs_.insert(ins.b.text);
+				}
 				if (ins.kind != lowir2cy86::InstrKind::Branch ||
 				    ins.a.kind != lowir2cy86::ValueKind::Temp)
 					continue;
@@ -404,20 +262,25 @@ private:
 		     << (lowir2cy86::is_void_type(fn.ret) ? "void" : "rax") << "\n";
 	}
 
-	void dump_frame(const lowir2cy86::Function& fn)
+	void dump_frame(const lowir2cy86::Function& fn,
+	                const vector<string>& preserves)
 	{
-		const bool preserve_rbx = estimates_preserve_rbx(fn);
 		const bool float_frame = function_uses_float(fn);
+		const size_t saved_reg_bytes = preserves.size() * 8;
 		out_ << "  frame\n";
 		out_ << "    stack_size "
-		     << max(mir_stack_size(fn),
-		            max(preserve_rbx ? static_cast<size_t>(16) : static_cast<size_t>(0),
-		                float_frame ? static_cast<size_t>(48) : static_cast<size_t>(0)))
+		     << max(align_to(raw_stack_size(fn) + saved_reg_bytes, 16),
+		            float_frame ? static_cast<size_t>(48) : static_cast<size_t>(0))
 		     << "\n";
 		out_ << "    scratch_bytes "
 		     << (float_frame || fn.needs_convert_scratch ? 48 : 0) << "\n";
-		if (preserve_rbx)
-			out_ << "    preserve rbx\n";
+		if (!preserves.empty())
+		{
+			out_ << "    preserve";
+			for (size_t i = 0; i < preserves.size(); ++i)
+				out_ << " " << preserves[i];
+			out_ << "\n";
+		}
 		for (size_t i = 0; i < fn.slots.size(); ++i)
 			out_ << "    slot " << fn.slots[i].name << " -> "
 			     << mem_for_offset(fn.slots[i].offset) << " : "
@@ -439,29 +302,30 @@ private:
 		return false;
 	}
 
-	bool estimates_preserve_rbx(const lowir2cy86::Function& fn) const
+	vector<string> frame_preserves(const lowir2cy86::Function& fn)
 	{
+		reset_function_state();
 		for (size_t i = 0; i < fn.blocks.size(); ++i)
 		{
 			for (size_t j = 0; j < fn.blocks[i].instructions.size(); ++j)
-			{
-				const lowir2cy86::Instruction& ins = fn.blocks[i].instructions[j];
-				if (ins.kind == lowir2cy86::InstrKind::Binary &&
-				    ins.a.kind == lowir2cy86::ValueKind::Temp)
-				{
-					if (ins.b.kind == lowir2cy86::ValueKind::Temp &&
-					    ins.a.text == ins.b.text)
-						continue;
-					map<string, int>::const_iterator it = use_counts_.find(ins.a.text);
-					if (it != use_counts_.end() && it->second > 1)
-						return true;
-				}
-			}
+				simulate_instruction(fn, fn.blocks[i].instructions[j]);
 		}
-		return false;
+		return ordered_preserves();
 	}
 
-	size_t mir_stack_size(const lowir2cy86::Function& fn) const
+	vector<string> ordered_preserves() const
+	{
+		static const char* const order[] = {"rbx", "r12", "r13", "r14", "r15"};
+		vector<string> regs;
+		for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); ++i)
+		{
+			if (used_preserves_.find(order[i]) != used_preserves_.end())
+				regs.push_back(order[i]);
+		}
+		return regs;
+	}
+
+	size_t raw_stack_size(const lowir2cy86::Function& fn) const
 	{
 		size_t bytes = 0;
 		for (size_t i = 0; i < fn.slots.size(); ++i)
@@ -470,7 +334,7 @@ private:
 			if (end > bytes)
 				bytes = end;
 		}
-		return align_to(bytes, 16);
+		return bytes;
 	}
 
 	size_t align_to(size_t value, size_t alignment) const
@@ -486,11 +350,22 @@ private:
 		for (size_t i = 0; i < temp_names_.size(); ++i)
 		{
 			if (temp_names_[i] == name)
+			{
+				note_temp_reg(temp_regs_[i]);
 				return temp_regs_[i];
+			}
 		}
 		temp_names_.push_back(name);
 		temp_regs_.push_back(reg_for_index(temp_regs_.size()));
+		note_temp_reg(temp_regs_.back());
 		return temp_regs_.back();
+	}
+
+	void note_temp_reg(const string& reg)
+	{
+		if (reg == "rbx" || reg == "r12" || reg == "r13" ||
+		    reg == "r14" || reg == "r15")
+			used_preserves_.insert(reg);
 	}
 
 	string xmm_reg(const string& name)
@@ -553,6 +428,28 @@ private:
 		return value_reg(fn, value);
 	}
 
+	string f80_home(const lowir2cy86::Function& fn, const string& name) const
+	{
+		map<string, size_t>::const_iterator it = fn.temp_offsets.find(name);
+		if (it != fn.temp_offsets.end())
+			return mem_for_offset(it->second);
+		return name;
+	}
+
+	string f80_value(const lowir2cy86::Function& fn,
+	                 const lowir2cy86::Value& value) const
+	{
+		if (value.kind == lowir2cy86::ValueKind::Temp)
+			return f80_home(fn, value.text);
+		if (value.kind == lowir2cy86::ValueKind::Slot)
+		{
+			map<string, size_t>::const_iterator it = fn.slot_offsets.find(value.text);
+			if (it != fn.slot_offsets.end())
+				return mem_for_offset(it->second);
+		}
+		return value.text;
+	}
+
 	string value_reg(const lowir2cy86::Function& fn, const lowir2cy86::Value& value)
 	{
 		if (value.kind == lowir2cy86::ValueKind::Temp)
@@ -562,6 +459,9 @@ private:
 				if (fn.params[i].name == value.text)
 					return abi_gpr(i);
 			}
+			map<string, string>::const_iterator fit = fixed_temp_regs_.find(value.text);
+			if (fit != fixed_temp_regs_.end())
+				return fit->second;
 			return temp_reg(value.text);
 		}
 		if (value.kind == lowir2cy86::ValueKind::Literal)
@@ -590,6 +490,9 @@ private:
 			dump_copy(fn, ins);
 			break;
 		case lowir2cy86::InstrKind::Addr:
+			if (inline_atomic_expected_addrs_.find(ins.dest) !=
+			    inline_atomic_expected_addrs_.end())
+				break;
 			dump_addr(fn, ins);
 			break;
 		case lowir2cy86::InstrKind::Load:
@@ -597,9 +500,10 @@ private:
 			dump_load(fn, ins);
 			break;
 		case lowir2cy86::InstrKind::Store:
+			dump_store(fn, ins);
+			break;
 		case lowir2cy86::InstrKind::AtomicStore:
-			out_ << "    store." << ins.type.text << " " << store_dest(fn, ins.b)
-			     << ", " << value_reg(fn, ins.a) << "\n";
+			dump_atomic_store(fn, ins);
 			break;
 		case lowir2cy86::InstrKind::Index:
 			dump_index(fn, ins);
@@ -651,6 +555,203 @@ private:
 		}
 	}
 
+	void simulate_instruction(const lowir2cy86::Function& fn,
+	                          const lowir2cy86::Instruction& ins)
+	{
+		switch (ins.kind)
+		{
+		case lowir2cy86::InstrKind::Const:
+			if (lowir2cy86::is_float_type(ins.type) &&
+			    !lowir2cy86::is_f80_type(ins.type))
+				xmm_reg(ins.dest);
+			else
+				remember_const_dest(ins.dest, const_dest_reg(ins));
+			break;
+		case lowir2cy86::InstrKind::Copy:
+			if (lowir2cy86::is_float_type(ins.type) &&
+			    !lowir2cy86::is_f80_type(ins.type))
+			{
+				float_value(fn, ins.a);
+				xmm_reg(ins.dest);
+			}
+			else
+			{
+				temp_reg(ins.dest);
+				value_reg(fn, ins.a);
+			}
+			break;
+		case lowir2cy86::InstrKind::Addr:
+			if (inline_atomic_expected_addrs_.find(ins.dest) !=
+			    inline_atomic_expected_addrs_.end())
+				break;
+			temp_reg(ins.dest);
+			value_reg(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::Load:
+		case lowir2cy86::InstrKind::AtomicLoad:
+		{
+			const string dst = load_dest_reg(fn, ins);
+			load_source(fn, ins.a);
+			remember_load_dest(ins.dest, dst);
+			break;
+		}
+		case lowir2cy86::InstrKind::Store:
+			value_reg(fn, ins.a);
+			store_dest(fn, ins.b);
+			remember_store_literal(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::AtomicStore:
+			remember_store_reload(fn, ins.b, ins.a);
+			break;
+		case lowir2cy86::InstrKind::Index:
+			temp_reg(ins.dest);
+			value_reg(fn, ins.a);
+			if (ins.b.kind != lowir2cy86::ValueKind::Literal)
+				value_reg(fn, ins.b);
+			break;
+		case lowir2cy86::InstrKind::CopyObj:
+			value_reg(fn, ins.b);
+			value_reg(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::ZeroInit:
+			value_reg(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::Unary:
+			temp_reg(ins.dest);
+			value_reg(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::Binary:
+			simulate_binary(fn, ins);
+			break;
+		case lowir2cy86::InstrKind::Cmp:
+			if (direct_branch_cmp_.find(ins.dest) == direct_branch_cmp_.end())
+				simulate_cmp(fn, ins);
+			break;
+		case lowir2cy86::InstrKind::Convert:
+		{
+			const string dst = convert_dest(fn, ins);
+			convert_source(fn, ins);
+			remember_convert_dest(ins, dst);
+			break;
+		}
+		case lowir2cy86::InstrKind::Call:
+			for (size_t i = 0; i < ins.args.size() && i < 6; ++i)
+				value_reg(fn, ins.args[i]);
+			if (ins.a.kind != lowir2cy86::ValueKind::Function)
+				value_reg(fn, ins.a);
+			if (ins.has_dest && !lowir2cy86::is_void_type(ins.type))
+				temp_reg(ins.dest);
+			break;
+		case lowir2cy86::InstrKind::AtomicExchange:
+		case lowir2cy86::InstrKind::AtomicCompareExchange:
+		case lowir2cy86::InstrKind::AtomicAddFetch:
+			simulate_atomic(fn, ins);
+			break;
+		case lowir2cy86::InstrKind::Branch:
+			if (ins.a.kind == lowir2cy86::ValueKind::Temp &&
+			    direct_branch_cmp_.find(ins.a.text) != direct_branch_cmp_.end())
+			{
+				const lowir2cy86::Instruction& cmp = *definitions_[ins.a.text];
+				value_reg(fn, cmp.a);
+				if (cmp.b.kind != lowir2cy86::ValueKind::Literal)
+					value_reg(fn, cmp.b);
+			}
+			else
+				value_reg(fn, ins.a);
+			break;
+		case lowir2cy86::InstrKind::Switch:
+			value_reg(fn, ins.a);
+			for (size_t i = 0; i < ins.switch_cases.size(); ++i)
+				value_reg(fn, ins.switch_cases[i].value);
+			break;
+		case lowir2cy86::InstrKind::Return:
+			value_reg(fn, ins.a);
+			break;
+		default:
+			break;
+		}
+	}
+
+	void simulate_atomic(const lowir2cy86::Function& fn,
+	                     const lowir2cy86::Instruction& ins)
+	{
+		if (ins.has_dest)
+			temp_reg(ins.dest);
+		if (ins.kind == lowir2cy86::InstrKind::AtomicExchange)
+		{
+			const string ptr = value_reg(fn, ins.a);
+			const string src = value_reg(fn, ins.b);
+			if (can_reuse_written_value(ins.b))
+				remember_reload(ptr, src, true);
+		}
+		else if (ins.kind == lowir2cy86::InstrKind::AtomicCompareExchange)
+		{
+			const string ptr = value_reg(fn, ins.a);
+			simulate_expected_pointer(fn, ins.b);
+			const string desired = value_reg(fn, ins.c);
+			if (can_reuse_written_value(ins.c))
+				remember_reload(ptr, desired, false);
+			prefer_r8_stack_load_ = true;
+		}
+		else
+		{
+			value_reg(fn, ins.a);
+			value_reg(fn, ins.b);
+			value_reg(fn, ins.c);
+		}
+		if (ins.has_dest &&
+		    ins.kind != lowir2cy86::InstrKind::AtomicCompareExchange)
+			prefer_r8_literal_ = true;
+	}
+
+	void simulate_expected_pointer(const lowir2cy86::Function& fn,
+	                               const lowir2cy86::Value& value)
+	{
+		const lowir2cy86::Instruction* addr = inline_addr_definition(value);
+		if (addr != nullptr)
+		{
+			if (addr->a.kind == lowir2cy86::ValueKind::Temp)
+				value_reg(fn, addr->a);
+			return;
+		}
+		value_reg(fn, value);
+	}
+
+	void simulate_binary(const lowir2cy86::Function& fn,
+	                     const lowir2cy86::Instruction& ins)
+	{
+		if (lowir2cy86::is_float_type(ins.type) &&
+		    !lowir2cy86::is_f80_type(ins.type))
+		{
+			float_binary_dest(ins);
+			float_value(fn, ins.a);
+			float_value(fn, ins.b);
+			return;
+		}
+		const string dst = binary_dest_reg(ins);
+		value_reg(fn, ins.a);
+		if (ins.b.kind != lowir2cy86::ValueKind::Literal)
+			value_reg(fn, ins.b);
+		remember_temp_reg(ins.dest, dst);
+	}
+
+	void simulate_cmp(const lowir2cy86::Function& fn,
+	                  const lowir2cy86::Instruction& ins)
+	{
+		if (lowir2cy86::is_float_type(ins.type))
+		{
+			float_value(fn, ins.a);
+			float_value(fn, ins.b);
+			remember_temp_reg(ins.dest, "rax");
+			return;
+		}
+		const string dst = cmp_value_dest_reg(fn, ins);
+		value_reg(fn, ins.a);
+		if (ins.b.kind != lowir2cy86::ValueKind::Literal)
+			value_reg(fn, ins.b);
+		remember_temp_reg(ins.dest, dst);
+	}
+
 	void dump_const(const lowir2cy86::Instruction& ins)
 	{
 		if (lowir2cy86::is_float_type(ins.type) && !lowir2cy86::is_f80_type(ins.type))
@@ -659,7 +760,39 @@ private:
 			     << ", " << ins.a.text << "\n";
 			return;
 		}
-		out_ << "    mov " << temp_reg(ins.dest) << ", " << ins.a.text << "\n";
+		const string dst = const_dest_reg(ins);
+		out_ << "    mov " << dst << ", " << ins.a.text << "\n";
+		dump_narrow_extend(ins.type, dst);
+		remember_const_dest(ins.dest, dst);
+	}
+
+	string const_dest_reg(const lowir2cy86::Instruction& ins)
+	{
+		if (!preferred_literal_reg_.empty() && lowir2cy86::is_integer_type(ins.type))
+		{
+			const string reg = preferred_literal_reg_;
+			preferred_literal_reg_.clear();
+			fixed_const_dest_ = true;
+			return reg;
+		}
+		if (prefer_r8_literal_ && lowir2cy86::is_integer_type(ins.type))
+		{
+			prefer_r8_literal_ = false;
+			return "r8";
+		}
+		return temp_reg(ins.dest);
+	}
+
+	void remember_const_dest(const string& name, const string& reg)
+	{
+		if (fixed_const_dest_)
+		{
+			fixed_temp_regs_[name] = reg;
+			note_temp_reg(reg);
+			fixed_const_dest_ = false;
+			return;
+		}
+		remember_temp_reg(name, reg);
 	}
 
 	void dump_addr(const lowir2cy86::Function& fn,
@@ -713,17 +846,92 @@ private:
 	void dump_load(const lowir2cy86::Function& fn,
 	               const lowir2cy86::Instruction& ins)
 	{
-		const string dst = load_dest_reg(ins);
+		const string dst = load_dest_reg(fn, ins);
 		out_ << "    load." << ins.type.text << " " << dst << ", "
 		     << load_source(fn, ins.a) << "\n";
-		remember_temp_reg(ins.dest, dst);
+		dump_narrow_extend(ins.type, dst);
+		remember_load_dest(ins.dest, dst);
 	}
 
-	string load_dest_reg(const lowir2cy86::Instruction& ins)
+	string load_dest_reg(const lowir2cy86::Function& fn,
+	                     const lowir2cy86::Instruction& ins)
 	{
+		if (ins.kind == lowir2cy86::InstrKind::AtomicLoad)
+		{
+			const string ptr = value_reg(fn, ins.a);
+			if (!preferred_load_reg_.empty() && ptr == preferred_load_ptr_)
+			{
+				const string reg = preferred_load_reg_;
+				preferred_load_ptr_.clear();
+				preferred_load_reg_.clear();
+				fixed_load_dest_ = true;
+				if (preferred_load_sets_literal_)
+					prefer_r8_literal_ = true;
+				preferred_load_sets_literal_ = false;
+				return reg;
+			}
+			return temp_reg(ins.dest);
+		}
+		if (prefer_r8_stack_load_ && ins.a.kind == lowir2cy86::ValueKind::Slot)
+		{
+			prefer_r8_stack_load_ = false;
+			fixed_load_dest_ = true;
+			return "r8";
+		}
 		if (ins.a.kind == lowir2cy86::ValueKind::Temp)
 			return "r8";
 		return temp_reg(ins.dest);
+	}
+
+	void remember_load_dest(const string& name, const string& reg)
+	{
+		if (fixed_load_dest_)
+		{
+			fixed_temp_regs_[name] = reg;
+			note_temp_reg(reg);
+			fixed_load_dest_ = false;
+			return;
+		}
+		remember_temp_reg(name, reg);
+	}
+
+	void dump_atomic_store(const lowir2cy86::Function& fn,
+	                       const lowir2cy86::Instruction& ins)
+	{
+		const string ptr = value_reg(fn, ins.b);
+		const string src = value_reg(fn, ins.a);
+		if (ins.order_a >= 5)
+		{
+			out_ << "    mov rax, " << src << "\n";
+			out_ << "    xchg." << ins.type.text << " [" << ptr << "], rax\n";
+			remember_reload(ptr, src, true);
+			return;
+		}
+		out_ << "    store." << ins.type.text << " [" << ptr << "], " << src << "\n";
+		remember_reload(ptr, src, true);
+	}
+
+	void remember_store_reload(const lowir2cy86::Function& fn,
+	                           const lowir2cy86::Value& ptr_value,
+	                           const lowir2cy86::Value& src_value)
+	{
+		remember_reload(value_reg(fn, ptr_value), value_reg(fn, src_value), true);
+	}
+
+	void remember_reload(const string& ptr, const string& reg, bool prefer_literal)
+	{
+		preferred_load_ptr_ = ptr;
+		preferred_load_reg_ = reg;
+		preferred_load_sets_literal_ = prefer_literal;
+		note_temp_reg(reg);
+	}
+
+	void dump_narrow_extend(const lowir2cy86::Type& type, const string& reg)
+	{
+		if (lowir2cy86::is_signed_integer_type(type) && type.bits < 64)
+			out_ << "    sext.i" << type.bits << " " << reg << "\n";
+		else if (type.kind == lowir2cy86::TypeKind::UnsignedInt && type.bits < 64)
+			out_ << "    zext.i" << type.bits << " " << reg << "\n";
 	}
 
 	string store_dest(const lowir2cy86::Function& fn,
@@ -732,6 +940,21 @@ private:
 		if (value.kind == lowir2cy86::ValueKind::Temp)
 			return "[" + value_reg(fn, value) + "]";
 		return value_reg(fn, value);
+	}
+
+	void dump_store(const lowir2cy86::Function& fn,
+	                const lowir2cy86::Instruction& ins)
+	{
+		out_ << "    store." << ins.type.text << " " << store_dest(fn, ins.b)
+		     << ", " << value_reg(fn, ins.a) << "\n";
+		remember_store_literal(fn, ins.a);
+	}
+
+	void remember_store_literal(const lowir2cy86::Function& fn,
+	                            const lowir2cy86::Value& value)
+	{
+		if (can_reuse_written_value(value))
+			preferred_literal_reg_ = value_reg(fn, value);
 	}
 
 	void dump_scalar(const lowir2cy86::Function& fn,
@@ -744,9 +967,7 @@ private:
 		else if (ins.kind == lowir2cy86::InstrKind::Cmp)
 			dump_cmp_value(fn, ins);
 		else
-			out_ << "    " << ins.op << "." << ins.src_type.text << "."
-			     << ins.type.text << " " << temp_reg(ins.dest) << ", "
-			     << value_reg(fn, ins.a) << "\n";
+			dump_convert(fn, ins);
 	}
 
 	void dump_unary(const lowir2cy86::Function& fn,
@@ -759,13 +980,85 @@ private:
 		else if (ins.op == "bitnot")
 			out_ << "    not " << dst << "\n";
 		else if (ins.op == "bswap")
+		{
 			out_ << "    bswap " << dst << "\n";
+			if (ins.type.kind == lowir2cy86::TypeKind::UnsignedInt &&
+			    ins.type.bits < 64)
+				out_ << "    zext.i" << ins.type.bits << " " << dst << "\n";
+		}
 		else if (ins.op == "not")
 		{
 			out_ << "    cmp." << ins.type.text << " " << dst << ", 0\n";
 			out_ << "    sete " << dst << "\n";
 			out_ << "    movzx " << dst << ", " << dst << "\n";
 		}
+	}
+
+	void dump_convert(const lowir2cy86::Function& fn,
+	                  const lowir2cy86::Instruction& ins)
+	{
+		const string dst = convert_dest(fn, ins);
+		out_ << "    " << ins.op << "." << conversion_type_text(ins.src_type)
+		     << "." << conversion_type_text(ins.type) << " " << dst << ", "
+		     << convert_source(fn, ins) << "\n";
+		remember_convert_dest(ins, dst);
+	}
+
+	string conversion_type_text(const lowir2cy86::Type& type) const
+	{
+		if (lowir2cy86::is_integer_type(type))
+			return "i" + to_string(type.bits);
+		return type.text;
+	}
+
+	string convert_dest(const lowir2cy86::Function& fn,
+	                    const lowir2cy86::Instruction& ins)
+	{
+		if (lowir2cy86::is_float_type(ins.type) && !lowir2cy86::is_f80_type(ins.type))
+			return "xmm0";
+		if (lowir2cy86::is_integer_type(ins.type))
+		{
+			const string origin = integer_roundtrip_origin(fn, ins);
+			if (!origin.empty())
+				return origin;
+		}
+		return lowir2cy86::is_float_type(ins.type) ? f80_home(fn, ins.dest)
+		                                           : temp_reg(ins.dest);
+	}
+
+	string convert_source(const lowir2cy86::Function& fn,
+	                      const lowir2cy86::Instruction& ins)
+	{
+		if (lowir2cy86::is_float_type(ins.src_type) &&
+		    !lowir2cy86::is_f80_type(ins.src_type))
+			return float_value(fn, ins.a);
+		if (lowir2cy86::is_f80_type(ins.src_type))
+			return f80_value(fn, ins.a);
+		return value_reg(fn, ins.a);
+	}
+
+	void remember_convert_dest(const lowir2cy86::Instruction& ins,
+	                           const string& dst)
+	{
+		if (lowir2cy86::is_float_type(ins.type) && !lowir2cy86::is_f80_type(ins.type))
+			remember_xmm_reg(ins.dest, dst);
+		else
+			remember_temp_reg(ins.dest, dst);
+	}
+
+	string integer_roundtrip_origin(const lowir2cy86::Function& fn,
+	                                const lowir2cy86::Instruction& ins)
+	{
+		if (ins.a.kind != lowir2cy86::ValueKind::Temp)
+			return "";
+		map<string, const lowir2cy86::Instruction*>::const_iterator it =
+		    definitions_.find(ins.a.text);
+		if (it == definitions_.end() || it->second->kind != lowir2cy86::InstrKind::Convert)
+			return "";
+		const lowir2cy86::Instruction& src = *it->second;
+		if (src.a.kind != lowir2cy86::ValueKind::Temp)
+			return "";
+		return value_reg(fn, src.a);
 	}
 
 	void dump_binary(const lowir2cy86::Function& fn,
@@ -800,6 +1093,7 @@ private:
 			out_ << "    " << binary_opcode(ins.op) << " " << dst << ", "
 			     << rhs << "\n";
 		}
+		dump_narrow_extend(ins.type, dst);
 		remember_temp_reg(ins.dest, dst);
 	}
 
@@ -847,6 +1141,7 @@ private:
 
 	void remember_temp_reg(const string& name, const string& reg)
 	{
+		note_temp_reg(reg);
 		for (size_t i = 0; i < temp_names_.size(); ++i)
 		{
 			if (temp_names_[i] == name)
@@ -902,7 +1197,7 @@ private:
 			remember_temp_reg(ins.dest, "rax");
 			return;
 		}
-		const string dst = cmp_value_dest_reg(ins);
+		const string dst = cmp_value_dest_reg(fn, ins);
 		const string lhs = value_reg(fn, ins.a);
 		if (dst != lhs)
 			out_ << "    mov " << dst << ", " << lhs << "\n";
@@ -924,11 +1219,12 @@ private:
 		return op;
 	}
 
-	string cmp_value_dest_reg(const lowir2cy86::Instruction& ins)
+	string cmp_value_dest_reg(const lowir2cy86::Function& fn,
+	                          const lowir2cy86::Instruction& ins)
 	{
 		if (ins.a.kind == lowir2cy86::ValueKind::Temp &&
 		    use_counts_[ins.a.text] == 1)
-			return temp_reg(ins.a.text);
+			return value_reg(fn, ins.a);
 		return temp_reg(ins.dest);
 	}
 
@@ -1068,16 +1364,87 @@ private:
 	{
 		const string dst = ins.has_dest ? temp_reg(ins.dest) : "rax";
 		if (ins.kind == lowir2cy86::InstrKind::AtomicExchange)
-			out_ << "    xchg." << ins.type.text << " ["
-			     << value_reg(fn, ins.a) << "], " << value_reg(fn, ins.b) << "\n";
+		{
+			const string ptr = value_reg(fn, ins.a);
+			const string src = value_reg(fn, ins.b);
+			out_ << "    mov rax, " << src << "\n";
+			out_ << "    xchg." << ins.type.text << " [" << ptr << "], rax\n";
+			if (can_reuse_written_value(ins.b))
+				remember_reload(ptr, src, true);
+		}
 		else if (ins.kind == lowir2cy86::InstrKind::AtomicAddFetch)
-			out_ << "    lock_xadd." << ins.type.text << " ["
-			     << value_reg(fn, ins.a) << "], " << value_reg(fn, ins.b) << "\n";
+		{
+			out_ << "    mov rcx, " << value_reg(fn, ins.a) << "\n";
+			out_ << "    mov rdx, " << value_reg(fn, ins.b) << "\n";
+			out_ << "    mov rax, " << value_reg(fn, ins.b) << "\n";
+			out_ << "    lock_xadd." << ins.type.text << " [rcx], rax\n";
+			out_ << "    add rax, rdx\n";
+		}
 		else
-			out_ << "    lock_cmpxchg." << ins.type.text << " ["
-			     << value_reg(fn, ins.a) << "], " << value_reg(fn, ins.c) << "\n";
+			dump_atomic_compare_exchange(fn, ins);
 		if (ins.has_dest)
+		{
 			out_ << "    mov " << dst << ", rax\n";
+			if (ins.kind != lowir2cy86::InstrKind::AtomicCompareExchange)
+				dump_narrow_extend(ins.type, dst);
+			if (ins.kind != lowir2cy86::InstrKind::AtomicCompareExchange)
+				prefer_r8_literal_ = true;
+			if (ins.kind == lowir2cy86::InstrKind::AtomicCompareExchange)
+				prefer_r8_stack_load_ = true;
+		}
+	}
+
+	void dump_atomic_compare_exchange(const lowir2cy86::Function& fn,
+	                                  const lowir2cy86::Instruction& ins)
+	{
+		const string ptr = value_reg(fn, ins.a);
+		out_ << "    mov rcx, " << ptr << "\n";
+		dump_expected_pointer(fn, ins.b);
+		out_ << "    load." << ins.type.text << " rax, [rdx]\n";
+		const string desired = value_reg(fn, ins.c);
+		out_ << "    mov rsi, " << desired << "\n";
+		out_ << "    lock_cmpxchg." << ins.type.text << " [rcx], rsi\n";
+		out_ << "    store." << ins.type.text << " [rdx], rax\n";
+		out_ << "    sete rax\n";
+		out_ << "    movzx rax, rax\n";
+		if (can_reuse_written_value(ins.c))
+			remember_reload(ptr, desired, false);
+	}
+
+	void dump_expected_pointer(const lowir2cy86::Function& fn,
+	                           const lowir2cy86::Value& value)
+	{
+		const lowir2cy86::Instruction* addr = inline_addr_definition(value);
+		if (addr != nullptr)
+		{
+			const string op =
+			    addr->a.kind == lowir2cy86::ValueKind::Global ? "mov" : "lea";
+			out_ << "    " << op << " rdx, " << value_reg(fn, addr->a) << "\n";
+			return;
+		}
+		out_ << "    mov rdx, " << value_reg(fn, value) << "\n";
+	}
+
+	const lowir2cy86::Instruction* inline_addr_definition(
+	    const lowir2cy86::Value& value) const
+	{
+		if (value.kind != lowir2cy86::ValueKind::Temp ||
+		    inline_atomic_expected_addrs_.find(value.text) ==
+		        inline_atomic_expected_addrs_.end())
+			return nullptr;
+		map<string, const lowir2cy86::Instruction*>::const_iterator it =
+		    definitions_.find(value.text);
+		if (it == definitions_.end())
+			return nullptr;
+		return it->second;
+	}
+
+	bool can_reuse_written_value(const lowir2cy86::Value& value) const
+	{
+		if (value.kind != lowir2cy86::ValueKind::Temp)
+			return false;
+		map<string, int>::const_iterator it = use_counts_.find(value.text);
+		return it == use_counts_.end() || it->second <= 1;
 	}
 
 	void dump_switch(const lowir2cy86::Function& fn,

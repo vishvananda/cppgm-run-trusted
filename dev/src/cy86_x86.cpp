@@ -564,6 +564,25 @@ void emit_not(Emitter& e, const Statement& stmt, int width, const Context& ctx)
 	emit_store_operand(e, stmt.operands[0], width, RAX, ctx);
 }
 
+void emit_bswap(Emitter& e, const Statement& stmt, int width, const Context& ctx)
+{
+	emit_load_operand(e, stmt.operands[1], width, RAX, ctx);
+	if (width == 16)
+	{
+		e.u8(0x66);
+		e.u8(0xc1);
+		e.u8(0xc0);
+		e.u8(8);
+	}
+	else if (width == 32 || width == 64)
+	{
+		e.rex(width == 64, 0, 0, RAX);
+		e.u8(0x0f);
+		e.u8(0xc8 + (RAX & 7));
+	}
+	emit_store_operand(e, stmt.operands[0], width, RAX, ctx);
+}
+
 void emit_binary(Emitter& e, const Statement& stmt, int width,
                  void (*op)(Emitter&, int, int, int), const Context& ctx)
 {
@@ -942,6 +961,7 @@ void emit_instruction(Emitter& e, const Statement& stmt, const Context& ctx)
 	if (core == "move") emit_move(e, stmt, width, ctx);
 	else if (stmt.opcode == "jump" || stmt.opcode == "jumpif" || stmt.opcode == "call" || stmt.opcode == "ret") emit_control(e, stmt, ctx);
 	else if (core == "not") emit_not(e, stmt, width, ctx);
+	else if (core == "bswap") emit_bswap(e, stmt, width, ctx);
 	else if (core == "and") emit_binary(e, stmt, width, emit_and_reg_reg, ctx);
 	else if (core == "or") emit_binary(e, stmt, width, emit_or_reg_reg, ctx);
 	else if (core == "xor") emit_binary(e, stmt, width, emit_xor_reg_reg, ctx);
