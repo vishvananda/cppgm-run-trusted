@@ -1,0 +1,15 @@
+extern "C" int puts(const char *);
+
+int main(int argc, char **)
+{
+  unsigned long size = (unsigned long)(argc + 32);
+  char *p = (char *)__builtin_alloca(size);
+  for(int i = 0; i < 16; ++i) {
+    p[i] = (char)i;
+  }
+  if(p[0] != 0 || p[15] != 15) {
+    return 1;
+  }
+  puts("alloca ok");
+  return 0;
+}

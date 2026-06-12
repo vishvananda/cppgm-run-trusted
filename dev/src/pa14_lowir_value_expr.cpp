@@ -28,6 +28,19 @@ Value FunctionLowerer::emit_builtin_va_arg(const Node& expr)
 	return Value(scalar_lowir_type(expr.type), out);
 }
 
+Value FunctionLowerer::emit_builtin_alloca(const Node& expr)
+{
+	if (expr.children.size() < 2)
+		throw runtime_error("invalid __builtin_alloca");
+	Value raw_size = emit_rvalue(expr.children[1]);
+	Value size = convert_value(raw_size,
+	                           expr.children[1].type,
+	                           pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
+	string out = fresh_temp();
+	instr(out + " = stackalloc i64 " + size.text);
+	return Value("ptr", out);
+}
+
 Value FunctionLowerer::emit_rvalue(const Node& expr) {
 	if (starts_with(expr.line, "literal "))
 		return emit_literal(expr);
@@ -152,6 +165,9 @@ Value FunctionLowerer::emit_rvalue(const Node& expr) {
 				emit_builtin_va_start(expr);
 			return Value("void", "");
 		}
+		if (expr.direct_call != NULL &&
+		    expr.direct_call->name == "__builtin_alloca")
+			return emit_builtin_alloca(expr);
 		Value value = emit_call(expr);
 		if (is_reference(expr.type)) {
 			TypePtr value_type = object_type(expr.type);

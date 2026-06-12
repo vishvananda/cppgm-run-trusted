@@ -303,7 +303,8 @@ Type instruction_result_type(const Instruction& ins)
 	    ins.kind == InstrKind::AtomicExchange ||
 	    ins.kind == InstrKind::AtomicCompareExchange ||
 	    ins.kind == InstrKind::AtomicAddFetch || ins.kind == InstrKind::Unary ||
-	    ins.kind == InstrKind::Binary || ins.kind == InstrKind::VaArg)
+	    ins.kind == InstrKind::Binary || ins.kind == InstrKind::VaArg ||
+	    ins.kind == InstrKind::StackAlloc)
 		return ins.kind == InstrKind::AtomicCompareExchange ? parse_type_text("i64")
 		                                                    : ins.type;
 	return Type();
@@ -413,6 +414,7 @@ void validate_instruction_operands(Function& fn,
 	case InstrKind::Unary:
 	case InstrKind::Exception:
 	case InstrKind::ExceptionSelector:
+	case InstrKind::StackAlloc:
 	case InstrKind::Throw:
 	case InstrKind::Return:
 		validate_symbol_value(fn, program, ins.a);
@@ -482,6 +484,9 @@ void validate_instruction_operands(Function& fn,
 	}
 	if (ins.kind == InstrKind::Unary && ins.op == "decay" && !is_ptr_type(ins.type))
 		throw runtime_error("decay requires pointer");
+	if (ins.kind == InstrKind::StackAlloc &&
+	    (!is_ptr_type(ins.type) || !is_integer_type(ins.src_type)))
+		throw runtime_error("invalid stackalloc");
 	if (ins.kind == InstrKind::Index)
 		validate_projection(ins.op);
 }

@@ -777,6 +777,7 @@ bool FuncGen::emit_value_instruction(const Instruction& ins)
 	if (ins.kind == InstrKind::VaEnd)
 		return true;
 	if (ins.kind == InstrKind::VaArg) { emit_va_arg(ins); return true; }
+	if (ins.kind == InstrKind::StackAlloc) { emit_stack_alloc(ins); return true; }
 	if (ins.kind == InstrKind::Const)
 	{
 		if (lowir2cy86::is_float_type(ins.type))
@@ -885,6 +886,20 @@ bool FuncGen::emit_value_instruction(const Instruction& ins)
 	load_value(ins.a, ins.type, RAX);
 	store_temp(ins.dest, ins.type, RAX);
 	return true;
+}
+
+void FuncGen::emit_stack_alloc(const Instruction& ins)
+{
+	if (!lowir2cy86::is_ptr_type(ins.type))
+		throw runtime_error("invalid stackalloc destination");
+	load_value(ins.a, ins.src_type, RAX);
+	x.mov_imm(64, RCX, 15);
+	x.binary(0x01, 64, RAX, RCX);
+	x.mov_imm(64, RCX, ~static_cast<uint64_t>(15));
+	x.binary(0x21, 64, RAX, RCX);
+	x.binary(0x29, 64, RSP, RAX);
+	x.mov_rr(64, RAX, RSP);
+	store_temp(ins.dest, ins.type, RAX);
 }
 
 bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)

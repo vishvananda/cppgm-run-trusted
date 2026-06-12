@@ -499,6 +499,8 @@ private:
 			parse_atomic_compare_exchange(ins);
 		else if (kw == "call")
 			parse_call(ins, false);
+		else if (kw == "stackalloc")
+			parse_stackalloc(ins);
 		else if (kw == "va_arg")
 			parse_va_arg(ins);
 		else if (kw == "exception" || kw == "exception_selector")
@@ -685,6 +687,14 @@ private:
 		expect(")");
 		if (match("as"))
 			ins.signature = parse_call_signature();
+	}
+
+	void parse_stackalloc(Instruction& ins)
+	{
+		ins.kind = InstrKind::StackAlloc;
+		ins.type = parse_type_text("ptr");
+		ins.src_type = parse_type();
+		ins.a = parse_value();
 	}
 
 	void parse_va_start(Instruction& ins)

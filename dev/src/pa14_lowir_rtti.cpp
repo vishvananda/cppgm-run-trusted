@@ -319,6 +319,17 @@ string typeinfo_name_spelling(TypePtr record)
 		return typeinfo_object_metadata_safe(spelling) ? "_ZTI" + spelling : "";
 	}
 
+	bool eligible_key_function_candidate(const Binding* fn)
+	{
+		return fn != NULL &&
+		       fn->kind == BindingKind::Function &&
+		       fn->is_virtual &&
+		       !fn->is_pure_virtual &&
+		       !fn->is_inline_definition &&
+		       !fn->is_declared_inline &&
+		       !fn->is_constexpr;
+	}
+
 	Binding* record_key_function_candidate(TypePtr record)
 	{
 		TypePtr bare = pa11::strip_cv(record);
@@ -326,24 +337,25 @@ string typeinfo_name_spelling(TypePtr record)
 		    bare->kind != TypeKind::Record ||
 		    bare->scope == NULL)
 			return NULL;
-		for (map<string, vector<Binding*> >::const_iterator it =
-			     bare->scope->members.begin();
-		     it != bare->scope->members.end();
-		     ++it)
+		for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
 		{
-			for (size_t i = 0; i < it->second.size(); ++i)
-			{
-				Binding* fn = it->second[i];
-				if (fn == NULL ||
-				    fn->kind != BindingKind::Function ||
-				    !fn->is_virtual ||
-				    fn->is_pure_virtual ||
-				    fn->is_inline_definition)
-					continue;
+			Binding* fn = bare->scope->binding_order[i];
+			if (eligible_key_function_candidate(fn))
 				return fn;
-			}
 		}
 		return NULL;
+	}
+
+	bool key_function_binding_matches(const Binding* key, const Binding* fn)
+	{
+		return key != NULL &&
+		       fn != NULL &&
+		       fn->kind == BindingKind::Function &&
+		       fn->owner == key->owner &&
+		       fn->name == key->name &&
+		       fn->type.get() != NULL &&
+		       key->type.get() != NULL &&
+		       pa11::same_type(fn->type, key->type);
 	}
 
 	bool record_key_function_defined_here(const ProgramLowerer& program,
@@ -354,24 +366,23 @@ string typeinfo_name_spelling(TypePtr record)
 		    bare->kind != TypeKind::Record ||
 		    bare->scope == NULL)
 			return false;
-		for (map<string, vector<Binding*> >::const_iterator it =
-			     bare->scope->members.begin();
-		     it != bare->scope->members.end();
-		     ++it)
+		Binding* key = record_key_function_candidate(bare);
+		if (key == NULL)
+			return false;
+		if (program.function_definition_bindings.find(key) !=
+		    program.function_definition_bindings.end())
+			return true;
+		map<string, vector<Binding*> >::const_iterator overloads =
+			bare->scope->members.find(key->name);
+		if (overloads == bare->scope->members.end())
+			return false;
+		for (size_t i = 0; i < overloads->second.size(); ++i)
 		{
-			for (size_t i = 0; i < it->second.size(); ++i)
-			{
-				Binding* fn = it->second[i];
-				if (fn == NULL ||
-				    fn->kind != BindingKind::Function ||
-				    !fn->is_virtual ||
-				    fn->is_pure_virtual ||
-				    fn->is_inline_definition)
-					continue;
-				if (program.function_definition_bindings.find(fn) !=
+			Binding* candidate = overloads->second[i];
+			if (key_function_binding_matches(key, candidate) &&
+			    program.function_definition_bindings.find(candidate) !=
 				    program.function_definition_bindings.end())
-					return true;
-			}
+				return true;
 		}
 		return false;
 	}

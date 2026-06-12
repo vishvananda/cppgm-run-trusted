@@ -550,6 +550,7 @@ struct FuncGen
 	void save_variadic_registers();
 	void emit_va_start(const Instruction& ins);
 	void emit_va_arg(const Instruction& ins);
+	void emit_stack_alloc(const Instruction& ins);
 	void emit_call(const Instruction& ins);
 	void emit_simple_constructor_inline_call(const Function& callee,
 	                                         const Instruction& ins);

@@ -209,6 +209,8 @@ struct CyEmitter {
 		case InstrKind::Call:
 			emit_call(fn, ins);
 			break;
+		case InstrKind::StackAlloc:
+			throw runtime_error("stackalloc unsupported by cy86 backend");
 		case InstrKind::VaStart:
 		case InstrKind::VaArg:
 		case InstrKind::VaEnd:

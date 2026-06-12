@@ -1,0 +1,13 @@
+#include "200-host-key-function-order-import.helper.h"
+
+int KeyOrder::second()
+{
+  return value + 7;
+}
+
+int main()
+{
+  KeyOrder object(2);
+  return host_use_key_order(&object) - 20;
+}
+

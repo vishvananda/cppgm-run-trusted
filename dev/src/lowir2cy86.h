@@ -121,6 +121,7 @@ enum class InstrKind
 	Cmp,
 	Convert,
 	Call,
+	StackAlloc,
 	VaStart,
 	VaArg,
 	VaEnd,

@@ -56,3 +56,45 @@ PA31 host object writer.
   RTTI/vtable emission, and host object calls do not become catch-all modules.
 - Commit cohesive checkpoints only after the scoped or through report is stable
   enough to make the commit useful for regression isolation.
+
+## Architecture Review
+
+The PA33 implementation is organized around the intended phase boundaries.
+Typed declaration, template, builtin, and record facts remain in `pa11`/`pa12`;
+ABI spelling and LowIR metadata are produced in `pa14_lowir*`; ELF sections,
+relocations, call lowering, LSDA, and host machine code stay in
+`pa31_host_object*`. The audit did not find reference-binary shell-outs,
+fixture-name gates, skipped compiler phases, embedded runtime payloads, or host
+compiler output used as compiler output.
+
+Two ownership defects needed cleanup. First, vtable/RTTI ownership was checking
+whether any out-of-line virtual member was defined in the TU, which could emit a
+vtable from a TU that defined a later virtual but not the key function. The
+selection now walks class `binding_order`, chooses the first eligible key
+function declaration, and treats duplicate out-of-class definition bindings as
+definitions of that same key only when owner, name, and function type match.
+Second, `__builtin_alloca` was declared as a host object import for `malloc`,
+which was a semantic substitute instead of stack allocation. It is now a typed
+`stackalloc` LowIR operation, rejected by the older CY86 backend and lowered by
+the host object backend with a 16-byte-aligned dynamic `rsp` decrement restored
+by the normal frame epilogue.
+
+The file-audit pass also caught that adding alloca code directly to
+`FuncGen::emit_value_instruction` pushed the dispatcher over the function-size
+limit. That lowering was split into `FuncGen::emit_stack_alloc`, preserving the
+host-object ownership boundary and keeping the dispatcher below the audit cap.
+
+## Final Architecture Review
+
+The final PA33 shape keeps object facts explicit: vtable/RTTI decisions are made
+from `Binding` and `Type` state before object emission; the object writer
+receives concrete LowIR operations and metadata rather than reconstructing C++
+semantics from strings. Host-only constructs added for PA33, including
+`stackalloc` and varargs, are explicit IR surfaces with validation and backend
+ownership instead of fallback imports.
+
+Regression coverage was added under `cppgm.tests/course/pa33/` for both audit
+findings: a cross-TU key-function test proves a TU defining only a later virtual
+imports, rather than emits, the key-owned vtable/RTTI; an alloca test proves the
+object does not import `malloc`. The required through-stage report and file
+audit pass on the final source.

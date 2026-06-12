@@ -646,6 +646,7 @@ private:
 	Value emit_rvalue(const Node& expr);
 	void emit_builtin_va_start(const Node& expr);
 	Value emit_builtin_va_arg(const Node& expr);
+	Value emit_builtin_alloca(const Node& expr);
 	Value emit_lvalue_addr(const Node& expr);
 	Value emit_member_lvalue_addr(const Node& expr);
 	Value emit_literal(const Node& expr);
