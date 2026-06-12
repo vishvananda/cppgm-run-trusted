@@ -1,5 +1,6 @@
 #include "pa12_templates_function_abi_internal.h"
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <functional>
@@ -848,29 +849,92 @@ string abi_dependent_typename_type(
 	vector<string> parts = abi_split_qualified_name(type->name);
 	if (parts.empty())
 		return abi_source_name(type->name);
-	string out;
+		if (!type->dependent_typename_qualified &&
+		    type->dependent_typename_template_id)
+		{
+			string root = type->template_primary_name.empty()
+				? parts[0] : type->template_primary_name;
+		size_t template_pos = root.find('<');
+		if (template_pos != string::npos)
+			root = root.substr(0, template_pos);
+		if (internal_type_transform_name(root))
+		{
+			string out = include_typename_marker ? "Tn" : "";
+			out += "u" + abi_source_name(root);
+			vector<pa11::TemplateInstanceArgument> arguments =
+				!type->dependent_typename_template_argument_lists.empty()
+				? type->dependent_typename_template_argument_lists[0]
+				: type->template_arguments;
+			if (!arguments.empty())
+			{
+				out += "I";
+				for (size_t i = 0; i < arguments.size(); ++i)
+					out += abi_template_instance_argument(arguments[i],
+					                                      template_parameters,
+					                                      expression_tokens);
+				out += "E";
+			}
+				return out;
+			}
+		}
+		if (!type->dependent_typename_qualified &&
+		    type->dependent_typename_template_id)
+		{
+			string root = type->template_primary_name.empty()
+				? parts[0] : type->template_primary_name;
+			size_t template_pos = root.find('<');
+			if (template_pos != string::npos)
+				root = root.substr(0, template_pos);
+			if (root == "enable_if_t")
+			{
+				vector<pa11::TemplateInstanceArgument> arguments =
+					!type->dependent_typename_template_argument_lists.empty()
+					? type->dependent_typename_template_argument_lists[0]
+					: type->template_arguments;
+				string out = include_typename_marker ? "TnN" : "N";
+				out += abi_source_name("enable_if");
+				if (!arguments.empty())
+				{
+					out += "I";
+					for (size_t i = 0; i < arguments.size(); ++i)
+						out += abi_template_instance_argument(arguments[i],
+						                                      template_parameters,
+						                                      expression_tokens);
+					out += "E";
+				}
+				out += abi_source_name("type") + "E";
+				return out;
+			}
+		}
+		string out;
 	if (type->dependent_typename_qualified)
 		out = include_typename_marker ? "TnN" : "N";
 	else
 		out = include_typename_marker ? "Tn" : "";
 	size_t list_index = 0;
 	for (size_t i = 0; i < parts.size(); ++i)
-	{
-		string part = parts[i];
-		size_t template_pos = part.find('<');
-		bool has_template_id = template_pos != string::npos;
-		if (has_template_id)
-			part = part.substr(0, template_pos);
-		out += abi_source_name(part);
-		vector<pa11::TemplateInstanceArgument> arguments;
-		if (has_template_id &&
-		    list_index <
-			    type->dependent_typename_template_argument_lists.size())
-			arguments =
-				type->dependent_typename_template_argument_lists[list_index++];
-		else if (has_template_id && i == 0 &&
-		         !type->template_arguments.empty())
-			arguments = type->template_arguments;
+		{
+			string part = parts[i];
+			size_t template_pos = part.find('<');
+			bool has_template_id = template_pos != string::npos;
+			bool implicit_template_id =
+				!has_template_id &&
+				i == 0 &&
+				type->dependent_typename_template_id &&
+				(!type->template_arguments.empty() ||
+				 !type->dependent_typename_template_argument_lists.empty());
+			if (has_template_id)
+				part = part.substr(0, template_pos);
+			out += abi_source_name(part);
+			vector<pa11::TemplateInstanceArgument> arguments;
+			if ((has_template_id || implicit_template_id) &&
+			    list_index <
+				    type->dependent_typename_template_argument_lists.size())
+				arguments =
+					type->dependent_typename_template_argument_lists[list_index++];
+			else if ((has_template_id || implicit_template_id) && i == 0 &&
+			         !type->template_arguments.empty())
+				arguments = type->template_arguments;
 		if (!arguments.empty())
 		{
 			out += "I";

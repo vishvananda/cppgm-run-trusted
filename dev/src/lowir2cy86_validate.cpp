@@ -303,7 +303,7 @@ Type instruction_result_type(const Instruction& ins)
 	    ins.kind == InstrKind::AtomicExchange ||
 	    ins.kind == InstrKind::AtomicCompareExchange ||
 	    ins.kind == InstrKind::AtomicAddFetch || ins.kind == InstrKind::Unary ||
-	    ins.kind == InstrKind::Binary)
+	    ins.kind == InstrKind::Binary || ins.kind == InstrKind::VaArg)
 		return ins.kind == InstrKind::AtomicCompareExchange ? parse_type_text("i64")
 		                                                    : ins.type;
 	return Type();
@@ -439,6 +439,11 @@ void validate_instruction_operands(Function& fn,
 		break;
 	case InstrKind::Call:
 		validate_call(fn, program, ins);
+		break;
+	case InstrKind::VaStart:
+	case InstrKind::VaArg:
+	case InstrKind::VaEnd:
+		validate_symbol_value(fn, program, ins.a);
 		break;
 	case InstrKind::Branch:
 		validate_symbol_value(fn, program, ins.a);

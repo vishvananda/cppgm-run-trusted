@@ -1334,10 +1334,12 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			target->kind == ScopeKind::Class &&
 			!class_protected_access_.empty() &&
 			class_protected_access_.back();
-		function->unwind_no = suffix != NULL && suffix->noexcept_decl;
-		function->ref_qualifier = ref_qualifier;
-		if (suffix != NULL &&
-		    target->kind == ScopeKind::Class &&
+			function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+			function->ref_qualifier = ref_qualifier;
+			if (suffix != NULL && !suffix->abi_tags.empty())
+				function->abi_tags = suffix->abi_tags;
+			if (suffix != NULL &&
+			    target->kind == ScopeKind::Class &&
 		    constructor_name_matches_scope(target, name))
 			for (size_t i = 0; i < suffix->parameters.size(); ++i)
 				if (suffix->parameters[i].has_default)

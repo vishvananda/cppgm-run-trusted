@@ -200,11 +200,12 @@ struct ProgramLowerer
 	map<const Binding*, string> symbols;
 	map<string, int> used_symbols;
 	map<string, string> function_symbols;
-	set<string> defined_functions;
-	set<string> declared_functions;
-	set<string> defined_globals;
-	set<string> declared_globals;
-	vector<const Binding*> global_definition_bindings;
+		set<string> defined_functions;
+		set<string> declared_functions;
+		set<string> defined_globals;
+		set<string> declared_globals;
+		set<const Binding*> function_definition_bindings;
+		vector<const Binding*> global_definition_bindings;
 	map<const Binding*, Node> global_definition_nodes;
 	map<string, string> string_literals;
 	map<string, string> string_literal_types;
@@ -235,13 +236,14 @@ struct ProgramLowerer
 	const Binding* active_inline_definition;
 	size_t active_inline_dependency_insert_count;
 	bool native_lowering;
+	bool host_object_lowering;
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
 		int generated_assignment_emit_depth;
 
 		typedef vector<const Binding*>::iterator PendingInlineIterator;
 
-		explicit ProgramLowerer(bool native = false);
+		ProgramLowerer(bool native = false, bool host_object = false);
 	string symbol_for(const Binding* binding);
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
 	string destructor_symbol_for(const Binding* binding, bool base_entry);
@@ -391,6 +393,7 @@ private:
 		string ret;
 		string preallocated_call_slot;
 		vector<string> args;
+		vector<TypePtr> arg_types;
 		vector<pair<Value, TypePtr> > temp_cleanups;
 		bool setup_may_create_temp_cleanup;
 		bool protect_setup_only;
@@ -641,6 +644,8 @@ private:
 	                        const Node*& default_node);
 
 	Value emit_rvalue(const Node& expr);
+	void emit_builtin_va_start(const Node& expr);
+	Value emit_builtin_va_arg(const Node& expr);
 	Value emit_lvalue_addr(const Node& expr);
 	Value emit_member_lvalue_addr(const Node& expr);
 	Value emit_literal(const Node& expr);
@@ -758,7 +763,10 @@ private:
 	Value emit_throw(const Node& expr);
 	void ensure_throw_runtime_declarations();
 	void ensure_rethrow_runtime_declaration();
+	void ensure_noexcept_terminate_helper();
 	void emit_rethrow();
+	void emit_noexcept_terminate_landing(TypePtr ret,
+	                                      bool indirect_result);
 	string ensure_exception_object_global(TypePtr object);
 	string emit_exception_allocation(TypePtr object,
 	                                 bool protect_throw,

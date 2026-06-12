@@ -19,6 +19,15 @@ bool abi_binding_has_only_std_namespace(const vector<Scope*>& scopes)
 	return scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0]);
 }
 
+vector<Scope*> abi_dependent_typename_scope_prefix_for_binding(
+	const Binding* binding)
+{
+	if (binding == NULL || binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Namespace)
+		return vector<Scope*>();
+	return abi_scope_path_outer_first(binding->owner);
+}
+
 string abi_encode_binding_name_with_substitutions(
 	const Binding* binding,
 	AbiSubstitutionContext& ctx)
@@ -79,6 +88,13 @@ string abi_encode_function_template_name_with_substitutions(
 	if (scopes.empty() && declaration->name.compare(0, 8, "operator") == 0)
 		abi_add_substitution(ctx, name);
 	string leaf = name + "I";
+	bool saved_function_template_argument_list =
+		ctx.function_template_argument_list;
+	size_t saved_function_template_argument_substitution_floor =
+		ctx.function_template_argument_substitution_floor;
+	ctx.function_template_argument_list = true;
+	ctx.function_template_argument_substitution_floor =
+		ctx.substitutions.size();
 	for (size_t i = 0; i < full_args.size(); ++i)
 	{
 		if (i < declaration->parameters.size())
@@ -88,6 +104,10 @@ string abi_encode_function_template_name_with_substitutions(
 			leaf += abi_template_argument_with_substitutions(full_args[i],
 			                                                ctx);
 	}
+	ctx.function_template_argument_list =
+		saved_function_template_argument_list;
+	ctx.function_template_argument_substitution_floor =
+		saved_function_template_argument_substitution_floor;
 	leaf += "E";
 	string encoded;
 	if (scopes.empty())
@@ -106,6 +126,13 @@ void abi_append_template_argument_list_with_substitutions(
 	const vector<TemplateArgument>& full_args,
 	AbiSubstitutionContext& ctx)
 {
+	bool saved_function_template_argument_list =
+		ctx.function_template_argument_list;
+	size_t saved_function_template_argument_substitution_floor =
+		ctx.function_template_argument_substitution_floor;
+	ctx.function_template_argument_list = true;
+	ctx.function_template_argument_substitution_floor =
+		ctx.substitutions.size();
 	for (size_t i = 0; i < full_args.size(); ++i)
 	{
 		if (i < declaration->parameters.size())
@@ -114,6 +141,30 @@ void abi_append_template_argument_list_with_substitutions(
 		else
 			out += abi_template_argument_with_substitutions(full_args[i], ctx);
 	}
+	ctx.function_template_argument_list =
+		saved_function_template_argument_list;
+	ctx.function_template_argument_substitution_floor =
+		saved_function_template_argument_substitution_floor;
+}
+
+void abi_append_raw_template_argument_list_with_substitutions(
+	string& out,
+	const vector<TemplateArgument>& full_args,
+	AbiSubstitutionContext& ctx)
+{
+	bool saved_function_template_argument_list =
+		ctx.function_template_argument_list;
+	size_t saved_function_template_argument_substitution_floor =
+		ctx.function_template_argument_substitution_floor;
+	ctx.function_template_argument_list = true;
+	ctx.function_template_argument_substitution_floor =
+		ctx.substitutions.size();
+	for (size_t i = 0; i < full_args.size(); ++i)
+		out += abi_template_argument_with_substitutions(full_args[i], ctx);
+	ctx.function_template_argument_list =
+		saved_function_template_argument_list;
+	ctx.function_template_argument_substitution_floor =
+		saved_function_template_argument_substitution_floor;
 }
 
 TypePtr abi_owner_record_for_special_member(const Binding* binding)
@@ -137,10 +188,10 @@ TypePtr abi_owner_record_for_special_member(const Binding* binding)
 	return owner_record;
 }
 
-string abi_special_member_symbol_with_substitutions(
-	const Binding* binding,
-	AbiSubstitutionContext& ctx)
-{
+	string abi_special_member_symbol_with_substitutions(
+		const Binding* binding,
+		AbiSubstitutionContext& ctx)
+	{
 	if (binding->kind != BindingKind::Function ||
 	    binding->owner == NULL ||
 	    binding->owner->kind != ScopeKind::Class ||
@@ -154,23 +205,27 @@ string abi_special_member_symbol_with_substitutions(
 		 owner_record->is_template_specialization &&
 		 !owner_record->template_primary_name.empty() &&
 		 binding->name == owner_record->template_primary_name);
-	bool destructor = !binding->name.empty() && binding->name[0] == '~';
-	if (owner_record.get() == NULL || (!constructor && !destructor))
-		return "";
-	string owner_name =
-		abi_record_type_with_substitutions(owner_record, ctx, true);
-	string encoded_name;
+		bool destructor = !binding->name.empty() && binding->name[0] == '~';
+		if (owner_record.get() == NULL || (!constructor && !destructor))
+			return "";
+		string abi_tags;
+		for (size_t i = 0; i < binding->abi_tags.size(); ++i)
+			abi_tags += "B" + abi_source_name(binding->abi_tags[i]);
+		string owner_name =
+			abi_record_type_with_substitutions(owner_record, ctx, true);
+		string encoded_name;
 	if (owner_name.size() >= 2 &&
 	    owner_name[0] == 'N' &&
-	    owner_name[owner_name.size() - 1] == 'E')
-		encoded_name = owner_name.substr(0, owner_name.size() - 1) +
-		               (constructor ? "C1" : "D1") + "E";
-	else
-		encoded_name = "N" + owner_name +
-		               (constructor ? "C1" : "D1") + "E";
+		    owner_name[owner_name.size() - 1] == 'E')
+			encoded_name = owner_name.substr(0, owner_name.size() - 1) +
+			               (constructor ? "C1" : "D1") + abi_tags + "E";
+		else
+			encoded_name = "N" + owner_name +
+			               (constructor ? "C1" : "D1") + abi_tags + "E";
 	string bare;
 	for (size_t i = 1; i < binding->type->parameters.size(); ++i)
-		bare += abi_type_with_substitutions(binding->type->parameters[i], ctx);
+		bare += abi_function_parameter_type_with_substitutions(
+			binding->type->parameters[i], ctx);
 	if (binding->type->parameters.size() == 1)
 		bare += "v";
 	return "_Z" + encoded_name + bare;
@@ -205,7 +260,8 @@ string abi_constructor_template_specialization_symbol(
 		? binding->type : fn_type;
 	size_t first_param = 1;
 	for (size_t i = first_param; i < bare_fn_type->parameters.size(); ++i)
-		bare += abi_type_with_substitutions(bare_fn_type->parameters[i], ctx);
+		bare += abi_function_parameter_type_with_substitutions(
+			bare_fn_type->parameters[i], ctx);
 	if (bare_fn_type->parameters.size() == first_param)
 		bare += "v";
 	return "_Z" + encoded_name + bare;
@@ -228,33 +284,43 @@ string abi_binding_symbol_with_substitutions(
 	      binding->owner->name.empty())))
 		return binding->name;
 	AbiSubstitutionContext ctx(template_parameters, NULL, NULL);
+	ctx.dependent_typename_scope_prefix =
+		abi_dependent_typename_scope_prefix_for_binding(binding);
 	string special_member =
 		abi_special_member_symbol_with_substitutions(binding, ctx);
 	if (!special_member.empty())
 		return special_member;
-	string encoded_name =
-		abi_encode_binding_name_with_substitutions(binding, ctx);
 	if (binding->kind != BindingKind::Function ||
 	    binding->type.get() == NULL ||
 	    binding->type->kind != pa11::TypeKind::Function)
+	{
+		string encoded_name =
+			abi_encode_binding_name_with_substitutions(binding, ctx);
 		return "_Z" + encoded_name;
+	}
+	string encoded_name;
 	if (binding->name.compare(0, 9, "operator ") == 0)
 	{
 		if (binding->owner != NULL &&
 		    binding->owner->kind == ScopeKind::Class)
 		{
-			TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
+			vector<Scope*> scopes =
+				abi_binding_scope_path_outer_first(binding);
 			encoded_name = "N";
+			bool const_member = (binding->type->cv & pa11::CV_CONST) != 0;
+			bool volatile_member =
+				(binding->type->cv & pa11::CV_VOLATILE) != 0;
 			if (!binding->type->parameters.empty() &&
 			    pa11::strip_cv(binding->type->parameters[0])->kind ==
 				    pa11::TypeKind::Pointer &&
 			    pa11::type_has_const(
 				    pa11::strip_cv(binding->type->parameters[0])->base))
+				const_member = true;
+			if (const_member)
 				encoded_name += "K";
-			encoded_name +=
-				abi_record_type_with_substitutions(owner_record,
-				                                   ctx,
-				                                   false);
+			if (volatile_member)
+				encoded_name += "V";
+			encoded_name += abi_scope_prefix_with_substitutions(scopes, ctx);
 			encoded_name += "cv" +
 				abi_type_with_substitutions(binding->type->base,
 				                            ctx);
@@ -265,14 +331,17 @@ string abi_binding_symbol_with_substitutions(
 				abi_type_with_substitutions(binding->type->base,
 				                            ctx);
 	}
+	else
+		encoded_name =
+			abi_encode_binding_name_with_substitutions(binding, ctx);
 	string bare;
 	size_t first_param =
 		binding->owner != NULL &&
 		binding->owner->kind == ScopeKind::Class &&
 		!binding->is_static_member ? 1 : 0;
 	for (size_t i = first_param; i < binding->type->parameters.size(); ++i)
-		bare += abi_type_with_substitutions(binding->type->parameters[i],
-		                                    ctx);
+		bare += abi_function_parameter_type_with_substitutions(
+			binding->type->parameters[i], ctx);
 	if (binding->type->variadic)
 		bare += "z";
 	else if (binding->type->parameters.size() == first_param)
@@ -298,6 +367,8 @@ string abi_function_template_specialization_symbol_with_substitutions(
 	                           expression_tokens,
 	                           parameter_names);
 	ctx.actual_template_arguments = full_args;
+	ctx.dependent_typename_scope_prefix =
+		abi_dependent_typename_scope_prefix_for_binding(binding);
 	string encoded_name;
 	TypePtr fn_type = declaration->generic_function_type;
 	bool constructor_template =
@@ -339,9 +410,8 @@ string abi_function_template_specialization_symbol_with_substitutions(
 		else
 			encoded_name += "cv" +
 				abi_type_with_substitutions(fn_type->base, ctx) + "I";
-		for (size_t i = 0; i < full_args.size(); ++i)
-			encoded_name += abi_template_argument_with_substitutions(
-				full_args[i], ctx);
+		abi_append_raw_template_argument_list_with_substitutions(
+			encoded_name, full_args, ctx);
 		encoded_name += "E";
 		if (binding != NULL &&
 		    binding->owner != NULL &&
@@ -381,11 +451,13 @@ string abi_function_template_specialization_symbol_with_substitutions(
 		{
 			bool saved = ctx.use_actual_template_parameter_types;
 			ctx.use_actual_template_parameter_types = true;
-			bare += abi_type_with_substitutions(param, ctx);
+			bare += abi_function_parameter_type_with_substitutions(
+				param, ctx);
 			ctx.use_actual_template_parameter_types = saved;
 		}
 		else
-			bare += abi_type_with_substitutions(param, ctx);
+			bare += abi_function_parameter_type_with_substitutions(
+				param, ctx);
 	}
 	if (fn_type->variadic)
 		bare += "z";

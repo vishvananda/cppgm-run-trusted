@@ -2,6 +2,16 @@
 
 namespace std {
 
+class logic_error : public exception {
+  const char* message_;
+
+public:
+  explicit logic_error(const char* message) : message_(message) {}
+  logic_error(const logic_error& other) : exception(other), message_(other.message_) {}
+  virtual ~logic_error() {}
+  virtual const char* what() const { return message_; }
+};
+
 class runtime_error : public exception {
   const char* message_;
 

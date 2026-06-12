@@ -1,0 +1,20 @@
+#include <exception>
+
+namespace std {
+
+class type_info {
+public:
+  virtual ~type_info();
+  bool operator==(const type_info &) const;
+  bool operator!=(const type_info &) const;
+  const char *name() const;
+};
+
+class bad_typeid : public exception {
+public:
+  bad_typeid() throw();
+  virtual ~bad_typeid() throw();
+  virtual const char *what() const throw();
+};
+
+}

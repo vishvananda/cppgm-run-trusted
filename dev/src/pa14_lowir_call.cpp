@@ -865,58 +865,80 @@ void FunctionLowerer::build_scalar_call(CallEmissionState& call)
 		out << call.args[i];
 	}
 	out << ")";
-	if (call.direct == NULL || call.virtual_call)
+	bool direct_variadic_signature =
+		program_.native_lowering &&
+		call.direct != NULL &&
+		!call.virtual_call &&
+		call.callee_type->variadic &&
+		call.arg_types.size() == call.args.size();
+	if (call.direct == NULL || call.virtual_call || direct_variadic_signature)
 	{
 		out << " as (";
-		for (size_t i = 0; i < call.callee_type->parameters.size(); ++i)
+		if (direct_variadic_signature)
 		{
-			if (i != 0)
-				out << ", ";
-			out << "%arg" << i << " : "
-			    << lowir_parameter(call.callee_type->parameters[i]);
-		}
-		size_t hidden = 0;
-		bool member_this_param =
-			call.direct != NULL &&
-			call.direct->owner != NULL &&
-			call.direct->owner->kind == ScopeKind::Class &&
-			!call.direct->is_static_member &&
-			!call.callee_type->parameters.empty();
-		for (size_t i = member_this_param ? 1 : 0;
-		     i < call.callee_type->parameters.size();
-		     ++i)
-		{
-			vector<TypePtr> vbases = call.direct != NULL
-				? program_.hidden_virtual_bases_for_function_parameter(
-					call.direct, i, call.callee_type->parameters[i])
-				: hidden_virtual_bases_for_parameter(
-					call.callee_type->parameters[i]);
-			for (size_t v = 0; v < vbases.size(); ++v)
+			for (size_t i = 0; i < call.arg_types.size(); ++i)
 			{
-				if (hidden != 0 || !call.callee_type->parameters.empty())
+				if (i != 0)
 					out << ", ";
-				out << "%__pvbptr" << hidden++ << " : ptr";
+				out << "%arg" << i << " : "
+				    << lowir_parameter(call.arg_types[i]);
 			}
 		}
-		if (member_this_param &&
-		    call.direct != NULL &&
-		    !is_class_constructor_binding(call.direct) &&
-		    !is_class_destructor_binding(call.direct))
+		else
 		{
-			vector<TypePtr> vbases = call.direct->is_virtual
-				? program_.hidden_virtual_bases_for_function_parameter(
-					call.direct, 0, call.callee_type->parameters[0])
-				: hidden_virtual_bases_for_record(
-					class_record_for_member(call.direct));
-			for (size_t v = 0; v < vbases.size(); ++v)
+			for (size_t i = 0; i < call.callee_type->parameters.size(); ++i)
 			{
-				if (hidden != 0 || !call.callee_type->parameters.empty() ||
-				    v != 0)
+				if (i != 0)
 					out << ", ";
-				out << "%__vbptr" << v << " : ptr";
+				out << "%arg" << i << " : "
+				    << lowir_parameter(call.callee_type->parameters[i]);
+			}
+			size_t hidden = 0;
+			bool member_this_param =
+				call.direct != NULL &&
+				call.direct->owner != NULL &&
+				call.direct->owner->kind == ScopeKind::Class &&
+				!call.direct->is_static_member &&
+				!call.callee_type->parameters.empty();
+			for (size_t i = member_this_param ? 1 : 0;
+			     i < call.callee_type->parameters.size();
+			     ++i)
+			{
+				vector<TypePtr> vbases = call.direct != NULL
+					? program_.hidden_virtual_bases_for_function_parameter(
+						call.direct, i, call.callee_type->parameters[i])
+					: hidden_virtual_bases_for_parameter(
+						call.callee_type->parameters[i]);
+				for (size_t v = 0; v < vbases.size(); ++v)
+				{
+					if (hidden != 0 || !call.callee_type->parameters.empty())
+						out << ", ";
+					out << "%__pvbptr" << hidden++ << " : ptr";
+				}
+			}
+			if (member_this_param &&
+			    call.direct != NULL &&
+			    !is_class_constructor_binding(call.direct) &&
+			    !is_class_destructor_binding(call.direct))
+			{
+				vector<TypePtr> vbases = call.direct->is_virtual
+					? program_.hidden_virtual_bases_for_function_parameter(
+						call.direct, 0, call.callee_type->parameters[0])
+					: hidden_virtual_bases_for_record(
+						class_record_for_member(call.direct));
+				for (size_t v = 0; v < vbases.size(); ++v)
+				{
+					if (hidden != 0 ||
+					    !call.callee_type->parameters.empty() ||
+					    v != 0)
+						out << ", ";
+					out << "%__vbptr" << v << " : ptr";
+				}
 			}
 		}
 		out << ") -> " << call.ret;
+		if (direct_variadic_signature)
+			out << " [arity=variadic]";
 	}
 	call.call_text = out.str();
 	call.cleanup_temps_in_call =

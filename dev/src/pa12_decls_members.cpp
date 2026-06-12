@@ -186,12 +186,14 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node) {
 	                                      fn_params,
 	                                      false);
 	string dtor_name = "~" + class_scope->name;
-	Binding* dtor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          dtor_name,
-	                          fn_type);
-	dtor->unwind_no = suffix.noexcept_decl;
-	function_parameter_names_[dtor] = vector<string>(1, "this");
+		Binding* dtor = add_value(class_scope,
+		                          BindingKind::Function,
+		                          dtor_name,
+		                          fn_type);
+		dtor->unwind_no = suffix.noexcept_decl;
+		if (!suffix.abi_tags.empty())
+			dtor->abi_tags = suffix.abi_tags;
+		function_parameter_names_[dtor] = vector<string>(1, "this");
 	if (!active_class_instantiation_dependent())
 		stamp_template_member_function_symbol(dtor);
 	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
@@ -724,8 +726,10 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		ctor->is_inline_definition &&
 		bare_class_type->is_template_specialization &&
 		!active_class_instantiation_dependent();
-	ctor->unwind_no = suffix.noexcept_decl;
-	if (defaulted) {
+		ctor->unwind_no = suffix.noexcept_decl;
+		if (!suffix.abi_tags.empty())
+			ctor->abi_tags = suffix.abi_tags;
+		if (defaulted) {
 		ctor->is_defaulted = true;
 		ctor->is_generated_default_constructor = parameters.empty(); }
 	if (!active_class_instantiation_dependent())
@@ -1255,9 +1259,11 @@ bool Parser::parse_destructor_like_member() {
 	                          dtor_name,
 	                          fn_type);
 	function_parameter_names_[dtor] = vector<string>(1, "this");
-	dtor->is_inline_definition = at(OP_LBRACE);
-	dtor->unwind_no = suffix.noexcept_decl;
-	dtor->is_virtual = dtor->is_virtual || virtual_decl;
+		dtor->is_inline_definition = at(OP_LBRACE);
+		dtor->unwind_no = suffix.noexcept_decl;
+		if (!suffix.abi_tags.empty())
+			dtor->abi_tags = suffix.abi_tags;
+		dtor->is_virtual = dtor->is_virtual || virtual_decl;
 	dtor->is_override_specified =
 		dtor->is_override_specified || suffix.override_decl;
 	dtor->is_final_virtual = dtor->is_final_virtual || suffix.final_decl;

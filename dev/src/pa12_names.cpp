@@ -699,9 +699,11 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 			}
 			else
 				pos_ = save;
-		}
-		else
-			pos_ = save;
+			}
+			else
+			{
+				pos_ = save;
+			}
 			if (scope == NULL)
 			{
 				string ordinary_root = consume_identifier();
@@ -784,9 +786,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 				if (scope == NULL)
 					scope = resolve_qualifier(binding);
 				if (scope == NULL)
-				{
 					throw runtime_error("qualified lookup root not found");
-				}
 				text = ordinary_root + "::";
 			}
 		}

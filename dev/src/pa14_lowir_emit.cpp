@@ -4,13 +4,22 @@ namespace pa14 {
 namespace internal {
 namespace {
 
-void collect_direct_calls(const Node& node, set<const Binding*>& out)
-{
-	if (node.direct_call != NULL)
-		out.insert(node.direct_call);
-	for (size_t i = 0; i < node.children.size(); ++i)
-		collect_direct_calls(node.children[i], out);
-}
+	void collect_direct_calls(const Node& node, set<const Binding*>& out)
+	{
+		if (node.direct_call != NULL)
+			out.insert(node.direct_call);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			collect_direct_calls(node.children[i], out);
+	}
+
+	void note_function_definitions(ProgramLowerer& program, const Node& node)
+	{
+		if (starts_with(node.line, "function-definition ") &&
+		    node.binding != NULL)
+			program.function_definition_bindings.insert(node.binding);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			note_function_definitions(program, node.children[i]);
+	}
 
 void collect_base_constructor_calls(const Node& node, set<const Binding*>& out)
 {
@@ -315,11 +324,14 @@ void demand_noop_generated_default_dependencies(
 void collect_parser_output(ProgramLowerer& program,
                            pa12::internal::Parser& parser)
 {
-	const vector<Node>& extra = parser.extra_lowir_nodes();
-	set<const Binding*> direct_calls;
-	collect_direct_calls(parser.root(), direct_calls);
-	for (size_t i = 0; i < extra.size(); ++i)
-		program.register_inline_definition(extra[i]);
+		const vector<Node>& extra = parser.extra_lowir_nodes();
+		set<const Binding*> direct_calls;
+		collect_direct_calls(parser.root(), direct_calls);
+		note_function_definitions(program, parser.root());
+		for (size_t i = 0; i < extra.size(); ++i)
+			note_function_definitions(program, extra[i]);
+		for (size_t i = 0; i < extra.size(); ++i)
+			program.register_inline_definition(extra[i]);
 	for (size_t i = 0; i < extra.size(); ++i)
 		collect_extra_variable(program, extra[i]);
 	demand_object_roots(program, extra);
@@ -339,7 +351,8 @@ void emit_lowir(const vector<string>& srcfiles,
                 const string& outfile,
                 const Options& options)
 {
-	internal::ProgramLowerer program(options.native_lowering);
+	internal::ProgramLowerer program(options.native_lowering,
+	                                 options.host_object_lowering);
 	vector<unique_ptr<pa12::internal::Parser> > parsers;
 	for (size_t i = 0; i < srcfiles.size(); ++i)
 	{

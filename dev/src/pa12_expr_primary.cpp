@@ -26,8 +26,21 @@ if (type->kind == pa11::TypeKind::Array) return "A" + (type->unknown_bound ? str
 if (type->kind == pa11::TypeKind::Fundamental) return lambda_abi_fundamental(type->fundamental); if (type->kind == pa11::TypeKind::Record || type->kind == pa11::TypeKind::Enum)
 { string name = type->name; size_t pos = name.rfind("::"); if (pos != string::npos)
 name = name.substr(pos + 2); return lambda_abi_source_name(name); } return "i";
-} string lambda_abi_parameter_list(const vector<ParameterInfo>& parameters) { string out;
-for (size_t i = 0; i < parameters.size(); ++i) if (parameters[i].type.get() != NULL) out += lambda_abi_type(parameters[i].type); return out.empty() ? string("v") : out;
+} string lambda_abi_base36(size_t value) { static const char digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; string out;
+do { out.insert(out.begin(), digits[value % 36]); value /= 36; } while (value != 0); return out;
+} string lambda_abi_substitution_code(size_t index) { return index == 0 ? string("S_") : "S" + lambda_abi_base36(index - 1) + "_";
+} size_t lambda_abi_find_substitution(const vector<string>& substitutions, const string& encoded)
+{ for (size_t i = 0; i < substitutions.size(); ++i) if (substitutions[i] == encoded) return i; return static_cast<size_t>(-1);
+} void lambda_abi_add_substitution(vector<string>& substitutions, const string& encoded)
+{ if (encoded.empty() || lambda_abi_find_substitution(substitutions, encoded) != static_cast<size_t>(-1)) return; substitutions.push_back(encoded);
+} void lambda_abi_record_type(TypePtr type, vector<string>& substitutions) { if (type.get() == NULL) return;
+if (type->kind == pa11::TypeKind::Cv || type->kind == pa11::TypeKind::Pointer || type->kind == pa11::TypeKind::LValueReference || type->kind == pa11::TypeKind::RValueReference || type->kind == pa11::TypeKind::Array)
+{ lambda_abi_record_type(type->base, substitutions); lambda_abi_add_substitution(substitutions, lambda_abi_type(type)); return; }
+if (type->kind == pa11::TypeKind::Record || type->kind == pa11::TypeKind::Enum) lambda_abi_add_substitution(substitutions, lambda_abi_type(type));
+} string lambda_abi_parameter_list(const vector<ParameterInfo>& parameters, vector<string>* substitutions = NULL, bool prefer_substitution = false) { string out;
+for (size_t i = 0; i < parameters.size(); ++i) if (parameters[i].type.get() != NULL) { string encoded = lambda_abi_type(parameters[i].type); if (substitutions != NULL && prefer_substitution) { size_t found = lambda_abi_find_substitution(*substitutions, encoded); if (found != static_cast<size_t>(-1)) { out += lambda_abi_substitution_code(found); continue; } } out += encoded; if (substitutions != NULL) lambda_abi_record_type(parameters[i].type, *substitutions); } return out.empty() ? string("v") : out;
+} size_t lambda_abi_context_substitution_seed(const string& encoded_context) { size_t count = 0;
+for (size_t i = 0; i < encoded_context.size(); ++i) { if (!isdigit(static_cast<unsigned char>(encoded_context[i]))) continue; size_t j = i; size_t len = 0; while (j < encoded_context.size() && isdigit(static_cast<unsigned char>(encoded_context[j]))) { len = len * 10 + static_cast<size_t>(encoded_context[j] - '0'); ++j; } if (len != 0 && j + len <= encoded_context.size()) { ++count; i = j + len - 1; } } return count;
 } string lambda_abi_local_source_name(size_t ordinal) { string name = "$_" + to_string(ordinal);
 return to_string(name.size()) + name; } string lambda_specialization_name_part(const TemplateArgument& arg) {
 string text; if (arg.kind == TemplateArgumentKind::Type && arg.type.get() != NULL) text = pa11::describe_type(pa11::strip_cv(arg.type));
@@ -147,11 +160,12 @@ false); call_op->language_linkage = current_language_linkage(); call_op->is_inli
 call_op->ref_qualifier = suffix.ref_qualifier; vector<string> operator_names(1, "this"); for (size_t i = 0; i < suffix.parameters.size(); ++i) operator_names.push_back(suffix.parameters[i].name);
 function_parameter_names_[call_op] = operator_names; string context_abi = context_function != NULL ? (context_function->function_specialization_symbol.empty() ? abi_binding_symbol(context_function, map<string, size_t>())
 : context_function->function_specialization_symbol) : string("_Z0v"); string encoded_context = context_abi.compare(0, 2, "_Z") == 0
-? context_abi.substr(2) : context_abi; string params_abi = lambda_abi_parameter_list(suffix.parameters); bool template_or_member_context = context_function != NULL &&
+? context_abi.substr(2) : context_abi; bool template_or_member_context = context_function != NULL &&
 ((context_function->owner != NULL && context_function->owner->kind == ScopeKind::Class) || !context_function->function_specialization_symbol.empty()); string closure_abi;
-if (template_or_member_context) { string lambda_component = "Ul" + params_abi + "E"; if (ordinal != 0)
+string params_abi = lambda_abi_parameter_list(suffix.parameters); string call_params_abi = params_abi;
+if (template_or_member_context) { vector<string> lambda_substitutions(lambda_abi_context_substitution_seed(encoded_context), string()); params_abi = lambda_abi_parameter_list(suffix.parameters, &lambda_substitutions, false); call_params_abi = lambda_abi_parameter_list(suffix.parameters, &lambda_substitutions, true); string lambda_component = "Ul" + params_abi + "E"; if (ordinal != 0)
 lambda_component += to_string(ordinal - 1) + "_"; closure_abi = "_ZZ" + encoded_context + "EN" + (operator_function_type->cv & pa11::CV_CONST ? "K" : "") +
-lambda_component + "_clE" + params_abi; } else {
+lambda_component + "_clE" + call_params_abi; } else {
 closure_abi = "_ZZ" + encoded_context + "EN" + (operator_function_type->cv & pa11::CV_CONST ? "K" : "") + lambda_abi_local_source_name(ordinal) +
 "clE" + params_abi; } call_op->function_specialization_symbol = closure_abi; map<Binding*, Binding*> capture_fields;
 vector<Node> capture_initializers; for (size_t i = 0; i < captures.size(); ++i) { LambdaCapture& capture = captures[i];

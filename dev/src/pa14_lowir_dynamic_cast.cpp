@@ -3,6 +3,39 @@
 namespace pa14 {
 namespace internal {
 
+namespace {
+
+bool record_has_virtual_base_subobject(TypePtr record, TypePtr base)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr wanted = base.get() != NULL ? pa11::strip_cv(base) : TypePtr();
+	if (bare.get() == NULL || wanted.get() == NULL ||
+	    bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return false;
+	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
+	for (size_t i = 0; i < vbases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
+			return true;
+	return false;
+}
+
+int64_t virtual_base_offset_slot(TypePtr record, TypePtr base)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr wanted = base.get() != NULL ? pa11::strip_cv(base) : TypePtr();
+	if (bare.get() == NULL || wanted.get() == NULL ||
+	    bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return 0;
+	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
+	for (size_t i = 0; i < vbases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
+			return static_cast<int64_t>(i * 8) -
+			       static_cast<int64_t>(vtable_address_point_offset(bare));
+	return 0;
+}
+
+}  // namespace
+
 Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
                                          bool reference_result)
 {
@@ -65,6 +98,52 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 		instr(loaded + " = load ptr $" + slot);
 		return Value("ptr", loaded);
 	}
+	if (source_object.get() != NULL && target_object.get() != NULL &&
+	    source_object->kind == TypeKind::Record &&
+	    target_object->kind == TypeKind::Record &&
+	    record_has_base_subobject(source_object, target_object))
+	{
+		string slot = fresh_aux_slot("dyn_cast", "ptr");
+		instr("store ptr 0, $" + slot);
+		string is_null = fresh_temp();
+		instr(is_null + " = cmp eq ptr " + source_ptr.text + ", 0");
+		string adjust = fresh_block("dyn_cast_upcast");
+		string end = fresh_block("dyn_cast_end");
+		terminate("branch " + is_null + ", ^" + end + ", ^" + adjust);
+		start_block(adjust);
+		string adjusted = source_ptr.text;
+		if (record_has_virtual_base_subobject(source_object, target_object))
+		{
+			string vptr = fresh_temp();
+			instr(vptr + " = load ptr " + source_ptr.text);
+			string offset_addr = fresh_temp();
+			instr(offset_addr + " = index i8 " + vptr + ", " +
+			      to_string(virtual_base_offset_slot(source_object,
+			                                         target_object)));
+			string offset = fresh_temp();
+			instr(offset + " = load i64 " + offset_addr);
+			adjusted = fresh_temp();
+			instr(adjusted + " = index i8 " + source_ptr.text + ", " +
+			      offset);
+		}
+		else
+		{
+			uint64_t offset =
+				base_subobject_offset(source_object, target_object);
+			if (offset != 0)
+			{
+				adjusted = fresh_temp();
+				instr(adjusted + " = index i8 " + source_ptr.text +
+				      ", " + to_string(offset));
+			}
+		}
+		instr("store ptr " + adjusted + ", $" + slot);
+		terminate("jump ^" + end);
+		start_block(end);
+		string loaded = fresh_temp();
+		instr(loaded + " = load ptr $" + slot);
+		return Value("ptr", loaded);
+	}
 	if (reference_result)
 	{
 		if (program_.declared_functions.insert(
@@ -118,12 +197,10 @@ Value FunctionLowerer::emit_dynamic_cast(const Node& expr,
 	instr(target_addr + " = addr @" + target_rtti);
 	string result = fresh_temp();
 	int64_t hint = -2;
-	if (record_has_base_subobject(target_object, source_object))
+	if (record_has_base_subobject(target_object, source_object) &&
+	    !record_has_virtual_base_subobject(target_object, source_object))
 		hint = static_cast<int64_t>(
 			base_subobject_offset(target_object, source_object));
-	else if (record_has_base_subobject(source_object, target_object))
-		hint = static_cast<int64_t>(
-			base_subobject_offset(source_object, target_object));
 	instr(result + " = call ptr @__external_runtime____dynamic_cast(" +
 	      source_ptr.text + ", " + source_addr + ", " + target_addr +
 	      ", " + to_string(hint) + ")");

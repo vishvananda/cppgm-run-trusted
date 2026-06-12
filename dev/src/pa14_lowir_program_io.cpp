@@ -108,6 +108,10 @@ bool demand_builtin_declaration(ProgramLowerer& program,
 			"%arg1 : ptr [capture=nocapture, access=read], "
 			"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
 			"binding=strong, object=cppgm_builtin_memmove]";
+	else if (binding->name == "__builtin_alloca")
+		declaration =
+			"declare function @__builtin_alloca(%arg0 : i64) -> ptr "
+			"[effects=readwrite, unwind=no, binding=strong, object=malloc]";
 	else if (binding->owner != NULL && binding->owner->parent == NULL &&
 	         binding->name == "operatornew" &&
 	         binding->type->parameters.size() == 1)

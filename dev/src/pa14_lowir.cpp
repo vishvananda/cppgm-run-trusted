@@ -14,6 +14,38 @@ if (catch_runtime && program.declared_functions.insert( "__external_runtime____c
 program.declared_functions.insert( "__external_runtime____cxa_end_catch").second) program.declares.push_back( "declare function @__external_runtime____cxa_end_catch() -> void "
 "[role=eh_end_catch, linkage=c, binding=strong, " "object=__cxa_end_catch]"); if (program.declared_functions.insert( "__external_runtime____gxx_personality_v0").second)
 program.declares.push_back( "declare function @__external_runtime____gxx_personality_v0() " "-> void [role=eh_personality, linkage=c, binding=strong, " "object=__gxx_personality_v0]");
+} void FunctionLowerer::ensure_noexcept_terminate_helper() {
+demand_host_eh_declarations(program_, true);
+if (program_.declared_functions.insert("std__terminate").second)
+program_.declares.push_back(
+"declare function @std__terminate() -> void "
+"[return=noreturn, unwind=no, binding=strong, object=_ZSt9terminatev]");
+if (!program_.defined_functions.insert("cppgm_call_terminate").second)
+return;
+FunctionOut helper;
+helper.name = "cppgm_call_terminate";
+helper.header =
+"function @cppgm_call_terminate(%exception : ptr) -> void "
+"[return=noreturn, binding=weak, object=cppgm_call_terminate]";
+helper.parameter_names.push_back("exception");
+Block entry("entry");
+entry.instrs.push_back(
+"    %caught = call ptr @__external_runtime____cxa_begin_catch(%exception)");
+entry.instrs.push_back("    call void @std__terminate()");
+entry.instrs.push_back("    return void");
+entry.terminated = true;
+helper.blocks.push_back(entry);
+program_.functions.push_back(helper);
+} void FunctionLowerer::emit_noexcept_terminate_landing(TypePtr ret,
+                                                        bool indirect_result) {
+string exception = fresh_temp();
+instr(exception + " = exception ptr");
+instr("call void @cppgm_call_terminate(" + exception + ")");
+if (pa11::is_void_type(ret) || indirect_result ||
+    pa11::strip_cv(ret)->kind == TypeKind::Record)
+terminate("return void");
+else
+terminate("return " + scalar_lowir_type(ret) + " 0");
 } bool record_has_default_constructor_for_array(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record || bare->scope == NULL) return false; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name);
 if (found == bare->scope->members.end()) return false; for (size_t i = 0; i < found->second.size(); ++i) if (found->second[i]->kind == BindingKind::Function &&
@@ -338,13 +370,28 @@ binding->owner->kind == ScopeKind::Class) { TypePtr record = pa11::record_type_f
 Binding* ctor = find_record_copy_move_constructor(record->fields[i]->type, true); if (ctor != NULL && ctor->is_inline_definition)
 program_.demand_inline_function(ctor); } } }
 cleanups_.push_back(vector<Cleanup>()); lower_params(); start_block("entry"); lower_param_stores();
+bool noexcept_terminate = program_.host_object_lowering && binding->unwind_no;
+string noexcept_dispatch;
+if (noexcept_terminate) {
+ensure_noexcept_terminate_helper();
+noexcept_dispatch = fresh_block("noexcept_dispatch");
+instr("eh_try ^" + noexcept_dispatch);
+cleanups_.back().push_back(Cleanup("eh_end"));
+}
 if (!lower_defaulted_storage_special_member()) for (size_t i = 0; i < fn_.children.size(); ++i) { if (starts_with(fn_.children[i].line, "compound-statement"))
 lower_compound(fn_.children[i]); } if (current_ != NULL && !current_->terminated) {
 emit_scope_cleanups(cleanups_.back()); if (pa11::is_void_type(fn_type->base) || indirect_result) terminate("return void"); else if (pa11::strip_cv(fn_type->base)->kind == TypeKind::Record)
 { if (record_return_slot_.empty()) record_return_slot_ = fresh_aux_slot("retobj", slot_lowir_type(fn_type->base));
 instr("zeroinit " + to_string(pa11::type_size(fn_type->base)) + "x" + to_string(pa11::type_align(fn_type->base)) + " $" + record_return_slot_);
 terminate("return " + scalar_lowir_type(fn_type->base) + " $" + record_return_slot_); } else
-terminate("return " + scalar_lowir_type(fn_type->base) + " 0"); } cleanups_.pop_back(); for (size_t i = 0; i < blocks_.size(); ++i)
+terminate("return " + scalar_lowir_type(fn_type->base) + " 0"); } if (noexcept_terminate) {
+start_block(noexcept_dispatch);
+instr("eh_catch_all, 1");
+string noexcept_entry = fresh_block("noexcept_terminate");
+terminate("jump ^" + noexcept_entry);
+start_block(noexcept_entry);
+emit_noexcept_terminate_landing(fn_type->base, indirect_result);
+} cleanups_.pop_back(); for (size_t i = 0; i < blocks_.size(); ++i)
 out_.blocks.push_back(*blocks_[i]); return out_; }
 
 FunctionOut FunctionLowerer::lower_deleting_destructor_entry(
@@ -727,6 +774,9 @@ emit_pending_temp_cleanups(); emit_all_cleanups(); terminate("return " + scalar_
 emit_pending_temp_cleanups(); emit_all_cleanups(); terminate("return " + scalar_lowir_type(ret) + " " + value.text); }
 void FunctionLowerer::lower_expr_stmt(const Node& node) { if (!node.children.empty()) lower_discarded_expr(node.children[0]);
 emit_pending_temp_cleanups(); } void FunctionLowerer::lower_discarded_expr(const Node& expr) {
+if (starts_with(expr.line, "call-expression") && expr.direct_call != NULL &&
+    (expr.direct_call->name == "__builtin_va_start" ||
+     expr.direct_call->name == "__builtin_va_end")) { emit_rvalue(expr); return; }
 if (starts_with(expr.line, "cast-expression") && pa11::is_void_type(expr.type) && expr.children.size() == 1) {
 TypePtr child_object = pa11::strip_cv(object_type(expr.children[0].type)); if (expr.children[0].category == ValueCategory::LValue && child_object->kind == TypeKind::Record) ensure_pointer(emit_lvalue_addr(expr.children[0]));
 else lower_discarded_expr(expr.children[0]); return; }
@@ -1040,12 +1090,10 @@ terminate("jump ^" + cond_block); break_targets_.pop_back(); continue_targets_.p
 	for (size_t i = 0; i < catches.size(); ++i)
 		active_catches_.push_back(catches[i].ctx);
 	instr("eh_try ^" + dispatch);
-	++eh_try_depth_;
 	cleanups_.push_back(vector<Cleanup>());
 	cleanups_.back().push_back(Cleanup("eh_end"));
 	lower_stmt(protected_body);
 	cleanups_.pop_back();
-	--eh_try_depth_;
 	for (size_t i = 0; i < catches.size(); ++i)
 		active_catches_.pop_back();
 	if (!current_->terminated) {

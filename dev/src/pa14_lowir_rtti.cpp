@@ -76,6 +76,13 @@ string typeinfo_component_for_type(TypePtr type);
 bool typeinfo_argument_incomplete(
 	const pa11::TemplateInstanceArgument& arg);
 
+int64_t virtual_base_rtti_offset_flags(TypePtr record, TypePtr vbase);
+
+void emit_virtual_base_offset_entries(ostringstream& out,
+                                      TypePtr table_record,
+                                      TypePtr complete_record,
+                                      uint64_t view_offset);
+
 bool typeinfo_type_incomplete(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -288,21 +295,130 @@ string typeinfo_name_spelling(TypePtr record)
 	return out;
 }
 
-bool typeinfo_object_metadata_safe(const string& spelling)
-{
-	if (spelling.empty())
-		return false;
-	for (size_t i = 0; i < spelling.size(); ++i)
+	bool typeinfo_object_metadata_safe(const string& spelling)
+	{
+		if (spelling.empty())
+			return false;
+		for (size_t i = 0; i < spelling.size(); ++i)
 		if (std::isspace(static_cast<unsigned char>(spelling[i])) ||
 		    spelling[i] == ',' ||
 		    spelling[i] == ']')
-			return false;
-	return true;
-}
+				return false;
+		return true;
+	}
 
-void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
-{
-	string name = typeinfo_name_spelling(record);
+	string vtable_object_symbol(TypePtr record)
+	{
+		string spelling = typeinfo_name_spelling(record);
+		return typeinfo_object_metadata_safe(spelling) ? "_ZTV" + spelling : "";
+	}
+
+	string rtti_object_symbol(TypePtr record)
+	{
+		string spelling = typeinfo_name_spelling(record);
+		return typeinfo_object_metadata_safe(spelling) ? "_ZTI" + spelling : "";
+	}
+
+	Binding* record_key_function_candidate(TypePtr record)
+	{
+		TypePtr bare = pa11::strip_cv(record);
+		if (bare.get() == NULL ||
+		    bare->kind != TypeKind::Record ||
+		    bare->scope == NULL)
+			return NULL;
+		for (map<string, vector<Binding*> >::const_iterator it =
+			     bare->scope->members.begin();
+		     it != bare->scope->members.end();
+		     ++it)
+		{
+			for (size_t i = 0; i < it->second.size(); ++i)
+			{
+				Binding* fn = it->second[i];
+				if (fn == NULL ||
+				    fn->kind != BindingKind::Function ||
+				    !fn->is_virtual ||
+				    fn->is_pure_virtual ||
+				    fn->is_inline_definition)
+					continue;
+				return fn;
+			}
+		}
+		return NULL;
+	}
+
+	bool record_key_function_defined_here(const ProgramLowerer& program,
+	                                      TypePtr record)
+	{
+		TypePtr bare = pa11::strip_cv(record);
+		if (bare.get() == NULL ||
+		    bare->kind != TypeKind::Record ||
+		    bare->scope == NULL)
+			return false;
+		for (map<string, vector<Binding*> >::const_iterator it =
+			     bare->scope->members.begin();
+		     it != bare->scope->members.end();
+		     ++it)
+		{
+			for (size_t i = 0; i < it->second.size(); ++i)
+			{
+				Binding* fn = it->second[i];
+				if (fn == NULL ||
+				    fn->kind != BindingKind::Function ||
+				    !fn->is_virtual ||
+				    fn->is_pure_virtual ||
+				    fn->is_inline_definition)
+					continue;
+				if (program.function_definition_bindings.find(fn) !=
+				    program.function_definition_bindings.end())
+					return true;
+			}
+		}
+		return false;
+	}
+
+	bool record_imports_key_function_vtable(const ProgramLowerer& program,
+	                                        TypePtr record)
+	{
+		return record_key_function_candidate(record) != NULL &&
+		       !record_key_function_defined_here(program, record);
+	}
+
+	void declare_external_record_rtti(ProgramLowerer& program, TypePtr record)
+	{
+		TypePtr bare = pa11::strip_cv(record);
+		string symbol = rtti_symbol_for_record(bare);
+		if (program.defined_globals.find(symbol) != program.defined_globals.end())
+			return;
+		if (!program.declared_globals.insert(symbol).second)
+			return;
+		vector<string> metadata;
+		string object = rtti_object_symbol(bare);
+		if (!object.empty())
+			metadata.push_back("object=" + object);
+		program.global_declares.push_back("declare global @" + symbol +
+		                                  metadata_suffix(metadata));
+	}
+
+	void declare_external_record_vtable(ProgramLowerer& program, TypePtr record)
+	{
+		TypePtr bare = pa11::strip_cv(record);
+		declare_external_record_rtti(program, bare);
+		string symbol = vtable_symbol_for_record(bare);
+		if (program.defined_globals.find(symbol) != program.defined_globals.end())
+			return;
+		if (!program.declared_globals.insert(symbol).second)
+			return;
+		vector<string> metadata;
+		string object = vtable_object_symbol(bare);
+		if (!object.empty())
+			metadata.push_back("object=" + object);
+		program.global_declares.push_back("declare global @" + symbol +
+		                                  metadata_suffix(metadata));
+	}
+
+	void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
+	{
+		string name = typeinfo_name_spelling(record);
 	ostringstream out;
 	out << "global @" << typeinfo_name_symbol(record)
 	    << " [storage=readonly, binding=weak";
@@ -376,14 +492,19 @@ void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 
 }  // namespace
 
-void ProgramLowerer::emit_rtti(TypePtr record)
-{
-	TypePtr bare = pa11::strip_cv(record);
-	if (bare->kind != TypeKind::Record)
-		return;
-	string rtti_symbol = rtti_symbol_for_record(bare);
-	if (!defined_globals.insert(rtti_symbol).second)
-		return;
+	void ProgramLowerer::emit_rtti(TypePtr record)
+	{
+		TypePtr bare = pa11::strip_cv(record);
+		if (bare->kind != TypeKind::Record)
+			return;
+		if (record_imports_key_function_vtable(*this, bare))
+		{
+			declare_external_record_rtti(*this, bare);
+			return;
+		}
+		string rtti_symbol = rtti_symbol_for_record(bare);
+		if (!defined_globals.insert(rtti_symbol).second)
+			return;
 	if (declared_globals.insert("__external_rtti_vtable____class_type_info").second)
 		global_declares.push_back(
 			"declare global @__external_rtti_vtable____class_type_info "
@@ -452,7 +573,8 @@ void ProgramLowerer::emit_rtti(TypePtr record)
 				pa11::record_direct_base_offset(bare, record_bases[i]);
 			bool is_virtual = i < bare->direct_base_virtuals.size() &&
 			                  bare->direct_base_virtuals[i];
-			int64_t flags = is_virtual ? -6141 :
+			int64_t flags = is_virtual
+				? virtual_base_rtti_offset_flags(bare, record_bases[i]) :
 			                static_cast<int64_t>(offset * 256 + 2);
 			out << "  ptr addr @" << rtti_symbol_for_record(record_bases[i])
 			    << "\n";
@@ -578,205 +700,6 @@ string ProgramLowerer::catch_rtti_symbol(TypePtr type)
 		return "__external_rtti__" + typeinfo_builtin_part(bare);
 	}
 	return "";
-}
-
-void ProgramLowerer::emit_deleting_destructor_entry(const Binding* dtor)
-{
-	if (dtor == NULL || emitted_deleting_destructors.find(dtor) !=
-	    emitted_deleting_destructors.end())
-		return;
-	emitted_deleting_destructors.insert(dtor);
-	TypePtr record = class_record_for_member(dtor);
-	if (record.get() == NULL)
-		return;
-	ensure_eh_declarations();
-	demand_function_declaration(dtor);
-	demand_inline_function(dtor);
-	if (declared_functions.find("operator_delete") == declared_functions.end() &&
-	    defined_functions.find("operator_delete") == defined_functions.end())
-	{
-		declared_functions.insert("operator_delete");
-		declares.push_back(
-			"declare function @operator_delete(%arg0 : ptr) -> void "
-			"[unwind=no, binding=strong, object=" +
-			string(native_lowering
-			       ? "_ZdlPv" : "cppgm_builtin_operator_delete") + "]");
-	}
-	string name = symbol_for(dtor) + "__deleting_entry";
-	if (defined_functions.find(name) != defined_functions.end())
-		return;
-	defined_functions.insert(name);
-	FunctionOut out;
-	out.binding = dtor;
-	out.name = name;
-	string object = !dtor->function_specialization_symbol.empty()
-		? dtor->function_specialization_symbol : global_object_symbol(dtor);
-	if (object.empty() &&
-	    dtor->aliased_binding != NULL &&
-	    !dtor->aliased_binding->function_specialization_symbol.empty())
-		object = dtor->aliased_binding->function_specialization_symbol;
-	size_t dtor_entry = object.rfind("D1E");
-	if (dtor_entry != string::npos)
-		object.replace(dtor_entry, 3, "D0E");
-	out.header = "function @" + name + "(%this : ptr) -> void [binding=weak";
-	if (!object.empty())
-		out.header += ", object=" + object;
-	out.header += "]";
-	const Node* inline_node = NULL;
-	map<const Binding*, const Node*>::const_iterator found_inline =
-		inline_definitions.find(dtor);
-	if (found_inline != inline_definitions.end())
-		inline_node = found_inline->second;
-	else if (dtor->aliased_binding != NULL)
-	{
-		found_inline = inline_definitions.find(dtor->aliased_binding);
-		if (found_inline != inline_definitions.end())
-			inline_node = found_inline->second;
-	}
-	if (inline_node != NULL)
-	{
-		FunctionLowerer lowerer(*this, *inline_node);
-		functions.push_back(
-			lowerer.lower_deleting_destructor_entry(name, out.header));
-		return;
-	}
-	out.slots.push_back("  slot $this : ptr");
-	Block block("entry");
-	int temp = 1;
-	block.instrs.push_back("    store ptr %this, $this");
-	string self = "%t" + to_string(temp++);
-	block.instrs.push_back("    " + self + " = load ptr $this");
-	string vt = "%t" + to_string(temp++);
-block.instrs.push_back("    " + vt + " = addr @" +
-	                       vtable_symbol_for_record(record));
-	string addr_point = "%t" + to_string(temp++);
-	block.instrs.push_back("    " + addr_point + " = index i8 " + vt + ", " +
-	                       to_string(vtable_address_point_offset(record)));
-	block.instrs.push_back("    store ptr " + addr_point + ", " + self);
-	TypePtr bare = pa11::strip_cv(record);
-	vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare);
-	set<uint64_t> stored_view_offsets;
-	for (size_t i = 0; i < views.size(); ++i)
-	{
-		if (!stored_view_offsets.insert(views[i].second).second)
-			continue;
-		string reload = "%t" + to_string(temp++);
-		block.instrs.push_back("    " + reload + " = load ptr $this");
-		string base_addr = "%t" + to_string(temp++);
-		block.instrs.push_back(
-			"    " + base_addr +
-			" = index i8 [projection=base_subobject] " +
-			reload + ", " + to_string(views[i].second));
-		string view = "%t" + to_string(temp++);
-		block.instrs.push_back(
-			"    " + view + " = addr @" +
-			vtable_view_symbol_for_record(bare,
-			                              views[i].first,
-			                              views[i].second));
-		if (vtable_address_point_offset(bare) != 16)
-		{
-			string view_addr = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + view_addr + " = index i8 " +
-			                       view + ", " +
-			                       to_string(vtable_address_point_offset(bare)));
-			view = view_addr;
-		}
-		block.instrs.push_back("    store ptr " + view + ", " + base_addr);
-	}
-	vector<TypePtr> bases = pa11::record_direct_bases(bare);
-	for (size_t n = 0; n < bases.size(); ++n)
-	{
-		size_t i = bases.size() - 1 - n;
-		if (pa11::record_direct_base_is_virtual(bare, i))
-			continue;
-		TypePtr base = bases[i].get() != NULL
-			? pa11::strip_cv(bases[i]) : TypePtr();
-		if (base.get() == NULL || base->kind != TypeKind::Record)
-			continue;
-		Binding* base_dtor = find_destructor(base);
-		if (base_dtor != NULL && base_dtor->is_virtual)
-		{
-			demand_function_declaration(base_dtor);
-			string base_callee = destructor_symbol_for(base_dtor, true);
-			demand_inline_function(base_dtor, false);
-			string reload = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + reload + " = load ptr $this");
-			string base_addr = "%t" + to_string(temp++);
-			block.instrs.push_back(
-				"    " + base_addr +
-				" = index i8 [projection=base_subobject] " +
-				reload + ", " +
-				to_string(base_subobject_offset(record, base)));
-				vector<string> args;
-				args.push_back(base_addr);
-				if (!native_lowering &&
-				    base->is_polymorphic &&
-				    record_uses_virtual_base_vtt(base))
-				{
-					size_t vtt_slot =
-						construction_vtt_slot_for_direct_base(record, base);
-					if (vtt_slot != static_cast<size_t>(-1))
-					{
-						string vtt_base = "%t" + to_string(temp++);
-						block.instrs.push_back(
-							"    " + vtt_base + " = addr @" +
-							vtt_symbol_for_record(record));
-						string vtt_arg = vtt_base;
-						if (vtt_slot != 0)
-						{
-							vtt_arg = "%t" + to_string(temp++);
-							block.instrs.push_back(
-								"    " + vtt_arg + " = index i8 " +
-								vtt_base + ", " + to_string(vtt_slot * 8));
-						}
-						args.push_back(vtt_arg);
-					}
-					vector<TypePtr> vbases =
-						hidden_virtual_bases_for_record(base);
-					for (size_t v = 0; v < vbases.size(); ++v)
-					{
-						string hidden;
-						if (record_has_base_subobject(record, vbases[v]))
-						{
-							string this_ptr = "%t" + to_string(temp++);
-							block.instrs.push_back(
-								"    " + this_ptr + " = load ptr $this");
-							uint64_t offset =
-								base_subobject_offset(record, vbases[v]);
-							if (offset == 0)
-								hidden = this_ptr;
-							else
-							{
-								hidden = "%t" + to_string(temp++);
-								block.instrs.push_back(
-									"    " + hidden + " = index i8 " +
-									this_ptr + ", " + to_string(offset));
-							}
-						}
-						if (hidden.empty())
-							hidden = "0";
-						args.push_back(hidden);
-					}
-				}
-				ostringstream call;
-			call << "    call void @" << base_callee << "(";
-			for (size_t a = 0; a < args.size(); ++a)
-			{
-				if (a != 0)
-					call << ", ";
-				call << args[a];
-			}
-			call << ")";
-			block.instrs.push_back(call.str());
-		}
-	}
-	string del_arg = "%t" + to_string(temp++);
-	block.instrs.push_back("    " + del_arg + " = load ptr $this");
-	block.instrs.push_back("    call void @operator_delete(" + del_arg + ")");
-	block.instrs.push_back("    return void");
-	block.terminated = true;
-	out.blocks.push_back(block);
-	functions.push_back(out);
 }
 
 namespace {
@@ -947,15 +870,61 @@ bool record_uses_virtual_base_vtable_shape(TypePtr record)
 	       !pa11::record_virtual_bases(bare).empty();
 }
 
-uint64_t first_virtual_base_offset(TypePtr record)
+size_t virtual_base_index(TypePtr record, TypePtr vbase)
 {
 	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	if (bare.get() == NULL || bare->kind != TypeKind::Record)
-		return 0;
+	TypePtr wanted = vbase.get() != NULL ? pa11::strip_cv(vbase) : TypePtr();
+	if (bare.get() == NULL || wanted.get() == NULL)
+		return static_cast<size_t>(-1);
 	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
-	if (vbases.empty())
+	for (size_t i = 0; i < vbases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
+			return i;
+	return static_cast<size_t>(-1);
+}
+
+int64_t virtual_base_rtti_offset_flags(TypePtr record, TypePtr vbase)
+{
+	size_t index = virtual_base_index(record, vbase);
+	if (index == static_cast<size_t>(-1))
+		return -6141;
+	int64_t slot = static_cast<int64_t>(index * 8) -
+	               static_cast<int64_t>(vtable_address_point_offset(record));
+	return slot * 256 + 3;
+}
+
+uint64_t virtual_base_complete_offset(TypePtr complete, TypePtr vbase)
+{
+	TypePtr complete_bare = complete.get() != NULL
+		? pa11::strip_cv(complete) : TypePtr();
+	TypePtr vbase_bare = vbase.get() != NULL ? pa11::strip_cv(vbase) : TypePtr();
+	if (complete_bare.get() == NULL || vbase_bare.get() == NULL)
 		return 0;
-	return pa11::record_virtual_base_offset(bare, vbases[0]);
+	if (record_has_base_subobject(complete_bare, vbase_bare))
+		return pa11::record_virtual_base_offset(complete_bare, vbase_bare);
+	return pa11::record_virtual_base_offset(vbase_bare, vbase_bare);
+}
+
+void emit_virtual_base_offset_entries(ostringstream& out,
+                                      TypePtr table_record,
+                                      TypePtr complete_record,
+                                      uint64_t view_offset)
+{
+	TypePtr table_bare = table_record.get() != NULL
+		? pa11::strip_cv(table_record) : TypePtr();
+	TypePtr complete_bare = complete_record.get() != NULL
+		? pa11::strip_cv(complete_record) : table_bare;
+	if (table_bare.get() == NULL || table_bare->kind != TypeKind::Record)
+		return;
+	vector<TypePtr> vbases = pa11::record_virtual_bases(table_bare);
+	for (size_t i = 0; i < vbases.size(); ++i)
+	{
+		uint64_t complete_offset =
+			virtual_base_complete_offset(complete_bare,
+			                             pa11::strip_cv(vbases[i]));
+		out << "  i64 " << (static_cast<int64_t>(complete_offset) -
+		                    static_cast<int64_t>(view_offset)) << "\n";
+	}
 }
 
 bool entry_owner_is_virtual_base_slot(TypePtr record,
@@ -1086,10 +1055,10 @@ void emit_construction_primary_vtable(ProgramLowerer& program,
 	ostringstream out;
 	out << "global @" << symbol
 	    << " [storage=readonly, binding=weak] = {\n";
-	int64_t first = static_cast<int64_t>(
-		first_virtual_base_offset(complete_bare)) -
-		static_cast<int64_t>(subobject_offset);
-	out << "  i64 " << first << "\n";
+	emit_virtual_base_offset_entries(out,
+	                                 sub_bare,
+	                                 complete_bare,
+	                                 subobject_offset);
 	out << "  i64 " << (subobject_offset == 0 ? 0 :
 	                    -static_cast<int64_t>(subobject_offset)) << "\n";
 	out << "  ptr addr @" << rtti_symbol_for_record(sub_bare) << "\n";
@@ -1131,11 +1100,10 @@ void emit_construction_view_vtable(ProgramLowerer& program,
 	ostringstream out;
 	out << "global @" << symbol
 	    << " [storage=readonly, binding=weak] = {\n";
-	int64_t first = record_is_virtual_base_of(sub_bare, view_bare)
-		? 0
-		: static_cast<int64_t>(first_virtual_base_offset(complete_bare)) -
-		  static_cast<int64_t>(complete_view_offset);
-	out << "  i64 " << first << "\n";
+	emit_virtual_base_offset_entries(out,
+	                                 sub_bare,
+	                                 complete_bare,
+	                                 complete_view_offset);
 	out << "  i64 " << (complete_view_offset == 0 ? 0 :
 	                    -static_cast<int64_t>(complete_view_offset))
 	    << "\n";
@@ -1279,8 +1247,13 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 				demand_vtable(direct_base);
 		}
 	}
-	emitted_vtables.insert(bare.get());
-	Binding* virtual_dtor = find_destructor(bare);
+		emitted_vtables.insert(bare.get());
+		if (record_imports_key_function_vtable(*this, bare))
+		{
+			declare_external_record_vtable(*this, bare);
+			return;
+		}
+		Binding* virtual_dtor = find_destructor(bare);
 	if (virtual_dtor != NULL &&
 	    virtual_dtor->is_virtual &&
 	    record_uses_virtual_base_vtt(bare))
@@ -1301,12 +1274,16 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		}
 	}
 	emit_rtti(bare);
-	bool virtual_base_shape = record_uses_virtual_base_vtable_shape(bare);
-	ostringstream out;
-	out << "global @" << vtable_symbol_for_record(bare)
-	    << " [storage=readonly, binding=weak] = {\n";
+		bool virtual_base_shape = record_uses_virtual_base_vtable_shape(bare);
+		ostringstream out;
+		out << "global @" << vtable_symbol_for_record(bare)
+		    << " [storage=readonly, binding=weak";
+		string vtable_object = vtable_object_symbol(bare);
+		if (!vtable_object.empty())
+			out << ", object=" << vtable_object;
+		out << "] = {\n";
 	if (virtual_base_shape)
-		out << "  i64 " << first_virtual_base_offset(bare) << "\n";
+		emit_virtual_base_offset_entries(out, bare, bare, 0);
 	out << "  i64 0\n";
 	out << "  ptr addr @" << rtti_symbol_for_record(bare) << "\n";
 	emit_vtable_entries(*this, out, bare, bare, 0, virtual_base_shape, true);
@@ -1325,16 +1302,7 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		     << "] = {\n";
 		if (virtual_base_shape)
 		{
-			uint64_t vbase_offset = first_virtual_base_offset(bare);
-			bool virtual_view = false;
-			vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
-			for (size_t i = 0; i < vbases.size(); ++i)
-				if (pa11::same_type(pa11::strip_cv(vbases[i]), view_base))
-					virtual_view = true;
-			int64_t first = virtual_view ? 0 :
-				static_cast<int64_t>(vbase_offset) -
-				static_cast<int64_t>(view_offset);
-			view << "  i64 " << first << "\n";
+			emit_virtual_base_offset_entries(view, bare, bare, view_offset);
 			view << "  i64 -" << view_offset << "\n";
 			view << "  ptr addr @" << rtti_symbol_for_record(bare) << "\n";
 		}

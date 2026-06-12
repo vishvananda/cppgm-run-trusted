@@ -25,6 +25,7 @@ using lowir2cy86::Instruction;
 using lowir2cy86::Parameter;
 using lowir2cy86::Program;
 using lowir2cy86::Span;
+using lowir2cy86::SwitchCase;
 using lowir2cy86::Type;
 using lowir2cy86::TypeKind;
 using lowir2cy86::Value;
@@ -431,6 +432,13 @@ struct X86
 		if (bytes <= 127) u8(static_cast<uint8_t>(bytes));
 		else u32(static_cast<uint32_t>(bytes));
 	}
+	void add_rsp(size_t bytes)
+	{
+		if (bytes == 0) return;
+		rex(true); u8(bytes <= 127 ? 0x83 : 0x81); modrm(3, 0, RSP);
+		if (bytes <= 127) u8(static_cast<uint8_t>(bytes));
+		else u32(static_cast<uint32_t>(bytes));
+	}
 };
 struct Patch
 {
@@ -462,14 +470,22 @@ struct FunctionInfo
 	size_t lsda_offset;
 	FunctionInfo() : start(0), size(0), has_lsda(false), lsda_offset(0) {}
 };
+struct SimpleCtorStore
+{
+	Type type;
+	size_t offset;
+	Value value;
+};
 struct Unit
 {
 	Program& program;
 	ObjectFile& obj;
+	Options options;
 	map<string, string> globals;
 	map<string, string> functions;
 	vector<FunctionInfo> infos;
-	Unit(Program& p, ObjectFile& o) : program(p), obj(o) {}
+	Unit(Program& p, ObjectFile& o, const Options& opts)
+		: program(p), obj(o), options(opts) {}
 	void prepare_symbols();
 	void emit_globals();
 	void emit_tls_wrappers();
@@ -501,10 +517,13 @@ struct FuncGen
 	size_t frame_size;
 	size_t exc_off;
 	size_t sel_off;
+	size_t va_reg_save_off;
 	bool has_eh;
+	bool has_va_start;
 	FuncGen(Unit& u, const Function& f)
 		: unit(u), fn(f), text(u.function_text_section(f)), x(text), frame_size(0),
-		  exc_off(0), sel_off(0), has_eh(false) {}
+		  exc_off(0), sel_off(0), va_reg_save_off(0), has_eh(false),
+		  has_va_start(false) {}
 	void emit(FunctionInfo& info);
 	void emit_instruction(const Instruction& ins, const string& block);
 	bool emit_value_instruction(const Instruction& ins);
@@ -528,9 +547,15 @@ struct FuncGen
 	Mem frame_mem(size_t off) const { return Mem(RBP, -static_cast<int32_t>(off)); }
 	void store_temp(const string& name, const Type& type, int reg);
 	void store_float_temp(const string& name, const Type& type, int xmm);
+	void save_variadic_registers();
+	void emit_va_start(const Instruction& ins);
+	void emit_va_arg(const Instruction& ins);
 	void emit_call(const Instruction& ins);
+	void emit_simple_constructor_inline_call(const Function& callee,
+	                                         const Instruction& ins);
 	void emit_return(const Instruction& ins);
 	void emit_branch(const Instruction& ins);
+	void emit_switch(const Instruction& ins);
 	void patch_jumps(size_t base);
 	void finish_lsda(FunctionInfo& info, size_t base);
 	void save_landing_registers();
@@ -555,6 +580,9 @@ uint32_t parse_f32_bits(const std::string& text);
 uint8_t symbol_bind(const lowir2cy86::Metadata& md);
 bool skip_global_definition(const Global& g);
 bool pruned_noop_constructor_function(const Function& fn);
+bool simple_inline_constructor_function(const Function& fn,
+                                        std::vector<SimpleCtorStore>* stores);
+bool o1_inline_constructor_function(const Unit& unit, const Function& fn);
 void write_integer(Blob& b, const Type& type, uint64_t value);
 int width_for(const Type& type);
 bool wide_integer_type(const Type& type);

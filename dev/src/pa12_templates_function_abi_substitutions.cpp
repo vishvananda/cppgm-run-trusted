@@ -1,5 +1,6 @@
 #include "pa12_templates_function_abi_internal.h"
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -102,6 +103,11 @@ string abi_template_parameter_type_with_substitutions(
 	}
 	string encoded = index == 0 ? string("T_") :
 	                 string("T") + to_string(index - 1) + "_";
+	if (ctx.force_template_parameter_spelling)
+	{
+		abi_add_substitution(ctx, encoded);
+		return encoded;
+	}
 	return abi_use_or_add_substitution(ctx, encoded);
 }
 
@@ -113,12 +119,118 @@ string abi_record_type_probe_with_substitutions(TypePtr type,
                                                 bool include_namespace);
 string abi_scope_prefix_probe_with_substitutions(const vector<Scope*>& scopes,
                                                 AbiSubstitutionContext& ctx);
+	string abi_dependent_typename_type_with_substitutions(
+		TypePtr type,
+		AbiSubstitutionContext& ctx,
+		bool include_typename_marker);
 string abi_template_argument_with_substitutions(
 	const TemplateArgument& arg,
 	AbiSubstitutionContext& ctx);
-string abi_template_instance_argument_with_substitutions(
+	string abi_template_instance_argument_with_substitutions(
+		const pa11::TemplateInstanceArgument& arg,
+		AbiSubstitutionContext& ctx);
+
+	string abi_dependent_template_argument_type_with_substitutions(
+		TypePtr type,
+		AbiSubstitutionContext& ctx)
+	{
+		if (type.get() != NULL &&
+		    type->is_dependent_typename &&
+		    (type->dependent_typename_decltype ||
+		     type->name.compare(0, 9, "decltype(") == 0))
+			return abi_type_with_substitutions(type, ctx);
+		return abi_use_or_add_substitution(
+			ctx,
+			abi_dependent_typename_type_with_substitutions(type, ctx, false));
+	}
+
+string abi_vendor_transform_type_argument_with_substitutions(
+	TypePtr type,
+	AbiSubstitutionContext& ctx)
+{
+	if (type.get() == NULL)
+		return "v";
+	TypePtr bare = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::Cv)
+	{
+		string quals;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			quals += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			quals += "V";
+		return quals + abi_vendor_transform_type_argument_with_substitutions(
+			type->base, ctx);
+	}
+	if (bare->kind == pa11::TypeKind::TemplateParameter ||
+	    bare->kind == pa11::TypeKind::TemplateTemplateParameter)
+	{
+		string encoded =
+			abi_template_parameter_expression(bare->name,
+			                                  ctx.template_parameters);
+		if (!encoded.empty())
+		{
+			abi_add_substitution(ctx, encoded);
+			return encoded;
+		}
+	}
+	if (type->is_dependent_typename)
+		return abi_dependent_typename_type_with_substitutions(type,
+		                                                      ctx,
+		                                                      false);
+	if (type->kind == pa11::TypeKind::Pointer)
+		return "P" + abi_vendor_transform_type_argument_with_substitutions(
+			type->base, ctx);
+	if (type->kind == pa11::TypeKind::LValueReference)
+		return "R" + abi_vendor_transform_type_argument_with_substitutions(
+			type->base, ctx);
+	if (type->kind == pa11::TypeKind::RValueReference)
+		return "O" + abi_vendor_transform_type_argument_with_substitutions(
+			type->base, ctx);
+	if (type->kind == pa11::TypeKind::Array)
+		return "A" + (type->unknown_bound ? string("") :
+		       to_string(type->bound)) + "_" +
+		       abi_vendor_transform_type_argument_with_substitutions(
+			       type->base, ctx);
+	return abi_type_with_substitutions(type, ctx);
+}
+
+string abi_vendor_transform_instance_argument_with_substitutions(
 	const pa11::TemplateInstanceArgument& arg,
-	AbiSubstitutionContext& ctx);
+	AbiSubstitutionContext& ctx)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return abi_vendor_transform_type_argument_with_substitutions(
+			arg.type, ctx);
+	return abi_template_instance_argument_with_substitutions(arg, ctx);
+}
+
+string abi_dependent_typename_scope_prefix_with_substitutions(
+	AbiSubstitutionContext& ctx)
+{
+	if (ctx.dependent_typename_scope_prefix.empty())
+		return "";
+	string raw_prefix;
+	for (size_t i = 0; i < ctx.dependent_typename_scope_prefix.size(); ++i)
+	{
+		Scope* scope = ctx.dependent_typename_scope_prefix[i];
+		if (scope == NULL)
+			continue;
+		if (abi_scope_is_std_namespace(scope))
+			raw_prefix += "St";
+		else if (scope->kind == ScopeKind::Namespace)
+		{
+			string name = scope->name == "<unnamed>"
+				? string("_GLOBAL__N_1") : scope->name;
+			raw_prefix += abi_source_name(name);
+		}
+	}
+	string key = "N" + raw_prefix + "E";
+	size_t found = abi_find_substitution(ctx, key);
+	if (found != static_cast<size_t>(-1))
+		return abi_substitution_code(found);
+	return abi_scope_prefix_with_substitutions(
+		ctx.dependent_typename_scope_prefix, ctx);
+}
 
 string abi_dependent_typename_type_with_substitutions(
 	TypePtr type,
@@ -128,21 +240,167 @@ string abi_dependent_typename_type_with_substitutions(
 	vector<string> parts = abi_split_qualified_name(type->name);
 	if (parts.empty())
 		return abi_source_name(type->name);
+
+	if (!type->dependent_typename_qualified &&
+	    type->dependent_typename_template_id)
+	{
+		string root = type->template_primary_name.empty()
+			? parts[0] : type->template_primary_name;
+		size_t template_pos = root.find('<');
+		if (template_pos != string::npos)
+			root = root.substr(0, template_pos);
+		if (internal_type_transform_name(root))
+		{
+			string out = include_typename_marker ? "Tn" : "";
+			out += "u" + abi_source_name(root);
+			vector<pa11::TemplateInstanceArgument> arguments;
+			if (!type->dependent_typename_template_argument_lists.empty())
+				arguments =
+					type->dependent_typename_template_argument_lists[0];
+			else
+				arguments = type->template_arguments;
+			if (!arguments.empty())
+			{
+				out += "I";
+				for (size_t i = 0; i < arguments.size(); ++i)
+					out +=
+						abi_vendor_transform_instance_argument_with_substitutions(
+						arguments[i], ctx);
+				out += "E";
+			}
+			return out;
+		}
+	}
+
+	if (!type->dependent_typename_qualified &&
+	    type->dependent_typename_template_id)
+	{
+		string root = type->template_primary_name.empty()
+			? parts[0] : type->template_primary_name;
+		size_t template_pos = root.find('<');
+		if (template_pos != string::npos)
+			root = root.substr(0, template_pos);
+		if (root == "enable_if_t")
+		{
+			vector<pa11::TemplateInstanceArgument> arguments;
+			if (!type->dependent_typename_template_argument_lists.empty())
+				arguments =
+					type->dependent_typename_template_argument_lists[0];
+			else
+				arguments = type->template_arguments;
+			string out = include_typename_marker ? "TnN" : "N";
+			out += abi_source_name("enable_if");
+			if (!arguments.empty())
+			{
+				out += "I";
+				for (size_t i = 0; i < arguments.size(); ++i)
+					out += abi_template_instance_argument_with_substitutions(
+						arguments[i], ctx);
+				out += "E";
+			}
+			out += abi_source_name("type") + "E";
+			return out;
+		}
+	}
+
+	if (!type->dependent_typename_qualified &&
+	    type->dependent_typename_template_id)
+	{
+		string root = type->template_primary_name.empty()
+			? parts[0] : type->template_primary_name;
+		size_t template_pos = root.find('<');
+		if (template_pos != string::npos)
+			root = root.substr(0, template_pos);
+		string parameter = abi_template_parameter_expression(
+			root, ctx.template_parameters);
+		if (!parameter.empty())
+		{
+			string out = parameter;
+			vector<pa11::TemplateInstanceArgument> arguments;
+			if (!type->dependent_typename_template_argument_lists.empty())
+				arguments =
+					type->dependent_typename_template_argument_lists[0];
+			else
+				arguments = type->template_arguments;
+			if (!arguments.empty())
+			{
+				out += "I";
+				for (size_t i = 0; i < arguments.size(); ++i)
+					out += abi_template_instance_argument_with_substitutions(
+						arguments[i], ctx);
+				out += "E";
+			}
+			return out;
+		}
+	}
+
 	string out;
-	if (type->dependent_typename_qualified)
+	string root_part = parts[0];
+	bool unqualified_template_root =
+		root_part.find('<') != string::npos &&
+		type->template_primary_name.find("::") == string::npos;
+	bool prefix_with_context_scope =
+		!ctx.dependent_typename_scope_prefix.empty() &&
+		(!type->dependent_typename_qualified || unqualified_template_root);
+	if (type->dependent_typename_qualified || prefix_with_context_scope)
 		out = include_typename_marker ? "TnN" : "N";
 	else
 		out = include_typename_marker ? "Tn" : "";
+	if (prefix_with_context_scope)
+		out += abi_dependent_typename_scope_prefix_with_substitutions(ctx);
 	size_t list_index = 0;
+	size_t implicit_template_part_index =
+		type->dependent_typename_qualified && parts.size() > 1
+		? parts.size() - 2
+		: 0;
+	if (type->dependent_typename_template_id &&
+	    !type->template_primary_name.empty())
+	{
+		vector<string> primary_parts =
+			abi_split_qualified_name(type->template_primary_name);
+		string primary_leaf = primary_parts.empty()
+			? type->template_primary_name
+			: primary_parts[primary_parts.size() - 1];
+		size_t primary_template_pos = primary_leaf.find('<');
+		if (primary_template_pos != string::npos)
+			primary_leaf = primary_leaf.substr(0, primary_template_pos);
+		size_t matched_part = implicit_template_part_index;
+		bool matched_primary = false;
+		for (size_t j = 0; j < parts.size(); ++j)
+		{
+			string part_leaf = parts[j];
+			size_t part_template_pos = part_leaf.find('<');
+			if (part_template_pos != string::npos)
+				part_leaf = part_leaf.substr(0, part_template_pos);
+			if (part_leaf == primary_leaf)
+			{
+				matched_part = j;
+				matched_primary = true;
+			}
+		}
+		bool first_qualified_scope =
+			matched_part == 0 &&
+			type->dependent_typename_qualified &&
+			parts.size() > 1 &&
+			parts[0].find('<') == string::npos;
+		if (matched_primary && !first_qualified_scope)
+			implicit_template_part_index = matched_part;
+	}
 	for (size_t i = 0; i < parts.size(); ++i)
 	{
 		string part = parts[i];
 		size_t template_pos = part.find('<');
 		bool has_template_id = template_pos != string::npos;
+		bool implicit_template_id =
+			!has_template_id &&
+			i == implicit_template_part_index &&
+			type->dependent_typename_template_id &&
+			(!type->template_arguments.empty() ||
+			 !type->dependent_typename_template_argument_lists.empty());
 		if (has_template_id)
 			part = part.substr(0, template_pos);
 		string source = abi_source_name(part);
-		if (has_template_id)
+		if (has_template_id || implicit_template_id)
 		{
 			size_t source_sub = abi_find_substitution(ctx, source);
 			if (source_sub != static_cast<size_t>(-1))
@@ -152,12 +410,13 @@ string abi_dependent_typename_type_with_substitutions(
 		}
 		out += source;
 		vector<pa11::TemplateInstanceArgument> arguments;
-		if (has_template_id &&
+		if ((has_template_id || implicit_template_id) &&
 		    list_index <
 			    type->dependent_typename_template_argument_lists.size())
 			arguments =
 				type->dependent_typename_template_argument_lists[list_index++];
-		else if (has_template_id && i == 0 &&
+		else if ((has_template_id || implicit_template_id) &&
+		         i == implicit_template_part_index &&
 		         !type->template_arguments.empty())
 			arguments = type->template_arguments;
 		if (!arguments.empty())
@@ -170,263 +429,9 @@ string abi_dependent_typename_type_with_substitutions(
 			out += "E";
 		}
 	}
-	if (type->dependent_typename_qualified)
+	if (type->dependent_typename_qualified || prefix_with_context_scope)
 		out += "E";
 	return out;
-}
-
-string abi_function_parameter_expression(const string& name,
-                                         const AbiSubstitutionContext& ctx)
-{
-	if (ctx.function_parameter_names == NULL)
-		return "";
-	for (size_t i = 0; i < ctx.function_parameter_names->size(); ++i)
-		if ((*ctx.function_parameter_names)[i] == name)
-			return i == 0
-				? string("fp_")
-				: string("fp") + abi_base36_number(i - 1) + "_";
-	return "";
-}
-
-bool abi_find_call_open(const vector<Token>& tokens,
-                        size_t begin,
-                        size_t end,
-                        size_t& open)
-{
-	if (end <= begin + 2 || !abi_token_is_simple(tokens, end - 1, OP_RPAREN))
-		return false;
-	int depth = 0;
-	for (size_t i = end; i > begin; --i)
-	{
-		size_t pos = i - 1;
-		if (tokens[pos].kind != posttoken::TokenKind::Simple)
-			continue;
-		if (tokens[pos].type == OP_RPAREN)
-			++depth;
-		else if (tokens[pos].type == OP_LPAREN)
-		{
-			--depth;
-			if (depth == 0)
-			{
-				open = pos;
-				return open > begin;
-			}
-		}
-	}
-	return false;
-}
-
-bool abi_find_top_level_member_operator(const vector<Token>& tokens,
-                                        size_t begin,
-                                        size_t end,
-                                        size_t& op)
-{
-	int paren = 0;
-	int square = 0;
-	int brace = 0;
-	bool found = false;
-	for (size_t i = begin; i < end; ++i)
-	{
-		if (tokens[i].kind != posttoken::TokenKind::Simple)
-			continue;
-		ETokenType type = tokens[i].type;
-		if (type == OP_LPAREN)
-			++paren;
-		else if (type == OP_RPAREN)
-			--paren;
-		else if (type == OP_LSQUARE)
-			++square;
-		else if (type == OP_RSQUARE)
-			--square;
-		else if (type == OP_LBRACE)
-			++brace;
-		else if (type == OP_RBRACE)
-			--brace;
-		else if (paren == 0 && square == 0 && brace == 0 &&
-		         (type == OP_DOT || type == OP_ARROW))
-		{
-			op = i;
-			found = true;
-		}
-	}
-	return found;
-}
-
-void abi_split_top_level_arguments(const vector<Token>& tokens,
-                                   size_t begin,
-                                   size_t end,
-                                   vector<pair<size_t, size_t> >& out)
-{
-	int paren = 0;
-	int square = 0;
-	int brace = 0;
-	size_t arg_begin = begin;
-	for (size_t i = begin; i < end; ++i)
-	{
-		if (tokens[i].kind != posttoken::TokenKind::Simple)
-			continue;
-		ETokenType type = tokens[i].type;
-		if (type == OP_LPAREN)
-			++paren;
-		else if (type == OP_RPAREN)
-			--paren;
-		else if (type == OP_LSQUARE)
-			++square;
-		else if (type == OP_RSQUARE)
-			--square;
-		else if (type == OP_LBRACE)
-			++brace;
-		else if (type == OP_RBRACE)
-			--brace;
-		else if (type == OP_COMMA && paren == 0 && square == 0 &&
-		         brace == 0)
-		{
-			out.push_back(make_pair(arg_begin, i));
-			arg_begin = i + 1;
-		}
-	}
-	if (arg_begin < end)
-		out.push_back(make_pair(arg_begin, end));
-}
-
-string abi_dependent_expression_with_substitutions(
-	const vector<Token>& tokens,
-	size_t begin,
-	size_t end,
-	AbiSubstitutionContext& ctx)
-{
-	if (end > tokens.size() || begin >= end)
-		return "";
-	abi_trim_wrapping_parens(tokens, begin, end);
-	if (begin >= end)
-		return "";
-	static const ETokenType comma_ops[] = { OP_COMMA };
-	static const ETokenType lor_ops[] = { OP_LOR };
-	static const ETokenType land_ops[] = { OP_LAND };
-	static const ETokenType equality_ops[] = { OP_EQ, OP_NE };
-	static const ETokenType relational_ops[] = { OP_LT, OP_GT, OP_LE, OP_GE };
-	static const ETokenType shift_ops[] = { OP_LSHIFT, OP_RSHIFT };
-	static const ETokenType additive_ops[] = { OP_PLUS, OP_MINUS };
-	static const ETokenType multiplicative_ops[] = { OP_STAR, OP_DIV, OP_MOD };
-	static const ETokenType bit_and_ops[] = { OP_AMP };
-	static const ETokenType bit_xor_ops[] = { OP_XOR };
-	static const ETokenType bit_or_ops[] = { OP_BOR };
-	const ETokenType* groups[] = {
-		comma_ops, lor_ops, land_ops, bit_or_ops, bit_xor_ops,
-		bit_and_ops, equality_ops, relational_ops, shift_ops,
-		additive_ops, multiplicative_ops
-	};
-	const size_t group_sizes[] = {
-		1, 1, 1, 1, 1, 1, 2, 4, 2, 2, 3
-	};
-	for (size_t g = 0; g < sizeof(groups) / sizeof(groups[0]); ++g)
-	{
-		vector<ETokenType> ops(groups[g], groups[g] + group_sizes[g]);
-		size_t op = 0;
-		if (!abi_find_top_level_operator(tokens, begin, end, ops, op))
-			continue;
-		string left = abi_dependent_expression_with_substitutions(
-			tokens, begin, op, ctx);
-		string right = abi_dependent_expression_with_substitutions(
-			tokens, op + 1, end, ctx);
-		string code = abi_binary_operator_code(tokens[op].type);
-		if (!left.empty() && !right.empty() && !code.empty())
-			return code + left + right;
-		return "";
-	}
-	if (abi_token_is_simple(tokens, begin, OP_LNOT))
-	{
-		string inner = abi_dependent_expression_with_substitutions(
-			tokens, begin + 1, end, ctx);
-		return inner.empty() ? string("") : string("nt") + inner;
-	}
-	if (begin + 3 == end &&
-	    abi_token_is_simple(tokens, begin + 1, OP_LPAREN) &&
-	    abi_token_is_simple(tokens, begin + 2, OP_RPAREN))
-	{
-		AbiTokenType cast_type =
-			abi_encode_type_tokens(tokens,
-			                       begin,
-			                       begin + 1,
-			                       ctx.template_parameters);
-		if (!cast_type.encoded.empty())
-			return "cv" + cast_type.encoded + "_E";
-	}
-	size_t call_open = 0;
-	if (abi_find_call_open(tokens, begin, end, call_open))
-	{
-		string callee = abi_dependent_expression_with_substitutions(
-			tokens, begin, call_open, ctx);
-		if (callee.empty())
-			return "";
-		string out = "cl" + callee;
-		vector<pair<size_t, size_t> > args;
-		abi_split_top_level_arguments(tokens, call_open + 1, end - 1, args);
-		for (size_t i = 0; i < args.size(); ++i)
-		{
-			string arg = abi_dependent_expression_with_substitutions(
-				tokens, args[i].first, args[i].second, ctx);
-			if (arg.empty())
-				return "";
-			out += arg;
-		}
-		out += "E";
-		return out;
-	}
-	size_t member_op = 0;
-	if (abi_find_top_level_member_operator(tokens, begin, end, member_op) &&
-	    member_op + 1 < end &&
-	    tokens[member_op + 1].kind == posttoken::TokenKind::Identifier)
-	{
-		string object = abi_dependent_expression_with_substitutions(
-			tokens, begin, member_op, ctx);
-		if (object.empty())
-			return "";
-		return string(tokens[member_op].type == OP_ARROW ? "pt" : "dt") +
-		       object + abi_source_name(tokens[member_op + 1].source);
-	}
-	if (end == begin + 1)
-	{
-		string literal = abi_literal_expression(tokens[begin]);
-		if (!literal.empty())
-			return literal;
-		if (tokens[begin].kind == posttoken::TokenKind::Identifier)
-		{
-			string param =
-				abi_function_parameter_expression(tokens[begin].source, ctx);
-			if (!param.empty())
-				return param;
-			return abi_template_parameter_expression(tokens[begin].source,
-			                                        ctx.template_parameters);
-		}
-	}
-	return "";
-}
-
-string abi_dependent_decltype_type_with_substitutions(
-	TypePtr type,
-	AbiSubstitutionContext& ctx)
-{
-	if (type.get() == NULL ||
-	    !type->dependent_typename_decltype ||
-	    type->name.compare(0, 9, "decltype(") != 0)
-		return "";
-	vector<Token> tokens;
-	size_t end = 0;
-	if (!collect_replay_tokens(type->name, tokens) ||
-	    tokens.size() < 4)
-		return "";
-	end = tokens.size();
-	while (end > 0 && tokens[end - 1].kind == posttoken::TokenKind::EndOfFile)
-		--end;
-	if (end < 4 ||
-	    !abi_token_is_simple(tokens, 0, KW_DECLTYPE) ||
-	    !abi_token_is_simple(tokens, 1, OP_LPAREN) ||
-	    !abi_token_is_simple(tokens, end - 1, OP_RPAREN))
-		return "";
-	string expression = abi_dependent_expression_with_substitutions(
-		tokens, 2, end - 1, ctx);
-	return expression.empty() ? string("") : string("DT") + expression + "E";
 }
 
 bool abi_scope_is_std_namespace(Scope* scope)
@@ -457,15 +462,19 @@ string abi_std_abbreviation(TypePtr type)
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
 	if (bare.get() == NULL || !abi_record_in_std_namespace(bare))
 		return "";
+	bool directly_in_std =
+		bare->scope != NULL &&
+		bare->scope->parent != NULL &&
+		abi_scope_is_std_namespace(bare->scope->parent);
 	string name = bare->is_template_specialization &&
 	              !bare->template_primary_name.empty()
 		? bare->template_primary_name : bare->name;
 	size_t args = name.find('<');
 	if (args != string::npos)
 		name = name.substr(0, args);
-	if (name == "allocator")
+	if (directly_in_std && name == "allocator")
 		return "Sa";
-	if (name == "basic_string")
+	if (directly_in_std && name == "basic_string")
 		return "Sb";
 	return "";
 }
@@ -541,6 +550,30 @@ string abi_scope_component_with_substitutions(Scope* scope,
 string abi_scope_prefix_with_substitutions(const vector<Scope*>& scopes,
                                           AbiSubstitutionContext& ctx)
 {
+	string raw_prefix;
+	bool namespace_only = true;
+	for (size_t i = 0; i < scopes.size(); ++i)
+	{
+		if (scopes[i]->kind != ScopeKind::Namespace)
+		{
+			namespace_only = false;
+			break;
+		}
+		if (scopes[i]->name == "std")
+			raw_prefix += "St";
+		else if (!scopes[i]->name.empty())
+		{
+			string name = scopes[i]->name == "<unnamed>"
+				? string("_GLOBAL__N_1") : scopes[i]->name;
+			raw_prefix += abi_source_name(name);
+		}
+	}
+	if (namespace_only && !raw_prefix.empty())
+	{
+		size_t full = abi_find_substitution(ctx, "N" + raw_prefix + "E");
+		if (full != static_cast<size_t>(-1))
+			return abi_substitution_code(full);
+	}
 	string out;
 	string prefix_key;
 	for (size_t i = 0; i < scopes.size(); ++i)
@@ -568,6 +601,42 @@ string abi_scope_prefix_with_substitutions(const vector<Scope*>& scopes,
 		prefix_key = key;
 	}
 	return out;
+}
+
+string abi_namespace_scope_prefix_key(const vector<Scope*>& scopes)
+{
+	string key;
+	for (size_t i = 0; i < scopes.size(); ++i)
+	{
+		if (scopes[i]->kind != ScopeKind::Namespace)
+			return "";
+		if (scopes[i]->name.empty())
+			continue;
+		string name = scopes[i]->name == "<unnamed>"
+			? string("_GLOBAL__N_1") : scopes[i]->name;
+		string component = name == "std" ? string("St") : abi_source_name(name);
+		key = key.empty() ? component : string("N") + key + component + "E";
+	}
+	return key;
+}
+
+void abi_alias_function_template_argument_scope(
+	AbiSubstitutionContext& ctx,
+	const vector<Scope*>& scopes,
+	const string& encoded)
+{
+	if (!ctx.function_template_argument_list ||
+	    scopes.size() != 1 ||
+	    abi_scope_is_std_namespace(scopes[0]))
+		return;
+	string key = abi_namespace_scope_prefix_key(scopes);
+	if (key.empty())
+		return;
+	size_t found = abi_find_substitution(ctx, key);
+	if (found != static_cast<size_t>(-1) &&
+	    found < ctx.function_template_argument_substitution_floor)
+		return;
+	abi_add_substitution_alias(ctx, key, encoded);
 }
 
 string abi_record_type_with_substitutions(TypePtr type,
@@ -622,6 +691,7 @@ string abi_record_type_with_substitutions(TypePtr type,
 			                                         ctx,
 			                                         include_namespace),
 			encoded);
+		abi_alias_function_template_argument_scope(ctx, scopes, encoded);
 		return result;
 	}
 	string leaf = abi_record_unscoped_with_substitutions(bare, ctx);
@@ -638,6 +708,7 @@ string abi_record_type_with_substitutions(TypePtr type,
 		ctx,
 		abi_record_type_probe_with_substitutions(bare, ctx, include_namespace),
 		encoded);
+	abi_alias_function_template_argument_scope(ctx, scopes, encoded);
 	return result;
 }
 
@@ -677,10 +748,9 @@ string abi_template_instance_argument_with_substitutions(
 						    owner_arg.type->is_dependent_typename)
 						{
 							owner_has_dependent_typename_argument = true;
-							out += abi_use_or_add_substitution(
-								ctx,
-								abi_dependent_typename_type_with_substitutions(
-									owner_arg.type, ctx, false));
+								out +=
+									abi_dependent_template_argument_type_with_substitutions(
+										owner_arg.type, ctx);
 						}
 						else
 							out += abi_template_instance_argument_with_substitutions(
@@ -773,10 +843,9 @@ string abi_template_argument_with_substitutions(
 						    owner_arg.type->is_dependent_typename)
 						{
 							owner_has_dependent_typename_argument = true;
-							out += abi_use_or_add_substitution(
-								ctx,
-								abi_dependent_typename_type_with_substitutions(
-									owner_arg.type, ctx, false));
+								out +=
+									abi_dependent_template_argument_type_with_substitutions(
+										owner_arg.type, ctx);
 						}
 						else
 							out += abi_template_instance_argument_with_substitutions(
@@ -881,16 +950,31 @@ string abi_type_with_substitutions(TypePtr type,
 {
 	if (type.get() == NULL)
 		return "v";
+	if (ctx.force_template_parameter_spelling)
+	{
+		TypePtr bare_force = pa11::strip_cv(type);
+		if (bare_force->kind == pa11::TypeKind::TemplateParameter ||
+		    bare_force->kind == pa11::TypeKind::TemplateTemplateParameter)
+			return abi_template_parameter_type_with_substitutions(
+				bare_force->name, ctx);
+	}
 	string probe = abi_type_probe_with_substitutions(type, ctx);
 	size_t whole = abi_find_substitution(ctx, probe);
 	if (whole != static_cast<size_t>(-1))
 		return abi_substitution_code(whole);
 	if (type->is_dependent_typename)
+	{
+		string decltype_type =
+			abi_dependent_decltype_type_with_substitutions(type, ctx);
+		if (!decltype_type.empty())
+			return abi_use_or_add_substitution(ctx, decltype_type);
 		return abi_use_or_add_substitution(
 			ctx,
-			abi_dependent_typename_type_with_substitutions(type,
-			                                               ctx,
-			                                               true));
+			abi_dependent_typename_type_with_substitutions(
+				type,
+				ctx,
+				!ctx.suppress_dependent_typename_marker));
+	}
 	if (type->kind == pa11::TypeKind::Cv)
 	{
 		string quals;
@@ -965,10 +1049,16 @@ string abi_function_return_type_with_substitutions(
 {
 	if (type.get() != NULL && type->is_dependent_typename)
 	{
-		string decltype_type =
-			abi_dependent_decltype_type_with_substitutions(type, ctx);
-		if (!decltype_type.empty())
-			return decltype_type;
+			string decltype_type =
+				abi_dependent_decltype_type_with_substitutions(type, ctx);
+			if (!decltype_type.empty())
+			{
+				if (!type->template_primary_name.empty() ||
+				    !type->template_arguments.empty())
+					return abi_use_or_add_substitution(ctx,
+					                                   decltype_type);
+				return decltype_type;
+			}
 		bool saved = ctx.use_actual_template_parameter_types;
 		ctx.use_actual_template_parameter_types = true;
 		string encoded =
@@ -977,6 +1067,17 @@ string abi_function_return_type_with_substitutions(
 		return encoded;
 	}
 	return abi_type_with_substitutions(type, ctx);
+}
+
+string abi_function_parameter_type_with_substitutions(
+	TypePtr type,
+	AbiSubstitutionContext& ctx)
+{
+	bool saved = ctx.suppress_dependent_typename_marker;
+	ctx.suppress_dependent_typename_marker = true;
+	string out = abi_type_with_substitutions(type, ctx);
+	ctx.suppress_dependent_typename_marker = saved;
+	return out;
 }
 
 string abi_type_probe_with_substitutions(TypePtr type,
@@ -1093,7 +1194,7 @@ string abi_type_probe_with_substitutions(TypePtr type,
 		return abi_dependent_typename_type(type,
 		                                   ctx.template_parameters,
 		                                   ctx.expression_tokens,
-		                                   true);
+		                                   !ctx.suppress_dependent_typename_marker);
 	if (type->kind == pa11::TypeKind::Cv)
 	{
 		string quals;

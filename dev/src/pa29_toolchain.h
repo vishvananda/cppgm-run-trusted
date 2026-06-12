@@ -13,8 +13,11 @@ struct Options
 {
 	preproc::Options preprocess;
 	string target;
+	int optimization_level;
 	vector<string> library_paths;
 	vector<string> libraries;
+
+	Options() : optimization_level(0) {}
 };
 
 bool is_object_like_path(const string& path);

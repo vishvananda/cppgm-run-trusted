@@ -336,7 +336,7 @@ if (template_record_uses_abi_global_symbol(bare)) return "__vtable_" + template_
 string vtable_view_symbol_for_record(TypePtr record, TypePtr view_base, uint64_t offset)
 { return record_lowir_name(record) + "____view__" + record_lowir_name(view_base) + "__" + to_string(offset) + "__vtable"; }
 uint64_t vtable_address_point_offset(TypePtr record)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record) return 16; return pa11::record_virtual_bases(bare).empty() ? 16 : 24; }
+{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record) return 16; vector<TypePtr> vbases = pa11::record_virtual_bases(bare); return vbases.empty() ? 16 : 16 + vbases.size() * 8; }
 string vtt_symbol_for_record(TypePtr record)
 { return record_lowir_name(record) + "____vtt"; }
 string construction_vtable_symbol_for_record(TypePtr record, TypePtr constructed, uint64_t offset, size_t slice)

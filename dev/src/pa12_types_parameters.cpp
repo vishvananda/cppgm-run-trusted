@@ -17,17 +17,83 @@ TypePtr adjust_parameter_type(TypePtr type)
 	return type;
 }
 
-bool type_contains_template_parameter_name(TypePtr type, string& name)
-{
-	return template_type_has_template_parameter_name(type, name);
-}
+	bool type_contains_template_parameter_name(TypePtr type, string& name)
+	{
+		return template_type_has_template_parameter_name(type, name);
+	}
 
-}  // namespace
+	bool is_abi_tag_attribute_name(const string& name)
+	{
+		return name == "__abi_tag__" || name == "abi_tag";
+	}
 
-void Parser::parse_function_suffix_tail(Suffix& suffix)
-{ for (;;) { if (at_simple_cv()) { suffix.function_cv |= consume_cv_flag(); continue; } if (consume(OP_AMP)) { suffix.ref_qualifier = 1; continue; } if (consume(OP_LAND)) { suffix.ref_qualifier = 2; continue; }
-if (consume(KW_NOEXCEPT)) { suffix.noexcept_decl = true; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (consume(KW_THROW)) { suffix.noexcept_decl = true; if (at(OP_LPAREN))
-skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (at_identifier() && current().source == "override") { ++pos_; suffix.override_decl = true; continue; } if (at_identifier() && current().source == "final") { ++pos_;
+	string string_literal_payload(const string& token)
+	{
+		size_t first = token.find('"');
+		size_t last = token.rfind('"');
+		if (first == string::npos || last == string::npos || last <= first)
+			return "";
+		return token.substr(first + 1, last - first - 1);
+	}
+
+	}  // namespace
+
+	bool Parser::parse_gnu_attribute_suffix(Suffix& suffix)
+	{
+		if (!at_identifier() || current().source != "__attribute__")
+			return false;
+		++pos_;
+		if (!consume(OP_LPAREN))
+			return true;
+		if (!consume(OP_LPAREN))
+		{
+			while (!at_eof() && !consume(OP_RPAREN))
+				++pos_;
+			return true;
+		}
+		while (!at_eof() && !at(OP_RPAREN))
+		{
+			if (at_identifier() &&
+			    is_abi_tag_attribute_name(current().source))
+			{
+				++pos_;
+				if (consume(OP_LPAREN))
+				{
+					while (!at_eof() && !at(OP_RPAREN))
+					{
+						if (!current().source.empty() &&
+						    current().source.find('"') != string::npos)
+						{
+							string tag =
+								string_literal_payload(current().source);
+							if (!tag.empty())
+								suffix.abi_tags.push_back(tag);
+							++pos_;
+						}
+						else if (at(OP_LPAREN))
+							skip_balanced(OP_LPAREN, OP_RPAREN);
+						else
+							++pos_;
+						consume(OP_COMMA);
+					}
+					expect(OP_RPAREN);
+				}
+			}
+			else if (at(OP_LPAREN))
+				skip_balanced(OP_LPAREN, OP_RPAREN);
+			else
+				++pos_;
+			consume(OP_COMMA);
+		}
+		expect(OP_RPAREN);
+		expect(OP_RPAREN);
+		return true;
+	}
+
+	void Parser::parse_function_suffix_tail(Suffix& suffix)
+	{ for (;;) { if (at_simple_cv()) { suffix.function_cv |= consume_cv_flag(); continue; } if (consume(OP_AMP)) { suffix.ref_qualifier = 1; continue; } if (consume(OP_LAND)) { suffix.ref_qualifier = 2; continue; }
+	if (consume(KW_NOEXCEPT)) { suffix.noexcept_decl = true; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (consume(KW_THROW)) { suffix.noexcept_decl = true; if (at(OP_LPAREN))
+	skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (parse_gnu_attribute_suffix(suffix)) { continue; } if (at_identifier() && current().source == "override") { ++pos_; suffix.override_decl = true; continue; } if (at_identifier() && current().source == "final") { ++pos_;
 suffix.final_decl = true; continue; } if (consume(OP_ARROW)) { vector<Scope*> saved_scopes = scopes_; Scope* parameter_scope = pa11::create_child_scope(current_scope(), ScopeKind::Function, "");
 scopes_.push_back(parameter_scope); map<string, vector<Binding*> > parameter_packs; for (size_t i = 0; i < suffix.parameters.size(); ++i) { const ParameterInfo& parameter = suffix.parameters[i];
 if (!parameter.pack_expression_name.empty() && !parameter.pack_name.empty()) { TemplateArgument subst; if (find_template_value_substitution( parameter.pack_name, subst) && subst.kind == TemplateArgumentKind::Pack &&

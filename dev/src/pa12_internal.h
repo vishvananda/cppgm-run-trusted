@@ -218,11 +218,12 @@ struct Suffix
 	int ref_qualifier;
 	bool noexcept_decl;
 	bool override_decl;
-	bool final_decl;
-	TypePtr trailing_return;
+		bool final_decl;
+		TypePtr trailing_return;
+		vector<string> abi_tags;
 
-	explicit Suffix(SuffixKind k);
-};
+		explicit Suffix(SuffixKind k);
+	};
 
 struct Declarator
 {
@@ -599,6 +600,8 @@ public:
 		                                           Expr& init);
 
 	DeclSpecs parse_decl_specifier_seq(bool type_id_context);
+	bool try_parse_builtin_va_list_decl_spec(DeclSpecs& specs,
+	                                         bool& saw_non_cv_type);
 	TypePtr type_from_decl_specs(const DeclSpecs& specs);
 	TypePtr parse_type_id();
 	TypePtr parse_decltype_specifier();
@@ -625,6 +628,7 @@ public:
 	Suffix parse_array_suffix();
 	Suffix parse_function_suffix();
 	void parse_function_suffix_tail(Suffix& suffix);
+	bool parse_gnu_attribute_suffix(Suffix& suffix);
 		void parse_parameter_clause(vector<ParameterInfo>& parameters, bool& variadic);
 	ParameterInfo parse_parameter_declaration();
 	vector<ParameterInfo> expand_parameter_pack( const ParameterInfo& parameter) const;
@@ -776,6 +780,7 @@ public:
 	Binding* resolve_constructor_candidate(TypePtr type, const vector<Expr>& args, bool copy_initialization, vector<Expr>& converted);
 	Expr make_constructor_init_expr(TypePtr type, const vector<Expr>& args, bool copy_initialization);
 	Expr make_call_expr(Expr callee, vector<Expr> args);
+	Expr make_builtin_va_arg_expr(Expr list, TypePtr result);
 	public:
 		bool try_evaluate_constexpr_call(Binding* function, const vector<Node>& args, ConstexprValue& out);
 		bool try_evaluate_constexpr_call_values(Binding* function, const vector<ConstexprValue>& args, ConstexprValue& out);

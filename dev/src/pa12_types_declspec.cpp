@@ -74,6 +74,19 @@ bool Parser::try_resolve_type_pack_element(
 	return true;
 }
 
+bool Parser::try_parse_builtin_va_list_decl_spec(DeclSpecs& specs,
+                                                 bool& saw_non_cv_type)
+{
+	if (saw_non_cv_type ||
+	    !at_identifier() ||
+	    current().source != "__builtin_va_list")
+		return false;
+	++pos_;
+	specs.named_type = pa11::make_pointer(pa11::make_fundamental(FT_VOID));
+	saw_non_cv_type = true;
+	return true;
+}
+
 DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 {
 	DeclSpecs specs;
@@ -172,6 +185,8 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 			saw_any = true;
 			saw_non_cv_type = true;
 		}
+		else if (try_parse_builtin_va_list_decl_spec(specs, saw_non_cv_type))
+			saw_any = true;
 		else if (!saw_non_cv_type)
 		{
 			bool parsed_type_name = false;

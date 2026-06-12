@@ -370,11 +370,13 @@ string temp_object_path(const string& outfile, size_t index)
 
 void compile_source_to_lowir(const string& srcfile,
                              const string& objfile,
-                             const Options& options)
+                             const Options& options,
+                             bool host_object)
 {
 	pa14::Options lowir_options;
 	lowir_options.preprocess = options.preprocess;
 	lowir_options.native_lowering = true;
+	lowir_options.host_object_lowering = host_object;
 	pa14::emit_lowir(vector<string>(1, srcfile), objfile, lowir_options);
 }
 
@@ -435,13 +437,15 @@ void compile_source_to_object(const string& srcfile,
 		TempFiles temps;
 		const string tmp = temp_object_path(objfile, temps.paths.size());
 		temps.paths.push_back(tmp);
-		compile_source_to_lowir(srcfile, tmp, options);
+		compile_source_to_lowir(srcfile, tmp, options, true);
 		lowir2cy86::Program program =
 		    lowir2cy86::parse_files(vector<string>(1, tmp));
-		pa31::write_host_object(program, objfile);
+		pa31::Options host_options;
+		host_options.optimization_level = options.optimization_level;
+		pa31::write_host_object(program, objfile, host_options);
 		return;
 	}
-	compile_source_to_lowir(srcfile, objfile, options);
+	compile_source_to_lowir(srcfile, objfile, options, false);
 }
 
 void link_inputs_to_executable(const vector<string>& inputs,
@@ -461,7 +465,7 @@ void link_inputs_to_executable(const vector<string>& inputs,
 		}
 		const string tmp = temp_object_path(outfile, temps.paths.size());
 		temps.paths.push_back(tmp);
-		compile_source_to_lowir(inputs[i], tmp, options);
+		compile_source_to_lowir(inputs[i], tmp, options, false);
 		lowir_objects.push_back(tmp);
 	}
 

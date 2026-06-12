@@ -29,7 +29,12 @@ struct AbiSubstitutionContext
 	std::vector<std::string> substitutions;
 	std::map<std::string, size_t> substitution_aliases;
 	std::map<std::string, size_t> semantic_type_substitutions;
+	std::vector<Scope*> dependent_typename_scope_prefix;
+	size_t function_template_argument_substitution_floor;
 	bool use_actual_template_parameter_types;
+	bool suppress_dependent_typename_marker;
+	bool force_template_parameter_spelling;
+	bool function_template_argument_list;
 
 	AbiSubstitutionContext(
 		const std::map<std::string, size_t>& parameters,
@@ -38,12 +43,17 @@ struct AbiSubstitutionContext
 		: template_parameters(parameters),
 		  expression_tokens(tokens),
 		  function_parameter_names(parameter_names),
-		  use_actual_template_parameter_types(false)
+		  function_template_argument_substitution_floor(0),
+		  use_actual_template_parameter_types(false),
+		  suppress_dependent_typename_marker(false),
+		  force_template_parameter_spelling(false),
+		  function_template_argument_list(false)
 	{
 	}
 };
 
 std::string abi_source_name(const std::string& name);
+std::string abi_base36_number(size_t value);
 std::string abi_binding_source_name(const Binding* binding);
 std::string abi_fundamental_type(EFundamentalType type);
 std::string abi_type(TypePtr type,
@@ -111,6 +121,9 @@ std::string abi_function_return_type(
 	const std::vector<Token>* expression_tokens);
 std::string abi_type_with_substitutions(TypePtr type,
                                         AbiSubstitutionContext& ctx);
+std::string abi_function_parameter_type_with_substitutions(
+	TypePtr type,
+	AbiSubstitutionContext& ctx);
 std::string abi_type_probe_with_substitutions(TypePtr type,
                                               AbiSubstitutionContext& ctx);
 std::string abi_record_type_with_substitutions(TypePtr type,
@@ -127,6 +140,9 @@ std::string abi_template_instance_argument_with_substitutions(
 	const pa11::TemplateInstanceArgument& arg,
 	AbiSubstitutionContext& ctx);
 std::string abi_function_return_type_with_substitutions(
+	TypePtr type,
+	AbiSubstitutionContext& ctx);
+std::string abi_dependent_decltype_type_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx);
 void abi_add_substitution(AbiSubstitutionContext& ctx,

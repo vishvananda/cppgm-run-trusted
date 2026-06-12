@@ -938,9 +938,17 @@ TemplateArgument arg = explicit_expanded[explicit_index++]; TemplateArgument ori
 map<string, TypePtr> subst; map<string, TemplateArgument> value_subst; for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i) if (!declaration->parameters[i].name.empty()) {
 if (declaration->parameters[i].kind == TemplateParameterKind::Type) { if (declaration->parameters[i].is_pack) { subst[declaration->parameters[i].name] = pa11::make_template_parameter_type(
 declaration->parameters[i].name); value_subst[declaration->parameters[i].name] = out[i]; } else subst[declaration->parameters[i].name] = out[i].type; } else value_subst[declaration->parameters[i].name] = out[i]; }
+bool explicit_value_name_collides = false;
+if (arg.kind == TemplateArgumentKind::Value &&
+    arg.dependent &&
+    !arg.value_name.empty())
+	for (size_t pi = 0; pi < declaration->parameters.size(); ++pi)
+		if (declaration->parameters[pi].name == arg.value_name)
+			explicit_value_name_collides = true;
 vector<map<string, TypePtr> > save_subst = template_type_substitutions_; vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_; template_type_substitutions_.insert(
 template_type_substitutions_.end(), declaration->outer_type_substitutions.begin(), declaration->outer_type_substitutions.end()); template_value_substitutions_.insert( template_value_substitutions_.end(),
 declaration->outer_value_substitutions.begin(), declaration->outer_value_substitutions.end()); template_type_substitutions_.push_back(subst); template_value_substitutions_.push_back(value_subst); try {
+if (!explicit_value_name_collides)
 arg = substitute_template_argument(arg); } catch (...) { template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; throw; } template_type_substitutions_ = save_subst;
 template_value_substitutions_ = save_value_subst; } if (!template_argument_kind_matches_parameter(arg, parameter)) { TypePtr dependent_type = arg.type; TypePtr dependent_bare = dependent_type.get() != NULL
 ? pa11::strip_cv(dependent_type) : TypePtr(); if ((dependent_bare.get() == NULL || !dependent_bare->is_dependent_typename || !dependent_bare->dependent_typename_qualified) &&

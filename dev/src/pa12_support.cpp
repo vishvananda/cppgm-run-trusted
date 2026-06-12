@@ -159,12 +159,13 @@ Suffix::Suffix(SuffixKind k)
 	  variadic(false),
 	  function_cv(pa11::CV_NONE),
 	  ref_qualifier(0),
-	  noexcept_decl(false),
-	  override_decl(false),
-	  final_decl(false),
-	  trailing_return()
-{
-}
+		  noexcept_decl(false),
+		  override_decl(false),
+		  final_decl(false),
+		  trailing_return(),
+		  abi_tags()
+	{
+	}
 
 Declarator::Declarator() : has_name(false)
 {

@@ -851,6 +851,27 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		annotate_expr_node(out);
 		return out;
 	}
+	if (callee.binding != NULL &&
+	    (callee.binding->name == "__builtin_va_start" ||
+	     callee.binding->name == "__builtin_va_end"))
+	{
+		bool is_start = callee.binding->name == "__builtin_va_start";
+		if ((is_start && args.size() < 2) || (!is_start && args.size() != 1))
+			throw runtime_error("wrong argument count");
+		if (!args.empty() && args[0].category != ValueCategory::LValue)
+			throw runtime_error("va_list argument must be lvalue");
+		Expr out;
+		out.valid = true;
+		out.type = pa11::make_fundamental(FT_VOID);
+		out.category = ValueCategory::PRValue;
+		out.node = Node("call-expression prvalue void");
+		out.node.direct_call = callee.binding;
+		add_child(out.node, callee.node);
+		for (size_t i = 0; i < args.size(); ++i)
+			add_child(out.node, args[i].node);
+		annotate_expr_node(out);
+		return out;
+	}
 	if (!callee.overloads.empty() &&
 	    callee.node.line.compare(0, 17, "member-expression") == 0 &&
 	    !callee.node.children.empty())
@@ -993,6 +1014,25 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		                                constexpr_value))
 			apply_constexpr_value(out, constexpr_value);
 	}
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr Parser::make_builtin_va_arg_expr(Expr list, TypePtr result)
+{
+	Conversion conv = convert_to(
+		list,
+		pa11::make_pointer(pa11::make_fundamental(FT_VOID)));
+	if (!conv.viable)
+		throw runtime_error("invalid __builtin_va_arg list");
+	Expr out;
+	out.valid = true;
+	out.type = result;
+	out.category = call_category(result);
+	out.node = Node("builtin-va-arg-expression " +
+	                value_category_name(out.category) + " " +
+	                pa11::describe_type(result));
+	add_child(out.node, conv.expr.node);
 	annotate_expr_node(out);
 	return out;
 }

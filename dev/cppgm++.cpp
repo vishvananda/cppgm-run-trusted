@@ -42,13 +42,15 @@ struct DriverInvocation
   DriverMode mode;
   string outfile;
   string target;
+  int optimization_level;
   vector<string> include_paths;
   vector<string> library_paths;
   vector<string> libraries;
   vector<string> inputs;
 
   DriverInvocation()
-      : mode(DriverMode::Link)
+      : mode(DriverMode::Link),
+        optimization_level(0)
   {
   }
 };
@@ -95,6 +97,23 @@ bool is_query_driver_flag(const string & arg)
 bool is_optimization_flag(const string & arg)
 {
   return starts_with(arg, "-O");
+}
+
+int optimization_level_for_flag(const string & arg)
+{
+  if(arg == "-O0") {
+    return 0;
+  }
+  if(arg == "-O" || arg == "-O1" || arg == "-Og") {
+    return 1;
+  }
+  if(arg == "-O2" || arg == "-Os" || arg == "-Oz") {
+    return 2;
+  }
+  if(arg == "-O3" || arg == "-Ofast") {
+    return 3;
+  }
+  return 1;
 }
 
 bool is_benign_driver_flag(const string & arg)
@@ -414,6 +433,10 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
       preprocess_only = true;
       continue;
     }
+    if(is_optimization_flag(args[i])) {
+      invocation.optimization_level = optimization_level_for_flag(args[i]);
+      continue;
+    }
     if(args[i] == "-o") {
       consume_required_option_argument(args, i, "-o", "output file");
       if(explicit_outfile) {
@@ -504,6 +527,7 @@ pa29::Options make_pa29_options(const DriverInvocation & invocation)
                                           builtin_include_paths.begin(),
                                           builtin_include_paths.end());
   options.target = invocation.target;
+  options.optimization_level = invocation.optimization_level;
   options.library_paths = invocation.library_paths;
   options.libraries = invocation.libraries;
   return options;

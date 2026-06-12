@@ -68,9 +68,11 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		default_arguments_[ctor] = ctor_defaults;
 	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) || at(KW_TRY) ||
 	                             constexpr_ctor;
-	ctor->is_explicit = explicit_ctor;
-	ctor->unwind_no = suffix.noexcept_decl;
-	ctor->is_private = !class_private_access_.empty() &&
+		ctor->is_explicit = explicit_ctor;
+		ctor->unwind_no = suffix.noexcept_decl;
+		if (!suffix.abi_tags.empty())
+			ctor->abi_tags = suffix.abi_tags;
+		ctor->is_private = !class_private_access_.empty() &&
 	                   class_private_access_.back();
 	ctor->is_protected_member = !class_protected_access_.empty() &&
 	                            class_protected_access_.back();

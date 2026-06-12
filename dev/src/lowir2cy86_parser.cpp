@@ -499,6 +499,8 @@ private:
 			parse_atomic_compare_exchange(ins);
 		else if (kw == "call")
 			parse_call(ins, false);
+		else if (kw == "va_arg")
+			parse_va_arg(ins);
 		else if (kw == "exception" || kw == "exception_selector")
 			parse_exception_value(ins);
 		else
@@ -518,6 +520,10 @@ private:
 			parse_fence(ins, InstrKind::AtomicSignalFence);
 		else if (kw == "call")
 			parse_call(ins, true);
+		else if (kw == "va_start")
+			parse_va_start(ins);
+		else if (kw == "va_end")
+			parse_va_end(ins);
 		else if (kw == "copyobj")
 			parse_copyobj(ins);
 		else if (kw == "zeroinit")
@@ -679,6 +685,25 @@ private:
 		expect(")");
 		if (match("as"))
 			ins.signature = parse_call_signature();
+	}
+
+	void parse_va_start(Instruction& ins)
+	{
+		ins.kind = InstrKind::VaStart;
+		ins.a = parse_value();
+	}
+
+	void parse_va_arg(Instruction& ins)
+	{
+		ins.kind = InstrKind::VaArg;
+		ins.type = parse_type();
+		ins.a = parse_value();
+	}
+
+	void parse_va_end(Instruction& ins)
+	{
+		ins.kind = InstrKind::VaEnd;
+		ins.a = parse_value();
 	}
 
 	CallSignature parse_call_signature()

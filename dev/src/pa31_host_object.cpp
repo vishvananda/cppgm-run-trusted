@@ -197,6 +197,28 @@ bool constructor_object_symbol(const string& object)
 	return object.find("C1") != string::npos ||
 	       object.find("C2") != string::npos;
 }
+bool noop_constructor_instruction(const Function& fn, const Instruction& ins)
+{
+	if (ins.kind == InstrKind::Return)
+		return true;
+	if (ins.kind == InstrKind::Store &&
+	    lowir2cy86::is_ptr_type(ins.type) &&
+	    ins.a.text == fn.params[0].name &&
+	    ins.b.kind == ValueKind::Slot)
+		return true;
+	if (ins.kind == InstrKind::EhTry ||
+	    ins.kind == InstrKind::EhEnd ||
+	    ins.kind == InstrKind::EhCatchAll ||
+	    ins.kind == InstrKind::Exception ||
+	    ins.kind == InstrKind::Jump)
+		return true;
+	if (ins.kind == InstrKind::Call &&
+	    ins.a.kind == ValueKind::Function &&
+	    (ins.a.text == "@cppgm_call_terminate" ||
+	     ins.a.text == "cppgm_call_terminate"))
+		return true;
+	return false;
+}
 bool pruned_noop_constructor_function(const Function& fn)
 {
 	if (fn.declaration ||
@@ -212,17 +234,87 @@ bool pruned_noop_constructor_function(const Function& fn)
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 		{
 			const Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == InstrKind::Return)
-				continue;
-			if (ins.kind == InstrKind::Store &&
-			    lowir2cy86::is_ptr_type(ins.type) &&
-			    ins.a.text == fn.params[0].name &&
-			    ins.b.kind == ValueKind::Slot)
+			if (noop_constructor_instruction(fn, ins))
 				continue;
 			return false;
 		}
 	}
 	return true;
+}
+bool simple_inline_constructor_function(const Function& fn,
+                                        vector<SimpleCtorStore>* stores)
+{
+	if (fn.declaration ||
+	    symbol_bind(fn.metadata) != 2 ||
+	    !constructor_object_symbol(metadata(fn.metadata, "object")) ||
+	    !lowir2cy86::is_void_type(fn.ret) ||
+	    fn.params.size() != 1 ||
+	    !lowir2cy86::is_ptr_type(fn.params[0].type) ||
+	    fn.blocks.size() != 1)
+		return false;
+	set<string> this_slots;
+	set<string> this_temps;
+	map<string, size_t> field_temps;
+	vector<SimpleCtorStore> found_stores;
+	const vector<Instruction>& instructions = fn.blocks[0].instructions;
+	for (size_t i = 0; i < instructions.size(); ++i)
+	{
+		const Instruction& ins = instructions[i];
+		if (ins.kind == InstrKind::Return)
+			continue;
+		if (ins.kind == InstrKind::Store &&
+		    lowir2cy86::is_ptr_type(ins.type) &&
+		    ins.a.text == fn.params[0].name &&
+		    ins.b.kind == ValueKind::Slot)
+		{
+			this_slots.insert(ins.b.text);
+			continue;
+		}
+		if (ins.kind == InstrKind::Load &&
+		    lowir2cy86::is_ptr_type(ins.type) &&
+		    ins.a.kind == ValueKind::Slot &&
+		    this_slots.count(ins.a.text) != 0)
+		{
+			this_temps.insert(ins.dest);
+			continue;
+		}
+		if (ins.kind == InstrKind::Index &&
+		    (ins.op == "field" || ins.op == "base_subobject" ||
+		     ins.op.empty()) &&
+		    ins.a.kind == ValueKind::Temp &&
+		    this_temps.count(ins.a.text) != 0 &&
+		    ins.b.kind == ValueKind::Literal)
+		{
+			field_temps[ins.dest] =
+				static_cast<size_t>(parse_int(ins.b.text));
+			continue;
+		}
+		if (ins.kind == InstrKind::Store &&
+		    ins.b.kind == ValueKind::Temp &&
+		    field_temps.find(ins.b.text) != field_temps.end() &&
+		    ins.a.kind == ValueKind::Literal &&
+		    !lowir2cy86::is_obj_type(ins.type) &&
+		    !wide_integer_type(ins.type))
+		{
+			SimpleCtorStore store;
+			store.type = ins.type;
+			store.offset = field_temps[ins.b.text];
+			store.value = ins.a;
+			found_stores.push_back(store);
+			continue;
+		}
+		return false;
+	}
+	if (found_stores.empty())
+		return false;
+	if (stores != NULL)
+		stores->swap(found_stores);
+	return true;
+}
+bool o1_inline_constructor_function(const Unit& unit, const Function& fn)
+{
+	return unit.options.optimization_level >= 1 &&
+	       simple_inline_constructor_function(fn, NULL);
 }
 uint8_t symbol_bind(const lowir2cy86::Metadata& md)
 {
@@ -248,8 +340,15 @@ void Unit::prepare_symbols()
 bool Unit::prunes_function(const string& name) const
 {
 	map<string, size_t>::const_iterator it = program.function_by_name.find(name);
-	return it != program.function_by_name.end() &&
-	       pruned_noop_constructor_function(program.functions[it->second]);
+	if (it != program.function_by_name.end())
+		return pruned_noop_constructor_function(program.functions[it->second]) ||
+		       o1_inline_constructor_function(*this, program.functions[it->second]);
+	for (size_t i = 0; i < program.functions.size(); ++i)
+		if (program.functions[i].name == name)
+			return pruned_noop_constructor_function(program.functions[i]) ||
+			       o1_inline_constructor_function(*this,
+			                                      program.functions[i]);
+	return false;
 }
 Type FuncGen::value_type(const Value& v) const
 {
@@ -623,6 +722,20 @@ void emit_rel_jump(X86& x, vector<Patch>& patches, uint8_t kind, const string& t
 		emit_rel_jump(x, jumps, 0x85, ins.target);
 		emit_rel_jump(x, jumps, 0, ins.target_false);
 	}
+void FuncGen::emit_switch(const Instruction& ins)
+{
+	const Type type = value_type(ins.a);
+	const int width = width_for(type);
+	load_value(ins.a, type, RAX);
+	for (size_t i = 0; i < ins.switch_cases.size(); ++i)
+	{
+		const SwitchCase& item = ins.switch_cases[i];
+		load_value(item.value, type, R10);
+		x.cmp(width, RAX, R10);
+		emit_rel_jump(x, jumps, 0x84, item.target);
+	}
+	emit_rel_jump(x, jumps, 0, ins.target);
+}
 void FuncGen::emit_return(const Instruction& ins)
 {
 	if (!lowir2cy86::is_void_type(ins.type))
@@ -644,91 +757,6 @@ void FuncGen::emit_return(const Instruction& ins)
 	x.u8(0xc9);
 	x.u8(0xc3);
 }
-vector<Type> call_types(const Program& program, const Instruction& ins)
-{
-	vector<Type> out;
-	if (ins.signature.present)
-		for (size_t i = 0; i < ins.signature.params.size(); ++i)
-			out.push_back(ins.signature.params[i].type);
-	else if (ins.a.kind == ValueKind::Function)
-	{
-		map<string, size_t>::const_iterator f = program.function_by_name.find(ins.a.text);
-		if (f != program.function_by_name.end())
-			for (size_t i = 0; i < program.functions[f->second].params.size(); ++i)
-				out.push_back(program.functions[f->second].params[i].type);
-	}
-	return out;
-}
-void FuncGen::emit_call(const Instruction& ins)
-{
-	if (ins.a.kind == ValueKind::Function &&
-	    unit.prunes_function(ins.a.text))
-		return;
-	static const int regs[] = {RDI, RSI, RDX, RCX, R8, R9};
-	vector<Type> types = call_types(unit.program, ins);
-	size_t reg_index = 0;
-	size_t fp_index = 0;
-	for (size_t i = 0; i < ins.args.size(); ++i)
-	{
-		const Type type = i < types.size() ? types[i] : value_type(ins.args[i]);
-		if (lowir2cy86::is_float_type(type) && type.bits <= 64)
-		{
-			if (fp_index >= 8) throw runtime_error("stack float args unsupported");
-			load_float_value(ins.args[i], type, static_cast<int>(fp_index++));
-		}
-		else if (lowir2cy86::is_obj_type(type) && lowir2cy86::is_direct_object_abi(type))
-		{
-			storage_address(ins.args[i], R11);
-			for (size_t c = 0; c < lowir2cy86::direct_object_abi_slots(type); ++c)
-			{
-				if (reg_index >= 6) throw runtime_error("stack object args unsupported");
-				x.mov_rm(lowir2cy86::direct_object_abi_chunk_width_bits(type, c),
-				         regs[reg_index++], Mem(R11, static_cast<int32_t>(c * 8)));
-			}
-		}
-		else
-		{
-			if (reg_index >= 6) throw runtime_error("stack args unsupported");
-			load_value(ins.args[i], type, regs[reg_index++]);
-		}
-	}
-	if (ins.args.size() > types.size())
-		x.mov_imm(8, RAX, fp_index);
-	if (ins.a.kind == ValueKind::Function)
-	{
-		x.u8(0xe8);
-		const size_t off = x.pos();
-		x.u32(0);
-		unit.obj.reloc(text, off, target_symbol(unit.program, ins.a.text),
-		               R_X86_64_PLT32, -4);
-	}
-	else
-	{
-		load_value(ins.a, lowir2cy86::parse_type_text("ptr"), R11);
-		x.rex(true, 2, 0, R11);
-		x.u8(0xff);
-		x.modrm(3, 2, R11);
-	}
-	if (ins.has_dest && !lowir2cy86::is_void_type(ins.type))
-	{
-		if (lowir2cy86::is_obj_type(ins.type))
-		{
-			const size_t off = fn.temp_offsets.find(ins.dest)->second;
-			x.mov_mr(lowir2cy86::direct_object_abi_chunk_width_bits(ins.type, 0),
-			         frame_object_mem(off, 0), RAX);
-			if (lowir2cy86::direct_object_abi_slots(ins.type) == 2)
-				x.mov_mr(lowir2cy86::direct_object_abi_chunk_width_bits(ins.type, 1),
-				         frame_object_mem(off, 8), RDX);
-		}
-		else
-		{
-			if (lowir2cy86::is_float_type(ins.type))
-				store_float_temp(ins.dest, ins.type, 0);
-			else
-				store_temp(ins.dest, ins.type, RAX);
-		}
-	}
-}
 	uint8_t cmp_cc(const string& op)
 	{
 		if (op == "eq") return 0x94;
@@ -745,6 +773,10 @@ void FuncGen::emit_call(const Instruction& ins)
 	}
 bool FuncGen::emit_value_instruction(const Instruction& ins)
 {
+	if (ins.kind == InstrKind::VaStart) { emit_va_start(ins); return true; }
+	if (ins.kind == InstrKind::VaEnd)
+		return true;
+	if (ins.kind == InstrKind::VaArg) { emit_va_arg(ins); return true; }
 	if (ins.kind == InstrKind::Const)
 	{
 		if (lowir2cy86::is_float_type(ins.type))
@@ -1055,6 +1087,8 @@ bool FuncGen::emit_control_instruction(const Instruction& ins)
 		emit_rel_jump(x, jumps, 0, ins.target);
 	else if (ins.kind == InstrKind::Branch)
 		emit_branch(ins);
+	else if (ins.kind == InstrKind::Switch)
+		emit_switch(ins);
 	else if (ins.kind == InstrKind::Return)
 		emit_return(ins);
 	else
@@ -1150,11 +1184,19 @@ void FuncGen::emit(FunctionInfo& info)
 			    fn.blocks[b].instructions[i].kind == InstrKind::Exception ||
 			    fn.blocks[b].instructions[i].kind == InstrKind::Resume)
 				has_eh = true;
+			else if (fn.blocks[b].instructions[i].kind == InstrKind::VaStart)
+				has_va_start = true;
 	frame_size = fn.stack_size;
 	if (has_eh)
 	{
 		frame_size = align_up(frame_size, 8); exc_off = frame_size += 8;
 		sel_off = frame_size += 8;
+	}
+	if (has_va_start)
+	{
+		frame_size = align_up(frame_size, 16);
+		va_reg_save_off = frame_size + 176;
+		frame_size += 176;
 	}
 	frame_size = align_up(frame_size, 16);
 	text.bytes.align(16);
@@ -1165,6 +1207,7 @@ void FuncGen::emit(FunctionInfo& info)
 	x.u8(0x55);
 	x.rex(true); x.u8(0x89); x.modrm(3, RSP, RBP);
 	x.sub_rsp(frame_size);
+	save_variadic_registers();
 	size_t reg = 0;
 	size_t fp = 0;
 	size_t stack = 16;
@@ -1190,7 +1233,7 @@ void FuncGen::emit(FunctionInfo& info)
 		const Function& fn = program.functions[i];
 		if (fn.declaration)
 			continue;
-		if (pruned_noop_constructor_function(fn))
+		if (prunes_function(fn.name))
 			continue;
 		FunctionInfo info;
 		FuncGen gen(*this, fn);
@@ -1241,7 +1284,9 @@ void FuncGen::emit(FunctionInfo& info)
 	}
 }  // namespace host
 using namespace host;
-void write_host_object(lowir2cy86::Program& program, const string& outfile)
+void write_host_object(lowir2cy86::Program& program,
+                       const string& outfile,
+                       const Options& options)
 {
 	if (program.function_by_name.empty())
 	{
@@ -1255,7 +1300,7 @@ void write_host_object(lowir2cy86::Program& program, const string& outfile)
 	}
 	lowir2cy86::validate_and_layout_allow_f80(program);
 	ObjectFile obj;
-	Unit unit(program, obj);
+	Unit unit(program, obj, options);
 	unit.prepare_symbols();
 	unit.emit_globals();
 	unit.emit_tls_wrappers();

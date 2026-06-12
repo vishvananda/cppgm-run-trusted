@@ -1,6 +1,33 @@
 #include "pa14_lowir_internal.h"
 namespace pa14 {
 namespace internal {
+
+void FunctionLowerer::emit_builtin_va_start(const Node& expr)
+{
+	if (expr.children.size() < 3)
+		throw runtime_error("invalid __builtin_va_start");
+	Value list_addr = ensure_pointer(emit_lvalue_addr(expr.children[1]));
+	string tag_slot = fresh_aux_slot("va_list", "obj<24x8>");
+	string tag_addr = fresh_temp();
+	instr(tag_addr + " = addr $" + tag_slot);
+	instr("store ptr " + tag_addr + ", " + list_addr.text);
+	instr("va_start " + tag_addr);
+}
+
+Value FunctionLowerer::emit_builtin_va_arg(const Node& expr)
+{
+	if (expr.children.size() != 1)
+		throw runtime_error("invalid __builtin_va_arg");
+	Value list = convert_value(emit_rvalue(expr.children[0]),
+	                           expr.children[0].type,
+	                           pa11::make_pointer(
+		                           pa11::make_fundamental(FT_VOID)));
+	string out = fresh_temp();
+	instr(out + " = va_arg " + scalar_lowir_type(expr.type) + " " +
+	      list.text);
+	return Value(scalar_lowir_type(expr.type), out);
+}
+
 Value FunctionLowerer::emit_rvalue(const Node& expr) {
 	if (starts_with(expr.line, "literal "))
 		return emit_literal(expr);
@@ -110,11 +137,21 @@ Value FunctionLowerer::emit_rvalue(const Node& expr) {
 		return emit_assignment(expr);
 	if (starts_with(expr.line, "throw-expression"))
 		return emit_throw(expr);
+	if (starts_with(expr.line, "builtin-va-arg-expression"))
+		return emit_builtin_va_arg(expr);
 	if (starts_with(expr.line, "unary-expression"))
 		return emit_unary(expr);
 	if (starts_with(expr.line, "postfix-expression"))
 		return emit_postfix(expr);
 	if (starts_with(expr.line, "call-expression")) {
+		if (expr.direct_call != NULL &&
+		    (expr.direct_call->name == "__builtin_va_start" ||
+		     expr.direct_call->name == "__builtin_va_end"))
+		{
+			if (expr.direct_call->name == "__builtin_va_start")
+				emit_builtin_va_start(expr);
+			return Value("void", "");
+		}
 		Value value = emit_call(expr);
 		if (is_reference(expr.type)) {
 			TypePtr value_type = object_type(expr.type);

@@ -1,4 +1,5 @@
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -525,6 +526,18 @@ TypePtr Parser::instantiate_alias_template(
 			type->template_primary_name = declaration->name;
 			type->template_arguments = template_instance_arguments(full_args);
 		}
+		if (type.get() != NULL &&
+		    type->is_dependent_typename &&
+		    dependent_alias_arguments)
+		{
+			template_type_substitutions_ = save_subst;
+			template_value_substitutions_ = save_value_subst;
+			template_type_parameter_packs_ = save_pack_subst;
+			tokens_ = save_tokens;
+			scopes_ = save_scopes;
+			pos_ = save_pos;
+			return type;
+		}
 		if (type.get() != NULL)
 			type = substitute_template_type(type);
 		if (parsing_base_specifier_ &&
@@ -542,14 +555,18 @@ TypePtr Parser::instantiate_alias_template(
 			return deferred;
 		}
 	}
-	catch (const runtime_error&)
-	{
-		template_type_substitutions_ = save_subst;
+			catch (const runtime_error&)
+			{
+				template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
 		tokens_ = save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
+		if (dependent_alias_arguments &&
+		    type.get() != NULL &&
+		    type->is_dependent_typename)
+			return type;
 		if (dependent_alias_arguments)
 		{
 			TypePtr out = pa11::make_dependent_typename_type(
@@ -563,14 +580,18 @@ TypePtr Parser::instantiate_alias_template(
 		}
 		throw;
 	}
-	catch (...)
-	{
-		template_type_substitutions_ = save_subst;
+			catch (...)
+			{
+				template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
 		tokens_ = save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
+		if (dependent_alias_arguments &&
+		    type.get() != NULL &&
+		    type->is_dependent_typename)
+			return type;
 		if (dependent_alias_arguments)
 		{
 			TypePtr out = pa11::make_dependent_typename_type(

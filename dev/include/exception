@@ -25,8 +25,12 @@ public:
 
 typedef __exception_ptr::exception_ptr exception_ptr;
 
+typedef void (*terminate_handler)();
+
 exception_ptr current_exception() throw();
 void rethrow_exception(exception_ptr);
+terminate_handler set_terminate(terminate_handler) throw();
+void terminate() throw();
 
 template<class E>
 exception_ptr make_exception_ptr(E e) throw()

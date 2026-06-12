@@ -283,6 +283,7 @@ void FunctionLowerer::lower_call_arguments(const Node& expr,
 		lower_call_argument(expr.children[i], param, call.args,
 		                    &call.temp_cleanups,
 		                    preserve_no_storage_lvalue);
+		call.arg_types.push_back(param);
 		maybe_open_call_temp_cleanup_region(call);
 	}
 }

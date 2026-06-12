@@ -94,19 +94,24 @@ out.category = ValueCategory::LValue; out.valid = true; out.builtin_constant_p =
 if (!name.qualified && name.name == "__CHAR_BIT__") { Expr out; out.type = pa11::make_fundamental(FT_INT);
 out.category = ValueCategory::PRValue; out.valid = true; out.constant_expression = true; out.has_constant_value = true;
 out.constant_value = 8; out.node = Node("literal prvalue int 8"); out.node.token_text = "8"; annotate_expr_node(out);
-return out; } if (!name.qualified && (name.name == "__builtin_strlen" ||
-name.name == "__builtin_unreachable" || name.name == "__builtin_memcpy" || name.name == "__builtin_memmove" ||
-name.name == "__builtin_nanl" || name.name == "__builtin_isnan")) {
-Binding* binding = pa11::lookup_unqualified(global_scope(), name.name, pa11::LOOKUP_FUNCTION); if (binding == NULL) {
-vector<TypePtr> params; TypePtr result = pa11::make_fundamental(FT_VOID); TypePtr void_ptr = pa11::make_pointer(pa11::make_fundamental(FT_VOID));
-TypePtr const_void_ptr = pa11::make_pointer(pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST)); if (name.name == "__builtin_strlen")
-{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
-result = pa11::make_fundamental(FT_UNSIGNED_LONG_INT); } else if (name.name == "__builtin_memcpy" || name.name == "__builtin_memmove")
-{ params.push_back(void_ptr); params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
-result = void_ptr; } else if (name.name == "__builtin_nanl")
-{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
-result = pa11::make_fundamental(FT_LONG_DOUBLE); } else if (name.name == "__builtin_isnan")
-{ params.push_back(pa11::make_fundamental(FT_LONG_DOUBLE)); result = pa11::make_fundamental(FT_INT); } TypePtr fn = pa11::make_function(result, params, false); binding = add_value(global_scope(), BindingKind::Function, name.name, fn);
+	return out; } if (!name.qualified && (name.name == "__builtin_strlen" ||
+	name.name == "__builtin_unreachable" || name.name == "__builtin_memcpy" || name.name == "__builtin_memmove" ||
+	name.name == "__builtin_nanl" || name.name == "__builtin_isnan" ||
+	name.name == "__builtin_alloca" || name.name == "__builtin_va_start" ||
+	name.name == "__builtin_va_end")) {
+	Binding* binding = pa11::lookup_unqualified(global_scope(), name.name, pa11::LOOKUP_FUNCTION); if (binding == NULL) {
+	vector<TypePtr> params; TypePtr result = pa11::make_fundamental(FT_VOID); TypePtr void_ptr = pa11::make_pointer(pa11::make_fundamental(FT_VOID));
+	TypePtr const_void_ptr = pa11::make_pointer(pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST)); if (name.name == "__builtin_strlen")
+	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
+	result = pa11::make_fundamental(FT_UNSIGNED_LONG_INT); } else if (name.name == "__builtin_memcpy" || name.name == "__builtin_memmove")
+	{ params.push_back(void_ptr); params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
+	result = void_ptr; } else if (name.name == "__builtin_nanl")
+	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
+	result = pa11::make_fundamental(FT_LONG_DOUBLE); } else if (name.name == "__builtin_isnan")
+	{ params.push_back(pa11::make_fundamental(FT_LONG_DOUBLE)); result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_alloca")
+	{ params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr; } else if (name.name == "__builtin_va_start")
+	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_va_end")
+	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } TypePtr fn = pa11::make_function(result, params, name.name == "__builtin_va_start"); binding = add_value(global_scope(), BindingKind::Function, name.name, fn);
 } Expr out; out.valid = true; out.binding = binding;
 out.type = binding->type; out.category = ValueCategory::LValue; out.overloads.push_back(binding); out.node = Node("id-expression lvalue " +
 pa11::describe_type(out.type) + " " + binding->name); annotate_expr_node(out); return out; }

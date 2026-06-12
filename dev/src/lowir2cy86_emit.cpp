@@ -209,6 +209,10 @@ struct CyEmitter {
 		case InstrKind::Call:
 			emit_call(fn, ins);
 			break;
+		case InstrKind::VaStart:
+		case InstrKind::VaArg:
+		case InstrKind::VaEnd:
+			throw runtime_error("varargs unsupported by cy86 backend");
 		case InstrKind::AtomicExchange:
 			emit_atomic_exchange(fn, ins);
 			break;

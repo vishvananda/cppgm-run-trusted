@@ -162,9 +162,10 @@ struct Binding
 	bool is_local_static;
 	bool is_namespace_static;
 	string local_static_discriminator;
-	Binding* local_static_function_owner;
-		string function_specialization_symbol;
-		bool is_inline_definition;
+		Binding* local_static_function_owner;
+			string function_specialization_symbol;
+			vector<string> abi_tags;
+			bool is_inline_definition;
 		bool is_declared_inline;
 		bool is_generated_default_constructor;
 	bool is_generated_aggregate_constructor;

@@ -1,4 +1,5 @@
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -317,11 +318,28 @@ TypePtr Parser::substitute_template_type(TypePtr type) const
 				TypePtr retry = resolve_dependent_typename_type(type);
 				if (retry.get() != NULL && retry != type)
 					return substitute_template_type(retry);
-			}
-			}
-			if (type->template_primary_name == "__type_pack_element" ||
-			    type->name == "__type_pack_element")
-			{
+				}
+				}
+				string transform_name = !type->template_primary_name.empty()
+					? type->template_primary_name : type->name;
+				size_t transform_args = transform_name.find('<');
+				if (transform_args != string::npos)
+					transform_name = transform_name.substr(0, transform_args);
+				if (internal_type_transform_name(transform_name) &&
+				    type->template_arguments.size() == 1)
+				{
+					TemplateArgument arg =
+						raw_template_argument_from_instance_argument(
+							type->template_arguments[0]);
+					arg = substitute_template_argument(arg);
+					if (arg.kind == TemplateArgumentKind::Type &&
+					    !type_structurally_dependent(arg.type))
+						return apply_internal_type_transform(transform_name,
+						                                     arg.type);
+				}
+				if (type->template_primary_name == "__type_pack_element" ||
+				    type->name == "__type_pack_element")
+				{
 				vector<TemplateArgument> arguments;
 				for (size_t i = 0; i < type->template_arguments.size(); ++i)
 					arguments.push_back(

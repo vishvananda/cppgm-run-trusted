@@ -236,7 +236,11 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		program_.demand_global_declaration(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
-		return Value("ptr", addr);
+		if (!program_.native_lowering)
+			return Value("ptr", addr);
+		string value = fresh_temp();
+		instr(value + " = load ptr " + addr);
+		return Value("ptr", value);
 	}
 	if (object->kind == TypeKind::Array &&
 	    expr.binding->owner != NULL &&

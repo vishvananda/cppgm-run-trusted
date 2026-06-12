@@ -1061,6 +1061,16 @@ Expr Parser::parse_postfix_expression()
 			pos_ = direct_call_save;
 			return parse_postfix_suffixes(parse_primary_expression());
 		}
+		if (!name.qualified && name.name == "__builtin_va_arg")
+		{
+			expect(OP_LPAREN);
+			Expr list = parse_assignment_expression();
+			expect(OP_COMMA);
+			TypePtr result = parse_type_id();
+			expect(OP_RPAREN);
+			return parse_postfix_suffixes(
+				make_builtin_va_arg_expr(list, result));
+		}
 		expect(OP_LPAREN);
 		vector<Expr> args;
 		if (!at(OP_RPAREN))

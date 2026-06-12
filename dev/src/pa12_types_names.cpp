@@ -20,14 +20,28 @@ bool Parser::try_parse_type_name(TypePtr& out)
 	{
 		string transform = current().source;
 		if (internal_type_transform_name(transform))
-		{
-			consume_identifier();
-			expect(OP_LPAREN);
-			TypePtr inner = parse_type_id();
-			expect(OP_RPAREN);
-			out = apply_internal_type_transform(transform, inner);
-			return true;
-		}
+			{
+				consume_identifier();
+				expect(OP_LPAREN);
+				TypePtr inner = parse_type_id();
+				expect(OP_RPAREN);
+				if (type_structurally_dependent(inner))
+				{
+					vector<TemplateArgument> arguments;
+					arguments.push_back(TemplateArgument::type_arg(inner));
+					out = pa11::make_dependent_typename_type(
+						transform,
+						false,
+						true,
+						false);
+					out->template_primary_name = transform;
+					out->template_arguments =
+						dependent_template_instance_arguments(arguments);
+					return true;
+				}
+				out = apply_internal_type_transform(transform, inner);
+				return true;
+			}
 	}
 	bool template_id_qualifier = false;
 	if (at_identifier() && lookahead(OP_LT, 1))
