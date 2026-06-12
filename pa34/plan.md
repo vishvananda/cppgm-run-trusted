@@ -101,3 +101,59 @@ fixed before treating PA34 progress as complete.
 - Done: focused regressions, scoped PA34 report, required
   `make test-report-through-pa34`, and `scripts/cppgm_file_audit.pl --stage
   pa34 --paths dev/src` pass.
+
+## Architecture Review
+
+The PA34 implementation follows the staged compiler architecture in the
+assignment contract:
+
+- The driver remains in `dev/cppgm++.cpp`. It parses hosted `-E`, `-c`,
+  query, include, macro, dependency, and benign build-system flags, then routes
+  to the existing preprocessor and PA29 compile/link paths.
+- Hosted preprocessing is shared through `preproc::Options` and
+  `preproc::run_preproc`; compile mode and `-E` both consume the same include
+  paths, forced includes, command-line macro commands, and generated host macro
+  configuration.
+- Parser and semantic concessions live in the shared PA12 implementation:
+  builtin type spellings, GNU attributes, hosted traits/transforms, dependent
+  template handling, member template replay, callable traits, and hosted
+  source patterns are represented as parser/type/template state rather than as
+  PA34 harness behavior.
+- Builtin functions lower through typed call nodes and the PA14/PA31 object
+  path. Runtime-facing memory/string/math/new-delete/atomic builtins are
+  declared as LowIR functions with host object names instead of being replaced
+  by scripts, copied executables, or fixture payloads.
+- The new implementation files are listed in `dev/frontend_source_sets.mk` for
+  `cppgm++`, keeping source ownership under the audited `dev/src` tree.
+
+The audit found one architecture mismatch: the preprocessor advertised several
+hosted builtins through `__has_builtin` that were either not recognized as
+semantic traits (`__is_invocable_r`, `__is_signed`) or not wired all the way
+through hosted function binding and LowIR declaration (`__builtin_memset`).
+That made probe results stronger than the compiler's actual typed support. The
+cleanup aligns the probe table, parser trait recognition, semantic evaluation,
+and object declaration path.
+
+## Final Architecture Review
+
+After cleanup, PA34 has no known skipped compiler phase, fallback success path,
+dummy object/preprocessor output, interpreter/VM/trampoline/template-binary
+substitute, embedded earlier-IR payload, or source/test-path acceptance gate.
+Hosted compatibility switches are confined to semantic compatibility points
+where vendor headers name known trait templates or builtin spellings; they do
+not inspect test filenames or bypass parse, semantic analysis, lowering, or
+object emission.
+
+The `__has_builtin` table now matches the audited implemented surface for the
+newly checked hosted builtins, including `__is_invocable`,
+`__is_invocable_r`, `__is_signed`, and `__builtin_memset`.
+`__is_invocable_r` is evaluated by constructing the normal unevaluated call and
+checking conversion to the requested result type, while `__builtin_memset`
+uses the same hosted builtin binding and LowIR declaration path as
+`__builtin_memcpy` and `__builtin_memmove`.
+
+Performance-sensitive PA34 paths remain bounded by ordinary compiler work:
+include lookup walks the configured include path list, template traits use
+stored template arguments and existing call conversion, and object lowering
+uses direct builtin declarations. The audit did not find a timeout workaround,
+repeated full-suite walk, hidden source fragment, or file-audit bypass.

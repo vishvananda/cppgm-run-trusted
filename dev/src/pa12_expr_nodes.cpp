@@ -234,6 +234,7 @@ void classify_hosted_libc_math_builtin(const string& name,
 bool hosted_builtin_function_name(const string& name) {
 	return name == "__builtin_strlen" || name == "__builtin_unreachable" ||
 	       name == "__builtin_memcpy" || name == "__builtin_memmove" ||
+	       name == "__builtin_memset" ||
 	       name == "__builtin_strcmp" || name == "__builtin_memcmp" ||
 	       name == "__builtin_memchr" || name == "__builtin_strchr" ||
 	       name == "__builtin_bzero" ||
@@ -328,6 +329,8 @@ out.constant_value = 8; out.node = Node("literal prvalue int 8"); out.node.token
 	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
 	result = pa11::make_fundamental(FT_UNSIGNED_LONG_INT); } else if (name.name == "__builtin_memcpy" || name.name == "__builtin_memmove")
 	{ params.push_back(void_ptr); params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
+	result = void_ptr; } else if (name.name == "__builtin_memset")
+	{ params.push_back(void_ptr); params.push_back(pa11::make_fundamental(FT_INT)); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
 	result = void_ptr; } else if (name.name == "__builtin_strcmp")
 	{ params.push_back(const_char_ptr); params.push_back(const_char_ptr); result = pa11::make_fundamental(FT_INT);
 	} else if (name.name == "__builtin_memcmp")

@@ -898,6 +898,7 @@ bool builtin_type_trait_name(const string& name)
 	       name == "__is_assignable" ||
 	       name == "__is_convertible" ||
 	       name == "__is_invocable" ||
+	       name == "__is_invocable_r" ||
 	       name == "__is_nothrow_invocable" ||
 	       name == "__is_nothrow_constructible" ||
 	       name == "__is_nothrow_assignable" ||
@@ -907,6 +908,7 @@ bool builtin_type_trait_name(const string& name)
 	       name == "__is_destructible" ||
 	       name == "__is_trivially_copyable" ||
 	       name == "__is_integral" ||
+	       name == "__is_signed" ||
 	       name == "__is_floating_point" ||
 	       name == "__is_scalar" ||
 	       name == "__is_enum" ||

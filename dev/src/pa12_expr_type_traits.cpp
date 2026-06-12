@@ -179,6 +179,11 @@ bool Parser::evaluate_builtin_type_relation_trait(const string& name,
 		value = is_invocable_type_trait(types, name == "__is_nothrow_invocable");
 		return true;
 	}
+	if (name == "__is_invocable_r")
+	{
+		value = is_invocable_r_type_trait(types, false);
+		return true;
+	}
 	return false;
 }
 
@@ -198,6 +203,28 @@ bool Parser::evaluate_unary_builtin_type_trait(const string& name,
 		value = true;
 	else if (name == "__is_integral")
 		value = pa11::is_integral_or_bool_type(type);
+	else if (name == "__is_signed")
+	{
+		TypePtr object = trait_object_type(type);
+		if (object->kind == pa11::TypeKind::Enum)
+			value = !FundamentalTypeIsUnsigned(object->enum_underlying);
+		else if (object->kind == pa11::TypeKind::Fundamental)
+		{
+			value = object->fundamental == FT_SIGNED_CHAR ||
+			        object->fundamental == FT_SHORT_INT ||
+			        object->fundamental == FT_INT ||
+			        object->fundamental == FT_LONG_INT ||
+			        object->fundamental == FT_LONG_LONG_INT ||
+			        object->fundamental == FT_INT128 ||
+			        object->fundamental == FT_WCHAR_T ||
+			        object->fundamental == FT_CHAR ||
+			        object->fundamental == FT_FLOAT ||
+			        object->fundamental == FT_DOUBLE ||
+			        object->fundamental == FT_LONG_DOUBLE;
+		}
+		else
+			value = false;
+	}
 	else if (name == "__is_floating_point")
 	{
 		TypePtr object = pa11::strip_cv(type);
@@ -466,8 +493,8 @@ bool Parser::is_nothrow_constructible_type_trait(const vector<TypePtr>& types)
 	}
 }
 
-bool Parser::is_invocable_type_trait(const vector<TypePtr>& types,
-                                     bool require_noexcept)
+bool Parser::try_make_invocable_type_trait_call(const vector<TypePtr>& types,
+                                                Expr& call)
 {
 	if (types.empty())
 		return false;
@@ -475,8 +502,11 @@ bool Parser::is_invocable_type_trait(const vector<TypePtr>& types,
 	callee.valid = true;
 	callee.type = types[0];
 	callee.category = call_category(types[0]);
-	if (pa11::strip_cv(expression_object_type(types[0]))->kind ==
-	    pa11::TypeKind::Function)
+	TypePtr callee_object = expression_object_type(types[0]);
+	callee_object = callee_object.get() != NULL
+		? pa11::strip_cv(callee_object) : TypePtr();
+	if (callee_object.get() != NULL &&
+	    callee_object->kind == pa11::TypeKind::Function)
 		callee.category = ValueCategory::LValue;
 	callee.node = Node("id-expression " + value_category_name(callee.category) +
 	                   " " + pa11::describe_type(types[0]) +
@@ -504,9 +534,47 @@ bool Parser::is_invocable_type_trait(const vector<TypePtr>& types,
 	++unevaluated_expression_depth_;
 	try
 	{
-		Expr call = make_call_expr(callee, args);
+		call = make_call_expr(callee, args);
 		--unevaluated_expression_depth_;
+		return true;
+	}
+	catch (const runtime_error&)
+	{
+		--unevaluated_expression_depth_;
+		return false;
+	}
+}
+
+bool Parser::is_invocable_type_trait(const vector<TypePtr>& types,
+                                     bool require_noexcept)
+{
+	Expr call;
+	if (!try_make_invocable_type_trait_call(types, call))
+		return false;
+	return !require_noexcept || node_is_noexcept(call.node);
+}
+
+bool Parser::is_invocable_r_type_trait(const vector<TypePtr>& types,
+                                       bool require_noexcept)
+{
+	if (types.size() < 2)
+		return false;
+	vector<TypePtr> call_types(types.begin() + 1, types.end());
+	Expr call;
+	if (!try_make_invocable_type_trait_call(call_types, call))
+		return false;
+	TypePtr result = trait_object_type(types[0]);
+	if (result->kind == pa11::TypeKind::Fundamental &&
+	    result->fundamental == FT_VOID)
 		return !require_noexcept || node_is_noexcept(call.node);
+	try
+	{
+		++unevaluated_expression_depth_;
+		Conversion conv = convert_to(call, types[0]);
+		--unevaluated_expression_depth_;
+		if (!conv.viable)
+			return false;
+		return !require_noexcept || node_is_noexcept(conv.expr.node);
 	}
 	catch (const runtime_error&)
 	{

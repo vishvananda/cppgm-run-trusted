@@ -658,8 +658,12 @@ public:
 	bool at_builtin_integral_type_trait_expression() const;
 	bool is_constructible_type_trait(const vector<TypePtr>& types);
 	bool is_nothrow_constructible_type_trait(const vector<TypePtr>& types);
-		bool is_invocable_type_trait(const vector<TypePtr>& types,
-		                             bool require_noexcept);
+	bool try_make_invocable_type_trait_call(const vector<TypePtr>& types,
+	                                        Expr& call);
+	bool is_invocable_type_trait(const vector<TypePtr>& types,
+	                             bool require_noexcept);
+	bool is_invocable_r_type_trait(const vector<TypePtr>& types,
+	                               bool require_noexcept);
 		Expr parse_postfix_expression();
 		Expr parse_direct_call_postfix_expression();
 		Expr make_direct_named_call_expr(const QualifiedName& name, const vector<Expr>& args);

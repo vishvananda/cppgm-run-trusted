@@ -108,6 +108,12 @@ bool demand_builtin_declaration(ProgramLowerer& program,
 			"%arg1 : ptr [capture=nocapture, access=read], "
 			"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
 			"linkage=c, binding=strong, object=memmove]";
+	else if (binding->name == "__builtin_memset")
+		declaration =
+			"declare function @__builtin_memset(%arg0 : ptr "
+			"[capture=nocapture, access=write], %arg1 : i32, "
+			"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
+			"linkage=c, binding=strong, object=memset]";
 	else if (binding->name == "__builtin_strcmp")
 		declaration =
 			"declare function @__builtin_strcmp(%arg0 : ptr "
