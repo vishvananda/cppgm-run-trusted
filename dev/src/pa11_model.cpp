@@ -160,7 +160,8 @@ Type::Type(TypeKind k)
 	  direct_base_virtuals(),
 	  layout_valid(false),
 	  is_polymorphic(false),
-	  introduces_vptr(false)
+	  introduces_vptr(false),
+	  is_final_record(false)
 {
 }
 
@@ -189,9 +190,10 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 		  is_defaulted(false),
 		  is_explicit(false),
 		  has_default_arguments(false),
-		  is_private(false),
+	  is_private(false),
 	  is_protected_member(false),
 	  is_mutable_member(false),
+	  is_no_unique_address(false),
 	  is_reference_member(false),
 	  is_hidden_friend(false),
 	  is_thread_local(false),
@@ -531,6 +533,9 @@ bool is_integral_or_bool_type(const TypePtr& type)
 	}
 }
 
+static bool type_template_identity_matches(const TypePtr& left,
+                                           const TypePtr& right);
+
 bool same_type(const TypePtr& left, const TypePtr& right)
 {
 	if (left->kind != right->kind)
@@ -552,7 +557,23 @@ bool same_type(const TypePtr& left, const TypePtr& right)
 	    left->kind == TypeKind::Enum ||
 	    left->kind == TypeKind::TemplateParameter ||
 	    left->kind == TypeKind::TemplateTemplateParameter)
-		return left->name == right->name && left->scope == right->scope;
+	{
+		if (left->name != right->name || left->scope != right->scope)
+			return false;
+		if ((left->kind == TypeKind::Record ||
+		     left->kind == TypeKind::TemplateParameter ||
+		     left->kind == TypeKind::TemplateTemplateParameter) &&
+		    (left->is_template_specialization ||
+		     right->is_template_specialization ||
+		     left->is_dependent_typename ||
+		     right->is_dependent_typename ||
+		     !left->template_arguments.empty() ||
+		     !right->template_arguments.empty() ||
+		     !left->dependent_typename_template_argument_lists.empty() ||
+		     !right->dependent_typename_template_argument_lists.empty()))
+			return type_template_identity_matches(left, right);
+		return true;
+	}
 	return same_type(left->base, right->base);
 }
 
@@ -654,6 +675,8 @@ uint64_t type_align(const TypePtr& type)
 
 namespace {
 
+bool type_uses_object_storage(TypePtr type);
+
 bool record_uses_object_storage(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -661,8 +684,16 @@ bool record_uses_object_storage(TypePtr type)
 		return false;
 	if (bare->is_polymorphic)
 		return true;
-	if (!bare->fields.empty())
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		Binding* field = bare->fields[i];
+		if (field == NULL)
+			continue;
+		if (field->is_no_unique_address &&
+		    !type_uses_object_storage(field->type))
+			continue;
 		return true;
+	}
 	vector<TypePtr> bases = bare->direct_bases;
 	if (bases.empty() && bare->base.get() != NULL)
 		bases.push_back(bare->base);
@@ -670,6 +701,32 @@ bool record_uses_object_storage(TypePtr type)
 		if (bases[i].get() != NULL && record_uses_object_storage(bases[i]))
 			return true;
 	return false;
+}
+
+bool type_uses_object_storage(TypePtr type)
+{
+	TypePtr bare = strip_cv(type);
+	if (bare.get() == NULL)
+		return false;
+	if (bare->kind == TypeKind::Array)
+	{
+		if (bare->unknown_bound || bare->bound == 0)
+			return false;
+		return type_uses_object_storage(bare->base);
+	}
+	if (bare->kind == TypeKind::Record)
+	{
+		layout_record_type(bare);
+		return record_uses_object_storage(bare);
+	}
+	return true;
+}
+
+bool no_unique_member_uses_no_storage(Binding* member)
+{
+	return member != NULL &&
+	       member->is_no_unique_address &&
+	       !type_uses_object_storage(member->type);
 }
 
 }  // namespace
@@ -687,6 +744,103 @@ static uint64_t align_up(uint64_t offset, uint64_t align)
 		align = 1;
 	uint64_t padding = offset % align;
 	return padding == 0 ? offset : offset + align - padding;
+}
+
+bool same_type(const TypePtr& left, const TypePtr& right);
+
+static bool same_template_instance_argument(
+	const TemplateInstanceArgument& left,
+	const TemplateInstanceArgument& right);
+
+static bool same_template_instance_arguments(
+	const vector<TemplateInstanceArgument>& left,
+	const vector<TemplateInstanceArgument>& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_template_instance_argument(left[i], right[i]))
+			return false;
+	return true;
+}
+
+static bool template_instance_value_has_semantic_identity(
+	const TemplateInstanceArgument& argument)
+{
+	return !argument.value_owner_template_name.empty() ||
+	       !argument.value_member_name.empty() ||
+	       argument.value_name.find("::") != string::npos;
+}
+
+static bool same_template_instance_argument(
+	const TemplateInstanceArgument& left,
+	const TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	switch (left.kind)
+	{
+	case TemplateInstanceArgumentKind::Type:
+		if (left.type.get() == NULL || right.type.get() == NULL)
+			return left.type.get() == right.type.get();
+		return same_type(left.type, right.type);
+	case TemplateInstanceArgumentKind::Value:
+	{
+		bool compare_expr_range = true;
+		if (left.dependent && right.dependent &&
+		    (left.value_expr_end > left.value_expr_begin ||
+		     right.value_expr_end > right.value_expr_begin) &&
+		    template_instance_value_has_semantic_identity(left) &&
+		    template_instance_value_has_semantic_identity(right))
+			compare_expr_range = false;
+		if (left.dependent != right.dependent ||
+		    left.value_negated != right.value_negated ||
+		    left.value != right.value ||
+		    left.value_name != right.value_name ||
+		    left.value_owner_template_name !=
+			    right.value_owner_template_name ||
+		    left.value_member_name != right.value_member_name ||
+		    (compare_expr_range &&
+		     (left.value_expr_begin != right.value_expr_begin ||
+		      left.value_expr_end != right.value_expr_end)) ||
+		    !same_template_instance_arguments(
+			    left.value_owner_template_arguments,
+			    right.value_owner_template_arguments))
+			return false;
+		if (left.type.get() == NULL || right.type.get() == NULL)
+			return left.type.get() == right.type.get();
+		return same_type(left.type, right.type);
+	}
+	case TemplateInstanceArgumentKind::Template:
+		return left.template_name == right.template_name;
+	case TemplateInstanceArgumentKind::Pack:
+		return same_template_instance_arguments(left.pack, right.pack);
+	}
+	return false;
+}
+
+static bool same_template_argument_lists(
+	const vector<vector<TemplateInstanceArgument> >& left,
+	const vector<vector<TemplateInstanceArgument> >& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_template_instance_arguments(left[i], right[i]))
+			return false;
+	return true;
+}
+
+static bool type_template_identity_matches(const TypePtr& left,
+                                           const TypePtr& right)
+{
+	if (left->template_primary_name != right->template_primary_name)
+		return false;
+	return same_template_instance_arguments(left->template_arguments,
+	                                        right->template_arguments) &&
+	       same_template_argument_lists(
+		       left->dependent_typename_template_argument_lists,
+		       right->dependent_typename_template_argument_lists);
 }
 
 static bool type_vector_contains(const vector<TypePtr>& types, TypePtr type)
@@ -851,7 +1005,8 @@ static void layout_record_member(TypePtr bare,
 		member->member_offset = 0;
 		member->bit_offset = 0;
 		bare->fields.push_back(member);
-		cursor.offset = max<uint64_t>(cursor.offset, member_size);
+		if (!no_unique_member_uses_no_storage(member))
+			cursor.offset = max<uint64_t>(cursor.offset, member_size);
 		cursor.align = max<uint64_t>(cursor.align, member_align);
 		cursor.nonvirtual_align =
 			max<uint64_t>(cursor.nonvirtual_align, member_align);
@@ -901,6 +1056,13 @@ static void layout_record_member(TypePtr bare,
 		cursor.offset = bit_unit_offset + bit_unit_size;
 		bit_used = 0;
 		bit_unit_size = 0;
+	}
+	if (no_unique_member_uses_no_storage(member))
+	{
+		member->member_offset = 0;
+		member->bit_offset = 0;
+		bare->fields.push_back(member);
+		return;
 	}
 	cursor.offset = align_up(cursor.offset, member_align);
 	member->member_offset = cursor.offset;

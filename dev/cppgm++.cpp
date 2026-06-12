@@ -6,6 +6,7 @@
 #include "pa12_semantics.h"
 #include "pa14_lowir.h"
 #include "pa29_toolchain.h"
+#include "preproc_support.h"
 #include "tool_help_text.h"
 
 #include <cstdlib>
@@ -40,10 +41,13 @@ enum class DriverMode
 struct DriverInvocation
 {
   DriverMode mode;
+  string query_flag;
   string outfile;
   string target;
   int optimization_level;
   vector<string> include_paths;
+  vector<string> forced_includes;
+  vector<preproc::MacroCommand> macro_commands;
   vector<string> library_paths;
   vector<string> libraries;
   vector<string> inputs;
@@ -314,16 +318,63 @@ preproc::Options make_preproc_options()
   return options;
 }
 
-bool consume_preprocess_option(const vector<string> & args, size_t & i)
+void append_colon_separated_paths(vector<string> & out, const char * value)
 {
-  if(consume_joined_or_separate_option(args, i, "-D", "macro definition")) {
+  if(value == nullptr || *value == '\0') {
+    return;
+  }
+  const string paths(value);
+  string::size_type begin = 0;
+  while(begin <= paths.size()) {
+    string::size_type end = paths.find(':', begin);
+    if(end == string::npos) {
+      end = paths.size();
+    }
+    if(end > begin) {
+      out.push_back(paths.substr(begin, end - begin));
+    }
+    if(end == paths.size()) {
+      break;
+    }
+    begin = end + 1;
+  }
+}
+
+string default_object_output_path(const string & srcfile)
+{
+  string name = srcfile;
+  const string::size_type slash = name.find_last_of('/');
+  if(slash != string::npos) {
+    name = name.substr(slash + 1);
+  }
+  const string::size_type dot = name.find_last_of('.');
+  if(dot != string::npos) {
+    name = name.substr(0, dot);
+  }
+  if(name.empty()) {
+    name = "a";
+  }
+  return name + ".o";
+}
+
+bool consume_preprocess_option(const vector<string> & args,
+                               size_t & i,
+                               DriverInvocation & invocation)
+{
+  string value;
+  if(take_joined_or_separate_option(args, i, "-D", "macro definition", value)) {
+    invocation.macro_commands.push_back(
+        preproc::MacroCommand(preproc::MacroCommand::Define, value));
     return true;
   }
-  if(consume_joined_or_separate_option(args, i, "-U", "macro name")) {
+  if(take_joined_or_separate_option(args, i, "-U", "macro name", value)) {
+    invocation.macro_commands.push_back(
+        preproc::MacroCommand(preproc::MacroCommand::Undefine, value));
     return true;
   }
   if(args[i] == "-include") {
     consume_required_option_argument(args, i, "-include", "file");
+    invocation.forced_includes.push_back(args[i]);
     return true;
   }
   return false;
@@ -396,7 +447,7 @@ bool consume_toolchain_option(const vector<string> & args, size_t & i)
     return true;
   }
   if(args[i] == "-pthread") {
-    throw logic_error("option not yet supported: -pthread");
+    return true;
   }
   return false;
 }
@@ -413,6 +464,7 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
       throw logic_error("query flag must be used as a direct invocation");
     }
     invocation.mode = DriverMode::Query;
+    invocation.query_flag = args[0];
     return invocation;
   }
 
@@ -477,7 +529,7 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
       invocation.target = args[i].substr(string("--target=").size());
       continue;
     }
-    if(consume_preprocess_option(args, i) ||
+    if(consume_preprocess_option(args, i, invocation) ||
        consume_dependency_option(args, i) ||
        consume_toolchain_option(args, i) ||
        is_benign_driver_flag(args[i])) {
@@ -495,10 +547,11 @@ DriverInvocation parse_driver_invocation(const vector<string> & args)
   if(invocation.inputs.empty()) {
     throw logic_error("invalid usage");
   }
-  if(!explicit_outfile) {
+  if(!explicit_outfile && !compile_only && !preprocess_only) {
     throw logic_error("missing output file");
   }
-  if((compile_only || preprocess_only) && invocation.inputs.size() != 1) {
+  if((compile_only || preprocess_only) && explicit_outfile &&
+     invocation.inputs.size() != 1) {
     throw logic_error("cannot specify -o when generating multiple output files");
   }
 
@@ -517,20 +570,98 @@ int run_unimplemented_mode(const char * feature,
   throw NotImplementedException();
 }
 
+preproc::Options make_hosted_preprocess_options(
+    const DriverInvocation & invocation);
+
 pa29::Options make_pa29_options(const DriverInvocation & invocation)
 {
   pa29::Options options;
-  options.preprocess = make_preproc_options();
-  vector<string> builtin_include_paths = options.preprocess.include_paths;
-  options.preprocess.include_paths = invocation.include_paths;
-  options.preprocess.include_paths.insert(options.preprocess.include_paths.end(),
-                                          builtin_include_paths.begin(),
-                                          builtin_include_paths.end());
+  options.preprocess = make_hosted_preprocess_options(invocation);
   options.target = invocation.target;
   options.optimization_level = invocation.optimization_level;
+  options.hosted_compatibility = true;
   options.library_paths = invocation.library_paths;
   options.libraries = invocation.libraries;
   return options;
+}
+
+preproc::Options make_hosted_preprocess_options(
+    const DriverInvocation & invocation)
+{
+  preproc::Options options = make_preproc_options();
+  vector<string> builtin_include_paths = options.include_paths;
+  options.include_paths = invocation.include_paths;
+  append_colon_separated_paths(options.include_paths, getenv("CPPGM_STDINC_PATHS"));
+  options.include_paths.insert(options.include_paths.end(),
+                               builtin_include_paths.begin(),
+                               builtin_include_paths.end());
+  options.forced_includes = invocation.forced_includes;
+  options.macro_commands = invocation.macro_commands;
+  options.import_host_predefined_macros = true;
+  options.import_host_include_paths = true;
+  return options;
+}
+
+int run_query_mode(const DriverInvocation & invocation)
+{
+  if(invocation.query_flag == "--version") {
+    cout << "cppgm++ 201303\n";
+  }
+  else if(invocation.query_flag == "-v") {
+    cout << "cppgm++ 201303\n";
+    cout << "Target: x86_64-unknown-linux-gnu\n";
+  }
+  else if(invocation.query_flag == "-dumpmachine") {
+    cout << "x86_64-unknown-linux-gnu\n";
+  }
+  else if(invocation.query_flag == "-dumpversion") {
+    cout << "201303\n";
+  }
+  else if(invocation.query_flag == "-print-search-dirs") {
+    cout << "install: =\n";
+    cout << "programs: =\n";
+    cout << "libraries: =\n";
+  }
+  else {
+    throw logic_error("unknown query flag");
+  }
+  return EXIT_SUCCESS;
+}
+
+int run_preprocess_mode(const DriverInvocation & invocation)
+{
+  preproc::Options options = make_hosted_preprocess_options(invocation);
+  if(invocation.outfile.empty()) {
+    preproc::run_preproc(invocation.inputs, cout, options);
+    return EXIT_SUCCESS;
+  }
+
+  ofstream out(invocation.outfile.c_str());
+  if(!out) {
+    throw runtime_error("cannot open output file");
+  }
+  preproc::run_preproc(invocation.inputs, out, options);
+  out.close();
+  if(!out) {
+    throw runtime_error("failed writing output file");
+  }
+  return EXIT_SUCCESS;
+}
+
+int run_compile_mode(const DriverInvocation & invocation)
+{
+  if(!invocation.outfile.empty()) {
+    pa29::compile_source_to_object(invocation.inputs[0],
+                                   invocation.outfile,
+                                   make_pa29_options(invocation));
+    return EXIT_SUCCESS;
+  }
+  for(size_t i = 0; i < invocation.inputs.size(); ++i) {
+    pa29::compile_source_to_object(invocation.inputs[i],
+                                   default_object_output_path(invocation.inputs[i]),
+                                   make_pa29_options(invocation));
+  }
+  return EXIT_SUCCESS;
 }
 
 int run_emit_ast_mode(const vector<string> & args)
@@ -582,14 +713,11 @@ int run_driver_mode(const vector<string> & args)
   const DriverInvocation invocation = parse_driver_invocation(args);
   switch(invocation.mode) {
   case DriverMode::Query:
-    return run_unimplemented_mode("driver query mode", "PA34");
+    return run_query_mode(invocation);
   case DriverMode::Preprocess:
-    return run_unimplemented_mode("hosted preprocess driver mode (-E)", "PA34");
+    return run_preprocess_mode(invocation);
   case DriverMode::Compile:
-    pa29::compile_source_to_object(invocation.inputs[0],
-                                   invocation.outfile,
-                                   make_pa29_options(invocation));
-    return EXIT_SUCCESS;
+    return run_compile_mode(invocation);
   case DriverMode::Link:
     pa29::link_inputs_to_executable(invocation.inputs,
                                     invocation.outfile,

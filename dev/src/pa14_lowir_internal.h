@@ -541,10 +541,16 @@ private:
 	                          const Node& init);
 	void lower_direct_array_init(Value base, TypePtr type, const Node& init);
 	Value direct_array_element_addr(Value base, TypePtr elem, size_t index);
-	void lower_aggregate_elements(const function<Value()>& addr_for,
-	                              TypePtr type,
-	                              const vector<Node>& clauses,
-	                              size_t& index);
+		void lower_aggregate_elements(const function<Value()>& addr_for,
+		                              TypePtr type,
+		                              const vector<Node>& clauses,
+		                              size_t& index);
+		void lower_union_aggregate_elements(const function<Value()>& addr_for, TypePtr bare, const vector<Node>& clauses, size_t& index);
+			void lower_record_base_aggregate_elements(const function<Value()>& addr_for, TypePtr bare, const vector<Node>& clauses, size_t& index);
+			void lower_record_field_aggregate_elements(const function<Value()>& addr_for, TypePtr bare, const vector<Node>& clauses, size_t& index);
+			void lower_record_field_aggregate_element(const function<Value()>& addr_for, Binding* field, const vector<Node>& clauses, size_t& index);
+			void lower_bitfield_aggregate_field(const function<Value()>& field_addr, Binding* field, const Node& child);
+			void lower_array_aggregate_elements(const function<Value()>& addr_for, TypePtr bare, TypePtr type, const vector<Node>& clauses, size_t& index);
 		void lower_object_init(const function<Value()>& addr_for,
 		                       TypePtr type,
 		                       const Node& init);
@@ -643,10 +649,28 @@ private:
 	                        vector<pair<string, const Node*> >& cases,
 	                        const Node*& default_node);
 
-	Value emit_rvalue(const Node& expr);
-	void emit_builtin_va_start(const Node& expr);
+		Value emit_rvalue(const Node& expr);
+		Value emit_statement_expression(const Node& expr);
+		Value emit_member_pointer_function_rvalue(const Node& expr);
+		Value emit_call_rvalue(const Node& expr);
+		Value emit_new_expression(const Node& expr);
+		Value emit_array_new_expression(const Node& expr, TypePtr object);
+		Value emit_scalar_new_expression(const Node& expr, TypePtr object);
+		Value emit_delete_expression(const Node& expr);
+		Value emit_pseudo_destructor_rvalue(const Node& expr);
+		void emit_builtin_va_start(const Node& expr);
 	Value emit_builtin_va_arg(const Node& expr);
 	Value emit_builtin_alloca(const Node& expr);
+	Value emit_c11_atomic_builtin(const Node& expr);
+	Value emit_gnu_atomic_builtin(const Node& expr);
+	Value emit_builtin_bit_count(const Node& expr);
+	Value emit_builtin_assume_aligned(const Node& expr);
+	Value emit_builtin_prefetch(const Node& expr);
+	Value emit_builtin_operator_new_delete(const Node& expr);
+	Value emit_builtin_overflow(const Node& expr);
+	Value emit_builtin_flt_rounds(const Node& expr);
+	Value emit_builtin_fpclassify(const Node& expr);
+	Value emit_builtin_float_constant(const Node& expr);
 	Value emit_lvalue_addr(const Node& expr);
 	Value emit_member_lvalue_addr(const Node& expr);
 	Value emit_literal(const Node& expr);
@@ -658,12 +682,19 @@ private:
 	                                Value rhs,
 	                                TypePtr lhs_type,
 	                                TypePtr rhs_type);
-	Value emit_pointer_difference(const Node& expr,
-	                              Value lhs,
-	                              Value rhs,
-	                              TypePtr lhs_type);
-	Value emit_assignment(const Node& expr);
-	Value emit_unary(const Node& expr);
+		Value emit_pointer_difference(const Node& expr,
+		                              Value lhs,
+		                              Value rhs,
+		                              TypePtr lhs_type);
+		Value emit_assignment(const Node& expr);
+		Value emit_record_assignment(const Node& expr);
+		void finish_assignment_protection(bool wrap,
+		                                  bool define_dispatch,
+		                                  const string& dispatch);
+		Value emit_member_assignment(const Node& expr);
+		Value emit_compound_assignment(const Node& expr, TypePtr lhs_type);
+		Value emit_plain_assignment(const Node& expr, TypePtr lhs_type);
+		Value emit_unary(const Node& expr);
 	Value emit_postfix(const Node& expr);
 	Value emit_call(const Node& expr);
 	void init_call_target(const Node& expr, CallEmissionState& call);
@@ -784,11 +815,20 @@ private:
 	Value emit_typeid_lvalue_addr(const Node& expr);
 	Value emit_conditional(const Node& expr);
 	Value emit_conditional_value(const Node& expr);
-	Value convert_value(Value value,
-	                    TypePtr from,
-	                    TypePtr to,
-	                    bool fold_literals = true);
-	Value convert_binary_value(Value value, TypePtr from, TypePtr to);
+		Value convert_value(Value value,
+		                    TypePtr from,
+		                    TypePtr to,
+		                    bool fold_literals = true);
+		Value convert_member_pointer_value(Value value,
+		                                   TypePtr from,
+		                                   TypePtr to,
+		                                   const string& dst,
+		                                   const string& src);
+		Value convert_same_lowir_value(Value value,
+		                               TypePtr from,
+		                               TypePtr to,
+		                               const string& dst);
+		Value convert_binary_value(Value value, TypePtr from, TypePtr to);
 	Value bool_value(Value value, TypePtr type);
 	Value ensure_pointer(Value storage);
 	void branch_logical_operand(const Node& expr, const string& yes, const string& no);

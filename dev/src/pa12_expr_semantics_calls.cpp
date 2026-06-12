@@ -337,9 +337,11 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 			                      considered.end(),
 			                      duplicate));
 		}
-		considered.push_back(fn);
+			considered.push_back(fn);
 			if (!call_candidate_has_arguments(fn, args.size()))
+			{
 				continue;
+			}
 			vector<int> ranks;
 			vector<Expr> conv_args;
 			int object_rank = -1;
@@ -348,7 +350,9 @@ Binding* Parser::resolve_call_candidate(const vector<Binding*>& overloads,
 			                                      conv_args,
 			                                      ranks,
 			                                      object_rank))
+			{
 				continue;
+			}
 			add_variadic_argument_ranks(fn, args.size(), ranks);
 		if (object_rank < 0)
 			object_rank = 0;

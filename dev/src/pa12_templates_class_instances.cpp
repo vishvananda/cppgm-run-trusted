@@ -296,7 +296,35 @@ TypePtr Parser::instantiate_class_template(
 void Parser::complete_template_record(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind != pa11::TypeKind::Record || bare->complete)
+	if (bare->kind != pa11::TypeKind::Record)
+		return;
+	if (validating_template_definition_)
+	{
+		bool active_validation_record = false;
+		bool active_validation_base = false;
+		for (size_t i = 0; i < active_class_instantiations_.size(); ++i)
+		{
+			TypePtr active = pa11::strip_cv(
+				active_class_instantiations_[i].type);
+			if (active.get() == bare.get())
+			{
+				active_validation_record = true;
+				break;
+			}
+			vector<TypePtr> bases = pa11::record_direct_bases(active);
+			for (size_t b = 0; b < bases.size(); ++b)
+			{
+				TypePtr base = bases[b].get() != NULL
+					? pa11::strip_cv(bases[b]) : TypePtr();
+				if (base.get() != NULL &&
+				    pa11::same_type(base, bare))
+					active_validation_base = true;
+			}
+		}
+		if (!active_validation_record && !active_validation_base)
+			return;
+	}
+	if (bare->complete)
 		return;
 	candidate_only_class_template_specializations_.erase(bare.get());
 	map<const void*, TemplateDeclaration*>::iterator found =

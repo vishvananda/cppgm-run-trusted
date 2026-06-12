@@ -54,7 +54,7 @@ bool is_floating_literal_source(const string& source)
 	for (size_t i = 0; i < source.size(); ++i)
 	{
 		const char c = source[i];
-		if (c == '.' || c == 'e' || c == 'E')
+		if (c == '.' || c == 'e' || c == 'E' || c == 'p' || c == 'P')
 			return true;
 	}
 	return false;
@@ -64,10 +64,27 @@ EFundamentalType floating_literal_type(const string& source)
 {
 	if (source.empty())
 		return FT_DOUBLE;
+	if (source.size() >= 4)
+	{
+		const string suffix4 = source.substr(source.size() - 4);
+		if (suffix4 == "f128" || suffix4 == "F128")
+			return FT_LONG_DOUBLE;
+		if (suffix4 == "bf16" || suffix4 == "BF16")
+			return FT_FLOAT;
+	}
+	if (source.size() >= 3)
+	{
+		const string suffix3 = source.substr(source.size() - 3);
+		if (suffix3 == "f16" || suffix3 == "F16" ||
+		    suffix3 == "f32" || suffix3 == "F32")
+			return FT_FLOAT;
+		if (suffix3 == "f64" || suffix3 == "F64")
+			return FT_DOUBLE;
+	}
 	const char suffix = source[source.size() - 1];
 	if (suffix == 'f' || suffix == 'F')
 		return FT_FLOAT;
-	if (suffix == 'l' || suffix == 'L')
+	if (suffix == 'l' || suffix == 'L' || suffix == 'q' || suffix == 'Q')
 		return FT_LONG_DOUBLE;
 	return FT_DOUBLE;
 }

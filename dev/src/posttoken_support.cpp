@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -369,6 +370,20 @@ bool ParseIntegerCore(const string& s, IntegerCore& core)
 		return true;
 	}
 
+	if (s.size() >= 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+	{
+		size_t i = 2;
+		while (i < s.size() && (s[i] == '0' || s[i] == '1'))
+			++i;
+		if (i == 2)
+			return false;
+		core.digits_begin = 2;
+		core.digits_end = i;
+		core.base = 2;
+		core.decimal = false;
+		return true;
+	}
+
 	if (s[0] == '0')
 	{
 		size_t i = 1;
@@ -399,6 +414,8 @@ bool ParseIntegerValue(const string& s,
 	for (size_t i = core.digits_begin; i < core.digits_end; ++i)
 	{
 		const int digit = core.base == 16 ? HexDigitValue(s[i]) : s[i] - '0';
+		if (digit >= core.base)
+			return false;
 		if (!AddCheckedDigit(value, core.base, digit))
 			return false;
 	}
@@ -1330,24 +1347,15 @@ void DebugPostTokenOutputStream::emit_eof()
 // for example PA2Decode_float("12.34") returns "12.34" as a `float` type
 float PA2Decode_float(const string& s)
 {
-	istringstream iss(s);
-	float x;
-	iss >> x;
-	return x;
+	return strtof(s.c_str(), NULL);
 }
 
 double PA2Decode_double(const string& s)
 {
-	istringstream iss(s);
-	double x;
-	iss >> x;
-	return x;
+	return strtod(s.c_str(), NULL);
 }
 
 long double PA2Decode_long_double(const string& s)
 {
-	istringstream iss(s);
-	long double x;
-	iss >> x;
-	return x;
+	return strtold(s.c_str(), NULL);
 }

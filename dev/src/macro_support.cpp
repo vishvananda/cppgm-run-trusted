@@ -538,11 +538,21 @@ size_t MacroProcessor::parse_function_parameters(const vector<PPToken>& tokens,
 		}
 		if (!IsIdentifier(tokens[pos]) || tokens[pos].text == kVaArgs)
 			ThrowError("invalid macro parameter");
-		if (macro.parameter_index.count(tokens[pos].text) != 0)
+		string parameter = tokens[pos].text;
+		if (macro.parameter_index.count(parameter) != 0)
 			ThrowError("duplicate macro parameter");
-		macro.parameter_index[tokens[pos].text] = macro.parameters.size();
-		macro.parameters.push_back(tokens[pos].text);
 		pos = SkipHorizontalWhitespace(tokens, pos + 1, end);
+		if (pos < end && IsOp(tokens[pos], "..."))
+		{
+			macro.variadic = true;
+			macro.parameter_index[parameter] = macro.parameters.size();
+			pos = SkipHorizontalWhitespace(tokens, pos + 1, end);
+			if (pos >= end || !IsOp(tokens[pos], ")"))
+				ThrowError("expected ')' after variadic parameter");
+			return pos + 1;
+		}
+		macro.parameter_index[parameter] = macro.parameters.size();
+		macro.parameters.push_back(parameter);
 		if (pos < end && IsOp(tokens[pos], ")"))
 			return pos + 1;
 		if (pos >= end || !IsOp(tokens[pos], ","))

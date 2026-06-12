@@ -103,8 +103,55 @@ bool ParseExponentPart(const string& s, size_t& pos)
 	return pos > digits_begin;
 }
 
+bool ParseBinaryExponentPart(const string& s, size_t& pos)
+{
+	if (pos >= s.size() || (s[pos] != 'p' && s[pos] != 'P'))
+		return false;
+	++pos;
+	if (pos < s.size() && (s[pos] == '+' || s[pos] == '-'))
+		++pos;
+	const size_t digits_begin = pos;
+	while (pos < s.size() && IsAsciiDigit(s[pos]))
+		++pos;
+	return pos > digits_begin;
+}
+
+bool ParseHexFloatingCore(const string& s, size_t& end)
+{
+	if (s.size() < 3 || s[0] != '0' || (s[1] != 'x' && s[1] != 'X'))
+		return false;
+	size_t pos = 2;
+	const size_t leading_begin = pos;
+	while (pos < s.size() && IsHexDigitChar(s[pos]))
+		++pos;
+	const bool has_leading_digits = pos > leading_begin;
+	bool has_dot = false;
+	bool has_fraction_digits = false;
+	if (pos < s.size() && s[pos] == '.')
+	{
+		has_dot = true;
+		++pos;
+		const size_t fraction_begin = pos;
+		while (pos < s.size() && IsHexDigitChar(s[pos]))
+			++pos;
+		has_fraction_digits = pos > fraction_begin;
+	}
+	if (!has_leading_digits && !has_fraction_digits)
+		return false;
+	size_t exponent_pos = pos;
+	if (!ParseBinaryExponentPart(s, exponent_pos))
+		return false;
+	pos = exponent_pos;
+	(void)has_dot;
+	end = pos;
+	return true;
+}
+
 bool ParseFloatingCore(const string& s, size_t& end)
 {
+	if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		return ParseHexFloatingCore(s, end);
+
 	size_t pos = 0;
 	const size_t leading_begin = pos;
 	while (pos < s.size() && IsAsciiDigit(s[pos]))
@@ -148,7 +195,8 @@ void EmitFloatingLiteral(Output& output,
 		float x = PA2Decode_float(source);
 		output.emit_literal(source, FT_FLOAT, &x, sizeof(x));
 	}
-	else if (suffix == 'l' || suffix == 'L')
+	else if (suffix == 'l' || suffix == 'L' ||
+	         suffix == 'q' || suffix == 'Q')
 	{
 		long double x = PA2Decode_long_double(source);
 		output.emit_literal(source, FT_LONG_DOUBLE, &x, sizeof(x));
@@ -626,12 +674,33 @@ struct BasicPostTokenStream : IPPTokenStream
 		}
 		if (core_end + 1 == data.size() &&
 		    (data[core_end] == 'f' || data[core_end] == 'F' ||
-		     data[core_end] == 'l' || data[core_end] == 'L'))
+		     data[core_end] == 'l' || data[core_end] == 'L' ||
+		     data[core_end] == 'q' || data[core_end] == 'Q'))
 		{
 			EmitFloatingLiteral(output, data, data[core_end]);
 			return true;
 		}
 		const string suffix = data.substr(core_end);
+		if (suffix == "f16" || suffix == "F16" ||
+		    suffix == "f32" || suffix == "F32" ||
+		    suffix == "bf16" || suffix == "BF16")
+		{
+			float x = PA2Decode_float(data.substr(0, core_end));
+			output.emit_literal(data, FT_FLOAT, &x, sizeof(x));
+			return true;
+		}
+		if (suffix == "f64" || suffix == "F64")
+		{
+			double x = PA2Decode_double(data.substr(0, core_end));
+			output.emit_literal(data, FT_DOUBLE, &x, sizeof(x));
+			return true;
+		}
+		if (suffix == "f128" || suffix == "F128")
+		{
+			long double x = PA2Decode_long_double(data.substr(0, core_end));
+			output.emit_literal(data, FT_LONG_DOUBLE, &x, sizeof(x));
+			return true;
+		}
 		if (IsValidUdSuffix(suffix))
 		{
 			output.emit_user_defined_literal_floating(data, suffix, data.substr(0, core_end));

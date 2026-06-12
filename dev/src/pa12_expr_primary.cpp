@@ -112,14 +112,66 @@ binding = pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMET
 if (binding == NULL) throw runtime_error("this outside member function"); Expr out; out.binding = binding;
 out.type = binding->type; out.category = ValueCategory::LValue; out.valid = true; out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 " this"); annotate_expr_node(out); return out; }
-if (at_literal()) return parse_literal_expression(); if (consume(OP_LPAREN)) {
-if (at(OP_LBRACE)) { Node body = parse_compound_statement(); expect(OP_RPAREN); Expr out;
-out.valid = true; out.type = pa11::make_fundamental(FT_VOID); out.category = ValueCategory::PRValue;
-if (!body.children.empty() && node_starts_with(body.children.back(), "expression-statement") && !body.children.back().children.empty()) {
-const Node& result = body.children.back().children[0]; out.type = result.type; out.category = result.category; }
-out.node = Node("statement-expression " + value_category_name(out.category) + " " + pa11::describe_type(out.type));
-out.node.type = out.type; out.node.category = out.category; add_child(out.node, body); annotate_expr_node(out); return out; }
-Expr inner = parse_expression(); expect(OP_RPAREN); return inner; }
+if (at_identifier() &&
+    (current().source == "__func__" ||
+     current().source == "__FUNCTION__" ||
+     current().source == "__PRETTY_FUNCTION__"))
+{
+	string marker = current().source;
+	++pos_;
+	string name;
+	if (!active_functions_.empty())
+	{
+		Binding* function = active_functions_.back();
+		name = marker == "__PRETTY_FUNCTION__"
+			? qualified_decl_name(function) + "()"
+			: function->name;
+	}
+	return make_string_literal_expr(name);
+}
+if (at_identifier() && current().source == "__null")
+{
+	++pos_;
+	Expr out = make_integer_literal_expr(FT_LONG_INT, 0);
+	out.null_pointer_constant = true;
+	return out;
+}
+	if (at_literal()) return parse_literal_expression(); if (consume(OP_LPAREN)) {
+	if (at(OP_LBRACE)) { Node body = parse_compound_statement(); expect(OP_RPAREN); Expr out;
+	out.valid = true; out.type = pa11::make_fundamental(FT_VOID); out.category = ValueCategory::PRValue;
+	if (!body.children.empty() && node_starts_with(body.children.back(), "expression-statement") && !body.children.back().children.empty()) {
+	const Node& result = body.children.back().children[0]; out.type = result.type; out.category = result.category; }
+	out.node = Node("statement-expression " + value_category_name(out.category) + " " + pa11::describe_type(out.type));
+	out.node.type = out.type; out.node.category = out.category; add_child(out.node, body); annotate_expr_node(out); return out; }
+	size_t compound_save = pos_;
+	try {
+		TypePtr compound_type = parse_type_id();
+		expect(OP_RPAREN);
+		if (at(OP_LBRACE)) {
+			Expr init = parse_braced_init_list();
+			init.type = compound_type;
+			init.category = ValueCategory::PRValue;
+			init.node.type = compound_type;
+			init.node.category = init.category;
+			TypePtr bare = pa11::strip_cv(compound_type);
+			if (bare->kind == pa11::TypeKind::Record) {
+				if (!type_is_template_dependent(compound_type)) {
+					complete_template_record(bare);
+					ensure_aggregate_constructors_for_init(compound_type,
+					                                       init.node);
+					ensure_default_destructor(compound_type,
+					                          bare->base.get() != NULL);
+				}
+			}
+			annotate_expr_node(init);
+			return parse_postfix_suffixes(init);
+		}
+		pos_ = compound_save;
+	}
+	catch (const exception&) {
+		pos_ = compound_save;
+	}
+	Expr inner = parse_expression(); expect(OP_RPAREN); return inner; }
 { size_t save = pos_; TemplateArgument dependent; if (try_parse_dependent_qualified_non_type_template_argument(dependent))
 { Expr out; out.valid = true; out.type = dependent.type.get() != NULL
 ? dependent.type : pa11::make_fundamental(FT_INT); out.category = ValueCategory::PRValue; out.constant_expression = true;
@@ -145,7 +197,18 @@ throw runtime_error("this outside member function"); captures.push_back(capture)
 capture.binding = pa11::lookup_unqualified(current_scope(), capture.name, pa11::LOOKUP_VALUE);
 if (capture.binding == NULL) throw runtime_error("unknown lambda capture"); captures.push_back(capture); }
 if (!consume(OP_COMMA)) break; } }
-size_t close_bracket_token = pos_ + 1; expect(OP_RSQUARE); Suffix suffix(SuffixKind::Function); if (at(OP_LPAREN))
+size_t close_bracket_token = pos_ + 1; expect(OP_RSQUARE); vector<map<string, TypePtr> > lambda_save_subst = template_type_substitutions_;
+vector<map<string, TemplateArgument> > lambda_save_value_subst = template_value_substitutions_;
+vector<set<string> > lambda_save_pack_subst = template_type_parameter_packs_;
+vector<TemplateParameterInfo> lambda_parameters;
+bool lambda_template_scope = false; if (at(OP_LT)) { lambda_parameters = parse_template_parameter_clause();
+map<string, TypePtr> parameter_types; map<string, TemplateArgument> parameter_values; set<string> pack_names;
+for (size_t i = 0; i < lambda_parameters.size(); ++i) { const TemplateParameterInfo& parameter = lambda_parameters[i]; if (parameter.name.empty()) continue;
+if (parameter.kind == TemplateParameterKind::Type) { parameter_types[parameter.name] = pa11::make_template_parameter_type(parameter.name); if (parameter.is_pack) pack_names.insert(parameter.name); }
+else { TemplateArgument arg = TemplateArgument::dependent_value_arg(parameter.type.get() != NULL ? parameter.type : pa11::make_fundamental(FT_INT)); arg.value_name = parameter.name;
+if (parameter.is_pack) { vector<TemplateArgument> pack; pack.push_back(arg); parameter_values[parameter.name] = TemplateArgument::pack_arg(pack); } else parameter_values[parameter.name] = arg; } }
+template_type_substitutions_.push_back(parameter_types); template_value_substitutions_.push_back(parameter_values); template_type_parameter_packs_.push_back(pack_names); lambda_template_scope = true; }
+Suffix suffix(SuffixKind::Function); if (at(OP_LPAREN))
 suffix = parse_function_suffix(); bool mutable_lambda = consume(KW_MUTABLE); if (!at(OP_LBRACE)) throw runtime_error("lambda missing body");
 size_t signature_end_token = pos_; TypePtr result = suffix.trailing_return.get() != NULL ? suffix.trailing_return : pa11::make_fundamental(FT_VOID);
 vector<TypePtr> params; for (size_t i = 0; i < suffix.parameters.size(); ++i) params.push_back(suffix.parameters[i].type); TypePtr function_type =
@@ -157,8 +220,10 @@ params, suffix.variadic); operator_function_type->cv = mutable_lambda ? pa11::CV
 suffix.function_cv == pa11::CV_NONE ? pa11::CV_CONST : suffix.function_cv; TypePtr operator_type = make_member_function_type(closure_scope, operator_function_type);
 Binding* call_op = add_function_binding(closure_scope, "operator()", operator_type,
 false); call_op->language_linkage = current_language_linkage(); call_op->is_inline_definition = true; call_op->unwind_no = suffix.noexcept_decl;
-call_op->ref_qualifier = suffix.ref_qualifier; vector<string> operator_names(1, "this"); for (size_t i = 0; i < suffix.parameters.size(); ++i) operator_names.push_back(suffix.parameters[i].name);
-function_parameter_names_[call_op] = operator_names; string context_abi = context_function != NULL ? (context_function->function_specialization_symbol.empty() ? abi_binding_symbol(context_function, map<string, size_t>())
+call_op->ref_qualifier = suffix.ref_qualifier; vector<string> operator_names(1, "this"); vector<Expr> operator_defaults(1);
+for (size_t i = 0; i < suffix.parameters.size(); ++i) { operator_names.push_back(suffix.parameters[i].name); operator_defaults.push_back(suffix.parameters[i].default_value); }
+function_parameter_names_[call_op] = operator_names; if (lambda_template_scope) lambda_template_parameters_[call_op] = lambda_parameters;
+default_arguments_[call_op] = operator_defaults; string context_abi = context_function != NULL ? (context_function->function_specialization_symbol.empty() ? abi_binding_symbol(context_function, map<string, size_t>())
 : context_function->function_specialization_symbol) : string("_Z0v"); string encoded_context = context_abi.compare(0, 2, "_Z") == 0
 ? context_abi.substr(2) : context_abi; bool template_or_member_context = context_function != NULL &&
 ((context_function->owner != NULL && context_function->owner->kind == ScopeKind::Class) || !context_function->function_specialization_symbol.empty()); string closure_abi;
@@ -192,7 +257,7 @@ capture.field->is_reference_member = default_by_reference && !capture.is_this; c
 } } if (!capture_fields.empty() && !parsed_operator_for_captures.children.empty())
 { Binding* this_binding = parsed_operator_for_captures.children[0].binding; TypePtr this_type =
 parsed_operator_for_captures.children[0].type; rewrite_lambda_captures(parsed_operator_for_captures, capture_fields, this_binding,
-this_type); remember_function_body(call_op, parsed_operator_for_captures); } extra_lowir_nodes_.push_back(operator_wrapper.children.back());
+this_type); remember_function_body(call_op, parsed_operator_for_captures); } if (!lambda_template_scope) extra_lowir_nodes_.push_back(operator_wrapper.children.back());
 function_type->base = result; Scope* target = nearest_namespace_scope(current_scope()); Binding* function = add_value(target, BindingKind::Function, name, function_type);
 function->language_linkage = current_language_linkage(); function->is_inline_definition = true; function->is_namespace_static = true; function->unwind_no = suffix.noexcept_decl;
 function->ref_qualifier = suffix.ref_qualifier; Node fn("function-definition " + qualified_decl_name(function) + " " + pa11::describe_type(function_type)); fn.binding = function;
@@ -208,12 +273,14 @@ param.type = params[i]; add_child(fn, param); if (operator_param_index < parsed_
 Binding* old_binding = parsed_operator.children[operator_param_index].binding; if (old_binding != NULL && param_binding != NULL) replacements[old_binding] = param_binding;
 } ++operator_param_index; } if (!parsed_operator.children.empty())
 { Node body = parsed_operator.children.back(); rewrite_bindings(body, replacements); add_child(fn, body);
-} function_parameter_names_[function] = helper_names; remember_function_body(function, fn); extra_lowir_nodes_.push_back(fn);
+} vector<Expr> helper_defaults; for (size_t i = 0; i < suffix.parameters.size(); ++i) helper_defaults.push_back(suffix.parameters[i].default_value);
+function_parameter_names_[function] = helper_names; if (lambda_template_scope) lambda_template_parameters_[function] = lambda_parameters;
+default_arguments_[function] = helper_defaults; remember_function_body(function, fn); if (!lambda_template_scope) extra_lowir_nodes_.push_back(fn);
 lambda_closure_types_[function] = closure; lambda_call_operators_[function] = call_op; lambda_ordinals_[function] = ordinal; if (!capture_initializers.empty())
 lambda_capture_initializers_[function] = capture_initializers; if (local_type_counter_ != local_type_count_before || !captures.empty() || default_capture) lambda_requires_closure_object_.insert(function);
 Expr out; out.valid = true; out.binding = function; out.type = function->type;
 out.category = ValueCategory::LValue; out.node = Node("id-expression lvalue " + pa11::describe_type(function->type) + " " + name); out.node.binding = function;
-annotate_expr_node(out); if (!captures.empty() || default_capture) return lambda_closure_expr(out); return out;
+annotate_expr_node(out); if (lambda_template_scope) { template_type_substitutions_ = lambda_save_subst; template_value_substitutions_ = lambda_save_value_subst; template_type_parameter_packs_ = lambda_save_pack_subst; } if (!captures.empty() || default_capture) return lambda_closure_expr(out); return out;
 } bool Parser::is_lambda_helper_expr(const Expr& expr) const { Binding* binding = expr.binding != NULL ? expr.binding : expr.node.binding;
 return binding != NULL && lambda_closure_types_.find(binding) != lambda_closure_types_.end(); } Expr Parser::lambda_closure_expr(const Expr& expr)
 { Binding* binding = expr.binding != NULL ? expr.binding : expr.node.binding; map<Binding*, TypePtr>::const_iterator found = lambda_closure_types_.find(binding);
@@ -343,6 +410,17 @@ out.node = Node("statement-expression " + value_category_name(out.category) + " 
 out.node.type = out.type; out.node.category = out.category; add_child(out.node, body); annotate_expr_node(out); return parse_postfix_suffixes(out); }
 try { target = parse_type_id(); expect(OP_RPAREN);
 parsed_type_id = true; } catch (const exception&) {
+} if (parsed_type_id && at(OP_LBRACE)) {
+	Expr init = parse_braced_init_list(); init.type = target;
+	init.category = ValueCategory::PRValue; init.node.type = target;
+	init.node.category = init.category; TypePtr bare = pa11::strip_cv(target);
+	if (bare->kind == pa11::TypeKind::Record && !type_is_template_dependent(target))
+		{
+		complete_template_record(bare);
+		ensure_aggregate_constructors_for_init(target, init.node);
+		ensure_default_destructor(target, bare->base.get() != NULL);
+		}
+	annotate_expr_node(init); return parse_postfix_suffixes(init);
 } if (!parsed_type_id || at(OP_RPAREN) || at(OP_COMMA) ||
 at(OP_SEMICOLON) || at(OP_RSQUARE) || at(OP_RBRACE)) {
 pos_ = save; expect(OP_LPAREN); int save_template_argument_depth = template_argument_expression_depth_; template_argument_expression_depth_ = 0;
@@ -390,20 +468,37 @@ zero.node.token_text = "0"; annotate_expr_node(zero); return zero; }
 Expr inner = parse_expression(); expect(OP_RPAREN); return make_cast_expr(target, "", inner); }
 Expr Parser::parse_braced_init_list() { expect(OP_LBRACE); Expr init;
 init.valid = true; init.braced_init_list = true; init.node = Node("braced-init-list"); while (!at(OP_RBRACE))
-{ if (at(OP_LBRACE)) add_child(init.node, parse_braced_init_list().node); else
-{ vector<Expr> expanded; if (try_parse_static_member_pack_expansion(expanded)) {
-for (size_t i = 0; i < expanded.size(); ++i) add_child(init.node, expanded[i].node); if (!consume(OP_COMMA)) break;
-continue; } size_t child_begin = pos_; Expr child = parse_assignment_expression();
-size_t child_end = pos_; if (consume(OP_DOTS)) { if (!child.pack_expansion)
-{ vector<Expr> pattern_expansion; if (!try_expand_expression_pack_pattern( child_begin,
-child_end, pattern_expansion)) throw runtime_error( "pack expansion requires a pack");
-for (size_t i = 0; i < pattern_expansion.size(); ++i) add_child(init.node, pattern_expansion[i].node); if (!consume(OP_COMMA)) break;
-continue; } for (size_t i = 0; i < child.pack.size(); ++i) add_child(init.node, child.pack[i].node);
-if (!consume(OP_COMMA)) break; continue; }
-if (child.category == ValueCategory::PRValue) { TypePtr object = pa11::strip_cv(expression_object_type(child.type));
-if (object->kind == pa11::TypeKind::Record && object->base.get() != NULL) ensure_default_destructor(object, true); }
-add_child(init.node, child.node); } if (!consume(OP_COMMA)) break;
-} expect(OP_RBRACE); return init; }
+	{
+	if (consume(OP_DOT))
+		{
+		string name = consume_identifier(); expect(OP_ASS);
+		Expr child = at(OP_LBRACE) ? parse_braced_init_list() : parse_assignment_expression();
+		Node designator("designated-init " + name); designator.type = child.type;
+		designator.category = child.category; designator.binding = child.binding;
+		add_child(designator, child.node); add_child(init.node, designator);
+		}
+	else if (at(OP_LBRACE)) add_child(init.node, parse_braced_init_list().node);
+	else
+		{
+		vector<Expr> expanded; if (try_parse_static_member_pack_expansion(expanded))
+			{
+			for (size_t i = 0; i < expanded.size(); ++i) add_child(init.node, expanded[i].node);
+			if (!consume(OP_COMMA)) break; continue;
+			}
+		size_t child_begin = pos_; Expr child = parse_assignment_expression();
+		size_t child_end = pos_; if (consume(OP_DOTS)) { if (!child.pack_expansion)
+		{ vector<Expr> pattern_expansion; if (!try_expand_expression_pack_pattern( child_begin,
+		child_end, pattern_expansion)) throw runtime_error( "pack expansion requires a pack");
+		for (size_t i = 0; i < pattern_expansion.size(); ++i) add_child(init.node, pattern_expansion[i].node); if (!consume(OP_COMMA)) break;
+		continue; } for (size_t i = 0; i < child.pack.size(); ++i) add_child(init.node, child.pack[i].node);
+		if (!consume(OP_COMMA)) break; continue; }
+		if (child.category == ValueCategory::PRValue) { TypePtr object = pa11::strip_cv(expression_object_type(child.type));
+		if (object->kind == pa11::TypeKind::Record && object->base.get() != NULL) ensure_default_destructor(object, true); }
+		add_child(init.node, child.node);
+		}
+	if (!consume(OP_COMMA)) break;
+	}
+expect(OP_RBRACE); return init; }
 bool Parser::try_parse_static_member_pack_expansion(vector<Expr>& out) { size_t save = pos_; out.clear();
 if (!at_identifier()) return false; string root = consume_identifier(); string pack_name;
 TemplateDeclaration* owner_template = NULL; vector<TemplateArgument> owner_arguments; bool owner_is_template_id = false; size_t owner_arguments_begin = 0;

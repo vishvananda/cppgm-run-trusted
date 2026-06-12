@@ -50,9 +50,10 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 					TemplateArgument element = arg.pack[p];
 					string pack_name;
 					TemplateArgument pack_subst;
-					bool expands_current_pack =
-						element.kind == TemplateArgumentKind::Type &&
-						template_type_has_template_parameter_name(
+						bool expands_current_pack =
+							arg.value_name.empty() &&
+							element.kind == TemplateArgumentKind::Type &&
+							template_type_has_template_parameter_name(
 							element.type,
 							pack_name) &&
 						find_template_value_substitution(pack_name,

@@ -377,6 +377,7 @@ void compile_source_to_lowir(const string& srcfile,
 	lowir_options.preprocess = options.preprocess;
 	lowir_options.native_lowering = true;
 	lowir_options.host_object_lowering = host_object;
+	lowir_options.hosted_compatibility = options.hosted_compatibility;
 	pa14::emit_lowir(vector<string>(1, srcfile), objfile, lowir_options);
 }
 

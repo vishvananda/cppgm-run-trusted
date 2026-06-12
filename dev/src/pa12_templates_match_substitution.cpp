@@ -231,6 +231,24 @@ TypePtr Parser::expand_alias_template_for_match(
 	return out;
 }
 
+TypePtr Parser::resolve_dependent_typename_for_template_match(
+	TypePtr type) const
+{
+	if (type.get() == NULL || !type->is_dependent_typename)
+		return TypePtr();
+	try
+	{
+		TypePtr resolved = resolve_dependent_typename_type(type);
+		if (resolved.get() == NULL || resolved == type)
+			return TypePtr();
+		return substitute_template_type(resolved);
+	}
+	catch (const exception&)
+	{
+		return TypePtr();
+	}
+}
+
 TemplateDeclaration* Parser::class_template_declaration_for_match(
 	TypePtr type) const
 {

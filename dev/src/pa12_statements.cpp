@@ -16,13 +16,19 @@ static bool same_return_template_argument(
 static bool same_return_record_type(TypePtr left, TypePtr right) { TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right);
 if (pa11::same_type(l, r)) return true; return l->kind == pa11::TypeKind::Record && r->kind == pa11::TypeKind::Record &&
 l->is_template_specialization && r->is_template_specialization && !l->template_primary_name.empty() && l->template_primary_name == r->template_primary_name && same_return_template_arguments(l->template_arguments, r->template_arguments); }
+static bool top_level_semicolon_before_rparen(const vector<Token>& tokens, size_t pos)
+{ int paren = 0; int square = 0; int brace = 0; for (size_t i = pos; i < tokens.size(); ++i) { if (tokens[i].kind != posttoken::TokenKind::Simple) continue; ETokenType type = tokens[i].type;
+if (type == OP_LPAREN) ++paren; else if (type == OP_RPAREN) { if (paren == 0 && square == 0 && brace == 0) return false; if (paren > 0) --paren; }
+else if (type == OP_LSQUARE) ++square; else if (type == OP_RSQUARE) { if (square > 0) --square; }
+else if (type == OP_LBRACE) ++brace; else if (type == OP_RBRACE) { if (brace > 0) --brace; }
+else if (type == OP_SEMICOLON && paren == 0 && square == 0 && brace == 0) return true; } return false; }
 static Expr expr_from_node(const Node& node) { Expr out; out.valid = true;
 out.node = node; out.type = node.type; out.category = node.category; out.binding = node.binding;
 out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_template_arguments;
 out.has_constant_value = node.has_constant_value; out.constant_value = node.constant_value; out.dependent_value_name = node.dependent_value_name; out.dependent_value_owner_template_name =
 node.dependent_value_owner_template_name; out.dependent_value_member_name = node.dependent_value_member_name; out.dependent_value_negated = node.dependent_value_negated; out.dependent_value_owner_template_arguments =
 node.dependent_value_owner_template_arguments; out.braced_init_list = node.line.compare(0, 16, "braced-init-list") == 0; return out;
-} TypePtr Parser::deduce_auto_return_type(Binding* function, const Expr& expr) { map<Binding*, TypePtr>::const_iterator found =
+	} TypePtr Parser::deduce_auto_return_type(Binding* function, const Expr& expr) { map<Binding*, TypePtr>::const_iterator found =
 auto_return_patterns_.find(function); if (found == auto_return_patterns_.end()) throw runtime_error("auto return pattern missing"); TypePtr pattern = found->second;
 TypePtr bare = pa11::strip_cv(pattern); TypePtr deduced; if (bare->kind == pa11::TypeKind::LValueReference) deduced = pa11::make_lvalue_reference(
 pa11::make_cv(expression_object_type(expr.type), pattern->base->kind == pa11::TypeKind::Cv ? pattern->base->cv : pa11::CV_NONE)); else if (bare->kind == pa11::TypeKind::RValueReference)
@@ -33,9 +39,10 @@ auto_return_deduced_[function] = deduced; else if (!pa11::same_type(previous->se
 } void Parser::parse_function_body(Binding* function, const Declarator& declarator, Node& function_node)
 { vector<ParameterInfo> parameters; const Suffix* suffix = declarator_function_suffix(declarator); if (suffix != NULL)
 parameters = suffix->parameters; parse_function_body_from_parameters(function, parameters, function_node); } void Parser::parse_function_body_from_parameters(
-Binding* function, const vector<ParameterInfo>& parameters, Node& function_node) {
-if (function_node.children.empty()) throw runtime_error("missing function node"); Node& fn = function_node.children.back(); Scope* lexical_parent =
-function->owner != NULL && function->owner->kind == ScopeKind::Class ? function->owner : current_scope(); Scope* function_scope = pa11::create_child_scope(lexical_parent, ScopeKind::Function, function->name);
+	Binding* function, const vector<ParameterInfo>& parameters, Node& function_node) {
+	vector<Scope*> saved_scopes = scopes_;
+	if (function_node.children.empty()) throw runtime_error("missing function node"); Node& fn = function_node.children.back(); Scope* lexical_parent =
+	function->owner != NULL && function->owner->kind == ScopeKind::Class ? function->owner : current_scope(); Scope* function_scope = pa11::create_child_scope(lexical_parent, ScopeKind::Function, function->name);
 if (function->owner != NULL && function->owner->kind == ScopeKind::Class && !function->is_static_member) {
 if (function->type->parameters.empty()) throw runtime_error("member function missing this parameter"); TypePtr this_type = function->type->parameters[0]; Binding* this_binding =
 pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
@@ -65,12 +72,13 @@ if (!parameters[i].pack_expression_name.empty()) parameter_packs[parameters[i].p
 pa11::describe_type(parameter_type)); param_node.binding = param; param_node.type = parameter_type; add_child(fn, param_node);
 } else { Node param_node("parameter " + node_name + " " +
 pa11::describe_type(parameter_type)); param_node.type = parameter_type; add_child(fn, param_node); }
-} scopes_.push_back(function_scope); bool auto_return = auto_return_functions_.count(function) != 0; function_returns_.push_back(auto_return ? TypePtr() : function->type->base);
-active_functions_.push_back(function); function_parameter_pack_substitutions_.push_back(parameter_packs); if (at(KW_TRY)) { Node body("compound-statement"); add_child(body, parse_try_statement()); add_child(fn, body); } else add_child(fn, parse_compound_statement()); if (auto_return)
+	} scopes_.push_back(function_scope); bool auto_return = auto_return_functions_.count(function) != 0; function_returns_.push_back(auto_return ? TypePtr() : function->type->base);
+	active_functions_.push_back(function); function_parameter_pack_substitutions_.push_back(parameter_packs); try { if (at(KW_TRY)) { Node body("compound-statement"); add_child(body, parse_try_statement()); add_child(fn, body); } else add_child(fn, parse_compound_statement()); } catch (...) { function_parameter_pack_substitutions_.pop_back(); active_functions_.pop_back();
+	function_returns_.pop_back(); scopes_ = saved_scopes; throw; } if (auto_return)
 { map<Binding*, TypePtr>::const_iterator deduced = auto_return_deduced_.find(function); if (deduced == auto_return_deduced_.end())
 function->type->base = pa11::make_fundamental(FT_VOID); else function->type->base = deduced->second; fn.type = function->type;
-} remember_function_body(function, fn); function_parameter_pack_substitutions_.pop_back(); active_functions_.pop_back();
-function_returns_.pop_back(); scopes_.pop_back(); } void Parser::remember_function_body(Binding* function, const Node& function_node)
+	} remember_function_body(function, fn); function_parameter_pack_substitutions_.pop_back(); active_functions_.pop_back();
+	function_returns_.pop_back(); scopes_ = saved_scopes; } void Parser::remember_function_body(Binding* function, const Node& function_node)
 { if (function != NULL) function_bodies_[function] = function_node; }
 void Parser::enqueue_pending_member_body(Scope* class_scope, PendingFunctionBody pending) { pending.scopes = scopes_;
 pending.friend_class_scopes = active_friend_class_scopes_; pending.type_substitutions = template_type_substitutions_; pending.value_substitutions = template_value_substitutions_; pending.pack_substitutions = template_type_parameter_packs_;
@@ -161,20 +169,24 @@ pending_member_bodies_[class_scope] = still_pending; } void Parser::parse_deferr
 map<Scope*, vector<Scope*> >::iterator found = deferred_nested_member_body_scopes_.find(class_scope); if (found == deferred_nested_member_body_scopes_.end()) return;
 vector<Scope*> nested = found->second; deferred_nested_member_body_scopes_.erase(found); for (size_t i = 0; i < nested.size(); ++i) {
 parse_pending_member_bodies(nested[i]); parse_deferred_nested_member_bodies(nested[i]); } }
-Node Parser::parse_compound_statement() { expect(OP_LBRACE); Node node("compound-statement");
-Scope* block = pa11::create_child_scope(current_scope(), ScopeKind::Block, ""); scopes_.push_back(block); while (!at(OP_RBRACE)) {
-Node item = parse_block_item(); if (!item.line.empty()) add_child(node, item); }
-scopes_.pop_back(); expect(OP_RBRACE); return node; }
+	Node Parser::parse_compound_statement() { expect(OP_LBRACE); Node node("compound-statement");
+	vector<Scope*> saved_scopes = scopes_;
+	Scope* block = pa11::create_child_scope(current_scope(), ScopeKind::Block, ""); scopes_.push_back(block); try { while (!at(OP_RBRACE)) {
+	Node item = parse_block_item(); if (!item.line.empty()) add_child(node, item); }
+	} catch (...) { scopes_ = saved_scopes; throw; }
+	scopes_ = saved_scopes; expect(OP_RBRACE); return node; }
 Node Parser::parse_block_item() { if (at(KW_USING)) {
 Node node("compound-statement-placeholder"); parse_using_family(node); if (node.children.empty()) return Node();
 return node.children[0]; } if (at(KW_NAMESPACE)) {
 Node node; parse_namespace_or_alias(node); return Node(); }
 if (at(KW_STATIC_ASSERT)) { parse_static_assert_declaration(); return Node();
-} if (starts_declaration()) { size_t save = pos_;
-bool definitely_declaration = at_simple_builtin() || at_simple_cv() || at(KW_TYPEDEF) ||
+} if (at_gnu_asm()) return parse_statement();
+if (starts_declaration()) { size_t save = pos_;
+size_t attr_save = pos_; skip_attributes(); bool definitely_declaration = at_simple_builtin() || at_simple_cv() || at(KW_TYPEDEF) ||
 at(KW_CONSTEXPR) || at(KW_EXTERN) || at(KW_STATIC) || at(KW_DECLTYPE) ||
 at(KW_TYPENAME) || starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT) ||
-(at_identifier() && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier); if (!definitely_declaration && (at_identifier() || at(OP_COLON2)))
+(at_identifier() && (current().source == "__int128" || current().source == "_BitInt" || current().source == "_Atomic" || current().source == "__extension__" || current().source == "__decltype" || current().source == "__decltype__" || current().source == "__typeof" || current().source == "__typeof__" || current().source == "_Complex" || current().source == "__complex__" || current().source == "__complex")) ||
+(at_identifier() && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier); pos_ = attr_save; if (!definitely_declaration && (at_identifier() || at(OP_COLON2)))
 { size_t type_save = pos_; TypePtr type_probe; if (try_parse_type_name(type_probe) &&
 (starts_declarator() || at_identifier())) { bool parenthesized_this_argument = at(OP_LPAREN) &&
 pos_ + 2 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple && (tokens_[pos_ + 1].type == OP_STAR || tokens_[pos_ + 1].type == OP_AMP) &&
@@ -184,18 +196,25 @@ pos_ + 2 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Sim
 	if (tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple) { ETokenType next = tokens_[pos_ + 1].type;
 	parenthesized_non_declarator = !(next == OP_STAR || next == OP_AMP || next == OP_LAND || next == OP_LPAREN || next == OP_COLON2); } }
 	if (!parenthesized_this_argument && !empty_functional_temporary && !parenthesized_non_declarator) definitely_declaration = true; } pos_ = type_save;
-} try { Node node;
-parse_simple_or_function_declaration(node, true); if (!node.children.empty()) return node.children[0]; return Node();
-} catch (const exception&) { pos_ = save;
-if (definitely_declaration) throw; } }
+	} vector<Scope*> declaration_scopes = scopes_; try { Node node;
+	parse_simple_or_function_declaration(node, true); if (!node.children.empty()) return node.children[0]; return Node();
+	} catch (const exception&) { pos_ = save; scopes_ = declaration_scopes;
+	if (definitely_declaration) throw; } }
 return parse_statement(); } Node Parser::parse_statement() {
+skip_attributes(); if (at_gnu_asm()) { skip_gnu_asm(); expect(OP_SEMICOLON); return Node("expression-statement"); }
 if (at(OP_LBRACE)) return parse_compound_statement(); if (at(KW_IF)) return parse_if_statement();
 if (at(KW_SWITCH)) return parse_switch_statement(); if (at(KW_WHILE)) return parse_while_statement();
 if (at(KW_DO)) return parse_do_statement(); if (at(KW_FOR)) return parse_for_statement();
 if (at(KW_TRY)) return parse_try_statement(); if (at(KW_RETURN) || at(KW_BREAK) || at(KW_CONTINUE) || at(KW_GOTO)) return parse_jump_statement();
 if ((at_identifier() && lookahead(OP_COLON, 1)) || at(KW_CASE) || at(KW_DEFAULT)) return parse_labeled_statement(); return parse_expression_statement();
-} Node Parser::parse_if_statement() { expect(KW_IF);
-Node node("if-statement"); expect(OP_LPAREN); add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL))); expect(OP_RPAREN);
+} void Parser::skip_constexpr_if_statement()
+{ skip_attributes(); if (at(OP_LBRACE)) { skip_balanced(OP_LBRACE, OP_RBRACE); return; } if (at(KW_IF)) { ++pos_; if (at(KW_CONSTEXPR)) ++pos_; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); skip_constexpr_if_statement(); if (consume(KW_ELSE)) skip_constexpr_if_statement(); return; } while (!at_eof() && !consume(OP_SEMICOLON)) ++pos_; }
+Node Parser::parse_if_statement() { expect(KW_IF);
+bool constexpr_if = consume(KW_CONSTEXPR); Node node("if-statement"); expect(OP_LPAREN); if (top_level_semicolon_before_rparen(tokens_, pos_))
+{ Node init_node("if-init-statement"); if (at(KW_USING)) parse_using_family(init_node); else if (starts_declaration()) parse_simple_or_function_declaration(init_node, true); else init_node = parse_expression_statement();
+add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL))); } else add_child(node, parse_condition(pa11::make_fundamental(FT_BOOL))); expect(OP_RPAREN);
+if (constexpr_if && !node.children.empty() && !node.children[0].children.empty() && node.children[0].children[0].has_constant_value)
+{ bool take_then = node.children[0].children[0].constant_value != 0; if (take_then) { Node selected = parse_statement(); if (consume(KW_ELSE)) skip_constexpr_if_statement(); return selected; } skip_constexpr_if_statement(); if (consume(KW_ELSE)) return parse_statement(); return Node("compound-statement"); }
 Node then_node("then"); add_child(then_node, parse_statement()); add_child(node, then_node); if (consume(KW_ELSE))
 { Node else_node("else"); add_child(else_node, parse_statement()); add_child(node, else_node);
 } return node; } Node Parser::parse_switch_statement()

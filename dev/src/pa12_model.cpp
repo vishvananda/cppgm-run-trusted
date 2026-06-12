@@ -357,6 +357,42 @@ bool same_record_base_target(TypePtr left, TypePtr right)
 	       same_named_record_type(left, right);
 }
 
+bool record_has_base_family(TypePtr source,
+                            TypePtr target,
+                            vector<TypePtr>& seen)
+{
+	TypePtr s = pa11::strip_cv(source);
+	TypePtr t = pa11::strip_cv(target);
+	if (s.get() == NULL || s->kind != pa11::TypeKind::Record ||
+	    t.get() == NULL || t->kind != pa11::TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < seen.size(); ++i)
+		if (same_record_base_target(seen[i], s) ||
+		    same_template_record_family(seen[i], s))
+			return false;
+	seen.push_back(s);
+	vector<TypePtr> bases = pa11::record_direct_bases(s);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = pa11::strip_cv(bases[i]);
+		if (same_record_base_target(base, t) ||
+		    same_template_record_family(base, t) ||
+		    record_has_base_family(base, t, seen))
+		{
+			seen.pop_back();
+			return true;
+		}
+	}
+	seen.pop_back();
+	return false;
+}
+
+bool record_has_base_family(TypePtr source, TypePtr target)
+{
+	vector<TypePtr> seen;
+	return record_has_base_family(source, target, seen);
+}
+
 void collect_record_base_distances(TypePtr source,
                                    TypePtr target,
                                    int distance,
@@ -759,14 +795,17 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 		vector<TypePtr> bases = record.get() != NULL
 			? pa11::record_direct_bases(record) : vector<TypePtr>();
 		vector<Binding*> base_found;
-		for (size_t b = 0; b < bases.size(); ++b)
-		{
-			TypePtr base = bases[b].get() != NULL
-				? pa11::strip_cv(bases[b]) : TypePtr();
-			if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-			    base->scope != NULL &&
-			    !record_skips_dependent_base_unqualified_lookup(record))
+			for (size_t b = 0; b < bases.size(); ++b)
 			{
+				TypePtr base = bases[b].get() != NULL
+					? pa11::strip_cv(bases[b]) : TypePtr();
+				bool skip_dependent_base_lookup =
+					record_skips_dependent_base_unqualified_lookup(record) &&
+					(mask & pa11::LOOKUP_VALUE) != 0;
+				if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
+				    base->scope != NULL &&
+				    !skip_dependent_base_lookup)
+				{
 				complete_template_record(base);
 				set<Scope*> seen;
 				collect_in_scope(base->scope, name, mask, seen, base_found);
@@ -961,7 +1000,9 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 	{
 		TypePtr active_type = pa11::record_type_for_scope(active_class);
 		if (active_type.get() != NULL &&
-		    record_base_distance(active_type, class_type) < 1000000)
+		    (same_template_record_family(active_type, class_type) ||
+		     record_base_distance(active_type, class_type) < 1000000 ||
+		     record_has_base_family(active_type, class_type)))
 			return true;
 	}
 	map<Scope*, vector<Binding*> >::const_iterator fit =

@@ -358,6 +358,7 @@ void emit_lowir(const vector<string>& srcfiles,
 	{
 		pa12::Options pa12_options;
 		pa12_options.preprocess = options.preprocess;
+		pa12_options.hosted_compatibility = options.hosted_compatibility;
 		unique_ptr<pa12::internal::Parser> parser(
 			new pa12::internal::Parser(srcfiles[i], pa12_options));
 		parser->parse_translation_unit();

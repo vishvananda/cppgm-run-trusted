@@ -280,6 +280,11 @@ Expr Parser::make_deref_expr(const string& text, Expr inner)
 		object = bare->base;
 	else if (bare->kind == pa11::TypeKind::Array)
 		object = bare->base;
+	else if (type_is_template_dependent(object))
+		object = pa11::make_dependent_typename_type("__dependent_deref",
+		                                            false,
+		                                            false,
+		                                            false);
 	else
 		throw runtime_error("deref of non-pointer");
 	Expr out;

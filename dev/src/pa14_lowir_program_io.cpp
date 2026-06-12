@@ -87,27 +87,78 @@ bool demand_builtin_declaration(ProgramLowerer& program,
 		declaration =
 			"declare function @__builtin_strlen(%arg0 : ptr "
 			"[capture=nocapture, access=read]) -> i64 "
-			"[effects=readonly, unwind=no, binding=strong, "
-			"object=cppgm_builtin_strlen]";
+			"[effects=readonly, unwind=no, linkage=c, binding=strong, "
+			"object=strlen]";
 	else if (binding->name == "__builtin_unreachable")
 		declaration =
 			"declare function @__builtin_unreachable() -> void "
 			"[effects=readnone, unwind=no, return=noreturn, "
-			"binding=strong, object=cppgm_builtin_unreachable]";
+			"linkage=c, binding=strong, object=abort]";
 	else if (binding->name == "__builtin_memcpy")
 		declaration =
 			"declare function @__builtin_memcpy(%arg0 : ptr "
 			"[capture=nocapture, access=write, alias=noalias], "
 			"%arg1 : ptr [capture=nocapture, access=read, alias=noalias], "
 			"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
-			"binding=strong, object=cppgm_builtin_memcpy]";
+			"linkage=c, binding=strong, object=memcpy]";
 	else if (binding->name == "__builtin_memmove")
 		declaration =
 			"declare function @__builtin_memmove(%arg0 : ptr "
 			"[capture=nocapture, access=readwrite], "
 			"%arg1 : ptr [capture=nocapture, access=read], "
 			"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
-			"binding=strong, object=cppgm_builtin_memmove]";
+			"linkage=c, binding=strong, object=memmove]";
+	else if (binding->name == "__builtin_strcmp")
+		declaration =
+			"declare function @__builtin_strcmp(%arg0 : ptr "
+			"[capture=nocapture, access=read], "
+			"%arg1 : ptr [capture=nocapture, access=read]) -> i32 "
+			"[effects=readonly, unwind=no, linkage=c, binding=strong, "
+			"object=strcmp]";
+	else if (binding->name == "__builtin_memcmp")
+		declaration =
+			"declare function @__builtin_memcmp(%arg0 : ptr "
+			"[capture=nocapture, access=read], "
+			"%arg1 : ptr [capture=nocapture, access=read], "
+			"%arg2 : i64) -> i32 [effects=readonly, unwind=no, "
+			"linkage=c, binding=strong, object=memcmp]";
+	else if (binding->name == "__builtin_memchr")
+		declaration =
+			"declare function @__builtin_memchr(%arg0 : ptr "
+			"[capture=nocapture, access=read], %arg1 : i32, "
+			"%arg2 : i64) -> ptr [effects=readonly, unwind=no, "
+			"linkage=c, binding=strong, object=memchr]";
+	else if (binding->name == "__builtin_strchr")
+		declaration =
+			"declare function @__builtin_strchr(%arg0 : ptr "
+			"[capture=nocapture, access=read], %arg1 : i32) -> ptr "
+			"[effects=readonly, unwind=no, linkage=c, binding=strong, "
+			"object=strchr]";
+	else if (binding->name == "__builtin_bzero")
+		declaration =
+			"declare function @__builtin_bzero(%arg0 : ptr "
+			"[capture=nocapture, access=write], %arg1 : i64) -> void "
+			"[effects=readwrite, unwind=no, linkage=c, binding=strong, "
+			"object=bzero]";
+	else if (binding->name.compare(0, 10, "__builtin_") == 0)
+	{
+		string object = binding->name.substr(10);
+		if (object == "fabsf128")
+			object = "fabsl";
+		ostringstream out;
+		out << "declare function @" << name << "(";
+		for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+		{
+			if (i != 0)
+				out << ", ";
+			out << "%arg" << i << " : "
+			    << lowir_parameter(binding->type->parameters[i]);
+		}
+		out << ") -> " << scalar_lowir_type(binding->type->base)
+		    << " [unwind=no, linkage=c, binding=strong, object="
+		    << object << "]";
+		declaration = out.str();
+	}
 	else if (binding->owner != NULL && binding->owner->parent == NULL &&
 	         binding->name == "operatornew" &&
 	         binding->type->parameters.size() == 1)
@@ -441,16 +492,28 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	    binding->aliased_binding != NULL &&
 	    binding->aliased_binding->is_inline_definition)
 		binding = binding->aliased_binding;
+	if (binding->is_inline_definition)
+	{
+		demand_inline_function(binding, true);
+		return;
+	}
+	if (inline_definitions.find(binding) != inline_definitions.end())
+	{
+		demanded_inline_complete_entries.insert(binding);
+		insert_pending_inline_definition(binding);
+		return;
+	}
 	string name = symbol_for(binding);
 	if (defined_functions.find(name) != defined_functions.end() ||
 	    declared_functions.find(name) != declared_functions.end())
+		return;
+	if (demand_builtin_declaration(*this, binding, name))
 		return;
 	map<const Binding*, string>::const_iterator found =
 		function_declarations_by_binding.find(binding);
 	if (found == function_declarations_by_binding.end())
 	{
-		if (demand_builtin_declaration(*this, binding, name) ||
-		    demand_generated_empty_constructor(*this, binding, name))
+		if (demand_generated_empty_constructor(*this, binding, name))
 			return;
 		declared_functions.insert(name);
 		declares.push_back(ordinary_function_declaration(*this, binding, name));

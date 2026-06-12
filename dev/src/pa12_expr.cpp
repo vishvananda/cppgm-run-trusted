@@ -33,12 +33,29 @@ bool is_float_literal_text(const string& source)
 
 TypePtr floating_literal_type(const string& source)
 {
+	if (source.size() >= 4)
+	{
+		string suffix4 = source.substr(source.size() - 4);
+		if (suffix4 == "f128" || suffix4 == "F128")
+			return pa11::make_fundamental(FT_LONG_DOUBLE);
+		if (suffix4 == "bf16" || suffix4 == "BF16")
+			return pa11::make_fundamental(FT_FLOAT);
+	}
+	if (source.size() >= 3)
+	{
+		string suffix3 = source.substr(source.size() - 3);
+		if (suffix3 == "f16" || suffix3 == "F16" ||
+		    suffix3 == "f32" || suffix3 == "F32")
+			return pa11::make_fundamental(FT_FLOAT);
+		if (suffix3 == "f64" || suffix3 == "F64")
+			return pa11::make_fundamental(FT_DOUBLE);
+	}
 	if (!source.empty())
 	{
 		char last = source[source.size() - 1];
 		if (last == 'f' || last == 'F')
 			return pa11::make_fundamental(FT_FLOAT);
-		if (last == 'l' || last == 'L')
+		if (last == 'l' || last == 'L' || last == 'q' || last == 'Q')
 			return pa11::make_fundamental(FT_LONG_DOUBLE);
 	}
 	return pa11::make_fundamental(FT_DOUBLE);
@@ -337,7 +354,11 @@ pa11::TemplateInstanceArgument expr_template_instance_argument(
 	vector<pa11::TemplateInstanceArgument> pack;
 	for (size_t i = 0; i < argument.pack.size(); ++i)
 		pack.push_back(expr_template_instance_argument(argument.pack[i]));
-	return pa11::TemplateInstanceArgument::pack_arg(pack);
+	pa11::TemplateInstanceArgument out =
+		pa11::TemplateInstanceArgument::pack_arg(pack);
+	out.value_name = argument.value_name;
+	out.template_name = argument.value_name;
+	return out;
 }
 
 bool template_instance_argument_contains_template_parameter_name(
@@ -658,8 +679,17 @@ Expr Parser::parse_unary_expression()
 	if (at(KW_STATIC_CAST) || at(KW_CONST_CAST) ||
 	    at(KW_REINTERPET_CAST) || at(KW_DYNAMIC_CAST))
 		return parse_postfix_suffixes(parse_cast_expression());
+	if (at_identifier() && current().source == "__extension__")
+	{
+		++pos_;
+		return parse_unary_expression();
+	}
 	if (at(KW_SIZEOF) || at(KW_ALIGNOF))
 		return parse_type_trait_expression(current().type);
+	if (at_identifier() &&
+	    (current().source == "__alignof__" ||
+	     current().source == "__alignof"))
+		return parse_type_trait_expression(KW_ALIGNOF);
 	if (at_identifier() &&
 	    current().source == "__is_constructible" &&
 	    lookahead(OP_LPAREN, 1))
@@ -673,8 +703,19 @@ Expr Parser::parse_unary_expression()
 		    find_function_templates(trait_name).empty())
 			return parse_is_constructible_expression();
 	}
+	if (at_builtin_integral_type_trait_expression())
+		return parse_builtin_integral_type_trait_expression();
+	if (at_builtin_type_trait_expression())
+		return parse_builtin_type_trait_expression();
 	if (at(KW_NOEXCEPT))
 		return parse_noexcept_expression();
+	if (at_identifier() &&
+	    (current().source == "__real__" ||
+	     current().source == "__imag__"))
+	{
+		++pos_;
+		return parse_unary_expression();
+	}
 	if (at(OP_COLON2) && lookahead(KW_NEW, 1))
 		return parse_new_expression();
 	if (at(KW_NEW))
@@ -837,8 +878,6 @@ Expr Parser::parse_unary_expression()
 	return parse_postfix_expression();
 }
 
-namespace {
-
 bool node_is_noexcept(const Node& node)
 {
 	if (node.direct_call != NULL &&
@@ -853,7 +892,197 @@ bool node_is_noexcept(const Node& node)
 	return true;
 }
 
-}  // namespace
+bool builtin_type_trait_name(const string& name)
+{
+	return name == "__is_same" ||
+	       name == "__is_assignable" ||
+	       name == "__is_convertible" ||
+	       name == "__is_invocable" ||
+	       name == "__is_nothrow_invocable" ||
+	       name == "__is_nothrow_constructible" ||
+	       name == "__is_nothrow_assignable" ||
+	       name == "__is_trivially_constructible" ||
+	       name == "__is_trivially_assignable" ||
+	       name == "__is_trivially_destructible" ||
+	       name == "__is_destructible" ||
+	       name == "__is_trivially_copyable" ||
+	       name == "__is_integral" ||
+	       name == "__is_floating_point" ||
+	       name == "__is_scalar" ||
+	       name == "__is_enum" ||
+	       name == "__is_union" ||
+	       name == "__is_class" ||
+	       name == "__is_function" ||
+	       name == "__is_empty" ||
+	       name == "__is_final" ||
+	       name == "__is_pod" ||
+	       name == "__is_trivial" ||
+	       name == "__is_standard_layout" ||
+	       name == "__is_abstract" ||
+	       name == "__is_polymorphic" ||
+	       name == "__is_literal_type" ||
+	       name == "__has_virtual_destructor" ||
+	       name == "__has_trivial_constructor" ||
+	       name == "__has_trivial_destructor" ||
+	       name == "__is_member_pointer" ||
+	       name == "__is_member_object_pointer" ||
+	       name == "__is_member_function_pointer" ||
+	       name == "__is_base_of" ||
+	       name == "__is_complete_or_unbounded" ||
+	       name == "__reference_constructs_from_temporary" ||
+	       name == "__reference_binds_to_temporary";
+}
+
+TypePtr trait_object_type(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::LValueReference ||
+	    bare->kind == pa11::TypeKind::RValueReference)
+		return pa11::strip_cv(bare->base);
+	return bare;
+}
+
+bool trait_is_scalar(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	return pa11::is_integral_or_bool_type(bare) ||
+	       (bare->kind == pa11::TypeKind::Fundamental &&
+	        (bare->fundamental == FT_FLOAT ||
+	         bare->fundamental == FT_DOUBLE ||
+	         bare->fundamental == FT_LONG_DOUBLE)) ||
+	       bare->kind == pa11::TypeKind::Pointer ||
+	       bare->kind == pa11::TypeKind::MemberPointer ||
+	       bare->kind == pa11::TypeKind::Enum ||
+	       (bare->kind == pa11::TypeKind::Fundamental &&
+	        bare->fundamental == FT_NULLPTR_T);
+}
+
+bool trait_record_is_empty(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		Binding* field = bare->fields[i];
+		if (field != NULL &&
+		    field->is_no_unique_address &&
+		    trait_record_is_empty(field->type))
+			continue;
+		return false;
+	}
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (!trait_record_is_empty(bases[i]))
+			return false;
+	return true;
+}
+
+bool trait_record_has_virtual_destructor(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < bare->virtual_entries.size(); ++i)
+	{
+		Binding* fn = bare->virtual_entries[i].function;
+		if (fn != NULL && !fn->name.empty() && fn->name[0] == '~')
+			return true;
+	}
+	return false;
+}
+
+bool trait_record_is_abstract(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < bare->virtual_entries.size(); ++i)
+	{
+		Binding* fn = bare->virtual_entries[i].function;
+		if (fn != NULL && fn->is_pure_virtual)
+			return true;
+	}
+	return false;
+}
+
+bool trait_record_has_nonpublic_field(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	pa11::layout_record_type(bare);
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (bare->fields[i]->is_private ||
+		    bare->fields[i]->is_protected_member)
+			return true;
+	return false;
+}
+
+bool trait_record_derives_from(TypePtr source, TypePtr target)
+{
+	TypePtr wanted = pa11::strip_cv(target);
+	for (TypePtr cur = pa11::strip_cv(source);
+	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
+	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
+	{
+		if (pa11::same_type(cur, wanted))
+			return true;
+		vector<TypePtr> bases = pa11::record_direct_bases(cur);
+		for (size_t i = 0; i < bases.size(); ++i)
+			if (trait_record_derives_from(bases[i], wanted))
+				return true;
+		break;
+	}
+	return false;
+}
+
+bool trait_record_has_user_copy_constructor(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator ctors =
+		bare->scope->members.find(bare->scope->name);
+	if (ctors == bare->scope->members.end())
+		return false;
+	for (size_t i = 0; i < ctors->second.size(); ++i)
+	{
+		Binding* fn = ctors->second[i];
+		if (fn == NULL || fn->type.get() == NULL ||
+		    fn->type->kind != pa11::TypeKind::Function ||
+		    fn->type->parameters.size() != 2)
+			continue;
+		TypePtr param = pa11::strip_cv(fn->type->parameters[1]);
+		if ((param->kind == pa11::TypeKind::LValueReference ||
+		     param->kind == pa11::TypeKind::RValueReference) &&
+		    pa11::same_type(pa11::strip_cv(param->base), bare) &&
+		    !fn->is_defaulted &&
+		    !fn->is_generated_copy_move_constructor)
+			return true;
+	}
+	return false;
+}
+
+bool trait_record_has_user_assignment(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator assigns =
+		bare->scope->members.find("operator=");
+	if (assigns == bare->scope->members.end())
+		return false;
+	for (size_t i = 0; i < assigns->second.size(); ++i)
+	{
+		Binding* fn = assigns->second[i];
+		if (fn != NULL && !fn->is_defaulted &&
+		    !fn->is_generated_copy_move_assignment)
+			return true;
+	}
+	return false;
+}
 
 Expr make_bool_trait_expr(bool value)
 {
@@ -872,148 +1101,53 @@ Expr make_bool_trait_expr(bool value)
 	return out;
 }
 
-Expr Parser::parse_is_constructible_expression()
+bool Parser::at_builtin_type_trait_expression() const
 {
-	if (!at_identifier() || current().source != "__is_constructible")
-		throw runtime_error("expected __is_constructible");
+	return at_identifier() &&
+	       lookahead(OP_LPAREN, 1) &&
+	       builtin_type_trait_name(current().source);
+}
+
+bool Parser::at_builtin_integral_type_trait_expression() const
+{
+	return at_identifier() &&
+	       lookahead(OP_LPAREN, 1) &&
+	       current().source == "__array_rank";
+}
+
+Expr Parser::parse_builtin_integral_type_trait_expression()
+{
+	if (!at_builtin_integral_type_trait_expression())
+		throw runtime_error("expected builtin integral type trait");
+	string name = current().source;
 	++pos_;
 	expect(OP_LPAREN);
-	vector<TypePtr> types;
-	bool dependent = false;
-	string spelling = "__is_constructible(";
-	if (!at(OP_RPAREN))
-	{
-		for (;;)
-		{
-			TypePtr type = parse_type_id();
-			bool pack_expansion = consume(OP_DOTS);
-			if (pack_expansion || type_is_template_dependent(type))
-				dependent = true;
-			if (!types.empty())
-				spelling += ", ";
-			spelling += pa11::describe_type(type);
-			if (pack_expansion)
-				spelling += "...";
-			types.push_back(type);
-			if (!consume(OP_COMMA))
-				break;
-		}
-	}
+	TypePtr type = parse_type_id();
 	expect(OP_RPAREN);
-	spelling += ")";
-	if (types.empty())
-		return make_bool_trait_expr(false);
-	if (dependent)
+	if (type_is_template_dependent(type))
 	{
 		Expr out;
-		out.type = pa11::make_fundamental(FT_BOOL);
+		out.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
 		out.category = ValueCategory::PRValue;
 		out.valid = true;
 		out.constant_expression = true;
 		out.has_constant_value = false;
-		out.dependent_value_name = spelling;
-		out.node = Node("type-trait-expression prvalue bool");
-		out.node.token_text = spelling;
+		out.dependent_value_name =
+			name + "(" + pa11::describe_type(type) + ")";
+		out.node = Node("type-trait-expression prvalue " +
+		                pa11::describe_type(out.type));
+		out.node.token_text = out.dependent_value_name;
 		annotate_expr_node(out);
 		return out;
 	}
-	return make_bool_trait_expr(is_constructible_type_trait(types));
-}
-
-bool Parser::is_constructible_type_trait(const vector<TypePtr>& types)
-{
-	if (types.empty())
-		return false;
-	TypePtr target = types[0];
-	TypePtr bare = pa11::strip_cv(target);
-	if (bare->kind == pa11::TypeKind::LValueReference ||
-	    bare->kind == pa11::TypeKind::RValueReference)
+	uint64_t value = 0;
+	TypePtr cur = pa11::strip_cv(type);
+	while (cur.get() != NULL && cur->kind == pa11::TypeKind::Array)
 	{
-		if (types.size() != 2)
-			return false;
-		Expr arg;
-		arg.valid = true;
-		arg.type = types[1];
-		arg.category = call_category(types[1]);
-		arg.node = Node("id-expression " +
-		                value_category_name(arg.category) + " " +
-		                pa11::describe_type(types[1]) +
-		                " <constructible-arg>");
-		arg.node.type = types[1];
-		arg.node.category = arg.category;
-		annotate_expr_node(arg);
-		try
-		{
-			return convert_to(arg, target).viable;
-		}
-		catch (const runtime_error&)
-		{
-			return false;
-		}
+		++value;
+		cur = pa11::strip_cv(cur->base);
 	}
-	if (bare->kind == pa11::TypeKind::Fundamental &&
-	    bare->fundamental == FT_VOID)
-		return false;
-	if (bare->kind == pa11::TypeKind::Function)
-		return false;
-	if (types.size() == 1)
-	{
-		if (bare->kind == pa11::TypeKind::Array)
-		{
-			vector<TypePtr> elem;
-			elem.push_back(bare->base);
-			return is_constructible_type_trait(elem);
-		}
-		if (bare->kind != pa11::TypeKind::Record)
-			return true;
-		try
-		{
-			return ensure_default_constructor(target, true) != NULL;
-		}
-		catch (const runtime_error&)
-		{
-			return false;
-		}
-	}
-	vector<Expr> args;
-	for (size_t i = 1; i < types.size(); ++i)
-	{
-		Expr arg;
-		arg.valid = true;
-		arg.type = types[i];
-		arg.category = call_category(types[i]);
-		arg.node = Node("id-expression " +
-		                value_category_name(arg.category) + " " +
-		                pa11::describe_type(types[i]) +
-		                " <constructible-arg>");
-		arg.node.type = types[i];
-		arg.node.category = arg.category;
-		annotate_expr_node(arg);
-		args.push_back(arg);
-	}
-	if (bare->kind == pa11::TypeKind::Record)
-	{
-		try
-		{
-			complete_template_record(bare);
-			make_constructor_init_expr(target, args, false);
-			return true;
-		}
-		catch (const runtime_error&)
-		{
-			return false;
-		}
-	}
-	if (args.size() != 1)
-		return false;
-	try
-	{
-		return convert_to(args[0], target).viable;
-	}
-	catch (const runtime_error&)
-	{
-		return false;
-	}
+	return make_integer_literal_expr(FT_UNSIGNED_LONG_INT, value);
 }
 
 Expr Parser::parse_noexcept_expression()
@@ -1039,352 +1173,6 @@ Expr Parser::parse_noexcept_expression()
 	out.constant_expression = !dependent;
 	out.has_constant_value = !dependent;
 	return out;
-}
-
-Expr Parser::parse_postfix_expression()
-{
-	if (at_identifier() && (lookahead(OP_LPAREN, 1) || lookahead(OP_LT, 1)))
-	{
-		size_t direct_call_save = pos_;
-		QualifiedName name;
-		try
-		{
-			name = parse_id_expression_name();
-		}
-		catch (const exception&)
-		{
-			pos_ = direct_call_save;
-			return parse_postfix_suffixes(parse_primary_expression());
-		}
-		if (!at(OP_LPAREN))
-		{
-			pos_ = direct_call_save;
-			return parse_postfix_suffixes(parse_primary_expression());
-		}
-		if (!name.qualified && name.name == "__builtin_va_arg")
-		{
-			expect(OP_LPAREN);
-			Expr list = parse_assignment_expression();
-			expect(OP_COMMA);
-			TypePtr result = parse_type_id();
-			expect(OP_RPAREN);
-			return parse_postfix_suffixes(
-				make_builtin_va_arg_expr(list, result));
-		}
-		expect(OP_LPAREN);
-		vector<Expr> args;
-		if (!at(OP_RPAREN))
-			args = parse_argument_list();
-		expect(OP_RPAREN);
-		Expr callee;
-		bool have_ordinary = false;
-		try
-		{
-			callee = make_id_expr(name);
-			have_ordinary = true;
-		}
-		catch (const runtime_error&)
-		{
-			if (name.qualified)
-				throw;
-		}
-		bool ordinary_member =
-			have_ordinary &&
-			callee.node.line.compare(0, 17, "member-expression") == 0;
-		if (!name.qualified && !ordinary_member)
-		{
-			vector<Binding*> candidates =
-				have_ordinary ? callee.overloads : vector<Binding*>();
-			set<Scope*> hidden_seen;
-			set<Scope*> namespace_seen;
-			for (size_t i = 0; i < args.size(); ++i)
-			{
-				collect_associated_hidden_friends(args[i].type,
-				                                  name.name,
-				                                  hidden_seen,
-				                                  candidates);
-				collect_associated_namespace_functions(args[i].type,
-				                                       name.name,
-				                                       namespace_seen,
-				                                       candidates);
-			}
-			for (size_t i = 0; i < candidates.size();)
-			{
-				if (find(candidates.begin(), candidates.begin() + i,
-				         candidates[i]) != candidates.begin() + i)
-					candidates.erase(candidates.begin() + i);
-				else
-					++i;
-			}
-			if (!candidates.empty())
-			{
-				callee.valid = true;
-				callee.binding = candidates[0];
-				callee.type = candidates[0]->type;
-				callee.category = ValueCategory::LValue;
-				callee.overloads = candidates;
-				if (name.has_template_arguments)
-					for (size_t i = 0; i < candidates.size(); ++i)
-					{
-						Binding* placeholder =
-							candidates[i]->aliased_binding != NULL
-							? candidates[i]->aliased_binding
-							: candidates[i];
-						if (function_template_placeholders_.find(placeholder) !=
-						    function_template_placeholders_.end() ||
-						    function_template_placeholders_.find(candidates[i]) !=
-						    function_template_placeholders_.end())
-							callee.explicit_template_arguments[candidates[i]] =
-								name.template_arguments;
-					}
-				callee.node = Node("id-expression lvalue " +
-				                   pa11::describe_type(callee.type) + " " +
-				                   candidates[0]->name);
-				annotate_expr_node(callee);
-			}
-		}
-		if (!callee.valid)
-		{
-			bool dependent_args = false;
-			for (size_t i = 0; i < args.size(); ++i)
-				if (type_is_template_dependent(args[i].type))
-					dependent_args = true;
-			if (!name.qualified && dependent_args)
-			{
-				callee.valid = true;
-				callee.type = pa11::make_dependent_typename_type(
-					"__dependent_function",
-					false,
-					false,
-					false);
-				callee.category = ValueCategory::LValue;
-				callee.dependent_value_name = name.spelling;
-				callee.node = Node("id-expression lvalue " +
-				                   pa11::describe_type(callee.type) +
-				                   " " + name.spelling);
-				annotate_expr_node(callee);
-				return parse_postfix_suffixes(
-					make_dependent_call_expr(callee, args));
-			}
-			if (!name.qualified)
-			{
-				try
-				{
-					callee = make_missing_id_expr(name);
-				}
-				catch (const runtime_error&)
-				{
-				}
-			}
-			if (callee.valid)
-				return parse_postfix_suffixes(make_call_expr(callee, args));
-			throw runtime_error("name not found: " + name.spelling);
-		}
-		return parse_postfix_suffixes(make_call_expr(callee, args));
-	}
-	return parse_postfix_suffixes(parse_primary_expression());
-}
-
-Expr Parser::parse_postfix_suffixes(Expr expr)
-{
-	for (;;)
-	{
-		if (consume(OP_LPAREN))
-		{
-			vector<Expr> args;
-			if (!at(OP_RPAREN))
-				args = parse_argument_list();
-			expect(OP_RPAREN);
-			expr = make_call_expr(expr, args);
-		}
-		else if (consume(OP_LSQUARE))
-		{
-			Expr rhs = parse_expression();
-			expect(OP_RSQUARE);
-			expr = make_subscript_expr(expr, rhs);
-		}
-		else if (consume(OP_DOT) || consume(OP_ARROW))
-		{
-			string op = tokens_[pos_ - 1].source;
-			if (at(OP_COMPL))
-			{
-				++pos_;
-				consume_identifier();
-				expect(OP_LPAREN);
-				expect(OP_RPAREN);
-				Expr out;
-				out.valid = true;
-				out.type = pa11::make_fundamental(FT_VOID);
-				out.category = ValueCategory::PRValue;
-				out.node = Node("pseudo-destructor-expression prvalue void");
-				TypePtr object = expression_object_type(expr.type);
-				if (op == "->")
-					object = pointee_type_for_member(object);
-				TypePtr record = pa11::strip_cv(object);
-				if (record->kind == pa11::TypeKind::Record &&
-				    record->scope != NULL)
-				{
-					string dtor_name = "~" + record->scope->name;
-					Binding* dtor = pa11::lookup_qualified(record->scope,
-					                                       dtor_name,
-					                                       pa11::LOOKUP_FUNCTION);
-					out.node.direct_call = dtor;
-				}
-				out.node.has_op = true;
-				out.node.op = op == "->" ? OP_ARROW : OP_DOT;
-				add_child(out.node, expr.node);
-				annotate_expr_node(out);
-				expr = out;
-				continue;
-			}
-			bool template_disambiguator = consume(KW_TEMPLATE);
-			if (!template_disambiguator &&
-			    type_is_template_dependent(expr.type) &&
-			    ((at_identifier() && lookahead(OP_LT, 1)) ||
-			     at(KW_OPERATOR)))
-			{
-				size_t member_save = pos_;
-				bool template_id = false;
-				if (at(KW_OPERATOR))
-				{
-					consume_operator_function_name();
-					if (at(OP_LT))
-					{
-						size_t arg_save = pos_;
-						try
-						{
-							vector<TemplateArgument> ignored;
-							parse_template_argument_list(ignored);
-							template_id = true;
-						}
-						catch (const exception&)
-						{
-							pos_ = arg_save;
-						}
-					}
-				}
-				else
-				{
-					consume_identifier();
-					try
-					{
-						vector<TemplateArgument> ignored;
-						parse_template_argument_list(ignored);
-						template_id = true;
-					}
-					catch (const exception&)
-					{
-					}
-				}
-				pos_ = member_save;
-				if (template_id)
-					throw runtime_error("missing template disambiguator");
-			}
-			QualifiedName member_name = parse_id_expression_name();
-			if (member_name.qualifier != NULL)
-			{
-				vector<Binding*> found =
-					lookup_qualified_set(member_name.qualifier,
-					                     member_name.name,
-					                     pa11::LOOKUP_VALUE);
-				if (found.empty())
-				{
-					TypePtr qualifier_record =
-						pa11::record_type_for_scope(member_name.qualifier);
-					qualifier_record = qualifier_record.get() != NULL
-						? pa11::strip_cv(qualifier_record) : TypePtr();
-					bool dependent_qualifier =
-						qualifier_record.get() == NULL ||
-						qualifier_record->kind ==
-							pa11::TypeKind::TemplateParameter ||
-						type_is_template_dependent(qualifier_record);
-					TypePtr object_record =
-						pa11::strip_cv(expression_object_type(expr.type));
-					if (op == "->" &&
-					    object_record.get() != NULL &&
-					    object_record->kind == pa11::TypeKind::Pointer)
-						object_record = pa11::strip_cv(object_record->base);
-					if (dependent_qualifier &&
-					    object_record.get() != NULL &&
-					    object_record->kind == pa11::TypeKind::Record &&
-					    object_record->scope != NULL)
-						found = lookup_qualified_set(object_record->scope,
-						                             member_name.name,
-						                             pa11::LOOKUP_VALUE);
-					}
-					if (found.empty())
-					{
-						try
-						{
-							expr = make_member_expr(expr,
-							                        member_name.name,
-							                        op);
-						}
-						catch (const runtime_error&)
-						{
-							throw runtime_error("member not found: " +
-							                    member_name.name);
-						}
-					}
-					else if (found[0]->kind != BindingKind::Function)
-						expr = make_member_expr(expr, member_name.name, op);
-					else
-				{
-					vector<Binding*> overloads;
-					for (size_t i = 0; i < found.size(); ++i)
-						if (found[i]->kind == BindingKind::Function)
-							overloads.push_back(found[i]);
-					Expr out;
-					out.valid = true;
-					out.binding = overloads.empty() ? found[0] : overloads[0];
-					out.type = out.binding->type;
-					out.category = ValueCategory::LValue;
-					out.overloads = overloads;
-					out.node = Node("member-expression lvalue " +
-					                pa11::describe_type(out.type) +
-					                " OP_DOT:" + member_name.name);
-					add_child(out.node, expr.node);
-					out.node.binding = out.binding;
-					out.node.has_op = true;
-					out.node.op = op == "->" ? OP_ARROW : OP_DOT;
-					out.node.token_text = member_name.name;
-					annotate_expr_node(out);
-					expr = out;
-				}
-			}
-			else
-				expr = make_member_expr(expr, member_name.name, op);
-			if (member_name.has_template_arguments)
-				for (size_t i = 0; i < expr.overloads.size(); ++i)
-				{
-					Binding* overload = expr.overloads[i];
-					map<Binding*, TemplateDeclaration*>::iterator templ =
-						function_template_placeholders_.find(overload);
-					Binding* placeholder =
-						overload->aliased_binding != NULL
-						? overload->aliased_binding : overload;
-					if (templ == function_template_placeholders_.end() &&
-					    placeholder != overload)
-						templ = function_template_placeholders_.find(
-							placeholder);
-						if (templ != function_template_placeholders_.end() ||
-						    function_template_specialization_arguments_.find(overload) !=
-						    function_template_specialization_arguments_.end())
-							expr.explicit_template_arguments[overload] =
-								member_name.template_arguments;
-					}
-		}
-		else if (at(OP_INC) || at(OP_DEC))
-		{
-			ETokenType op = current().type;
-			string text = current().source;
-			++pos_;
-			expr = make_postfix_expr(op, text, expr);
-		}
-		else
-			break;
-	}
-	return expr;
 }
 
 }  // namespace internal

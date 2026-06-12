@@ -709,15 +709,18 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 			    pa11::same_type(candidate->type, fn_type)) {
 				existing_ctor = candidate;
 				break; } }
+	bool merged_noexcept = (existing_ctor != NULL && existing_ctor->unwind_no) ||
+		suffix.noexcept_decl;
 	if (existing_ctor != NULL &&
 	    existing_ctor->unwind_no != suffix.noexcept_decl)
-		throw runtime_error("exception specification mismatch");
+		throw runtime_error("function exception specification mismatch");
 	Binding* ctor = existing_ctor != NULL
 		? existing_ctor
 		: add_function_binding(class_scope, class_scope->name, fn_type, false);
 	for (size_t i = 0; i < parameters.size(); ++i)
 		if (parameters[i].has_default)
 			ctor->has_default_arguments = true;
+	ctor->unwind_no = merged_noexcept;
 	ctor->is_constexpr = ctor->is_constexpr || constexpr_spec;
 	ctor->is_inline_definition =
 		ctor->is_inline_definition || inline_spec || constexpr_spec;

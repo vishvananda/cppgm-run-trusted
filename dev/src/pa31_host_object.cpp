@@ -771,121 +771,160 @@ void FuncGen::emit_return(const Instruction& ins)
 		if (op == "uge") return 0x93;
 		throw runtime_error("unsupported cmp");
 	}
+bool FuncGen::emit_const_instruction(const Instruction& ins)
+{
+	if (lowir2cy86::is_float_type(ins.type))
+	{
+		load_float_value(ins.a, ins.type, 0);
+		store_float_temp(ins.dest, ins.type, 0);
+	}
+	else
+	{
+		x.mov_imm(width_for(ins.type), RAX, parse_int(ins.a.text));
+		store_temp(ins.dest, ins.type, RAX);
+	}
+	return true;
+}
+
+bool FuncGen::emit_copy_instruction(const Instruction& ins)
+{
+	if (lowir2cy86::is_float_type(ins.type))
+	{
+		load_float_value(ins.a, ins.type, 0);
+		store_float_temp(ins.dest, ins.type, 0);
+	}
+	else if (wide_integer_type(ins.type) && ins.a.kind != ValueKind::Literal)
+	{
+		value_storage_address(ins.a, R11);
+		copy_memory_to_frame(R11,
+		                     fn.temp_offsets.find(ins.dest)->second,
+		                     lowir2cy86::storage_size(ins.type));
+	}
+	else
+	{
+		load_value(ins.a, ins.type, RAX);
+		store_temp(ins.dest, ins.type, RAX);
+	}
+	return true;
+}
+
+bool FuncGen::emit_load_instruction(const Instruction& ins)
+{
+	storage_address(ins.a, R11);
+	if (lowir2cy86::is_float_type(ins.type))
+	{
+		if (ins.type.bits == 32) x.sse_rm(0xf3, 0x10, 0, Mem(R11, 0));
+		else x.sse_rm(0xf2, 0x10, 0, Mem(R11, 0));
+		store_float_temp(ins.dest, ins.type, 0);
+	}
+	else if (wide_integer_type(ins.type))
+		copy_memory_to_frame(R11,
+		                     fn.temp_offsets.find(ins.dest)->second,
+		                     lowir2cy86::storage_size(ins.type));
+	else
+	{
+		x.mov_rm(width_for(ins.type), RAX, Mem(R11, 0));
+		store_temp(ins.dest, ins.type, RAX);
+	}
+	return true;
+}
+
+bool FuncGen::emit_store_instruction(const Instruction& ins)
+{
+	if (lowir2cy86::is_float_type(ins.type))
+	{
+		load_float_value(ins.a, ins.type, 0);
+		store_float_value(ins.b, ins.type, 0);
+	}
+	else if (wide_integer_type(ins.type))
+	{
+		storage_address(ins.b, R11);
+		if (ins.a.kind == ValueKind::Literal)
+		{
+			x.mov_imm(64, RAX, parse_int(ins.a.text));
+			x.mov_mr(64, Mem(R11, 0), RAX);
+			zero_memory_tail(R11, 8, lowir2cy86::storage_size(ins.type));
+		}
+		else
+		{
+			value_storage_address(ins.a, R10);
+			copy_memory(R10, R11, lowir2cy86::storage_size(ins.type));
+		}
+	}
+	else
+	{
+		load_value(ins.a, ins.type, RAX);
+		store_value(ins.b, ins.type, RAX);
+	}
+	return true;
+}
+
+bool FuncGen::emit_index_instruction(const Instruction& ins)
+{
+	load_value(ins.a, lowir2cy86::parse_type_text("ptr"), RAX);
+	load_value(ins.b, lowir2cy86::parse_type_text("i64"), R10);
+	if (ins.op == "array_element" && ins.type.size > 1)
+		x.imul_imm(R10, static_cast<int32_t>(ins.type.size));
+	x.binary(0x01, 64, RAX, R10);
+	store_temp(ins.dest, lowir2cy86::parse_type_text("ptr"), RAX);
+	return true;
+}
+
+bool FuncGen::emit_unary_value_instruction(const Instruction& ins)
+{
+	if (ins.op == "neg" && lowir2cy86::is_float_type(ins.type))
+	{
+		const int width = ins.type.bits == 32 ? 32 : 64;
+		if (ins.a.kind == ValueKind::Literal)
+		{
+			uint64_t bits = width == 32
+				? parse_f32_bits(ins.a.text)
+				: parse_f64_bits(ins.a.text);
+			bits ^= width == 32
+				? uint64_t(0x80000000U)
+				: uint64_t(0x8000000000000000ULL);
+			x.mov_imm(width, RAX, bits);
+			x.movd_xmm_from_reg(width, 0, RAX);
+			store_float_temp(ins.dest, ins.type, 0);
+		}
+		else
+		{
+			load_float_value(ins.a, ins.type, 0);
+			store_float_temp(ins.dest, ins.type, 0);
+			size_t off = fn.temp_offsets.find(ins.dest)->second;
+			x.mov_rm(width, RAX, frame_mem(off));
+			x.mov_imm(width, R10, width == 32
+			          ? uint64_t(0x80000000U)
+			          : uint64_t(0x8000000000000000ULL));
+			x.binary(0x31, width, RAX, R10);
+			x.mov_mr(width, frame_mem(off), RAX);
+		}
+		return true;
+	}
+	load_value(ins.a, ins.type, RAX);
+	store_temp(ins.dest, ins.type, RAX);
+	return true;
+}
+
 bool FuncGen::emit_value_instruction(const Instruction& ins)
 {
 	if (ins.kind == InstrKind::VaStart) { emit_va_start(ins); return true; }
-	if (ins.kind == InstrKind::VaEnd)
-		return true;
+	if (ins.kind == InstrKind::VaEnd) return true;
 	if (ins.kind == InstrKind::VaArg) { emit_va_arg(ins); return true; }
 	if (ins.kind == InstrKind::StackAlloc) { emit_stack_alloc(ins); return true; }
-	if (ins.kind == InstrKind::Const)
-	{
-		if (lowir2cy86::is_float_type(ins.type))
-		{
-			load_float_value(ins.a, ins.type, 0);
-			store_float_temp(ins.dest, ins.type, 0);
-		}
-		else
-		{
-			x.mov_imm(width_for(ins.type), RAX, parse_int(ins.a.text));
-			store_temp(ins.dest, ins.type, RAX);
-		}
-		return true;
-	}
-	if (ins.kind == InstrKind::Copy)
-	{
-		if (lowir2cy86::is_float_type(ins.type))
-		{
-			load_float_value(ins.a, ins.type, 0);
-			store_float_temp(ins.dest, ins.type, 0);
-		}
-		else if (wide_integer_type(ins.type) &&
-		         ins.a.kind != ValueKind::Literal)
-		{
-			value_storage_address(ins.a, R11);
-			copy_memory_to_frame(R11,
-			                     fn.temp_offsets.find(ins.dest)->second,
-			                     lowir2cy86::storage_size(ins.type));
-		}
-		else
-		{
-			load_value(ins.a, ins.type, RAX);
-			store_temp(ins.dest, ins.type, RAX);
-		}
-		return true;
-	}
+	if (ins.kind == InstrKind::Const) return emit_const_instruction(ins);
+	if (ins.kind == InstrKind::Copy) return emit_copy_instruction(ins);
 	if (ins.kind == InstrKind::Addr)
 	{
 		storage_address(ins.a, RAX);
 		store_temp(ins.dest, lowir2cy86::parse_type_text("ptr"), RAX);
 		return true;
 	}
-	if (ins.kind == InstrKind::Load)
-	{
-		storage_address(ins.a, R11);
-		if (lowir2cy86::is_float_type(ins.type))
-		{
-			if (ins.type.bits == 32) x.sse_rm(0xf3, 0x10, 0, Mem(R11, 0));
-			else x.sse_rm(0xf2, 0x10, 0, Mem(R11, 0));
-			store_float_temp(ins.dest, ins.type, 0);
-		}
-		else if (wide_integer_type(ins.type))
-			copy_memory_to_frame(R11,
-			                     fn.temp_offsets.find(ins.dest)->second,
-			                     lowir2cy86::storage_size(ins.type));
-		else
-		{
-			x.mov_rm(width_for(ins.type), RAX, Mem(R11, 0));
-			store_temp(ins.dest, ins.type, RAX);
-		}
-		return true;
-	}
-	if (ins.kind != InstrKind::Store &&
-	    ins.kind != InstrKind::Index &&
-	    ins.kind != InstrKind::Unary)
-		return false;
-	if (ins.kind == InstrKind::Store)
-	{
-		if (lowir2cy86::is_float_type(ins.type))
-		{
-			load_float_value(ins.a, ins.type, 0);
-			store_float_value(ins.b, ins.type, 0);
-		}
-		else if (wide_integer_type(ins.type))
-		{
-			storage_address(ins.b, R11);
-			if (ins.a.kind == ValueKind::Literal)
-			{
-				x.mov_imm(64, RAX, parse_int(ins.a.text));
-				x.mov_mr(64, Mem(R11, 0), RAX);
-				zero_memory_tail(R11, 8, lowir2cy86::storage_size(ins.type));
-			}
-			else
-			{
-				value_storage_address(ins.a, R10);
-				copy_memory(R10, R11, lowir2cy86::storage_size(ins.type));
-			}
-		}
-		else
-		{
-			load_value(ins.a, ins.type, RAX);
-			store_value(ins.b, ins.type, RAX);
-		}
-		return true;
-	}
-	if (ins.kind == InstrKind::Index)
-	{
-		load_value(ins.a, lowir2cy86::parse_type_text("ptr"), RAX);
-		load_value(ins.b, lowir2cy86::parse_type_text("i64"), R10);
-		if (ins.op == "array_element" && ins.type.size > 1)
-			x.imul_imm(R10, static_cast<int32_t>(ins.type.size));
-		x.binary(0x01, 64, RAX, R10);
-		store_temp(ins.dest, lowir2cy86::parse_type_text("ptr"), RAX);
-		return true;
-	}
-	load_value(ins.a, ins.type, RAX);
-	store_temp(ins.dest, ins.type, RAX);
-	return true;
+	if (ins.kind == InstrKind::Load) return emit_load_instruction(ins);
+	if (ins.kind == InstrKind::Store) return emit_store_instruction(ins);
+	if (ins.kind == InstrKind::Index) return emit_index_instruction(ins);
+	if (ins.kind == InstrKind::Unary) return emit_unary_value_instruction(ins);
+	return false;
 }
 
 void FuncGen::emit_stack_alloc(const Instruction& ins)
@@ -924,10 +963,19 @@ bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)
 			if (ins.op == "add") x.binary(0x01, width_for(ins.type), RAX, R10);
 			else if (ins.op == "sub") x.binary(0x29, width_for(ins.type), RAX, R10);
 			else if (ins.op == "mul") x.imul(width_for(ins.type), RAX, R10);
+			else if (ins.op == "and") x.binary(0x21, width_for(ins.type), RAX, R10);
+			else if (ins.op == "or") x.binary(0x09, width_for(ins.type), RAX, R10);
+			else if (ins.op == "xor") x.binary(0x31, width_for(ins.type), RAX, R10);
 			else if (ins.op == "div" || ins.op == "mod")
 			{
 				x.idiv_reg(width_for(ins.type), R10);
 				if (ins.op == "mod")
+					x.mov_rr(width_for(ins.type), RAX, RDX);
+			}
+			else if (ins.op == "udiv" || ins.op == "umod")
+			{
+				x.div_reg(width_for(ins.type), R10);
+				if (ins.op == "umod")
 					x.mov_rr(width_for(ins.type), RAX, RDX);
 			}
 			else if (ins.op == "shl" || ins.op == "shr" || ins.op == "ushr")
@@ -957,6 +1005,17 @@ bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)
 			else if (ins.op == "ge") cc = 0x93;
 			else if (ins.op != "eq") throw runtime_error("unsupported float cmp");
 			x.setcc(cc);
+			x.mov_rr(64, R10, RAX);
+			if (ins.op == "ne")
+			{
+				x.setcc(0x9a);
+				x.binary(0x09, 64, RAX, R10);
+			}
+			else
+			{
+				x.setcc(0x9b);
+				x.binary(0x21, 64, RAX, R10);
+			}
 		}
 		else
 		{

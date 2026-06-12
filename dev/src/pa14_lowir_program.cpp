@@ -187,6 +187,8 @@ string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
 		if (init.binding->kind == BindingKind::Function &&
 		    init.binding->is_inline_definition)
 			demand_inline_function(init.binding);
+		if (init.binding->kind == BindingKind::Function)
+			demand_function_declaration(init.binding);
 		return "addr @" + symbol_for(init.binding);
 	}
 	if (starts_with(init.line, "unary-expression") && init.has_op &&
@@ -199,6 +201,7 @@ string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
 	{
 		if (init.children[0].binding->is_inline_definition)
 			demand_inline_function(init.children[0].binding);
+		demand_function_declaration(init.children[0].binding);
 		return "addr @" + symbol_for(init.children[0].binding);
 	}
 	if (starts_with(init.line, "binary-expression") && init.has_op &&
@@ -766,17 +769,19 @@ void ProgramLowerer::collect_node(const Node& node)
 			defined_functions.insert(symbol_for(node.binding));
 		FunctionLowerer lowerer(*this, node);
 		FunctionOut lowered = lowerer.lower();
-		if (is_class_constructor(node.binding))
-		{
-			string name = symbol_for(node.binding);
-			functions.push_back(make_constructor_base_entry(lowered, name));
-		}
-		if (is_class_destructor_binding(node.binding))
-		{
-			string name = symbol_for(node.binding);
-			FunctionLowerer base_lowerer(*this, node, true);
-			FunctionOut base_lowered = base_lowerer.lower();
-			functions.push_back(make_destructor_base_entry(base_lowered,
+			if (is_class_constructor(node.binding))
+			{
+				string name = symbol_for(node.binding);
+				defined_functions.insert(name + "__base_entry");
+				functions.push_back(make_constructor_base_entry(lowered, name));
+			}
+			if (is_class_destructor_binding(node.binding))
+			{
+				string name = symbol_for(node.binding);
+				defined_functions.insert(name + "__base_entry");
+				FunctionLowerer base_lowerer(*this, node, true);
+				FunctionOut base_lowered = base_lowerer.lower();
+				functions.push_back(make_destructor_base_entry(base_lowered,
 			                                               name,
 			                                               native_lowering));
 		}

@@ -229,6 +229,12 @@ Binding* Parser::instantiate_function_template(
 			return existing->second;
 		bool existing_has_body =
 			function_bodies_.find(existing->second) != function_bodies_.end();
+		if (!existing_usable &&
+		    !full_args_dependent &&
+		    !declaration->class_template_member &&
+		    existing->second->is_inline_definition &&
+		    existing_has_body)
+			existing_usable = true;
 		bool existing_dependent_return =
 			existing->second->type.get() != NULL &&
 			existing->second->type->kind == pa11::TypeKind::Function &&

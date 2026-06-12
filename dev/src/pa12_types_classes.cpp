@@ -69,6 +69,7 @@ TypePtr Parser::parse_class_specifier()
 		expect(OP_RPAREN);
 		forced_align = max<uint64_t>(forced_align, align_value);
 	}
+	skip_attributes();
 	string name;
 	Scope* qualified_owner = NULL;
 	bool template_id_qualifier = false;
@@ -120,6 +121,14 @@ TypePtr Parser::parse_class_specifier()
 			parse_template_argument_list(ignored_template_id);
 		}
 	}
+	bool final_record = false;
+	if (at_identifier() &&
+	    current().source == "final" &&
+	    (lookahead(OP_LBRACE, 1) || lookahead(OP_COLON, 1)))
+	{
+		++pos_;
+		final_record = true;
+	}
 	if (!at(OP_LBRACE) && !at(OP_COLON))
 	{
 		if (name.empty())
@@ -130,13 +139,20 @@ TypePtr Parser::parse_class_specifier()
 			: lookup_unqualified_set(current_scope(), name, pa11::LOOKUP_TYPE);
 		if (!found.empty() &&
 		    found[0]->type->kind == pa11::TypeKind::Record)
+		{
+			found[0]->type->is_final_record =
+				found[0]->type->is_final_record || final_record;
 			return found[0]->type;
-		return add_record(qualified_owner != NULL ? qualified_owner :
-		                  current_scope(),
-		                  name,
-		                  class_tag(key),
-		                  false,
-		                  NULL);
+		}
+		TypePtr declared = add_record(qualified_owner != NULL ? qualified_owner :
+		                              current_scope(),
+		                              name,
+		                              class_tag(key),
+		                              false,
+		                              NULL);
+		declared->is_final_record =
+			declared->is_final_record || final_record;
+		return declared;
 	}
 
 	bool anonymous = name.empty();
@@ -379,6 +395,8 @@ TypePtr Parser::parse_class_specifier()
 			type->scope = class_scope;
 		}
 	}
+	if (type.get() != NULL)
+		type->is_final_record = type->is_final_record || final_record;
 		type->direct_bases = direct_bases;
 		type->direct_base_virtuals = direct_base_virtuals;
 		type->base = direct_bases.empty() ? TypePtr() : direct_bases[0];

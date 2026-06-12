@@ -293,8 +293,8 @@ forwarding_reference_lvalue_parameter( declaration->generic_function_type->param
 Binding* rhs, const vector<Expr>& args) { TemplateDeclaration* left = function_template_origin(origins, lhs);
 TemplateDeclaration* right = function_template_origin(origins, rhs); if (left == NULL || right == NULL || left == right) return false; int left_penalty = forwarding_reference_lvalue_penalty(left, args);
 int right_penalty = forwarding_reference_lvalue_penalty(right, args); return left_penalty < right_penalty; } Binding* canonical_function_binding(Binding* binding)
-{ while (binding != NULL && binding->kind == BindingKind::Function && binding->aliased_binding != NULL)
-{ if (binding->is_inline_definition && !binding->aliased_binding->is_inline_definition && !type_structurally_dependent(binding->type)) break;
+{ set<Binding*> seen; while (binding != NULL && binding->kind == BindingKind::Function && binding->aliased_binding != NULL)
+{ if (!seen.insert(binding).second) break; if (binding->is_inline_definition && !binding->aliased_binding->is_inline_definition && !type_structurally_dependent(binding->type)) break;
 binding = binding->aliased_binding; } return binding; }
 void collect_conversion_functions(TypePtr record, set<Scope*>& seen, vector<Binding*>& out) {
 TypePtr bare = pa11::strip_cv(record); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL || !seen.insert(bare->scope).second)
@@ -436,7 +436,25 @@ TypePtr dst_same_record = pa11::strip_cv(dst); if (src_same_record->kind == pa11
 selected.category == ValueCategory::XValue)) { Binding* ctor = ensure_copy_move_constructor(dst_same_record,
 selected.category == ValueCategory::XValue); if (unevaluated_expression_depth_ == 0) parse_pending_member_body(ctor);
 } return Conversion(true, 0, selected); } TypePtr src_record = pa11::strip_cv(src);
-TypePtr dst_record = pa11::strip_cv(dst); if (src_record->kind == pa11::TypeKind::Record && dst_record->kind == pa11::TypeKind::Record) {
+TypePtr dst_record = pa11::strip_cv(dst); if (type_is_template_dependent(src) &&
+dst_record->kind != pa11::TypeKind::Record)
+{
+	Expr converted = selected;
+	converted.type = dst;
+	converted.category = ValueCategory::PRValue;
+	converted.constant_expression = selected.constant_expression;
+	converted.has_constant_value = false;
+	if (converted.dependent_value_name.empty())
+		converted.dependent_value_name = selected.node.token_text.empty()
+			? selected.node.line : selected.node.token_text;
+	converted.node = Node("cast-expression prvalue " +
+	                      pa11::describe_type(dst));
+	converted.node.dependent_value_name = converted.dependent_value_name;
+	add_child(converted.node, selected.node);
+	annotate_expr_node(converted);
+	return Conversion(true, 10, converted);
+}
+if (src_record->kind == pa11::TypeKind::Record && dst_record->kind == pa11::TypeKind::Record) {
 int distance = record_base_distance(src_record, dst_record); if (distance < 1000000) { Expr converted = selected;
 converted.type = dst; converted.category = ValueCategory::PRValue; converted.node = Node("cast-expression prvalue " + pa11::describe_type(dst));
 add_child(converted.node, selected.node); annotate_expr_node(converted); return Conversion(true, distance + 1, converted); }

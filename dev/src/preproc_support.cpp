@@ -1,5 +1,6 @@
 #include "preproc_support.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <set>
@@ -13,12 +14,56 @@
 #include "posttoken_support.h"
 #include "pptoken_lib.h"
 
+#if defined(__has_include)
+#if __has_include("cppgm_builtin_host_config.h")
+#include "cppgm_builtin_host_config.h"
+#define CPPGM_HAVE_BUILTIN_HOST_CONFIG 1
+#endif
+#endif
+
+#ifndef CPPGM_HAVE_BUILTIN_HOST_CONFIG
+namespace cppgm_builtin_host_config
+{
+static const char kHostPredefinedMacros[] = "";
+static const char * const kStandardIncludePaths[] = { 0 };
+}
+#endif
+
 using namespace std;
 
 namespace preproc {
+
+MacroCommand::MacroCommand()
+	: kind(Define)
+{
+}
+
+MacroCommand::MacroCommand(Kind kind, const string& value)
+	: kind(kind), value(value)
+{
+}
+
+Options::Options()
+	: import_host_predefined_macros(false),
+	  import_host_include_paths(false)
+{
+}
+
 namespace {
 
 typedef pair<unsigned long int, unsigned long int> PA5FileId;
+
+const size_t kNoIncludePathIndex = static_cast<size_t>(-1);
+
+struct IncludeSpec
+{
+	string name;
+	bool angled;
+
+	IncludeSpec() : angled(false) {}
+	IncludeSpec(const string& name, bool angled)
+		: name(name), angled(angled) {}
+};
 
 extern "C" long int syscall(long int n, ...) throw ();
 
@@ -63,11 +108,6 @@ size_t NextRealToken(const vector<PPToken>& tokens, size_t pos)
 	while (pos < tokens.size() && !IsRealToken(tokens[pos]))
 		++pos;
 	return pos;
-}
-
-bool HasRealTokens(const vector<PPToken>& tokens, size_t pos)
-{
-	return NextRealToken(tokens, pos) < tokens.size();
 }
 
 vector<PPToken> SliceTokens(const vector<PPToken>& tokens,
@@ -118,7 +158,8 @@ bool IsKnownDirective(const string& name)
 {
 	static const char* const names[] = {
 		"if", "ifdef", "ifndef", "elif", "else", "endif",
-		"include", "define", "undef", "line", "error", "pragma"
+		"include", "include_next", "define", "undef", "line",
+		"error", "warning", "pragma"
 	};
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
 	{
@@ -128,21 +169,275 @@ bool IsKnownDirective(const string& name)
 	return false;
 }
 
+bool NameInList(const string& name, const char* const* names, size_t count)
+{
+	for (size_t i = 0; i < count; ++i)
+	{
+		if (name == names[i])
+			return true;
+	}
+	return false;
+}
+
+bool IsHostedProbeName(const string& name)
+{
+	static const char* const names[] = {
+		"__has_builtin",
+		"__has_feature",
+		"__has_extension",
+		"__has_attribute",
+		"__has_cpp_attribute",
+		"__building_module",
+		"__has_include",
+		"__has_include_next",
+		"__is_identifier"
+	};
+	return NameInList(name, names, sizeof(names) / sizeof(names[0]));
+}
+
+const char* const kBuiltinProbeNames[] = {
+	"__add_lvalue_reference",
+	"__add_pointer",
+	"__add_rvalue_reference",
+	"__array_rank",
+	"__builtin_add_overflow",
+	"__builtin_addressof",
+	"__builtin_assume_aligned",
+	"__builtin_bswap16",
+	"__builtin_bswap32",
+	"__builtin_bswap64",
+	"__builtin_clz",
+	"__builtin_clzg",
+	"__builtin_clzl",
+	"__builtin_clzll",
+	"__builtin_COLUMN",
+	"__builtin_complex",
+	"__builtin_ctz",
+	"__builtin_ctzl",
+	"__builtin_ctzll",
+	"__builtin_expect",
+	"__builtin_FILE",
+	"__builtin_flt_rounds",
+	"__builtin_fpclassify",
+	"__builtin_FUNCTION",
+	"__builtin_huge_val",
+	"__builtin_huge_valf",
+	"__builtin_huge_vall",
+	"__builtin_inf",
+	"__builtin_inff",
+	"__builtin_infl",
+	"__builtin_invoke",
+	"__builtin_is_constant_evaluated",
+	"__builtin_LINE",
+	"__builtin_memchr",
+	"__builtin_memcmp",
+	"__builtin_memcpy",
+	"__builtin_memmove",
+	"__builtin_memset",
+	"__builtin_mul_overflow",
+	"__builtin_nans",
+	"__builtin_nansf",
+	"__builtin_nansl",
+	"__builtin_offsetof",
+	"__builtin_operator_delete",
+	"__builtin_operator_new",
+	"__builtin_popcount",
+	"__builtin_popcountg",
+	"__builtin_popcountl",
+	"__builtin_popcountll",
+	"__builtin_prefetch",
+	"__builtin_strchr",
+	"__builtin_strcmp",
+	"__builtin_strlen",
+	"__builtin_sub_overflow",
+	"__builtin_unreachable",
+	"__builtin_bzero",
+	"__atomic_add_fetch",
+	"__atomic_always_lock_free",
+	"__atomic_and_fetch",
+	"__atomic_exchange_n",
+	"__atomic_fetch_add",
+	"__atomic_fetch_and",
+	"__atomic_fetch_or",
+	"__atomic_fetch_sub",
+	"__atomic_fetch_xor",
+	"__atomic_is_lock_free",
+	"__atomic_load",
+	"__atomic_load_n",
+	"__atomic_or_fetch",
+	"__atomic_store",
+	"__atomic_store_n",
+	"__atomic_sub_fetch",
+	"__atomic_xor_fetch",
+	"__c11_atomic_compare_exchange_strong",
+	"__c11_atomic_compare_exchange_weak",
+	"__c11_atomic_exchange",
+	"__c11_atomic_fetch_add",
+	"__c11_atomic_fetch_and",
+	"__c11_atomic_fetch_or",
+	"__c11_atomic_fetch_sub",
+	"__c11_atomic_fetch_xor",
+	"__c11_atomic_init",
+	"__c11_atomic_is_lock_free",
+	"__c11_atomic_load",
+	"__c11_atomic_signal_fence",
+	"__c11_atomic_store",
+	"__c11_atomic_thread_fence",
+	"__decay",
+	"__has_trivial_constructor",
+	"__has_virtual_destructor",
+	"__integer_pack",
+	"__is_abstract",
+	"__is_assignable",
+	"__is_base_of",
+	"__is_constructible",
+	"__is_convertible",
+	"__is_destructible",
+	"__is_empty",
+	"__is_enum",
+	"__is_final",
+	"__is_floating_point",
+	"__is_function",
+	"__is_integral",
+	"__is_invocable_r",
+	"__is_literal_type",
+	"__is_member_function_pointer",
+	"__is_member_object_pointer",
+	"__is_member_pointer",
+	"__is_nothrow_assignable",
+	"__is_nothrow_constructible",
+	"__is_nothrow_invocable",
+	"__is_pod",
+	"__is_polymorphic",
+	"__is_same",
+	"__is_signed",
+	"__is_standard_layout",
+	"__is_trivial",
+	"__is_trivially_assignable",
+	"__is_trivially_constructible",
+	"__is_trivially_copyable",
+	"__is_trivially_destructible",
+	"__reference_binds_to_temporary",
+	"__reference_constructs_from_temporary",
+	"__remove_all_extents",
+	"__remove_const",
+	"__remove_cv",
+	"__remove_cvref",
+	"__remove_pointer",
+	"__remove_reference_t",
+	"__remove_volatile",
+	"__sync_lock_release",
+	"__sync_lock_test_and_set",
+	"__underlying_type"
+};
+
+bool HasBuiltinProbe(const string& name)
+{
+	return NameInList(name,
+	                  kBuiltinProbeNames,
+	                  sizeof(kBuiltinProbeNames) /
+	                  sizeof(kBuiltinProbeNames[0]));
+}
+
+bool HasFeatureProbe(const string& name)
+{
+	static const char* const names[] = {
+		"__cxx_binary_literals__",
+		"__cxx_variable_templates__",
+		"c_atomic",
+		"cxx_alias_templates",
+		"cxx_alignas",
+		"cxx_alignof",
+		"cxx_atomic",
+		"cxx_auto_type",
+		"cxx_decltype",
+		"cxx_decltype_incomplete_return_types",
+		"cxx_default_function_template_args",
+		"cxx_defaulted_functions",
+		"cxx_deleted_functions",
+		"cxx_exceptions",
+		"cxx_explicit_conversions",
+		"cxx_generalized_initializers",
+		"cxx_inline_namespaces",
+		"cxx_lambdas",
+		"cxx_local_type_template_args",
+		"cxx_noexcept",
+		"cxx_nullptr",
+		"cxx_override_control",
+		"cxx_range_for",
+		"cxx_raw_string_literals",
+		"cxx_reference_qualified_functions",
+		"cxx_rtti",
+		"cxx_rvalue_references",
+		"cxx_static_assert",
+		"cxx_strong_enums",
+		"cxx_trailing_return",
+		"cxx_unicode_literals",
+		"cxx_unrestricted_unions",
+		"cxx_variadic_templates",
+		"is_constructible",
+		"is_pod",
+		"is_trivially_constructible"
+	};
+	return NameInList(name, names, sizeof(names) / sizeof(names[0]));
+}
+
+bool HasAttributeProbe(const string& name)
+{
+	return name == "__using_if_exists__";
+}
+
+bool IsLanguageKeywordName(const string& name)
+{
+	unordered_map<string, ETokenType>::const_iterator found =
+		StringToTokenTypeMap.find(name);
+	return found != StringToTokenTypeMap.end() &&
+	       found->second >= KW_ALIGNAS &&
+	       found->second <= KW_WHILE;
+}
+
+bool IsIdentifierProbeResult(const string& name)
+{
+	if (IsLanguageKeywordName(name))
+		return false;
+	if (IsHostedProbeName(name) || HasBuiltinProbe(name))
+		return false;
+	return true;
+}
+
+void AppendHostStandardIncludePaths(vector<string>& out)
+{
+	for (size_t i = 0;
+	     cppgm_builtin_host_config::kStandardIncludePaths[i] != 0;
+	     ++i)
+		out.push_back(cppgm_builtin_host_config::kStandardIncludePaths[i]);
+}
+
 class Preprocessor
 {
 public:
 	explicit Preprocessor(const Options& options)
 		: include_paths_(options.include_paths),
-		  line_delta_(0)
+		  current_include_path_index_(kNoIncludePathIndex),
+		  line_delta_(0),
+		  import_host_predefined_macros_(options.import_host_predefined_macros)
 	{
+		if (options.import_host_include_paths)
+			AppendHostStandardIncludePaths(include_paths_);
 		macros_.initialize_predefined_macros(options.author,
 		                                     options.build_date,
 		                                     options.build_time);
+		if (options.import_host_predefined_macros)
+			import_host_predefined_macros();
+		apply_command_line_macros(options.macro_commands);
+		forced_includes_ = options.forced_includes;
 	}
 
 	void process_source_file(const string& srcfile, vector<PPToken>& output)
 	{
-		process_file(srcfile, output);
+		for (size_t i = 0; i < forced_includes_.size(); ++i)
+			process_forced_include(srcfile, forced_includes_[i], output);
+		process_file(srcfile, kNoIncludePathIndex, output);
 		if (!if_stack_.empty())
 			throw runtime_error("File completed with unmatched #if");
 	}
@@ -151,13 +446,107 @@ private:
 	macro::MacroProcessor macros_;
 	set<PA5FileId> once_files_;
 	vector<string> include_paths_;
+	vector<string> forced_includes_;
 	vector<IfFrame> if_stack_;
 	string current_file_;
+	size_t current_include_path_index_;
 	int line_delta_;
+	bool import_host_predefined_macros_;
 
 	bool is_active() const
 	{
 		return if_stack_.empty() || if_stack_.back().current_active;
+	}
+
+	bool is_defined_name(const string& name) const
+	{
+		if (macros_.is_defined(name))
+			return true;
+		return import_host_predefined_macros_ && IsHostedProbeName(name);
+	}
+
+	void import_host_predefined_macros()
+	{
+		istringstream input(cppgm_builtin_host_config::kHostPredefinedMacros);
+		string line;
+		while (getline(input, line))
+		{
+			if (line.empty())
+				continue;
+			vector<PPToken> tokens = TokenizePPString(line);
+			try
+			{
+				size_t hash = SkipHorizontalWhitespace(tokens, 0, tokens.size());
+				if (hash >= tokens.size() || !IsHash(tokens[hash]))
+					continue;
+				size_t name = SkipHorizontalWhitespace(tokens, hash + 1,
+				                                       tokens.size());
+				if (name >= tokens.size() || !IsIdentifier(tokens[name]))
+					continue;
+				const string directive = tokens[name].text;
+				size_t body = name + 1;
+				if (directive == "define")
+					macros_.parse_define(tokens, body, tokens.size());
+				else if (directive == "undef")
+					macros_.parse_undef(tokens, body, tokens.size());
+			}
+			catch (const exception&)
+			{
+			}
+		}
+	}
+
+	void apply_command_line_macros(const vector<MacroCommand>& commands)
+	{
+		for (size_t i = 0; i < commands.size(); ++i)
+		{
+			if (commands[i].kind == MacroCommand::Define)
+				apply_command_line_define(commands[i].value);
+			else
+				apply_command_line_undefine(commands[i].value);
+		}
+	}
+
+	void apply_command_line_define(const string& definition)
+	{
+		if (definition.empty())
+			throw runtime_error("empty command-line macro definition");
+		const size_t equals = definition.find('=');
+		const string lhs = equals == string::npos
+			? definition
+			: definition.substr(0, equals);
+		const string rhs = equals == string::npos
+			? string("1")
+			: definition.substr(equals + 1);
+		if (lhs.empty())
+			throw runtime_error("empty command-line macro name");
+		string source = "#define " + lhs;
+		if (equals == string::npos || !rhs.empty())
+			source += " " + rhs;
+		vector<PPToken> tokens = TokenizePPString(source);
+		size_t hash = SkipHorizontalWhitespace(tokens, 0, tokens.size());
+		size_t name = hash < tokens.size()
+			? SkipHorizontalWhitespace(tokens, hash + 1, tokens.size())
+			: tokens.size();
+		if (hash >= tokens.size() || !IsHash(tokens[hash]) ||
+		    name >= tokens.size() || !IsIdentifier(tokens[name], "define"))
+			throw runtime_error("invalid command-line macro definition");
+		macros_.parse_define(tokens, name + 1, tokens.size());
+	}
+
+	void apply_command_line_undefine(const string& name)
+	{
+		string source = "#undef " + name;
+		vector<PPToken> tokens = TokenizePPString(source);
+		size_t hash = SkipHorizontalWhitespace(tokens, 0, tokens.size());
+		size_t directive = hash < tokens.size()
+			? SkipHorizontalWhitespace(tokens, hash + 1, tokens.size())
+			: tokens.size();
+		if (hash >= tokens.size() || !IsHash(tokens[hash]) ||
+		    directive >= tokens.size() ||
+		    !IsIdentifier(tokens[directive], "undef"))
+			throw runtime_error("invalid command-line macro undefinition");
+		macros_.parse_undef(tokens, directive + 1, tokens.size());
 	}
 
 	PPToken presumed_token(const PPToken& raw) const
@@ -178,7 +567,30 @@ private:
 		return out;
 	}
 
-	void process_file(const string& path, vector<PPToken>& output)
+	void process_forced_include(const string& srcfile,
+	                            const string& include,
+	                            vector<PPToken>& output)
+	{
+		const string saved_file = current_file_;
+		const size_t saved_index = current_include_path_index_;
+		current_file_ = srcfile;
+		current_include_path_index_ = kNoIncludePathIndex;
+		IncludeSpec spec(include, false);
+		size_t include_path_index = kNoIncludePathIndex;
+		const string path = resolve_include(spec, false, include_path_index);
+		current_file_ = saved_file;
+		current_include_path_index_ = saved_index;
+
+		PA5FileId file_id;
+		if (PA5GetFileId(path, file_id) &&
+		    once_files_.find(file_id) != once_files_.end())
+			return;
+		process_file(path, include_path_index, output);
+	}
+
+	void process_file(const string& path,
+	                  size_t include_path_index,
+	                  vector<PPToken>& output)
 	{
 		ifstream in(path.c_str());
 		if (!in)
@@ -189,9 +601,11 @@ private:
 		pptoken::run_pptoken(in, collector);
 
 		const string saved_file = current_file_;
+		const size_t saved_include_path_index = current_include_path_index_;
 		const int saved_delta = line_delta_;
 		const size_t base_depth = if_stack_.size();
 		current_file_ = path;
+		current_include_path_index_ = include_path_index;
 		line_delta_ = 0;
 
 		vector<PPToken> text;
@@ -214,6 +628,7 @@ private:
 			throw runtime_error("File completed with unmatched #if");
 
 		current_file_ = saved_file;
+		current_include_path_index_ = saved_include_path_index;
 		line_delta_ = saved_delta;
 	}
 
@@ -295,7 +710,9 @@ private:
 		else if (!is_active())
 			return;
 		else if (name == "include")
-			handle_include(line, body, end, output);
+			handle_include(line, body, end, false, output);
+		else if (name == "include_next")
+			handle_include(line, body, end, true, output);
 		else if (name == "define")
 			macros_.parse_define(line, body, end);
 		else if (name == "undef")
@@ -304,6 +721,8 @@ private:
 			handle_line(line, body, end, newline_physical_line);
 		else if (name == "error")
 			throw runtime_error("#error");
+		else if (name == "warning")
+			return;
 		else if (name == "pragma")
 			execute_pragma_directive(SliceTokens(line, body, end));
 	}
@@ -312,12 +731,151 @@ private:
 	{
 		vector<PPToken> expr = SliceTokens(line, begin, end);
 		expr = macros_.expand_control_expression(expr);
+		expr = replace_control_probes(expr);
 		bool result = false;
 		ctrlexpr::DefinedPredicate pred =
-			[this](const string& name) { return macros_.is_defined(name); };
+			[this](const string& name) { return is_defined_name(name); };
 		if (!ctrlexpr::evaluate_tokens(expr, pred, result))
 			throw runtime_error("invalid controlling expression");
 		return result;
+	}
+
+	vector<PPToken> significant_tokens(const vector<PPToken>& tokens)
+	{
+		vector<PPToken> out;
+		for (size_t i = 0; i < tokens.size(); ++i)
+		{
+			if (IsRealToken(tokens[i]))
+				out.push_back(tokens[i]);
+		}
+		return out;
+	}
+
+	vector<PPToken> replace_control_probes(const vector<PPToken>& tokens)
+	{
+		vector<PPToken> out;
+		for (size_t pos = 0; pos < tokens.size(); ++pos)
+		{
+			const bool is_has_builtin = IsIdentifier(tokens[pos], "__has_builtin");
+			const bool is_has_feature = IsIdentifier(tokens[pos], "__has_feature");
+			const bool is_has_extension = IsIdentifier(tokens[pos], "__has_extension");
+			const bool is_has_attribute = IsIdentifier(tokens[pos], "__has_attribute");
+			const bool is_has_cpp_attribute =
+				IsIdentifier(tokens[pos], "__has_cpp_attribute");
+			const bool is_building_module =
+				IsIdentifier(tokens[pos], "__building_module");
+			const bool is_has_include = IsIdentifier(tokens[pos], "__has_include");
+			const bool is_has_include_next =
+				IsIdentifier(tokens[pos], "__has_include_next");
+			const bool is_is_identifier =
+				IsIdentifier(tokens[pos], "__is_identifier");
+
+			if (!is_has_builtin && !is_has_feature && !is_has_extension &&
+			    !is_has_attribute && !is_has_cpp_attribute &&
+			    !is_building_module && !is_has_include &&
+			    !is_has_include_next && !is_is_identifier)
+			{
+				out.push_back(tokens[pos]);
+				continue;
+			}
+
+			size_t open = NextRealToken(tokens, pos + 1);
+			if (open >= tokens.size() || !IsOp(tokens[open], "("))
+			{
+				out.push_back(tokens[pos]);
+				continue;
+			}
+
+			size_t close = tokens.size();
+			int depth = 0;
+			for (size_t scan = open; scan < tokens.size(); ++scan)
+			{
+				if (IsOp(tokens[scan], "("))
+					++depth;
+				else if (IsOp(tokens[scan], ")"))
+				{
+					--depth;
+					if (depth == 0)
+					{
+						close = scan;
+						break;
+					}
+				}
+			}
+			if (close == tokens.size())
+			{
+				out.push_back(tokens[pos]);
+				continue;
+			}
+
+			bool supported = false;
+			vector<PPToken> arg = SliceTokens(tokens, open + 1, close);
+			if (is_has_include || is_has_include_next)
+				supported = control_include_probe(arg, is_has_include_next);
+			else if (is_building_module)
+				supported = false;
+			else if (is_is_identifier)
+				supported = control_is_identifier_probe(arg);
+			else
+				supported = control_name_probe(arg,
+				                               is_has_builtin,
+				                               is_has_feature,
+				                               is_has_extension,
+				                               is_has_attribute,
+				                               is_has_cpp_attribute);
+
+			PPToken value(PPTokenKind::PPNumber, supported ? "1" : "0");
+			CopyTokenLocation(value, tokens[pos]);
+			out.push_back(value);
+			pos = close;
+		}
+		return out;
+	}
+
+	bool control_is_identifier_probe(const vector<PPToken>& arg)
+	{
+		vector<PPToken> significant = significant_tokens(arg);
+		if (significant.size() != 1 || !IsIdentifier(significant[0]))
+			return false;
+		return IsIdentifierProbeResult(significant[0].text);
+	}
+
+	bool control_name_probe(const vector<PPToken>& arg,
+	                        bool is_has_builtin,
+	                        bool is_has_feature,
+	                        bool is_has_extension,
+	                        bool is_has_attribute,
+	                        bool is_has_cpp_attribute)
+	{
+		vector<PPToken> significant = significant_tokens(arg);
+		if (significant.size() != 1 || !IsIdentifier(significant[0]))
+			return false;
+		const string name = significant[0].text;
+		if (is_has_builtin)
+			return HasBuiltinProbe(name);
+		if (is_has_feature || is_has_extension)
+			return HasFeatureProbe(name);
+		if (is_has_attribute)
+			return HasAttributeProbe(name);
+		if (is_has_cpp_attribute)
+			return false;
+		return false;
+	}
+
+	bool control_include_probe(const vector<PPToken>& arg, bool include_next)
+	{
+		try
+		{
+			vector<PPToken> expanded = macros_.expand_tokens(arg);
+			IncludeSpec spec = include_spec_from_tokens(expanded);
+			size_t include_path_index = kNoIncludePathIndex;
+			string path;
+			return find_include(spec, include_next, path, include_path_index);
+		}
+		catch (const exception&)
+		{
+			return false;
+		}
 	}
 
 	void handle_if(const vector<PPToken>& line, size_t begin, size_t end)
@@ -346,7 +904,7 @@ private:
 			size_t pos = SkipHorizontalWhitespace(line, begin, end);
 			if (pos >= end || !IsIdentifier(line[pos]))
 				throw runtime_error("invalid #ifdef");
-			condition = macros_.is_defined(line[pos].text);
+			condition = is_defined_name(line[pos].text);
 			pos = SkipHorizontalWhitespace(line, pos + 1, end);
 			if (pos != end)
 				throw runtime_error("invalid #ifdef");
@@ -402,61 +960,115 @@ private:
 	void handle_include(const vector<PPToken>& line,
 	                    size_t begin,
 	                    size_t end,
+	                    bool include_next,
 	                    vector<PPToken>& output)
 	{
 		vector<PPToken> operand = SliceTokens(line, begin, end);
 		operand = macros_.expand_tokens(operand);
-		const string include_name = include_name_from_tokens(operand);
-		const string include_path = resolve_include(include_name);
+		const IncludeSpec spec = include_spec_from_tokens(operand);
+		size_t include_path_index = kNoIncludePathIndex;
+		const string include_path =
+			resolve_include(spec, include_next, include_path_index);
 		PA5FileId file_id;
 		if (PA5GetFileId(include_path, file_id) &&
 		    once_files_.find(file_id) != once_files_.end())
 			return;
-		process_file(include_path, output);
+		process_file(include_path, include_path_index, output);
 	}
 
-	string include_name_from_tokens(const vector<PPToken>& tokens)
+	IncludeSpec include_spec_from_tokens(const vector<PPToken>& tokens)
 	{
-		size_t pos = NextRealToken(tokens, 0);
-		if (pos >= tokens.size())
-			throw runtime_error("invalid include");
-		const PPToken& token = tokens[pos];
-		if (HasRealTokens(tokens, pos + 1))
-			throw runtime_error("invalid include");
-		if (token.kind == PPTokenKind::HeaderName)
+		vector<PPToken> significant = significant_tokens(tokens);
+		if (significant.size() == 1)
 		{
-			if (token.text.size() >= 2 &&
-			    ((token.text[0] == '"' && token.text[token.text.size() - 1] == '"') ||
-			     (token.text[0] == '<' && token.text[token.text.size() - 1] == '>')))
-				return token.text.substr(1, token.text.size() - 2);
-			throw runtime_error("invalid include");
+			const PPToken& token = significant[0];
+			if (token.kind == PPTokenKind::HeaderName)
+			{
+				if (token.text.size() >= 2 &&
+				    ((token.text[0] == '"' &&
+				      token.text[token.text.size() - 1] == '"') ||
+				     (token.text[0] == '<' &&
+				      token.text[token.text.size() - 1] == '>')))
+					return IncludeSpec(token.text.substr(1,
+					                                     token.text.size() - 2),
+					                   token.text[0] == '<');
+				throw runtime_error("invalid include");
+			}
+			if (token.kind == PPTokenKind::StringLiteral)
+				return IncludeSpec(DecodeStringLiteralUtf8(token), false);
 		}
-		return DecodeStringLiteralUtf8(token);
+		if (significant.size() >= 2 &&
+		    IsOp(significant.front(), "<") &&
+		    IsOp(significant.back(), ">"))
+		{
+			string name;
+			for (size_t i = 1; i + 1 < significant.size(); ++i)
+				name += significant[i].text;
+			if (!name.empty())
+				return IncludeSpec(name, true);
+		}
+		throw runtime_error("invalid include");
 	}
 
-	string resolve_include(const string& name)
+	bool find_include(const IncludeSpec& spec,
+	                  bool include_next,
+	                  string& path,
+	                  size_t& include_path_index)
 	{
-		const size_t slash = current_file_.rfind('/');
-		if (slash != string::npos)
+		if (!include_next && !spec.angled)
 		{
-			const string pathrel = current_file_.substr(0, slash + 1) + name;
-			PA5FileId id;
-			if (PA5GetFileId(pathrel, id))
-				return pathrel;
+			const size_t slash = current_file_.rfind('/');
+			if (slash != string::npos)
+			{
+				const string pathrel =
+					current_file_.substr(0, slash + 1) + spec.name;
+				PA5FileId id;
+				if (PA5GetFileId(pathrel, id))
+				{
+					path = pathrel;
+					include_path_index = kNoIncludePathIndex;
+					return true;
+				}
+			}
 		}
-		for (size_t i = 0; i < include_paths_.size(); ++i)
+		size_t begin = 0;
+		if (include_next &&
+		    current_include_path_index_ != kNoIncludePathIndex)
+			begin = current_include_path_index_ + 1;
+		for (size_t i = begin; i < include_paths_.size(); ++i)
 		{
-			string path = include_paths_[i];
-			if (!path.empty() && path[path.size() - 1] != '/')
-				path += "/";
-			path += name;
+			string candidate = include_paths_[i];
+			if (!candidate.empty() && candidate[candidate.size() - 1] != '/')
+				candidate += "/";
+			candidate += spec.name;
 			PA5FileId id;
-			if (PA5GetFileId(path, id))
-				return path;
+			if (PA5GetFileId(candidate, id))
+			{
+				path = candidate;
+				include_path_index = i;
+				return true;
+			}
 		}
-		PA5FileId id;
-		if (PA5GetFileId(name, id))
-			return name;
+		if (!include_next)
+		{
+			PA5FileId id;
+			if (PA5GetFileId(spec.name, id))
+			{
+				path = spec.name;
+				include_path_index = kNoIncludePathIndex;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	string resolve_include(const IncludeSpec& spec,
+	                       bool include_next,
+	                       size_t& include_path_index)
+	{
+		string path;
+		if (find_include(spec, include_next, path, include_path_index))
+			return path;
 		throw runtime_error("include file not found");
 	}
 

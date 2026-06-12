@@ -1,8 +1,6 @@
 #include "pa12_internal.h"
 #include <cstdlib>
-#include <iomanip>
 #include <limits>
-#include <sstream>
 using namespace std;
 namespace pa12 {
 namespace internal {
@@ -48,6 +46,17 @@ bool is_float_type(TypePtr type)
 { TypePtr bare = pa11::strip_cv(type); return bare->kind == pa11::TypeKind::Fundamental && (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool starts_with(const string& text, const string& prefix)
 { return text.compare(0, prefix.size(), prefix) == 0; }
+bool template_name_is(const string& name, const string& unqualified)
+{
+	if (name == unqualified)
+		return true;
+	if (name.size() <= unqualified.size() + 2)
+		return false;
+	size_t offset = name.size() - unqualified.size();
+	return name.compare(offset, unqualified.size(), unqualified) == 0 &&
+	       offset >= 2 &&
+	       name.compare(offset - 2, 2, "::") == 0;
+}
 bool truthy(const ConstexprValue& value)
 { if (value.is_pointer) return value.pointer_binding != NULL || value.pointer_index != 0; return value.is_float ? value.float_value != 0 : value.int_value != 0; }
 uint64_t integer_value(const ConstexprValue& value)
@@ -136,8 +145,6 @@ string trim_float_suffix(string text)
 	}
 	return text;
 }
-string format_float(long double value)
-{ ostringstream out; out << setprecision(numeric_limits<long double>::digits10) << value; return out.str(); }
 bool is_array_type(TypePtr type)
 { return type.get() != NULL && pa11::strip_cv(type)->kind == pa11::TypeKind::Array; }
 bool consume_eval_step()
@@ -1216,10 +1223,9 @@ bool Parser::try_evaluate_constexpr_call(Binding* function,
 	}
 	return try_evaluate_constexpr_call_values(function, values, out);
 }
-bool Parser::try_evaluate_constexpr_call_values(
-	Binding* function,
-	const vector<ConstexprValue>& args,
-	ConstexprValue& out)
+bool Parser::try_evaluate_constexpr_call_values(Binding* function,
+                                                const vector<ConstexprValue>& args,
+                                                ConstexprValue& out)
 {
 	EvalBudgetScope budget;
 	EvalCallScope call_scope;
@@ -1285,11 +1291,10 @@ bool Parser::try_evaluate_constexpr_call_values(
 	out = result;
 	return true;
 }
-bool Parser::try_evaluate_constexpr_constructor(
-	Binding* function,
-	TypePtr object_type,
-	const vector<ConstexprValue>& args,
-	ConstexprValue& out)
+bool Parser::try_evaluate_constexpr_constructor(Binding* function,
+                                                TypePtr object_type,
+                                                const vector<ConstexprValue>& args,
+                                                ConstexprValue& out)
 {
 	EvalBudgetScope budget;
 	EvalCallScope call_scope;
@@ -1396,6 +1401,55 @@ bool Parser::try_evaluate_constexpr_binding(Binding* binding,
 	EvalBudgetScope budget;
 	if (binding == NULL)
 		return false;
+	if (binding->name == "value" &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class)
+	{
+		TypePtr owner = pa11::record_type_for_scope(binding->owner);
+		owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+		map<const void*, vector<TemplateArgument> >::const_iterator args =
+			owner.get() != NULL
+			? record_template_arguments_.find(owner.get())
+			: record_template_arguments_.end();
+		if (hosted_compatibility_ &&
+		    owner.get() != NULL &&
+		    owner->kind == pa11::TypeKind::Record &&
+		    template_name_is(owner->template_primary_name,
+		                     "__is_nothrow_invocable") &&
+		    args != record_template_arguments_.end())
+		{
+			vector<TypePtr> types;
+			bool type_args = true;
+			for (size_t i = 0; i < args->second.size(); ++i)
+			{
+				const TemplateArgument& arg = args->second[i];
+				if (arg.kind == TemplateArgumentKind::Type)
+					types.push_back(arg.type);
+				else if (arg.kind == TemplateArgumentKind::Pack)
+				{
+					for (size_t j = 0; j < arg.pack.size(); ++j)
+					{
+						if (arg.pack[j].kind != TemplateArgumentKind::Type)
+						{
+							type_args = false;
+							break;
+						}
+						types.push_back(arg.pack[j].type);
+					}
+				}
+				else
+					type_args = false;
+				if (!type_args)
+					break;
+			}
+			if (type_args)
+			{
+				bool value = is_invocable_type_trait(types, true);
+				out = ConstexprValue::integer(value ? 1 : 0);
+				return true;
+			}
+		}
+	}
 	if (binding->has_constant)
 	{
 		out = ConstexprValue::integer(binding->constant_value);
@@ -1437,44 +1491,6 @@ bool Parser::try_evaluate_constexpr_expr(const Node& node, ConstexprValue& out)
 	EvalState state;
 	return eval_node(*this, node, state, out);
 }
-bool Parser::try_evaluate_dependent_value_node(const Node& node,
-                                               ConstexprValue& out)
-{
-	if (node.dependent_value_name.empty())
-		return false;
-	TemplateArgument arg =
-		TemplateArgument::dependent_value_arg(expression_object_type(node.type));
-	arg.value_name = node.dependent_value_name;
-	arg.value_owner_template_name =
-		node.dependent_value_owner_template_name;
-	arg.value_member_name = node.dependent_value_member_name;
-	arg.value_negated = node.dependent_value_negated;
-	arg.value_owner_template_arguments =
-		node.dependent_value_owner_template_arguments;
-	TemplateArgument resolved;
-	if (!resolve_dependent_value_member_argument(arg, resolved))
-		return false;
-	resolved = substitute_template_argument(resolved);
-	if (resolved.kind != TemplateArgumentKind::Value ||
-	    resolved.dependent ||
-	    resolved.value_binding != NULL)
-		return false;
-	out = ConstexprValue::integer(resolved.value);
-	return true;
-}
-void Parser::apply_constexpr_value(Expr& expr, const ConstexprValue& value)
-{
-	if (!value.valid || value.is_object || value.is_pointer)
-		return;
-	expr.constant_expression = true;
-	expr.has_constant_value = true;
-	expr.constant_value = value.int_value;
-	expr.null_pointer_constant = value.int_value == 0 && !value.is_float;
-	expr.node.has_constant_value = true;
-	expr.node.constant_value = value.int_value;
-	expr.node.token_text = value.is_float
-		? format_float(value.float_value)
-		: to_string(value.int_value);
-}
+
 }  // namespace internal
 }  // namespace pa12

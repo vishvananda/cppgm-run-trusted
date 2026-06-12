@@ -12,6 +12,9 @@ namespace pa12 {
 struct Options
 {
 	preproc::Options preprocess;
+	bool hosted_compatibility;
+
+	Options() : hosted_compatibility(false) {}
 };
 
 void emit_semantics(const vector<string>& srcfiles,

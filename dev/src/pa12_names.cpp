@@ -45,7 +45,11 @@ pa11::TemplateInstanceArgument nested_name_template_instance_argument(
 	for (size_t i = 0; i < argument.pack.size(); ++i)
 		pack.push_back(nested_name_template_instance_argument(
 			argument.pack[i]));
-	return pa11::TemplateInstanceArgument::pack_arg(pack);
+	pa11::TemplateInstanceArgument out =
+		pa11::TemplateInstanceArgument::pack_arg(pack);
+	out.value_name = argument.value_name;
+	out.template_name = argument.value_name;
+	return out;
 }
 
 vector<pa11::TemplateInstanceArgument> nested_name_template_instance_arguments(
@@ -439,6 +443,31 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		                  type);
 		return type;
 	};
+	auto make_hosted_trait_template_qualifier =
+		[&](const string& component,
+		    const vector<TemplateArgument>& arguments) -> TypePtr
+	{
+		Scope* dependent_scope =
+			pa11::create_child_scope(current_scope(),
+			                         ScopeKind::Class,
+			                         component + "<>");
+		TypePtr type = pa11::make_record_type(component + "<>",
+		                                      "struct",
+		                                      false,
+		                                      dependent_scope);
+		type->is_template_specialization = true;
+		type->is_dependent_typename = true;
+		type->dependent_typename_template_id = true;
+		type->template_primary_name = component;
+		type->template_arguments =
+			nested_name_template_instance_arguments(arguments);
+		record_template_arguments_[type.get()] = arguments;
+		pa11::add_binding(current_scope(),
+		                  BindingKind::Type,
+		                  component + "<>",
+		                  type);
+		return type;
+	};
 	auto complete_qualifier_record = [&](TypePtr qualifier_type) {
 		size_t saved_pos = pos_;
 		vector<Scope*> saved_scopes = scopes_;
@@ -490,15 +519,23 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 						{
 								bool dependent_arguments =
 									template_arguments_dependent(arguments);
-								TypePtr type =
-									dependent_arguments && templ != NULL
-									? make_dependent_template_qualifier(
-										templ,
-										component,
-										arguments)
-									: (alias != NULL
-									   ? instantiate_alias_template(alias, arguments)
-									   : instantiate_class_template(templ, arguments));
+								TypePtr type;
+								if (hosted_compatibility_ &&
+								    component == "__empty_not_final")
+									type =
+										make_hosted_trait_template_qualifier(
+											component,
+											arguments);
+								else
+									type =
+										dependent_arguments && templ != NULL
+										? make_dependent_template_qualifier(
+											templ,
+											component,
+											arguments)
+										: (alias != NULL
+										   ? instantiate_alias_template(alias, arguments)
+										   : instantiate_class_template(templ, arguments));
 							TypePtr dependent_bare =
 								type.get() != NULL
 								? pa11::strip_cv(type) : TypePtr();
@@ -654,15 +691,22 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 								{
 									bool dependent_arguments =
 										template_arguments_dependent(arguments);
-									type =
-										dependent_arguments && templ != NULL
-										? make_dependent_template_qualifier(
-											templ,
-											root,
-											arguments)
-										: (alias != NULL
-										   ? instantiate_alias_template(alias, arguments)
-										   : instantiate_class_template(templ, arguments));
+									if (hosted_compatibility_ &&
+									    root == "__empty_not_final")
+										type =
+											make_hosted_trait_template_qualifier(
+												root,
+												arguments);
+									else
+										type =
+											dependent_arguments && templ != NULL
+											? make_dependent_template_qualifier(
+												templ,
+												root,
+												arguments)
+											: (alias != NULL
+											   ? instantiate_alias_template(alias, arguments)
+											   : instantiate_class_template(templ, arguments));
 								}
 							TypePtr dependent_bare =
 								type.get() != NULL

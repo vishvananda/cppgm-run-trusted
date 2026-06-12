@@ -6,6 +6,11 @@ bool type_is_floating(TypePtr type) { TypePtr bare = pa11::strip_cv(type); retur
 (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool type_is_arithmetic(TypePtr type) { return pa11::is_integral_or_bool_type(type) || type_is_floating(type); }
 bool type_is_pointer(TypePtr type) { return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer; }
+bool string_ends_with(const string& text, const string& suffix)
+{
+	return text.size() >= suffix.size() &&
+	       text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
 bool binding_is_function_template_candidate(Binding* binding, const map<Binding*, TemplateDeclaration*>& placeholders,
 const map<Binding*, vector<TemplateArgument> >& specializations) { if (binding == NULL) return false; Binding* aliased = binding->aliased_binding != NULL ? binding->aliased_binding : binding;
 return placeholders.find(binding) != placeholders.end() || specializations.find(binding) != specializations.end() ||
@@ -76,6 +81,228 @@ TypePtr left = pa11::strip_cv(lhs); TypePtr right = pa11::strip_cv(rhs); if (op 
 if (left->kind == pa11::TypeKind::Pointer) return pa11::is_integral_or_bool_type(right); return type_is_arithmetic(left) && type_is_arithmetic(right); }
 if (op == OP_STARASS || op == OP_DIVASS) return type_is_arithmetic(left) && type_is_arithmetic(right); if (op == OP_MODASS || op == OP_XORASS || op == OP_BANDASS || op == OP_BORASS || op == OP_LSHIFTASS || op == OP_RSHIFTASS)
 return pa11::is_integral_or_bool_type(left) && pa11::is_integral_or_bool_type(right); return false; }
+bool hosted_libc_math_builtin_core(const string& core)
+{
+	static const char* names[] = {
+		"abs", "labs", "llabs", "free",
+		"acos", "acosf", "acosl", "acosh", "acoshf", "acoshl",
+		"asin", "asinf", "asinl", "asinh", "asinhf", "asinhl",
+		"atan", "atanf", "atanl", "atan2", "atan2f", "atan2l",
+		"atanh", "atanhf", "atanhl",
+		"cbrt", "cbrtf", "cbrtl", "ceil", "ceilf", "ceill",
+		"copysign", "copysignf", "copysignl",
+		"cos", "cosf", "cosl", "cosh", "coshf", "coshl",
+		"erf", "erff", "erfl", "erfc", "erfcf", "erfcl",
+		"exp", "expf", "expl", "exp2", "exp2f", "exp2l",
+		"expm1", "expm1f", "expm1l",
+		"fabs", "fabsf", "fabsl", "fabsf128",
+		"fdim", "fdimf", "fdiml", "floor", "floorf", "floorl",
+		"fma", "fmaf", "fmal", "fmax", "fmaxf", "fmaxl",
+		"fmin", "fminf", "fminl", "fmod", "fmodf", "fmodl",
+		"fpclassify", "frexp", "frexpf", "frexpl",
+		"hypot", "hypotf", "hypotl",
+		"ilogb", "ilogbf", "ilogbl",
+		"isfinite", "isgreater", "isgreaterequal", "isinf",
+		"isless", "islessequal", "islessgreater", "isnan",
+		"isnormal", "isunordered",
+		"ldexp", "ldexpf", "ldexpl",
+		"lgamma", "lgammaf", "lgammal",
+		"llrint", "llrintf", "llrintl", "llround", "llroundf",
+		"llroundl",
+		"log", "logf", "logl", "log10", "log10f", "log10l",
+		"log1p", "log1pf", "log1pl", "log2", "log2f", "log2l",
+		"logb", "logbf", "logbl",
+		"lrint", "lrintf", "lrintl", "lround", "lroundf",
+		"lroundl",
+		"modf", "modff", "modfl", "nearbyint", "nearbyintf",
+		"nearbyintl",
+		"nextafter", "nextafterf", "nextafterl",
+		"nexttoward", "nexttowardf", "nexttowardl",
+		"pow", "powf", "powl", "remainder", "remainderf",
+		"remainderl", "remquo", "remquof", "remquol",
+		"rint", "rintf", "rintl", "round", "roundf", "roundl",
+		"scalbln", "scalblnf", "scalblnl",
+		"scalbn", "scalbnf", "scalbnl", "signbit",
+		"sin", "sinf", "sinl", "sinh", "sinhf", "sinhl",
+		"sqrt", "sqrtf", "sqrtl", "tan", "tanf", "tanl",
+		"tanh", "tanhf", "tanhl", "tgamma", "tgammaf",
+		"tgammal", "trunc", "truncf", "truncl"
+	};
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+		if (core == names[i])
+			return true;
+	return false;
+}
+bool hosted_libc_math_builtin_name(const string& name)
+{
+	return name.compare(0, 10, "__builtin_") == 0 &&
+	       hosted_libc_math_builtin_core(name.substr(10));
+}
+TypePtr hosted_float_builtin_type(const string& core)
+{
+	if (string_ends_with(core, "f") && !string_ends_with(core, "f128"))
+		return pa11::make_fundamental(FT_FLOAT);
+	if (string_ends_with(core, "l") || string_ends_with(core, "f128"))
+		return pa11::make_fundamental(FT_LONG_DOUBLE);
+	return pa11::make_fundamental(FT_DOUBLE);
+}
+bool hosted_core_starts_with(const string& core, const string& prefix)
+{
+	return core.compare(0, prefix.size(), prefix) == 0;
+}
+void classify_hosted_libc_math_builtin(const string& name,
+                                       vector<TypePtr>& params,
+                                       TypePtr& result)
+{
+	string core = name.substr(10);
+	TypePtr void_type = pa11::make_fundamental(FT_VOID);
+	TypePtr void_ptr = pa11::make_pointer(void_type);
+	TypePtr int_type = pa11::make_fundamental(FT_INT);
+	TypePtr long_type = pa11::make_fundamental(FT_LONG_INT);
+	TypePtr long_long_type = pa11::make_fundamental(FT_LONG_LONG_INT);
+	if (core == "free")
+	{
+		params.push_back(void_ptr);
+		result = void_type;
+		return;
+	}
+	if (core == "abs" || core == "labs" || core == "llabs")
+	{
+		result = core == "abs" ? int_type :
+		         core == "labs" ? long_type : long_long_type;
+		params.push_back(result);
+		return;
+	}
+	TypePtr real = hosted_float_builtin_type(core);
+	if (hosted_core_starts_with(core, "llrint") ||
+	    hosted_core_starts_with(core, "llround"))
+		result = long_long_type;
+	else if (hosted_core_starts_with(core, "lrint") ||
+	         hosted_core_starts_with(core, "lround"))
+		result = long_type;
+	else if (hosted_core_starts_with(core, "ilogb") ||
+	         core == "isfinite" || core == "isgreater" ||
+	         core == "isgreaterequal" || core == "isinf" ||
+	         core == "isless" || core == "islessequal" ||
+	         core == "islessgreater" || core == "isnan" ||
+	         core == "isnormal" || core == "isunordered" ||
+	         core == "signbit" || core == "fpclassify")
+		result = int_type;
+	else
+		result = real;
+	if (core == "isgreater" || core == "isgreaterequal" ||
+	    core == "isless" || core == "islessequal" ||
+	    core == "islessgreater" || core == "isunordered")
+	{
+		params.push_back(pa11::make_fundamental(FT_DOUBLE));
+		params.push_back(pa11::make_fundamental(FT_DOUBLE));
+		return;
+	}
+	params.push_back(real);
+	if (hosted_core_starts_with(core, "atan2") ||
+	    hosted_core_starts_with(core, "copysign") ||
+	    hosted_core_starts_with(core, "fdim") ||
+	    hosted_core_starts_with(core, "fmax") ||
+	    hosted_core_starts_with(core, "fmin") ||
+	    hosted_core_starts_with(core, "fmod") ||
+	    hosted_core_starts_with(core, "hypot") ||
+	    hosted_core_starts_with(core, "nextafter") ||
+	    hosted_core_starts_with(core, "nexttoward") ||
+	    hosted_core_starts_with(core, "pow") ||
+	    hosted_core_starts_with(core, "remainder"))
+		params.push_back(real);
+	else if (hosted_core_starts_with(core, "fma"))
+	{
+		params.push_back(real);
+		params.push_back(real);
+	}
+	else if (hosted_core_starts_with(core, "ldexp") ||
+	         hosted_core_starts_with(core, "scalbn"))
+		params.push_back(int_type);
+	else if (hosted_core_starts_with(core, "scalbln"))
+		params.push_back(long_type);
+	else if (hosted_core_starts_with(core, "frexp"))
+		params.push_back(pa11::make_pointer(int_type));
+	else if (hosted_core_starts_with(core, "modf"))
+		params.push_back(pa11::make_pointer(real));
+	else if (hosted_core_starts_with(core, "remquo"))
+	{
+		params.push_back(real);
+		params.push_back(pa11::make_pointer(int_type));
+	}
+}
+bool hosted_builtin_function_name(const string& name) {
+	return name == "__builtin_strlen" || name == "__builtin_unreachable" ||
+	       name == "__builtin_memcpy" || name == "__builtin_memmove" ||
+	       name == "__builtin_strcmp" || name == "__builtin_memcmp" ||
+	       name == "__builtin_memchr" || name == "__builtin_strchr" ||
+	       name == "__builtin_bzero" ||
+	       name == "__builtin_expect" ||
+	       name == "__builtin_is_constant_evaluated" ||
+	       name == "__builtin_addressof" ||
+	       name == "__builtin_assume_aligned" ||
+	       name == "__builtin_FILE" || name == "__builtin_FUNCTION" ||
+	       name == "__builtin_LINE" || name == "__builtin_COLUMN" ||
+	       name == "__builtin_inf" || name == "__builtin_inff" ||
+	       name == "__builtin_infl" ||
+	       name == "__builtin_huge_val" ||
+	       name == "__builtin_huge_valf" ||
+	       name == "__builtin_huge_vall" ||
+	       name == "__builtin_nan" || name == "__builtin_nanf" ||
+	       name == "__builtin_nanl" || name == "__builtin_nans" ||
+	       name == "__builtin_nansf" || name == "__builtin_nansl" ||
+	       name == "__builtin_isnan" ||
+	       name == "__builtin_flt_rounds" ||
+	       name == "__builtin_fpclassify" ||
+	       name == "__builtin_prefetch" ||
+	       name == "__builtin_operator_new" ||
+	       name == "__builtin_operator_delete" ||
+	       name == "__builtin_add_overflow" ||
+	       name == "__builtin_sub_overflow" ||
+	       name == "__builtin_mul_overflow" ||
+	       name == "__builtin_invoke" ||
+	       name == "__builtin_alloca" || name == "__builtin_va_start" ||
+	       name == "__builtin_va_end" || name == "__builtin_bswap16" ||
+	       name == "__builtin_bswap32" || name == "__builtin_bswap64" ||
+	       name == "__builtin_clz" || name == "__builtin_clzl" ||
+	       name == "__builtin_clzll" || name == "__builtin_clzg" ||
+	       name == "__builtin_ctz" || name == "__builtin_ctzl" ||
+	       name == "__builtin_ctzll" || name == "__builtin_popcount" ||
+	       name == "__builtin_popcountl" || name == "__builtin_popcountll" ||
+	       name == "__builtin_popcountg" ||
+	       name == "__builtin_complex" ||
+	       name == "__atomic_load_n" || name == "__atomic_load" ||
+	       name == "__atomic_store_n" || name == "__atomic_store" ||
+	       name == "__atomic_exchange_n" ||
+	       name == "__atomic_fetch_add" ||
+	       name == "__atomic_fetch_sub" ||
+	       name == "__atomic_fetch_and" ||
+	       name == "__atomic_fetch_or" ||
+	       name == "__atomic_fetch_xor" ||
+	       name == "__atomic_add_fetch" ||
+	       name == "__atomic_sub_fetch" ||
+	       name == "__atomic_and_fetch" ||
+	       name == "__atomic_or_fetch" ||
+	       name == "__atomic_xor_fetch" ||
+	       name == "__atomic_always_lock_free" ||
+	       name == "__atomic_is_lock_free" ||
+	       name == "__sync_lock_test_and_set" ||
+	       name == "__sync_lock_release" ||
+	       name == "__c11_atomic_load" || name == "__c11_atomic_init" ||
+	       name == "__c11_atomic_store" ||
+	       name == "__c11_atomic_exchange" ||
+	       name == "__c11_atomic_compare_exchange_strong" ||
+	       name == "__c11_atomic_compare_exchange_weak" ||
+	       name == "__c11_atomic_fetch_add" ||
+	       name == "__c11_atomic_fetch_sub" ||
+	       name == "__c11_atomic_fetch_and" ||
+	       name == "__c11_atomic_fetch_or" ||
+	       name == "__c11_atomic_fetch_xor" ||
+	       name == "__c11_atomic_is_lock_free" ||
+	       name == "__c11_atomic_thread_fence" ||
+	       name == "__c11_atomic_signal_fence" ||
+	       hosted_libc_math_builtin_name(name);
+}
 }  // namespace
 Expr Parser::make_builtin_id_expr(const QualifiedName& name) { if ((name.name == "operatornew" || name.name == "operatornew[]" ||
 name.name == "operatordelete" || name.name == "operatordelete[]") && (!name.qualified || name.qualifier == global_scope())) {
@@ -94,24 +321,58 @@ out.category = ValueCategory::LValue; out.valid = true; out.builtin_constant_p =
 if (!name.qualified && name.name == "__CHAR_BIT__") { Expr out; out.type = pa11::make_fundamental(FT_INT);
 out.category = ValueCategory::PRValue; out.valid = true; out.constant_expression = true; out.has_constant_value = true;
 out.constant_value = 8; out.node = Node("literal prvalue int 8"); out.node.token_text = "8"; annotate_expr_node(out);
-	return out; } if (!name.qualified && (name.name == "__builtin_strlen" ||
-	name.name == "__builtin_unreachable" || name.name == "__builtin_memcpy" || name.name == "__builtin_memmove" ||
-	name.name == "__builtin_nanl" || name.name == "__builtin_isnan" ||
-	name.name == "__builtin_alloca" || name.name == "__builtin_va_start" ||
-	name.name == "__builtin_va_end")) {
+	return out; } if (!name.qualified && hosted_builtin_function_name(name.name)) {
 	Binding* binding = pa11::lookup_unqualified(global_scope(), name.name, pa11::LOOKUP_FUNCTION); if (binding == NULL) {
 	vector<TypePtr> params; TypePtr result = pa11::make_fundamental(FT_VOID); TypePtr void_ptr = pa11::make_pointer(pa11::make_fundamental(FT_VOID));
-	TypePtr const_void_ptr = pa11::make_pointer(pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST)); if (name.name == "__builtin_strlen")
+	TypePtr const_void_ptr = pa11::make_pointer(pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST)); TypePtr chr = pa11::make_fundamental(FT_CHAR); TypePtr const_chr = pa11::make_cv(chr, pa11::CV_CONST); TypePtr const_char_ptr = pa11::make_pointer(const_chr); TypePtr char_ptr = pa11::make_pointer(chr); if (name.name == "__builtin_strlen")
 	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
 	result = pa11::make_fundamental(FT_UNSIGNED_LONG_INT); } else if (name.name == "__builtin_memcpy" || name.name == "__builtin_memmove")
 	{ params.push_back(void_ptr); params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
-	result = void_ptr; } else if (name.name == "__builtin_nanl")
+	result = void_ptr; } else if (name.name == "__builtin_strcmp")
+	{ params.push_back(const_char_ptr); params.push_back(const_char_ptr); result = pa11::make_fundamental(FT_INT);
+	} else if (name.name == "__builtin_memcmp")
+	{ params.push_back(const_void_ptr); params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = pa11::make_fundamental(FT_INT);
+	} else if (name.name == "__builtin_memchr")
+	{ params.push_back(const_void_ptr); params.push_back(pa11::make_fundamental(FT_INT)); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr;
+	} else if (name.name == "__builtin_strchr")
+	{ params.push_back(const_char_ptr); params.push_back(pa11::make_fundamental(FT_INT)); result = char_ptr;
+	} else if (name.name == "__builtin_bzero")
+	{ params.push_back(void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = pa11::make_fundamental(FT_VOID);
+	} else if (name.name == "__builtin_addressof")
+	{ result = void_ptr;
+	} else if (name.name == "__builtin_assume_aligned")
+	{ params.push_back(void_ptr); params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr;
+	} else if (name.name == "__builtin_is_constant_evaluated")
+	{ result = pa11::make_fundamental(FT_BOOL);
+	} else if (name.name == "__builtin_FILE" || name.name == "__builtin_FUNCTION")
+	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); result = pa11::make_pointer(chr);
+	} else if (name.name == "__builtin_LINE" || name.name == "__builtin_COLUMN")
+	{ result = pa11::make_fundamental(FT_INT);
+	} else if (name.name == "__builtin_inf" || name.name == "__builtin_huge_val" || name.name == "__builtin_nan" || name.name == "__builtin_nans")
+	{ if (name.name == "__builtin_nan" || name.name == "__builtin_nans") params.push_back(const_char_ptr); result = pa11::make_fundamental(FT_DOUBLE);
+	} else if (name.name == "__builtin_inff" || name.name == "__builtin_huge_valf" || name.name == "__builtin_nanf" || name.name == "__builtin_nansf")
+	{ if (name.name == "__builtin_nanf" || name.name == "__builtin_nansf") params.push_back(const_char_ptr); result = pa11::make_fundamental(FT_FLOAT);
+	} else if (name.name == "__builtin_infl" || name.name == "__builtin_huge_vall" || name.name == "__builtin_nansl")
+	{ if (name.name == "__builtin_nansl") params.push_back(const_char_ptr); result = pa11::make_fundamental(FT_LONG_DOUBLE);
+	} else if (name.name == "__builtin_nanl")
 	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
 	result = pa11::make_fundamental(FT_LONG_DOUBLE); } else if (name.name == "__builtin_isnan")
 	{ params.push_back(pa11::make_fundamental(FT_LONG_DOUBLE)); result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_alloca")
 	{ params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr; } else if (name.name == "__builtin_va_start")
 	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_va_end")
-	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } TypePtr fn = pa11::make_function(result, params, name.name == "__builtin_va_start"); binding = add_value(global_scope(), BindingKind::Function, name.name, fn);
+	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_bswap16")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_SHORT_INT); } else if (name.name == "__builtin_bswap32")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_INT); } else if (name.name == "__builtin_bswap64")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_LONG_LONG_INT); } else if (name.name == "__builtin_complex")
+	{ result = pa11::make_fundamental(FT_LONG_DOUBLE); } else if (name.name == "__builtin_clz" || name.name == "__builtin_clzl" || name.name == "__builtin_clzll" || name.name == "__builtin_clzg" || name.name == "__builtin_ctz" || name.name == "__builtin_ctzl" || name.name == "__builtin_ctzll" || name.name == "__builtin_popcount" || name.name == "__builtin_popcountl" || name.name == "__builtin_popcountll" || name.name == "__builtin_popcountg")
+	{ result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_flt_rounds" || name.name == "__builtin_fpclassify")
+	{ result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_prefetch" || name.name == "__builtin_operator_delete")
+	{ result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_operator_new")
+	{ params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr; } else if (name.name == "__builtin_add_overflow" || name.name == "__builtin_sub_overflow" || name.name == "__builtin_mul_overflow")
+	{ result = pa11::make_fundamental(FT_BOOL); } else if (hosted_libc_math_builtin_name(name.name))
+	{ classify_hosted_libc_math_builtin(name.name, params, result); } else if (name.name == "__builtin_invoke")
+	{ result = pa11::make_fundamental(FT_INT); } else if (name.name == "__atomic_always_lock_free" || name.name == "__atomic_is_lock_free" || name.name == "__c11_atomic_is_lock_free" || name.name == "__c11_atomic_compare_exchange_strong" || name.name == "__c11_atomic_compare_exchange_weak")
+	{ result = pa11::make_fundamental(FT_BOOL); } bool variadic_builtin = name.name == "__builtin_va_start" || name.name.compare(0, 5, "__c11") == 0 || name.name == "__builtin_assume_aligned" || name.name == "__builtin_prefetch" || name.name == "__builtin_operator_new" || name.name == "__builtin_operator_delete" || name.name == "__builtin_add_overflow" || name.name == "__builtin_sub_overflow" || name.name == "__builtin_mul_overflow" || name.name == "__builtin_fpclassify" || name.name == "__builtin_invoke"; TypePtr fn = pa11::make_function(result, params, variadic_builtin); binding = add_value(global_scope(), BindingKind::Function, name.name, fn);
 } Expr out; out.valid = true; out.binding = binding;
 out.type = binding->type; out.category = ValueCategory::LValue; out.overloads.push_back(binding); out.node = Node("id-expression lvalue " +
 pa11::describe_type(out.type) + " " + binding->name); annotate_expr_node(out); return out; }
@@ -471,7 +732,8 @@ callee.node.token_text = op->name; annotate_expr_node(callee); Expr ptr = make_c
 if (base->kind == pa11::TypeKind::Array) base = base->base; else if (base->kind == pa11::TypeKind::Pointer) base = base->base;
 else { TypePtr rbase = pa11::strip_cv(expression_object_type(rhs.type)); if (rbase->kind == pa11::TypeKind::Array)
 base = rbase->base; else if (rbase->kind == pa11::TypeKind::Pointer) base = rbase->base; else if (base->kind == pa11::TypeKind::Record && base->scope != NULL)
-return make_record_subscript_expr(base, lhs, rhs); else throw runtime_error("invalid subscript operands"); }
+return make_record_subscript_expr(base, lhs, rhs); else if (type_is_template_dependent(lhs.type) || type_is_template_dependent(rhs.type))
+base = pa11::make_dependent_typename_type("__dependent_subscript", false, false, false); else throw runtime_error("invalid subscript operands"); }
 Expr out; out.type = base; out.category = ValueCategory::LValue; out.valid = true;
 out.node = Node("subscript-expression lvalue " + pa11::describe_type(base)); TypePtr rhs_base = pa11::strip_cv(expression_object_type(rhs.type)); if (rhs_base->kind == pa11::TypeKind::Array || rhs_base->kind == pa11::TypeKind::Pointer)
 { add_child(out.node, rhs.node); add_child(out.node, lhs.node); }
@@ -483,7 +745,14 @@ false, false); out.category = ValueCategory::LValue; out.node = Node("member-exp
 pa11::describe_type(out.type) + " OP_DOT:" + name); add_child(out.node, object.node); out.node.has_op = true; out.node.op = op == "->" ? OP_ARROW : OP_DOT;
 out.node.token_text = name; annotate_expr_node(out); return out; }
 Expr Parser::make_member_expr(Expr object, const string& name, const string& op) { TypePtr type = expression_object_type(object.type); if (op == "->")
-type = pointee_type_for_member(type); TypePtr bare = pa11::strip_cv(type); if ((bare->kind != pa11::TypeKind::Record || bare->scope == NULL) && type_is_template_dependent(type))
+{ for (int arrow_depth = 0; arrow_depth < 16; ++arrow_depth) { TypePtr arrow_type = pa11::strip_cv(expression_object_type(object.type));
+if (arrow_type->kind == pa11::TypeKind::Pointer) { type = arrow_type->base; break; }
+if (type_is_template_dependent(arrow_type)) return make_dependent_member_expr(object, name, op);
+if (arrow_type->kind != pa11::TypeKind::Record || arrow_type->scope == NULL) throw runtime_error("arrow on non-pointer");
+vector<Binding*> ops = lookup_qualified_set(arrow_type->scope, "operator->", pa11::LOOKUP_FUNCTION);
+if (ops.empty()) throw runtime_error("arrow on non-pointer");
+Expr callee = make_member_expr(object, "operator->", "."); vector<Expr> args; object = make_call_expr(callee, args);
+if (arrow_depth == 15) throw runtime_error("recursive operator->"); } } TypePtr bare = pa11::strip_cv(type); if ((bare->kind != pa11::TypeKind::Record || bare->scope == NULL) && type_is_template_dependent(type))
 return make_dependent_member_expr(object, name, op); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) throw runtime_error("member access on non-record"); if (bare->is_template_specialization && !type_is_template_dependent(bare))
 complete_template_record(bare); if (!type_is_template_dependent(bare)) instantiate_member_function_templates(bare); vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
 if (found.empty() && (type_is_template_dependent(type) || record_dependent_base_lookup_skips_.count(bare.get()) != 0)) return make_dependent_member_expr(object, name, op);

@@ -5,6 +5,32 @@ namespace internal {
 
 Value FunctionLowerer::emit_conditional(const Node& expr)
 {
+	if (expr.category != ValueCategory::LValue && pa11::is_void_type(expr.type))
+	{
+		string yes = fresh_block("cond_then");
+		string no = fresh_block("cond_else");
+		string end = fresh_block("cond_end");
+		if (eh_try_depth_ == 0 && has_active_cleanups() &&
+		    node_contains_call_expression(expr.children[0]))
+			branch_with_unwind_cleanups(expr.children[0], yes, no);
+		else
+		{
+			Value cond = emit_rvalue(expr.children[0]);
+			if (is_float_type(expr.children[0].type))
+				cond = bool_value(cond, expr.children[0].type);
+			terminate_with_pending_temp_cleanups(cond.text, yes, no);
+		}
+		start_block(yes);
+		emit_rvalue(expr.children[1]);
+		emit_pending_temp_cleanups();
+		terminate("jump ^" + end);
+		start_block(no);
+		emit_rvalue(expr.children[2]);
+		emit_pending_temp_cleanups();
+		terminate("jump ^" + end);
+		start_block(end);
+		return Value("void", "");
+	}
 	string type = expr.category == ValueCategory::LValue ? "ptr" :
 	              scalar_lowir_type(expr.type);
 	string slot = fresh_aux_slot(expr.category == ValueCategory::LValue ?
@@ -87,6 +113,32 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 
 Value FunctionLowerer::emit_conditional_value(const Node& expr)
 {
+	if (pa11::is_void_type(expr.type))
+	{
+		string yes = fresh_block("cond_then");
+		string no = fresh_block("cond_else");
+		string end = fresh_block("cond_end");
+		if (eh_try_depth_ == 0 && has_active_cleanups() &&
+		    node_contains_call_expression(expr.children[0]))
+			branch_with_unwind_cleanups(expr.children[0], yes, no);
+		else
+		{
+			Value cond = emit_rvalue(expr.children[0]);
+			if (is_float_type(expr.children[0].type))
+				cond = bool_value(cond, expr.children[0].type);
+			terminate_with_pending_temp_cleanups(cond.text, yes, no);
+		}
+		start_block(yes);
+		emit_rvalue(expr.children[1]);
+		emit_pending_temp_cleanups();
+		terminate("jump ^" + end);
+		start_block(no);
+		emit_rvalue(expr.children[2]);
+		emit_pending_temp_cleanups();
+		terminate("jump ^" + end);
+		start_block(end);
+		return Value("void", "");
+	}
 	string type = scalar_lowir_type(expr.type);
 	string slot = fresh_aux_slot("cond", type);
 	string yes = fresh_block("cond_then");

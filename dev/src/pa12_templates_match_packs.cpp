@@ -72,6 +72,7 @@ bool match_pack_expansion_pattern(
 				return false;
 	}
 	TemplateArgument matched_pack = TemplateArgument::pack_arg(pack);
+	matched_pack.value_name = pack_name;
 	if (have_existing_pack)
 	{
 		if (!same_template_argument_value(existing_pack_value,

@@ -771,7 +771,11 @@ pa11::TemplateInstanceArgument template_instance_argument(
 			element.pack_expansion = false;
 		pack.push_back(template_instance_argument(element));
 	}
-	return pa11::TemplateInstanceArgument::pack_arg(pack);
+	pa11::TemplateInstanceArgument out =
+		pa11::TemplateInstanceArgument::pack_arg(pack);
+	out.value_name = argument.value_name;
+	out.template_name = argument.value_name;
+	return out;
 }
 
 	vector<pa11::TemplateInstanceArgument> template_instance_arguments(
@@ -835,14 +839,20 @@ pa11::TemplateInstanceArgument template_instance_argument(
 		for (size_t i = 0; i < argument.pack.size(); ++i)
 			pack.push_back(
 				template_argument_from_instance_argument(argument.pack[i]));
-		if (pack.size() == 1 &&
+		bool anonymous_pack =
+			argument.value_name.empty() && argument.template_name.empty();
+		if (anonymous_pack &&
+		    pack.size() == 1 &&
 		    pack[0].kind != TemplateArgumentKind::Pack &&
 		    single_instance_pack_element_is_expansion(pack[0]))
 		{
 			pack[0].pack_expansion = true;
 			return pack[0];
 		}
-		return TemplateArgument::pack_arg(pack);
+		TemplateArgument out = TemplateArgument::pack_arg(pack);
+		out.value_name = argument.value_name.empty()
+			? argument.template_name : argument.value_name;
+		return out;
 	}
 
 TemplateArgument match_template_argument_from_instance_argument(
@@ -854,7 +864,10 @@ TemplateArgument match_template_argument_from_instance_argument(
 	for (size_t i = 0; i < argument.pack.size(); ++i)
 		pack.push_back(
 			match_template_argument_from_instance_argument(argument.pack[i]));
-	return TemplateArgument::pack_arg(pack);
+	TemplateArgument out = TemplateArgument::pack_arg(pack);
+	out.value_name = argument.value_name.empty()
+		? argument.template_name : argument.value_name;
+	return out;
 }
 
 vector<TemplateArgument> match_template_arguments_from_instance_arguments(
@@ -898,14 +911,20 @@ TemplateArgument raw_template_argument_from_instance_argument(
 		for (size_t i = 0; i < argument.pack.size(); ++i)
 			pack.push_back(
 				raw_template_argument_from_instance_argument(argument.pack[i]));
-		if (pack.size() == 1 &&
+		bool anonymous_pack =
+			argument.value_name.empty() && argument.template_name.empty();
+		if (anonymous_pack &&
+		    pack.size() == 1 &&
 		    pack[0].kind != TemplateArgumentKind::Pack &&
 		    single_instance_pack_element_is_expansion(pack[0]))
 		{
 			pack[0].pack_expansion = true;
 			return pack[0];
 		}
-		return TemplateArgument::pack_arg(pack);
+		TemplateArgument out = TemplateArgument::pack_arg(pack);
+		out.value_name = argument.value_name.empty()
+			? argument.template_name : argument.value_name;
+		return out;
 	}
 
 

@@ -366,8 +366,12 @@ bool write_reference_global(ProgramLowerer& program,
 		return true;
 	const Node& init = node.children[0];
 	if (starts_with(init.line, "id-expression") && init.binding != NULL)
+	{
+		if (init.binding->kind == BindingKind::Function)
+			program.demand_function_declaration(init.binding);
 		program.init_actions.push_back(
 			InitAction(name, "addr", program.symbol_for(init.binding)));
+	}
 	else if (starts_with(init.line, "unary-expression") &&
 	         init.has_op && init.op == OP_STAR &&
 	         !init.children.empty() &&

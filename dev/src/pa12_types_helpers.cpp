@@ -1,6 +1,7 @@
 #include "pa12_types_support.h"
 
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 
 using namespace std;
@@ -78,14 +79,18 @@ bool decltype_operand_is_parenthesized(const vector<Token>& tokens,
 	return false;
 }
 
-bool instance_argument_structurally_dependent(
-	const pa11::TemplateInstanceArgument& argument);
+bool instance_argument_structurally_dependent_seen(
+	const pa11::TemplateInstanceArgument& argument,
+	set<const void*>& seen);
 
-bool type_structurally_dependent(TypePtr type)
+bool type_structurally_dependent_seen(TypePtr type,
+                                      set<const void*>& seen)
 {
 	if (type.get() == NULL)
 		return false;
 	type = pa11::strip_cv(type);
+	if (!seen.insert(type.get()).second)
+		return false;
 	if (type->is_dependent_typename ||
 	    type->kind == pa11::TypeKind::TemplateParameter ||
 	    type->kind == pa11::TypeKind::TemplateTemplateParameter)
@@ -94,22 +99,23 @@ bool type_structurally_dependent(TypePtr type)
 	    type->kind == pa11::TypeKind::LValueReference ||
 	    type->kind == pa11::TypeKind::RValueReference ||
 	    type->kind == pa11::TypeKind::Array)
-		return type_structurally_dependent(type->base);
+		return type_structurally_dependent_seen(type->base, seen);
 	if (type->kind == pa11::TypeKind::Function)
 	{
-		if (type_structurally_dependent(type->base))
+		if (type_structurally_dependent_seen(type->base, seen))
 			return true;
 		for (size_t i = 0; i < type->parameters.size(); ++i)
-			if (type_structurally_dependent(type->parameters[i]))
+			if (type_structurally_dependent_seen(type->parameters[i], seen))
 				return true;
 		return false;
 	}
 	if (type->kind == pa11::TypeKind::MemberPointer)
-		return type_structurally_dependent(type->member_class) ||
-		       type_structurally_dependent(type->base);
+		return type_structurally_dependent_seen(type->member_class, seen) ||
+		       type_structurally_dependent_seen(type->base, seen);
 	for (size_t i = 0; i < type->template_arguments.size(); ++i)
-		if (instance_argument_structurally_dependent(
-			    type->template_arguments[i]))
+		if (instance_argument_structurally_dependent_seen(
+			    type->template_arguments[i],
+			    seen))
 			return true;
 	for (size_t i = 0;
 	     i < type->dependent_typename_template_argument_lists.size();
@@ -117,14 +123,22 @@ bool type_structurally_dependent(TypePtr type)
 		for (size_t j = 0;
 		     j < type->dependent_typename_template_argument_lists[i].size();
 		     ++j)
-			if (instance_argument_structurally_dependent(
-				    type->dependent_typename_template_argument_lists[i][j]))
+			if (instance_argument_structurally_dependent_seen(
+				    type->dependent_typename_template_argument_lists[i][j],
+				    seen))
 				return true;
 	return false;
 }
 
-bool instance_argument_structurally_dependent(
-	const pa11::TemplateInstanceArgument& argument)
+bool type_structurally_dependent(TypePtr type)
+{
+	set<const void*> seen;
+	return type_structurally_dependent_seen(type, seen);
+}
+
+bool instance_argument_structurally_dependent_seen(
+	const pa11::TemplateInstanceArgument& argument,
+	set<const void*>& seen)
 {
 	if (argument.dependent || !argument.value_name.empty() ||
 	    !argument.value_owner_template_name.empty() ||
@@ -132,19 +146,28 @@ bool instance_argument_structurally_dependent(
 		return true;
 	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type ||
 	    argument.kind == pa11::TemplateInstanceArgumentKind::Value)
-		return type_structurally_dependent(argument.type);
+		return type_structurally_dependent_seen(argument.type, seen);
 	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
 		for (size_t i = 0; i < argument.pack.size(); ++i)
-			if (instance_argument_structurally_dependent(
-				    argument.pack[i]))
+			if (instance_argument_structurally_dependent_seen(
+				    argument.pack[i],
+				    seen))
 				return true;
 	for (size_t i = 0;
 	     i < argument.value_owner_template_arguments.size();
 	     ++i)
-		if (instance_argument_structurally_dependent(
-			    argument.value_owner_template_arguments[i]))
+		if (instance_argument_structurally_dependent_seen(
+			    argument.value_owner_template_arguments[i],
+			    seen))
 			return true;
 	return false;
+}
+
+bool instance_argument_structurally_dependent(
+	const pa11::TemplateInstanceArgument& argument)
+{
+	set<const void*> seen;
+	return instance_argument_structurally_dependent_seen(argument, seen);
 }
 
 bool expr_node_structurally_dependent(const Node& node)
@@ -215,7 +238,15 @@ bool internal_type_transform_name(const string& name)
 	return name == "__decay" ||
 	       name == "__remove_reference_t" ||
 	       name == "__remove_cv" ||
-	       name == "__remove_cvref";
+	       name == "__remove_cvref" ||
+	       name == "__add_lvalue_reference" ||
+	       name == "__add_rvalue_reference" ||
+	       name == "__add_pointer" ||
+	       name == "__remove_const" ||
+	       name == "__remove_volatile" ||
+	       name == "__remove_pointer" ||
+	       name == "__remove_all_extents" ||
+	       name == "__underlying_type";
 }
 
 TypePtr apply_internal_type_transform(const string& name, TypePtr inner)
@@ -226,7 +257,50 @@ TypePtr apply_internal_type_transform(const string& name, TypePtr inner)
 		return remove_reference_type(inner);
 	if (name == "__remove_cv")
 		return remove_cv_type(inner);
-	return remove_cvref_type(inner);
+	if (name == "__remove_cvref")
+		return remove_cvref_type(inner);
+	if (name == "__add_lvalue_reference")
+		return pa11::is_void_type(inner) ? inner :
+			pa11::make_lvalue_reference(inner);
+	if (name == "__add_rvalue_reference")
+		return pa11::is_void_type(inner) ? inner :
+			pa11::make_rvalue_reference(inner);
+	if (name == "__add_pointer")
+		return pa11::make_pointer(remove_reference_type(inner));
+	if (name == "__remove_const")
+	{
+		unsigned cv = inner->kind == pa11::TypeKind::Cv
+			? inner->cv : pa11::CV_NONE;
+		return pa11::make_cv(pa11::strip_cv(inner),
+		                     cv & ~pa11::CV_CONST);
+	}
+	if (name == "__remove_volatile")
+	{
+		unsigned cv = inner->kind == pa11::TypeKind::Cv
+			? inner->cv : pa11::CV_NONE;
+		return pa11::make_cv(pa11::strip_cv(inner),
+		                     cv & ~pa11::CV_VOLATILE);
+	}
+	if (name == "__remove_pointer")
+	{
+		TypePtr bare = pa11::strip_cv(inner);
+		return bare->kind == pa11::TypeKind::Pointer ? bare->base : inner;
+	}
+	if (name == "__remove_all_extents")
+	{
+		TypePtr bare = pa11::strip_cv(inner);
+		while (bare->kind == pa11::TypeKind::Array)
+			bare = pa11::strip_cv(bare->base);
+		return bare;
+	}
+	if (name == "__underlying_type")
+	{
+		TypePtr bare = pa11::strip_cv(inner);
+		if (bare->kind == pa11::TypeKind::Enum)
+			return pa11::make_fundamental(bare->enum_underlying);
+		return pa11::make_fundamental(FT_INT);
+	}
+	return inner;
 }
 
 pa11::TemplateInstanceArgument dependent_template_instance_argument(
@@ -293,7 +367,11 @@ pa11::TemplateInstanceArgument dependent_template_instance_argument(
 	for (size_t i = 0; i < argument.pack.size(); ++i)
 		pack.push_back(
 			dependent_template_instance_argument(argument.pack[i]));
-	return pa11::TemplateInstanceArgument::pack_arg(pack);
+	pa11::TemplateInstanceArgument out =
+		pa11::TemplateInstanceArgument::pack_arg(pack);
+	out.value_name = argument.value_name;
+	out.template_name = argument.value_name;
+	return out;
 }
 
 vector<pa11::TemplateInstanceArgument> dependent_template_instance_arguments(

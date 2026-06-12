@@ -14,8 +14,14 @@ struct Options
 	preproc::Options preprocess;
 	bool native_lowering;
 	bool host_object_lowering;
+	bool hosted_compatibility;
 
-	Options() : native_lowering(false), host_object_lowering(false) {}
+	Options()
+		: native_lowering(false),
+		  host_object_lowering(false),
+		  hosted_compatibility(false)
+	{
+	}
 };
 
 void emit_lowir(const vector<string>& srcfiles,

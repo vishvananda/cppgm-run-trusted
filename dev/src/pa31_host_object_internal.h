@@ -353,6 +353,19 @@ struct X86
 		u8(0xf7);
 		modrm(3, 7, src);
 	}
+	void div_reg(int width, int src)
+	{
+		if (width == 8)
+		{
+			u8(0x30);
+			u8(0xe4);
+		}
+		else
+			mov_imm(64, RDX, 0);
+		rex(width == 64, 0, 0, src);
+		u8(width == 8 ? 0xf6 : 0xf7);
+		modrm(3, 6, src);
+	}
 	void shift_cl(int width, int subop, int dst)
 	{
 		rex(width == 64, subop, 0, dst);
@@ -524,10 +537,16 @@ struct FuncGen
 		: unit(u), fn(f), text(u.function_text_section(f)), x(text), frame_size(0),
 		  exc_off(0), sel_off(0), va_reg_save_off(0), has_eh(false),
 		  has_va_start(false) {}
-	void emit(FunctionInfo& info);
-	void emit_instruction(const Instruction& ins, const string& block);
-	bool emit_value_instruction(const Instruction& ins);
-	bool emit_arithmetic_instruction(const Instruction& ins);
+		void emit(FunctionInfo& info);
+		void emit_instruction(const Instruction& ins, const string& block);
+		bool emit_value_instruction(const Instruction& ins);
+		bool emit_const_instruction(const Instruction& ins);
+		bool emit_copy_instruction(const Instruction& ins);
+		bool emit_load_instruction(const Instruction& ins);
+		bool emit_store_instruction(const Instruction& ins);
+		bool emit_index_instruction(const Instruction& ins);
+		bool emit_unary_value_instruction(const Instruction& ins);
+		bool emit_arithmetic_instruction(const Instruction& ins);
 	bool emit_protected_instruction(const Instruction& ins);
 	bool emit_eh_instruction(const Instruction& ins, const string& block);
 	bool emit_control_instruction(const Instruction& ins);

@@ -223,7 +223,6 @@ string abi_template_id_expression_with_substitutions(
 	    !abi_token_is_simple(tokens, end - 1, OP_GT))
 		return "";
 	string callee_name = abi_source_name(tokens[begin].source);
-	abi_add_substitution(ctx, callee_name);
 	string out = callee_name + "I";
 	vector<pair<size_t, size_t> > args;
 	abi_split_template_arguments(tokens, begin + 2, end - 1, args);

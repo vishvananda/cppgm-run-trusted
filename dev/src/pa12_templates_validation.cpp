@@ -313,7 +313,9 @@ void TemplateValidationState::restore_template_tables(
 
 void Parser::validate_class_template_definition(TemplateDeclaration* declaration)
 {
-	if (declaration == NULL || !declaration->has_definition)
+	if (declaration == NULL ||
+	    !declaration->has_definition ||
+	    declaration->class_definition_validated)
 		return;
 	TemplateValidationState saved(*this, declaration);
 
@@ -452,10 +454,16 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		    message == "function template not found" ||
 		    message == "too many template arguments" ||
 		    message.compare(0, 17, "unexpected token:") == 0)
+		{
+			declaration->class_definition_validated = true;
 			return;
+		}
 		if (dependent_base_lookup_deferred &&
 		    message.compare(0, 16, "name not found: ") == 0)
+		{
+			declaration->class_definition_validated = true;
 			return;
+		}
 		throw;
 	}
 	catch (const exception& err)
@@ -465,10 +473,14 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 		if (message == "dependent typename not resolved" ||
 		    message == "too many template arguments" ||
 		    message.compare(0, 17, "unexpected token:") == 0)
+		{
+			declaration->class_definition_validated = true;
 			return;
+		}
 		throw;
 	}
 	saved.restore(*this, declaration);
+	declaration->class_definition_validated = true;
 }
 
 void Parser::validate_function_template_definition(TemplateDeclaration* declaration)

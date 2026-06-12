@@ -303,6 +303,56 @@ size_t Parser::skip_template_declaration_body(size_t begin) const
 					--brace;
 				++q;
 			}
+			for (;;)
+			{
+				if (q < tokens_.size() &&
+				    tokens_[q].kind == posttoken::TokenKind::Identifier &&
+				    (tokens_[q].source == "__attribute__" ||
+				     tokens_[q].source == "__declspec") &&
+				    q + 1 < tokens_.size() &&
+				    tokens_[q + 1].kind == posttoken::TokenKind::Simple &&
+				    tokens_[q + 1].type == OP_LPAREN)
+				{
+					q += 2;
+					int attr_paren = 1;
+					while (q < tokens_.size() && attr_paren > 0)
+					{
+						if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+						    tokens_[q].type == OP_LPAREN)
+							++attr_paren;
+						else if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+						         tokens_[q].type == OP_RPAREN)
+							--attr_paren;
+						++q;
+					}
+					continue;
+				}
+				if (q + 1 < tokens_.size() &&
+				    tokens_[q].kind == posttoken::TokenKind::Simple &&
+				    tokens_[q].type == OP_LSQUARE &&
+				    tokens_[q + 1].kind == posttoken::TokenKind::Simple &&
+				    tokens_[q + 1].type == OP_LSQUARE)
+				{
+					q += 2;
+					int attr_square = 1;
+					while (q < tokens_.size() && attr_square > 0)
+					{
+						if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+						    tokens_[q].type == OP_LSQUARE)
+							++attr_square;
+						else if (tokens_[q].kind == posttoken::TokenKind::Simple &&
+						         tokens_[q].type == OP_RSQUARE)
+							--attr_square;
+						++q;
+					}
+					if (q < tokens_.size() &&
+					    tokens_[q].kind == posttoken::TokenKind::Simple &&
+					    tokens_[q].type == OP_RSQUARE)
+						++q;
+					continue;
+				}
+				break;
+			}
 			if (q < tokens_.size() &&
 			    tokens_[q].kind == posttoken::TokenKind::Simple &&
 			    tokens_[q].type == OP_SEMICOLON)

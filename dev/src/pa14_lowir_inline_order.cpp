@@ -1356,7 +1356,21 @@ if (class_ctor && need_base && !need_complete &&
     has_function_type &&
     defined_functions.find(name) == defined_functions.end())
 	need_complete = true;
-if ((class_ctor || class_dtor) && need_complete && defined_functions.find(name + "__base_entry") == defined_functions.end()) need_base = true; if (!need_complete && !need_base) continue; if (need_complete)
+bool auto_base_for_complete =
+	(class_ctor || class_dtor) &&
+	need_complete &&
+	defined_functions.find(name + "__base_entry") == defined_functions.end();
+if (auto_base_for_complete &&
+    class_ctor &&
+    binding->is_generated_default_constructor)
+{
+	TypePtr owner_record = first_this_record(binding);
+	if (owner_record.get() != NULL &&
+	    no_op_generated_default_constructor(const_cast<Binding*>(binding),
+	                                        owner_record))
+		auto_base_for_complete = false;
+}
+if (auto_base_for_complete) need_base = true; if (!need_complete && !need_base) continue; if (need_complete)
 defined_functions.insert(name); if (need_base) defined_functions.insert(name + "__base_entry"); const Binding* saved_active = active_inline_definition; size_t saved_dependency_insert_count =
 active_inline_dependency_insert_count; active_inline_definition = binding; active_inline_dependency_insert_count = 0; FunctionLowerer lowerer(*this, *found->second); if (binding->is_generated_copy_move_assignment)
 ++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; FunctionOut destructor_base_lowered; if (class_dtor && need_base) { FunctionLowerer base_lowerer(*this, *found->second, true); destructor_base_lowered = base_lowerer.lower(); } active_inline_definition = saved_active;

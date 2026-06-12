@@ -295,10 +295,11 @@ if ((current_c_linkage || (current_namespace_static && candidate->language_linka
 (candidate->language_linkage == "c" || candidate->is_namespace_static)) { if (candidate->kind == BindingKind::Function) throw runtime_error("conflicting C linkage declaration");
 if (candidate->kind == BindingKind::Variable) { bool same_variable = candidate->language_linkage == "c" && current_c_linkage && !current_namespace_static && !candidate->is_namespace_static &&
 (pa11::same_type(candidate->type, type) || array_redeclaration_compatible(candidate->type, type)); if (!same_variable) throw runtime_error("conflicting C linkage declaration"); } } } }
-if ((target->kind == ScopeKind::Namespace || target->kind == ScopeKind::Class) && (qname.qualifier != NULL || target->kind == ScopeKind::Namespace)) { Binding* existing =
-pa11::find_owned_binding(target, qname.name, BindingKind::Variable); if (existing != NULL && (pa11::same_type(existing->type, type) || array_redeclaration_compatible(existing->type, type))) { variable = existing;
-type = existing->type; } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))
-variable->is_reference_member = true; return finish_variable_declaration(specs, target, variable, qname, type, init, out); }
+	if ((target->kind == ScopeKind::Namespace || target->kind == ScopeKind::Class) && (qname.qualifier != NULL || target->kind == ScopeKind::Namespace)) { Binding* existing =
+	pa11::find_owned_binding(target, qname.name, BindingKind::Variable); if (existing != NULL && (pa11::same_type(existing->type, type) || array_redeclaration_compatible(existing->type, type))) { variable = existing;
+	type = existing->type; } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))
+	variable->is_reference_member = true; if (target->kind == ScopeKind::Class && specs.no_unique_address_decl)
+	variable->is_no_unique_address = true; return finish_variable_declaration(specs, target, variable, qname, type, init, out); }
 
 }  // namespace internal
 }  // namespace pa12

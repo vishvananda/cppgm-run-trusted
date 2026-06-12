@@ -7,6 +7,20 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool ignored_pointer_qualifier_name(const string& name)
+{
+	return name == "_Nonnull" ||
+	       name == "_Nullable" ||
+	       name == "_Null_unspecified" ||
+	       name == "_Nullable_result" ||
+	       name == "restrict" ||
+	       name == "__restrict" ||
+	       name == "__restrict__";
+}
+
+}  // namespace
 
 Declarator Parser::parse_declarator(bool abstract_allowed)
 {
@@ -71,6 +85,30 @@ void Parser::parse_noptr_declarator_root(Declarator& declarator,
 
 void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 {
+	auto consume_ptr_qualifiers = [&]() -> unsigned {
+		unsigned cv = pa11::CV_NONE;
+		for (;;)
+		{
+			if (at_simple_cv())
+			{
+				cv |= consume_cv_flag();
+				continue;
+			}
+			if (starts_attribute())
+			{
+				skip_attributes();
+				continue;
+			}
+			if (at_identifier() &&
+			    ignored_pointer_qualifier_name(current().source))
+			{
+				++pos_;
+				continue;
+			}
+			break;
+		}
+		return cv;
+	};
 	for (;;)
 	{
 		if (at_identifier() && lookahead(OP_COLON2, 1))
@@ -89,9 +127,7 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 			}
 			if (class_type.get() != NULL && consume(OP_STAR))
 			{
-				unsigned cv = pa11::CV_NONE;
-				while (at_simple_cv())
-					cv |= consume_cv_flag();
+				unsigned cv = consume_ptr_qualifiers();
 				ops.push_back(PtrOp(class_type, cv));
 				continue;
 			}
@@ -113,9 +149,7 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 				    class_type.get() != NULL &&
 				    consume(OP_STAR))
 				{
-					unsigned cv = pa11::CV_NONE;
-					while (at_simple_cv())
-						cv |= consume_cv_flag();
+					unsigned cv = consume_ptr_qualifiers();
 					ops.push_back(PtrOp(class_type, cv));
 					continue;
 				}
@@ -132,9 +166,7 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 			    consume(OP_COLON2) &&
 			    consume(OP_STAR))
 			{
-				unsigned cv = pa11::CV_NONE;
-				while (at_simple_cv())
-					cv |= consume_cv_flag();
+				unsigned cv = consume_ptr_qualifiers();
 				ops.push_back(PtrOp(class_type, cv));
 				continue;
 			}
@@ -153,16 +185,12 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 				return;
 			}
 			TypePtr class_type = found[0]->type;
-			unsigned cv = pa11::CV_NONE;
-			while (at_simple_cv())
-				cv |= consume_cv_flag();
+			unsigned cv = consume_ptr_qualifiers();
 			ops.push_back(PtrOp(class_type, cv));
 		}
-		else if (consume(OP_STAR))
+		else if (consume(OP_STAR) || consume(OP_XOR))
 		{
-			unsigned cv = pa11::CV_NONE;
-			while (at_simple_cv())
-				cv |= consume_cv_flag();
+			unsigned cv = consume_ptr_qualifiers();
 			ops.push_back(PtrOp(PtrKind::Pointer, cv));
 		}
 		else if (consume(OP_AMP))
@@ -178,7 +206,9 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes)
 {
 	for (;;)
 	{
-		if (at(OP_LSQUARE))
+		if (starts_attribute())
+			skip_attributes();
+		else if (at(OP_LSQUARE))
 			suffixes.push_back(parse_array_suffix());
 		else if (at(OP_LPAREN))
 		{
@@ -275,7 +305,9 @@ Suffix Parser::parse_array_suffix()
 			return suffix;
 		}
 	}
-	if (!bound.has_constant_value || bound.constant_value == 0)
+	if (!bound.has_constant_value ||
+	    (bound.constant_value == 0 &&
+	     current_scope()->kind != ScopeKind::Class))
 		throw runtime_error("invalid array bound");
 	suffix.bound = bound.constant_value;
 	expect(OP_RSQUARE);

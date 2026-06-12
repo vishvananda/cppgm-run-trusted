@@ -8,6 +8,33 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+string quote_string_literal(const string& value)
+{
+	string out = "\"";
+	for (size_t i = 0; i < value.size(); ++i)
+	{
+		unsigned char ch = static_cast<unsigned char>(value[i]);
+		if (ch == '\\' || ch == '"')
+			out += '\\', out += static_cast<char>(ch);
+		else if (ch == '\n')
+			out += "\\n";
+		else if (ch == '\t')
+			out += "\\t";
+		else if (ch < 0x20 || ch >= 0x7f)
+		{
+			static const char digits[] = "0123456789abcdef";
+			out += "\\x";
+			out += digits[(ch >> 4) & 0xf];
+			out += digits[ch & 0xf];
+		}
+		else
+			out += static_cast<char>(ch);
+	}
+	out += '"';
+	return out;
+}
+}  // namespace
 
 Node::Node()
 	: category(ValueCategory::PRValue),
@@ -131,6 +158,9 @@ DeclSpecs::DeclSpecs()
 	  auto_decl(false),
 	  virtual_decl(false),
 	  inline_decl(false),
+	  int128_decl(false),
+	  bitint_decl(false),
+	  no_unique_address_decl(false),
 	  cv(pa11::CV_NONE)
 {
 }
@@ -196,6 +226,7 @@ TemplateDeclaration::TemplateDeclaration()
 		  class_template_member(false),
 		  class_specialization(false),
 		  hidden_friend(false),
+		  class_definition_validated(false),
 		  function_definition_validated(false),
 		  friend_class_scope(NULL),
 		placeholder(NULL),
@@ -298,6 +329,40 @@ void annotate_expr_node(Expr& expr)
 		expr.dependent_value_owner_template_arguments;
 }
 
+Expr make_integer_literal_expr(EFundamentalType type, uint64_t value)
+{
+	Expr out;
+	out.valid = true;
+	out.type = pa11::make_fundamental(type);
+	out.category = ValueCategory::PRValue;
+	out.constant_expression = true;
+	out.has_constant_value = true;
+	out.constant_value = value;
+	out.node = Node("literal prvalue " + pa11::describe_type(out.type) + " " +
+	                to_string(value));
+	out.node.token_text = to_string(value);
+	annotate_expr_node(out);
+	return out;
+}
+
+Expr make_string_literal_expr(const string& value)
+{
+	string quoted = quote_string_literal(value);
+	Expr out;
+	out.valid = true;
+	out.type = pa11::make_array(
+		pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST),
+		false,
+		value.size() + 1);
+	out.category = ValueCategory::LValue;
+	out.constant_expression = true;
+	out.node = Node("literal lvalue " + pa11::describe_type(out.type) +
+	                " " + quoted);
+	out.node.token_text = quoted;
+	annotate_expr_node(out);
+	return out;
+}
+
 void dump_node(ostream& out, const Node& node, int depth)
 {
 	for (int i = 0; i < depth; ++i)
@@ -311,6 +376,7 @@ Parser::Parser(const string& srcfile, const Options& options)
 	: pos_(0),
 	  explicit_conversion_context_(0),
 	  root_("translation-unit"),
+	  hosted_compatibility_(options.hosted_compatibility),
 	  local_type_counter_(0),
 	  range_for_counter_(0),
 	  force_new_function_binding_(false),
@@ -480,6 +546,24 @@ const Token& Parser::at_token(size_t index) const
 	return tokens_[index];
 }
 
+bool Parser::consume_explicit_specifier()
+{
+	if (!consume(KW_EXPLICIT))
+		return false;
+	bool explicit_value = true;
+	if (at(OP_LPAREN))
+	{
+		if (pos_ + 2 < tokens_.size() &&
+		    tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple &&
+		    tokens_[pos_ + 1].type == KW_FALSE &&
+		    tokens_[pos_ + 2].kind == posttoken::TokenKind::Simple &&
+		    tokens_[pos_ + 2].type == OP_RPAREN)
+			explicit_value = false;
+		skip_balanced(OP_LPAREN, OP_RPAREN);
+	}
+	return explicit_value;
+}
+
 void Parser::parse_translation_unit()
 {
 	while (!at_eof())
@@ -563,6 +647,77 @@ void Parser::skip_balanced(ETokenType open, ETokenType close)
 		else
 			++pos_;
 	}
+}
+
+bool Parser::starts_attribute() const
+{
+	if (at(KW_ALIGNAS))
+		return true;
+	if (at(OP_LSQUARE) && lookahead(OP_LSQUARE, 1))
+		return true;
+	if (at_identifier() &&
+	    (current().source == "__attribute__" ||
+	     current().source == "__declspec"))
+		return true;
+	return false;
+}
+
+void Parser::skip_attributes(bool* no_unique_address)
+{
+	while (starts_attribute())
+	{
+		size_t attr_begin = pos_;
+		if (at(KW_ALIGNAS))
+		{
+			++pos_;
+			if (at(OP_LPAREN))
+				skip_balanced(OP_LPAREN, OP_RPAREN);
+			if (no_unique_address != NULL)
+				for (size_t i = attr_begin; i < pos_; ++i)
+					if (tokens_[i].source == "no_unique_address")
+						*no_unique_address = true;
+			continue;
+		}
+		if (at(OP_LSQUARE))
+		{
+			++pos_;
+			skip_balanced(OP_LSQUARE, OP_RSQUARE);
+			expect(OP_RSQUARE);
+			if (no_unique_address != NULL)
+				for (size_t i = attr_begin; i < pos_; ++i)
+					if (tokens_[i].source == "no_unique_address")
+						*no_unique_address = true;
+			continue;
+		}
+		++pos_;
+		if (at(OP_LPAREN))
+			skip_balanced(OP_LPAREN, OP_RPAREN);
+		if (no_unique_address != NULL)
+			for (size_t i = attr_begin; i < pos_; ++i)
+				if (tokens_[i].source == "no_unique_address")
+					*no_unique_address = true;
+	}
+}
+
+bool Parser::at_gnu_asm() const
+{
+	return at(KW_ASM) ||
+	       (at_identifier() &&
+	        (current().source == "__asm" || current().source == "__asm__"));
+}
+
+void Parser::skip_gnu_asm()
+{
+	if (!at_gnu_asm())
+		return;
+	++pos_;
+	if (at(KW_VOLATILE) ||
+	    (at_identifier() &&
+	     (current().source == "__volatile" ||
+	      current().source == "__volatile__")))
+		++pos_;
+	if (at(OP_LPAREN))
+		skip_balanced(OP_LPAREN, OP_RPAREN);
 }
 
 }  // namespace internal

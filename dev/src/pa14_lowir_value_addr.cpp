@@ -194,6 +194,7 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	{
 		if (expr.binding->is_inline_definition)
 			program_.demand_inline_function(expr.binding);
+		program_.demand_function_declaration(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
 		string decay = fresh_temp();
@@ -227,6 +228,8 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 						program_,
 						expr.binding,
 						object);
+				if (symbolic.empty())
+					program_.demand_function_declaration(fn);
 				instr(addr + " = addr @" +
 				      (symbolic.empty() ? program_.symbol_for(fn) :
 				       symbolic));
@@ -305,6 +308,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		{
 			if (expr.binding->is_inline_definition)
 				program_.demand_inline_function(expr.binding);
+			program_.demand_function_declaration(expr.binding);
 			string tmp = fresh_temp();
 			instr(tmp + " = addr @" + program_.symbol_for(expr.binding));
 			return Value("ptr", tmp);
@@ -588,6 +592,15 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	Binding* alias_member = anonymous_storage_member_target(expr.binding);
 	Binding* member = alias_member != NULL
 		? expr.binding->aliased_binding : expr.binding;
+	if (member->kind == BindingKind::Function && member->is_static_member)
+	{
+		if (member->is_inline_definition)
+			program_.demand_inline_function(member);
+		program_.demand_function_declaration(member);
+		string tmp = fresh_temp();
+		instr(tmp + " = addr @" + program_.symbol_for(member));
+		return Value("ptr", tmp);
+	}
 	if (member->is_static_member)
 	{
 		program_.demand_global_declaration(member);

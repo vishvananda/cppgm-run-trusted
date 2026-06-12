@@ -176,6 +176,67 @@ vector<SourceChar> decode_source(const string & bytes)
   return out;
 }
 
+bool byte_starts_invalid_utf8(const string & bytes, size_t i)
+{
+  size_t width = 0;
+  return decode_utf8_at(bytes, i, width) < 0;
+}
+
+void skip_quoted_bytes(const string & bytes, size_t & i, char quote)
+{
+  ++i;
+  while(i < bytes.size()) {
+    const unsigned char c = static_cast<unsigned char>(bytes[i]);
+    if(c == '\\' && i + 1 < bytes.size()) {
+      i += 2;
+      continue;
+    }
+    ++i;
+    if(c == static_cast<unsigned char>(quote)) {
+      return;
+    }
+  }
+}
+
+string sanitize_invalid_comment_bytes(const string & bytes)
+{
+  string out = bytes;
+  for(size_t i = 0; i < out.size();) {
+    if(out[i] == '"' || out[i] == '\'') {
+      skip_quoted_bytes(out, i, out[i]);
+      continue;
+    }
+    if(out[i] == '/' && i + 1 < out.size() && out[i + 1] == '/') {
+      i += 2;
+      while(i < out.size() && out[i] != '\n') {
+        if(static_cast<unsigned char>(out[i]) >= 0x80 &&
+           byte_starts_invalid_utf8(out, i)) {
+          out[i] = ' ';
+        }
+        ++i;
+      }
+      continue;
+    }
+    if(out[i] == '/' && i + 1 < out.size() && out[i + 1] == '*') {
+      i += 2;
+      while(i < out.size()) {
+        if(out[i] == '*' && i + 1 < out.size() && out[i + 1] == '/') {
+          i += 2;
+          break;
+        }
+        if(static_cast<unsigned char>(out[i]) >= 0x80 &&
+           byte_starts_invalid_utf8(out, i)) {
+          out[i] = ' ';
+        }
+        ++i;
+      }
+      continue;
+    }
+    ++i;
+  }
+  return out;
+}
+
 int trigraph_replacement(int c)
 {
   switch(c) {
@@ -1117,7 +1178,8 @@ private:
         continue;
       }
       if((logical.cp == '+' || logical.cp == '-') &&
-         (previous == 'e' || previous == 'E')) {
+         (previous == 'e' || previous == 'E' ||
+          previous == 'p' || previous == 'P')) {
         append_logical(pos_, logical, data);
         previous = logical.cp;
         pos_ += logical.width;
@@ -1215,7 +1277,8 @@ void run_pptoken(istream & in, IPPTokenStream & output)
 {
   ostringstream buffer;
   buffer << in.rdbuf();
-  const vector<SourceChar> source = decode_source(buffer.str());
+  const vector<SourceChar> source =
+      decode_source(sanitize_invalid_comment_bytes(buffer.str()));
   const vector<TextChar> text = translated_text(source);
   Tokenizer(source, text, output).run();
 }

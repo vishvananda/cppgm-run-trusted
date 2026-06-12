@@ -12,6 +12,7 @@ void Parser::parse_namespace_or_alias(Node& out)
 {
 	bool inline_ns = consume(KW_INLINE);
 	expect(KW_NAMESPACE);
+	skip_attributes();
 	if (!inline_ns && at_identifier() && lookahead(OP_ASS, 1))
 	{
 		string alias = consume_identifier();
@@ -29,6 +30,7 @@ void Parser::parse_namespace_or_alias(Node& out)
 		named = true;
 		name = consume_identifier();
 	}
+	skip_attributes();
 	expect(OP_LBRACE);
 	Scope* child = NULL;
 	if (named)
@@ -67,25 +69,30 @@ void Parser::parse_using_family(Node& out)
 		pa11::add_using_directive(current_scope(), target);
 		return;
 	}
-	if (at_identifier() && lookahead(OP_ASS, 1))
+	if (at_identifier())
 	{
+		size_t alias_save = pos_;
 		string name = consume_identifier();
-		TypePtr shadowed_template_parameter;
-		if (find_template_type_substitution(name, shadowed_template_parameter))
-			throw runtime_error("alias shadows template parameter");
-		expect(OP_ASS);
-		TypePtr type = parse_type_id();
-		if (type.get() != NULL && type->is_dependent_typename)
+		skip_attributes();
+		if (consume(OP_ASS))
 		{
-			TypePtr resolved = resolve_dependent_typename_type(type);
-			if (resolved.get() != NULL && resolved != type)
-				type = substitute_template_type(resolved);
+			TypePtr shadowed_template_parameter;
+			if (find_template_type_substitution(name, shadowed_template_parameter))
+				throw runtime_error("alias shadows template parameter");
+			TypePtr type = parse_type_id();
+			if (type.get() != NULL && type->is_dependent_typename)
+			{
+				TypePtr resolved = resolve_dependent_typename_type(type);
+				if (resolved.get() != NULL && resolved != type)
+					type = substitute_template_type(resolved);
+			}
+			expect(OP_SEMICOLON);
+			add_alias(current_scope(), name, type);
+			Node node("type-alias " + name + " " + pa11::describe_type(type));
+			add_child(out, node);
+			return;
 		}
-		expect(OP_SEMICOLON);
-		add_alias(current_scope(), name, type);
-		Node node("type-alias " + name + " " + pa11::describe_type(type));
-		add_child(out, node);
-		return;
+		pos_ = alias_save;
 	}
 	bool using_typename = consume(KW_TYPENAME);
 	string spelling;
@@ -93,6 +100,16 @@ void Parser::parse_using_family(Node& out)
 	string name = at(KW_OPERATOR)
 		? consume_operator_function_name()
 		: consume_identifier();
+	bool using_if_exists = false;
+	if (starts_attribute())
+	{
+		size_t attr_begin = pos_;
+		skip_attributes();
+		for (size_t i = attr_begin; i < pos_; ++i)
+			if (tokens_[i].source == "__using_if_exists__" ||
+			    tokens_[i].source == "using_if_exists")
+				using_if_exists = true;
+	}
 	expect(OP_SEMICOLON);
 	vector<Binding*> targets =
 		lookup_qualified_set(qualifier,
@@ -138,6 +155,8 @@ void Parser::parse_using_family(Node& out)
 		if (validating_template_definition_ &&
 		    qualifier_record.get() != NULL &&
 		    type_is_template_dependent(qualifier_record))
+			return;
+		if (using_if_exists)
 			return;
 		throw runtime_error("using declaration target not found");
 	}

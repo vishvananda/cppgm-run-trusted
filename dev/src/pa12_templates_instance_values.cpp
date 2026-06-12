@@ -146,6 +146,10 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 	    !arg.dependent ||
 	    arg.value_expr_end <= arg.value_expr_begin)
 		return false;
+	if (validating_template_definition_ &&
+	    template_argument_has_template_parameter(arg,
+	                                             record_template_arguments_))
+		return false;
 	string active_key =
 		to_string(arg.value_expr_begin) + ":" + to_string(arg.value_expr_end);
 	if (find(active_dependent_value_expression_keys_.begin(),

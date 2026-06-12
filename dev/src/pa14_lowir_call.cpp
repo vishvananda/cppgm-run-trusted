@@ -551,7 +551,7 @@ void FunctionLowerer::init_call_target(const Node& expr,
 			    result_record->is_polymorphic)
 				program_.demand_vtable(result_record);
 			program_.demand_function_declaration(call.direct);
-			program_.demand_inline_function(call.direct);
+			program_.demand_inline_function(call.direct, true);
 			call.callee = "@" + program_.symbol_for(call.direct);
 		}
 	}
@@ -728,7 +728,7 @@ void FunctionLowerer::resolve_call_callee(const Node& expr,
 			}
 		}
 		program_.demand_function_declaration(call.direct);
-		program_.demand_inline_function(call.direct);
+		program_.demand_inline_function(call.direct, true);
 		call.callee = "@" + program_.symbol_for(call.direct);
 	}
 	else if (call.direct == NULL)

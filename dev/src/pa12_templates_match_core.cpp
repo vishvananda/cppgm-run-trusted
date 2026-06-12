@@ -54,6 +54,256 @@ vector<TemplateArgument> flatten_template_argument_packs(
 vector<TemplateArgument> flatten_actual_template_argument_packs(
 	const vector<TemplateArgument>& arguments);
 
+bool dependent_value_has_semantic_identity(const TemplateArgument& argument)
+{
+	return !argument.value_owner_template_name.empty() ||
+	       !argument.value_member_name.empty() ||
+	       argument.value_name.find("::") != string::npos;
+}
+
+bool same_template_parameter_match_type(TypePtr left,
+                                        TypePtr right,
+                                        size_t depth);
+
+bool same_dependent_value_owner_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right);
+
+bool same_dependent_value_owner_instance_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return same_template_parameter_match_type(left.type, right.type, 0);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return left.dependent == right.dependent &&
+		       left.value_negated == right.value_negated &&
+		       left.value == right.value &&
+		       left.value_name == right.value_name &&
+		       left.value_owner_template_name ==
+			       right.value_owner_template_name &&
+		       left.value_member_name == right.value_member_name &&
+		       same_template_parameter_match_type(left.type,
+		                                          right.type,
+		                                          0) &&
+		       same_dependent_value_owner_instance_arguments(
+			       left.value_owner_template_arguments,
+			       right.value_owner_template_arguments);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!same_dependent_value_owner_instance_argument(left.pack[i],
+		                                                  right.pack[i]))
+			return false;
+	return true;
+}
+
+bool same_dependent_value_owner_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_dependent_value_owner_instance_argument(left[i], right[i]))
+			return false;
+	return true;
+}
+
+bool same_dependent_value_semantic_identity(
+	const TemplateArgument& left,
+	const TemplateArgument& right)
+{
+	if (!left.dependent || !right.dependent ||
+	    !dependent_value_has_semantic_identity(left) ||
+	    !dependent_value_has_semantic_identity(right))
+		return false;
+	if (left.value_negated != right.value_negated ||
+	    left.value_name != right.value_name ||
+	    left.value_owner_template_name != right.value_owner_template_name ||
+	    left.value_member_name != right.value_member_name ||
+	    (left.type.get() != NULL && right.type.get() != NULL &&
+	     !pa11::same_type(left.type, right.type)) ||
+	    left.value_owner_template_arguments.size() !=
+		    right.value_owner_template_arguments.size())
+		return false;
+	return same_dependent_value_owner_instance_arguments(
+		left.value_owner_template_arguments,
+		right.value_owner_template_arguments);
+}
+
+bool same_template_parameter_match_argument_lists(
+	const vector<vector<pa11::TemplateInstanceArgument> >& left,
+	const vector<vector<pa11::TemplateInstanceArgument> >& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_dependent_value_owner_instance_arguments(left[i], right[i]))
+			return false;
+	return true;
+}
+
+bool same_template_parameter_match_resolved_type(TypePtr left,
+                                                 TypePtr right,
+                                                 size_t depth)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (pa11::same_type(left, right))
+		return true;
+	if (depth >= 8 ||
+	    active_template_match_parser == NULL ||
+	    (!left->is_dependent_typename && !right->is_dependent_typename))
+		return false;
+	TypePtr resolved_left =
+		active_template_match_parser
+			->resolve_dependent_typename_for_template_match(left);
+	if (resolved_left.get() != NULL &&
+	    same_template_parameter_match_type(resolved_left,
+	                                       right,
+	                                       depth + 1))
+		return true;
+	TypePtr resolved_right =
+		active_template_match_parser
+			->resolve_dependent_typename_for_template_match(right);
+	if (resolved_right.get() != NULL &&
+	    same_template_parameter_match_type(left,
+	                                       resolved_right,
+	                                       depth + 1))
+		return true;
+	return false;
+}
+
+bool same_template_parameter_match_type_identity(TypePtr left,
+                                                 TypePtr right,
+                                                 size_t depth)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (pa11::same_type(left, right))
+		return true;
+	if (left->kind != right->kind)
+		return same_template_parameter_match_resolved_type(left,
+		                                                   right,
+		                                                   depth);
+	switch (left->kind)
+	{
+	case pa11::TypeKind::Fundamental:
+	case pa11::TypeKind::Cv:
+	case pa11::TypeKind::Pointer:
+	case pa11::TypeKind::LValueReference:
+	case pa11::TypeKind::RValueReference:
+	case pa11::TypeKind::Array:
+	case pa11::TypeKind::Function:
+	case pa11::TypeKind::MemberPointer:
+		return true;
+	case pa11::TypeKind::Record:
+	case pa11::TypeKind::Enum:
+	case pa11::TypeKind::TemplateParameter:
+	case pa11::TypeKind::TemplateTemplateParameter:
+		if (left->name == right->name &&
+		    left->scope == right->scope &&
+		    left->template_primary_name == right->template_primary_name &&
+		    left->is_template_specialization ==
+			    right->is_template_specialization &&
+		    left->is_dependent_typename == right->is_dependent_typename &&
+		    left->dependent_typename_qualified ==
+			    right->dependent_typename_qualified &&
+		    left->dependent_typename_template_id ==
+			    right->dependent_typename_template_id &&
+		    left->dependent_typename_decltype ==
+			    right->dependent_typename_decltype)
+			return true;
+		return same_template_parameter_match_resolved_type(left,
+		                                                   right,
+		                                                   depth);
+	}
+	return false;
+}
+
+bool same_template_parameter_match_type(TypePtr left,
+                                        TypePtr right,
+                                        size_t depth)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (pa11::same_type(left, right))
+		return true;
+	if (left->kind != right->kind)
+		return same_template_parameter_match_type_identity(left,
+		                                                   right,
+		                                                   depth);
+	switch (left->kind)
+	{
+	case pa11::TypeKind::Fundamental:
+		return left->fundamental == right->fundamental;
+	case pa11::TypeKind::Cv:
+		return left->cv == right->cv &&
+		       same_template_parameter_match_type(left->base,
+		                                          right->base,
+		                                          depth + 1);
+	case pa11::TypeKind::Pointer:
+	case pa11::TypeKind::LValueReference:
+	case pa11::TypeKind::RValueReference:
+		return same_template_parameter_match_type(left->base,
+		                                          right->base,
+		                                          depth + 1);
+	case pa11::TypeKind::Array:
+		return left->unknown_bound == right->unknown_bound &&
+		       left->bound == right->bound &&
+		       same_template_parameter_match_type(left->base,
+		                                          right->base,
+		                                          depth + 1);
+	case pa11::TypeKind::Function:
+		if (left->cv != right->cv ||
+		    left->ref_qualifier != right->ref_qualifier ||
+		    left->variadic != right->variadic ||
+		    left->parameters.size() != right->parameters.size() ||
+		    !same_template_parameter_match_type(left->base,
+		                                        right->base,
+		                                        depth + 1))
+			return false;
+		for (size_t i = 0; i < left->parameters.size(); ++i)
+			if (!same_template_parameter_match_type(left->parameters[i],
+			                                        right->parameters[i],
+			                                        depth + 1))
+				return false;
+		return true;
+	case pa11::TypeKind::MemberPointer:
+		return same_template_parameter_match_type(left->member_class,
+		                                          right->member_class,
+		                                          depth + 1) &&
+		       same_template_parameter_match_type(left->base,
+		                                          right->base,
+		                                          depth + 1);
+	case pa11::TypeKind::Record:
+	case pa11::TypeKind::Enum:
+	case pa11::TypeKind::TemplateParameter:
+	case pa11::TypeKind::TemplateTemplateParameter:
+		if (!same_template_parameter_match_type_identity(left,
+		                                                 right,
+		                                                 depth))
+			return false;
+		if (same_dependent_value_owner_instance_arguments(
+			    left->template_arguments,
+			    right->template_arguments) &&
+		    same_template_parameter_match_argument_lists(
+			    left->dependent_typename_template_argument_lists,
+			    right->dependent_typename_template_argument_lists))
+			return true;
+		return same_template_parameter_match_resolved_type(left,
+		                                                   right,
+		                                                   depth);
+	}
+	return false;
+}
+
 bool template_argument_has_pack_expansion_recursive(
 	const TemplateArgument& argument)
 {
@@ -256,9 +506,11 @@ bool match_function_parameter_pack_pattern(
 			                                     record_arguments))
 				return false;
 	}
+	TemplateArgument matched_pack = TemplateArgument::pack_arg(pack);
+	matched_pack.value_name = pack_name;
 	if (!merge_deduced_template_argument(local,
 	                                     pack_name,
-	                                     TemplateArgument::pack_arg(pack),
+	                                     matched_pack,
 	                                     record_arguments))
 		return false;
 	deduced = local;
@@ -352,7 +604,9 @@ bool template_parameter_lists_match(const vector<TemplateParameterInfo>& left,
 			if (left[i].kind == TemplateParameterKind::NonType &&
 			    left[i].type.get() != NULL &&
 			    right[i].type.get() != NULL &&
-			    !pa11::same_type(left[i].type, right[i].type))
+			    !same_template_parameter_match_type(left[i].type,
+			                                        right[i].type,
+			                                        0))
 				return false;
 			for (size_t j = 0; j < left[i].template_parameters.size(); ++j)
 			if (left[i].template_parameters[j].kind !=
@@ -630,10 +884,14 @@ bool same_template_argument_value(
 		}
 		if (left.dependent && right.dependent &&
 		    left.value_expr_end > left.value_expr_begin)
+		{
+			if (same_dependent_value_semantic_identity(left, right))
+				return true;
 			return left.value_expr_begin == right.value_expr_begin &&
 			       left.value_expr_end == right.value_expr_end &&
 			       (left.type.get() == NULL || right.type.get() == NULL ||
 			        pa11::same_type(left.type, right.type));
+		}
 		if (left.dependent || right.dependent)
 			return left.dependent && right.dependent &&
 			       left.value_negated == right.value_negated &&

@@ -752,6 +752,56 @@ bool Parser::resolve_dependent_value_member_argument(
 	    owner->scope == NULL)
 		return false;
 	const_cast<Parser*>(this)->complete_template_record(owner);
+	string owner_primary = owner->template_primary_name;
+	size_t owner_name_pos = owner_primary.rfind("::");
+	string owner_unqualified = owner_name_pos == string::npos
+		? owner_primary : owner_primary.substr(owner_name_pos + 2);
+	if (hosted_compatibility_ &&
+	    arg.value_member_name == "value" &&
+	    owner_unqualified == "__is_nothrow_invocable")
+	{
+		map<const void*, vector<TemplateArgument> >::const_iterator args =
+			record_template_arguments_.find(owner.get());
+		if (args != record_template_arguments_.end())
+		{
+			vector<TypePtr> types;
+			bool type_args = true;
+			for (size_t i = 0; i < args->second.size(); ++i)
+			{
+				const TemplateArgument& owner_arg = args->second[i];
+				if (owner_arg.kind == TemplateArgumentKind::Type)
+					types.push_back(owner_arg.type);
+				else if (owner_arg.kind == TemplateArgumentKind::Pack)
+				{
+					for (size_t j = 0; j < owner_arg.pack.size(); ++j)
+					{
+						if (owner_arg.pack[j].kind !=
+						    TemplateArgumentKind::Type)
+						{
+							type_args = false;
+							break;
+						}
+						types.push_back(owner_arg.pack[j].type);
+					}
+				}
+				else
+					type_args = false;
+				if (!type_args)
+					break;
+			}
+			if (type_args)
+			{
+				bool value = const_cast<Parser*>(this)->
+					is_invocable_type_trait(types, true);
+				out = TemplateArgument::value_arg(
+					pa11::make_fundamental(FT_BOOL),
+					arg.value_negated ? (value ? 0 : 1)
+					                  : (value ? 1 : 0));
+				out.value_name = arg.value_name;
+				return true;
+			}
+		}
+	}
 	vector<Binding*> found =
 		const_cast<Parser*>(this)->lookup_qualified_set(
 			owner->scope,
@@ -903,6 +953,8 @@ bool Parser::resolve_dependent_value_member_argument(
 			out = TemplateArgument::type_arg(inherited_type);
 			return true;
 		}
+		if (validating_template_definition_)
+			return false;
 		throw runtime_error("dependent value member not resolved");
 	}
 	TypePtr target = arg.type.get() != NULL
@@ -1044,10 +1096,18 @@ bool Parser::resolve_dependent_value_member_argument(
 	return true;
 }
 
-TemplateArgument Parser::substitute_template_argument(
-	const TemplateArgument& arg) const
-{
-	TemplateArgument resolved_member_value;
+	TemplateArgument Parser::substitute_template_argument(
+		const TemplateArgument& arg) const
+	{
+		if (arg.kind == TemplateArgumentKind::Pack &&
+		    arg.pack_expansion &&
+		    !arg.value_name.empty())
+		{
+			TemplateArgument out = arg;
+			out.pack_expansion = false;
+			return out;
+		}
+		TemplateArgument resolved_member_value;
 	if (arg.kind == TemplateArgumentKind::Value &&
 	    arg.dependent &&
 	    !arg.value_owner_template_name.empty() &&
@@ -1192,6 +1252,21 @@ TemplateArgument Parser::substitute_template_argument(
 			TypePtr bare = arg.type.get() != NULL
 				? pa11::strip_cv(arg.type) : TypePtr();
 			if (bare.get() != NULL &&
+			    bare->is_dependent_typename &&
+			    (bare->kind != pa11::TypeKind::TemplateParameter ||
+			     bare->is_dependent_typename))
+			{
+				TemplateArgument single = arg;
+				single.pack_expansion = false;
+				TemplateArgument substituted =
+					substitute_template_argument(single);
+				if (substituted.kind == TemplateArgumentKind::Type &&
+				    !template_argument_has_template_parameter(
+					    substituted,
+					    record_template_arguments_))
+					return substituted;
+			}
+			if (bare.get() != NULL &&
 			    bare->kind == pa11::TypeKind::TemplateParameter &&
 			    !bare->is_dependent_typename &&
 			    template_type_has_template_parameter_name(arg.type,
@@ -1243,6 +1318,14 @@ TemplateArgument Parser::substitute_template_argument(
 			size_t member_pos = bare->name.rfind("::");
 			if (member_pos == string::npos)
 				throw;
+			if (bare->name.substr(member_pos + 2) == "type")
+			{
+				string parameter_name;
+				if (function_template_candidate_instantiation_depth_ == 0 ||
+				    template_type_has_template_parameter_name(arg.type,
+				                                             parameter_name))
+					return arg;
+			}
 			TemplateArgument value_arg =
 				TemplateArgument::dependent_value_arg(TypePtr());
 			value_arg.value_name = bare->name;
@@ -1275,7 +1358,15 @@ TemplateArgument Parser::substitute_template_argument(
 	}
 	else if (arg.kind == TemplateArgumentKind::Pack)
 	{
-		if (arg.pack.size() == 1 &&
+		if (!arg.value_name.empty())
+		{
+			TemplateArgument subst;
+			if (find_template_value_substitution(arg.value_name, subst) &&
+			    subst.kind != TemplateArgumentKind::Pack)
+				return substitute_template_argument(subst);
+		}
+		if (arg.value_name.empty() &&
+		    arg.pack.size() == 1 &&
 		    arg.pack[0].kind == TemplateArgumentKind::Type)
 		{
 			string pack_name;

@@ -138,11 +138,23 @@ bool template_instance_argument_has_template_parameter_name(
 		return template_type_has_template_parameter_name(argument.type, name);
 	}
 	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
+	{
+		if (!argument.value_name.empty())
+		{
+			name = argument.value_name;
+			return true;
+		}
+		if (!argument.template_name.empty())
+		{
+			name = argument.template_name;
+			return true;
+		}
 		for (size_t i = 0; i < argument.pack.size(); ++i)
 			if (template_instance_argument_has_template_parameter_name(
 				    argument.pack[i],
 				    name))
 				return true;
+	}
 	return false;
 }
 

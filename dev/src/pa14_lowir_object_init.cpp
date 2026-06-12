@@ -253,51 +253,209 @@ void FunctionLowerer::lower_direct_array_init(Value base,
 		}
 	}
 
-void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for,
-                                               TypePtr type,
-                                               const vector<Node>& clauses,
-                                               size_t& index)
+void FunctionLowerer::lower_union_aggregate_elements(
+	const function<Value()>& addr_for,
+	TypePtr bare,
+	const vector<Node>& clauses,
+	size_t& index)
 {
-	TypePtr bare = pa11::strip_cv(type);
-	struct DestinationFlagGuard
-	{
-		FunctionLowerer* self;
-		bool saved;
-		explicit DestinationFlagGuard(FunctionLowerer* s)
-			: self(s), saved(s->constructor_destination_before_protected_try_)
-		{
-			self->constructor_destination_before_protected_try_ = false;
-		}
-		~DestinationFlagGuard()
-		{
-			self->constructor_destination_before_protected_try_ = saved;
-		}
-	} destination_guard(this);
-	if (bare->kind == TypeKind::Record)
-	{ pa11::layout_record_type(bare); if (bare->tag == "union") { if (bare->fields.empty()) return; Binding* field = bare->fields[0]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
-	string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr); }; if (index >= clauses.size())
-	lower_zero_init(field_addr, field->type); else { bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
-	lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } return; } vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size(); ++b) { TypePtr direct_base = bases[b]; function<Value()> base_addr = [this, addr_for, bare, direct_base]() {
-	Value base = addr_for(); return emit_base_subobject_addr(base, bare, direct_base); }; if (index >= clauses.size()) lower_base_zero_init(addr_for, bare, direct_base); else { const Node& child = clauses[index];
-	if (same_record_initializer(child, direct_base)) lower_object_init(base_addr, direct_base, clauses[index++]); else if (is_brace_elision_aggregate(direct_base) && !starts_with(child.line, "braced-init-list"))
-	lower_aggregate_elements(base_addr, direct_base, clauses, index); else lower_object_init(base_addr, direct_base, clauses[index++]); } } for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i];
-	function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for(); string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset));
-return Value("ptr", addr); }; if (index >= clauses.size()) { lower_zero_init(field_addr, field->type); continue; } const Node& child = clauses[index]; if (same_record_initializer(child, field->type)) {
-if (is_no_op_generated_default_prvalue(child, field->type)) { ++index; continue; } Binding* copy_move = NULL; if (child.category == ValueCategory::LValue || child.category == ValueCategory::XValue) {
-copy_move = find_copy_move_constructor(field->type, child.category == ValueCategory::XValue); if (copy_move == NULL && child.category == ValueCategory::XValue) copy_move = find_copy_move_constructor(field->type, false); }
-if (!record_has_storage_copy(field->type) && (child.category == ValueCategory::LValue || child.category == ValueCategory::XValue) && copy_move == NULL) {
-(void)field_addr(); ++index; continue; } lower_object_init(field_addr, field->type, clauses[index++]); } else if (is_brace_elision_aggregate(field->type) && !starts_with(child.line, "braced-init-list")) {
-bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array) lowering_array_subobject_init_ = true;
-lower_aggregate_elements(field_addr, field->type, clauses, index); lowering_array_subobject_init_ = saved_array_subobject; } else if (field->is_bit_field) { Value value = convert_value(emit_rvalue(child), child.type,
-field->type); string low_type = scalar_lowir_type(field->type); uint64_t mask = field->bit_width >= 64 ? ~uint64_t(0) : ((uint64_t(1) << field->bit_width) - 1); string masked = fresh_temp();
-instr(masked + " = binary and " + low_type + " " + to_string(mask) + ", " + value.text); if (field->bit_offset != 0) { string shifted = fresh_temp(); instr(shifted + " = binary shl " + low_type + " " +
-masked + ", " + to_string(field->bit_offset)); masked = shifted; } Value target = field_addr(); instr("store " + low_type + " " + masked + ", " + target.text); ++index; } else {
-if (is_no_op_generated_default_prvalue(child, field->type)) { ++index; continue; } bool saved_array_subobject = lowering_array_subobject_init_; if (pa11::strip_cv(field->type)->kind == TypeKind::Array)
-lowering_array_subobject_init_ = true; lower_object_init(field_addr, field->type, clauses[index++]); lowering_array_subobject_init_ = saved_array_subobject; } } return; }
-	if (bare->kind != TypeKind::Array)
+	if (bare->fields.empty())
 		return;
-	if (index < clauses.size() &&
-	    lower_string_array_init(addr_for, type, clauses[index]))
+	Binding* field = bare->fields[0];
+	const Node* child = index < clauses.size() ? &clauses[index] : NULL;
+	if (child != NULL && starts_with(child->line, "designated-init "))
+	{
+		string wanted = child->line.substr(16);
+		for (size_t i = 0; i < bare->fields.size(); ++i)
+			if (bare->fields[i]->name == wanted)
+			{
+				field = bare->fields[i];
+				break;
+			}
+		if (!child->children.empty())
+			child = &child->children[0];
+	}
+	function<Value()> field_addr = [this, addr_for, field]() {
+		Value base = addr_for();
+		string addr = fresh_temp();
+		instr(addr + " = index i8 [projection=field] " + base.text + ", " +
+		      to_string(field->member_offset));
+		return Value("ptr", addr);
+	};
+	if (child == NULL)
+	{
+		lower_zero_init(field_addr, field->type);
+		return;
+	}
+	bool saved_array_subobject = lowering_array_subobject_init_;
+	if (pa11::strip_cv(field->type)->kind == TypeKind::Array)
+		lowering_array_subobject_init_ = true;
+	lower_object_init(field_addr, field->type, *child);
+	lowering_array_subobject_init_ = saved_array_subobject;
+	++index;
+}
+
+void FunctionLowerer::lower_record_base_aggregate_elements(
+	const function<Value()>& addr_for,
+	TypePtr bare,
+	const vector<Node>& clauses,
+	size_t& index)
+{
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t b = 0; b < bases.size(); ++b)
+	{
+		TypePtr direct_base = bases[b];
+		function<Value()> base_addr = [this, addr_for, bare, direct_base]() {
+			Value base = addr_for();
+			return emit_base_subobject_addr(base, bare, direct_base);
+		};
+		if (index >= clauses.size())
+			lower_base_zero_init(addr_for, bare, direct_base);
+		else
+		{
+			const Node& child = clauses[index];
+			if (same_record_initializer(child, direct_base))
+				lower_object_init(base_addr, direct_base, clauses[index++]);
+			else if (is_brace_elision_aggregate(direct_base) &&
+			         !starts_with(child.line, "braced-init-list"))
+				lower_aggregate_elements(base_addr, direct_base, clauses, index);
+			else
+				lower_object_init(base_addr, direct_base, clauses[index++]);
+		}
+	}
+}
+
+void FunctionLowerer::lower_bitfield_aggregate_field(
+	const function<Value()>& field_addr,
+	Binding* field,
+	const Node& child)
+{
+	Value value = convert_value(emit_rvalue(child), child.type, field->type);
+	string low_type = scalar_lowir_type(field->type);
+	uint64_t mask = field->bit_width >= 64
+		? ~uint64_t(0)
+		: ((uint64_t(1) << field->bit_width) - 1);
+	string masked = fresh_temp();
+	instr(masked + " = binary and " + low_type + " " + to_string(mask) +
+	      ", " + value.text);
+	if (field->bit_offset != 0)
+	{
+		string shifted = fresh_temp();
+		instr(shifted + " = binary shl " + low_type + " " + masked + ", " +
+		      to_string(field->bit_offset));
+		masked = shifted;
+	}
+	Value target = field_addr();
+	instr("store " + low_type + " " + masked + ", " + target.text);
+}
+
+void FunctionLowerer::lower_record_field_aggregate_element(
+	const function<Value()>& addr_for,
+	Binding* field,
+	const vector<Node>& clauses,
+	size_t& index)
+{
+	function<Value()> field_addr = [this, addr_for, field]() {
+		Value base = addr_for();
+		string addr = fresh_temp();
+		instr(addr + " = index i8 [projection=field] " + base.text + ", " +
+		      to_string(field->member_offset));
+		return Value("ptr", addr);
+	};
+	if (index >= clauses.size())
+	{
+		lower_zero_init(field_addr, field->type);
+		return;
+	}
+	const Node* child = &clauses[index];
+	if (starts_with(child->line, "designated-init "))
+	{
+		string wanted = child->line.substr(16);
+		if (field->name != wanted)
+		{
+			lower_zero_init(field_addr, field->type);
+			return;
+		}
+		if (!child->children.empty())
+			child = &child->children[0];
+	}
+	if (same_record_initializer(*child, field->type))
+	{
+		if (is_no_op_generated_default_prvalue(*child, field->type))
+		{
+			++index;
+			return;
+		}
+		Binding* copy_move = NULL;
+		if (child->category == ValueCategory::LValue ||
+		    child->category == ValueCategory::XValue)
+		{
+			copy_move = find_copy_move_constructor(
+				field->type, child->category == ValueCategory::XValue);
+			if (copy_move == NULL && child->category == ValueCategory::XValue)
+				copy_move = find_copy_move_constructor(field->type, false);
+		}
+		if (!record_has_storage_copy(field->type) &&
+		    (child->category == ValueCategory::LValue ||
+		     child->category == ValueCategory::XValue) &&
+		    copy_move == NULL)
+		{
+			(void)field_addr();
+			++index;
+			return;
+		}
+		lower_object_init(field_addr, field->type, *child);
+		++index;
+		return;
+	}
+	if (is_brace_elision_aggregate(field->type) &&
+	    !starts_with(child->line, "braced-init-list"))
+	{
+		bool saved_array_subobject = lowering_array_subobject_init_;
+		if (pa11::strip_cv(field->type)->kind == TypeKind::Array)
+			lowering_array_subobject_init_ = true;
+		lower_aggregate_elements(field_addr, field->type, clauses, index);
+		lowering_array_subobject_init_ = saved_array_subobject;
+		return;
+	}
+	if (field->is_bit_field)
+	{
+		lower_bitfield_aggregate_field(field_addr, field, *child);
+		++index;
+		return;
+	}
+	if (is_no_op_generated_default_prvalue(*child, field->type))
+	{
+		++index;
+		return;
+	}
+	bool saved_array_subobject = lowering_array_subobject_init_;
+	if (pa11::strip_cv(field->type)->kind == TypeKind::Array)
+		lowering_array_subobject_init_ = true;
+	lower_object_init(field_addr, field->type, *child);
+	lowering_array_subobject_init_ = saved_array_subobject;
+	++index;
+}
+
+void FunctionLowerer::lower_record_field_aggregate_elements(
+	const function<Value()>& addr_for,
+	TypePtr bare,
+	const vector<Node>& clauses,
+	size_t& index)
+{
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		lower_record_field_aggregate_element(
+			addr_for, bare->fields[i], clauses, index);
+}
+
+void FunctionLowerer::lower_array_aggregate_elements(
+	const function<Value()>& addr_for,
+	TypePtr bare,
+	TypePtr type,
+	const vector<Node>& clauses,
+	size_t& index)
+{
+	if (index < clauses.size() && lower_string_array_init(addr_for, type, clauses[index]))
 	{
 		++index;
 		return;
@@ -322,8 +480,7 @@ lowering_array_subobject_init_ = true; lower_object_init(field_addr, field->type
 			}
 			string addr = fresh_temp();
 			instr(addr + " = index " + scalar_lowir_type(elem) +
-			      " [projection=array_element] " + decay + ", " +
-			      to_string(i));
+			      " [projection=array_element] " + decay + ", " + to_string(i));
 			return Value("ptr", addr);
 		};
 		if (index >= clauses.size())
@@ -338,6 +495,42 @@ lowering_array_subobject_init_ = true; lower_object_init(field_addr, field->type
 		else
 			lower_object_init(elem_addr, elem, clauses[index++]);
 	}
+}
+
+void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for,
+                                               TypePtr type,
+                                               const vector<Node>& clauses,
+                                               size_t& index)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	struct DestinationFlagGuard
+	{
+		FunctionLowerer* self;
+		bool saved;
+		explicit DestinationFlagGuard(FunctionLowerer* s)
+			: self(s), saved(s->constructor_destination_before_protected_try_)
+		{
+			self->constructor_destination_before_protected_try_ = false;
+		}
+		~DestinationFlagGuard()
+		{
+			self->constructor_destination_before_protected_try_ = saved;
+		}
+		} destination_guard(this);
+	if (bare->kind == TypeKind::Record)
+	{
+		pa11::layout_record_type(bare);
+		if (bare->tag == "union")
+			lower_union_aggregate_elements(addr_for, bare, clauses, index);
+		else
+		{
+			lower_record_base_aggregate_elements(addr_for, bare, clauses, index);
+			lower_record_field_aggregate_elements(addr_for, bare, clauses, index);
+		}
+		return;
+	}
+	if (bare->kind == TypeKind::Array)
+		lower_array_aggregate_elements(addr_for, bare, type, clauses, index);
 }
 
 bool FunctionLowerer::lower_braced_direct_constructor_init(
@@ -675,6 +868,8 @@ bool FunctionLowerer::lower_record_same_type_init(
 	TypePtr type,
 	const Node& init)
 {
+	if (init.type.get() == NULL)
+		return false;
 	TypePtr src_record = pa11::strip_cv(object_type(init.type));
 	TypePtr dst_record = pa11::strip_cv(type);
 	if (src_record->kind != TypeKind::Record ||
@@ -823,6 +1018,8 @@ void FunctionLowerer::lower_object_init(const function<Value()>& addr_for,
                                         TypePtr type,
                                         const Node& init)
 {
+	if (starts_with(init.line, "no-op-initializer"))
+		return;
 	if (starts_with(init.line, "statement-expression"))
 	{
 		if (init.children.empty())

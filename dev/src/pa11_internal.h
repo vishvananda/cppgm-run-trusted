@@ -129,6 +129,7 @@ struct Type
 	bool layout_valid;
 	bool is_polymorphic;
 	bool introduces_vptr;
+	bool is_final_record;
 	vector<VirtualTableEntry> virtual_entries;
 
 	explicit Type(TypeKind k);
@@ -178,6 +179,7 @@ struct Binding
 		bool is_private;
 	bool is_protected_member;
 	bool is_mutable_member;
+	bool is_no_unique_address;
 	bool is_reference_member;
 	bool is_hidden_friend;
 	bool is_thread_local;

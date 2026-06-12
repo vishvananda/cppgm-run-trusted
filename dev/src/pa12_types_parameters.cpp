@@ -93,7 +93,7 @@ TypePtr adjust_parameter_type(TypePtr type)
 	void Parser::parse_function_suffix_tail(Suffix& suffix)
 	{ for (;;) { if (at_simple_cv()) { suffix.function_cv |= consume_cv_flag(); continue; } if (consume(OP_AMP)) { suffix.ref_qualifier = 1; continue; } if (consume(OP_LAND)) { suffix.ref_qualifier = 2; continue; }
 	if (consume(KW_NOEXCEPT)) { suffix.noexcept_decl = true; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (consume(KW_THROW)) { suffix.noexcept_decl = true; if (at(OP_LPAREN))
-	skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (parse_gnu_attribute_suffix(suffix)) { continue; } if (at_identifier() && current().source == "override") { ++pos_; suffix.override_decl = true; continue; } if (at_identifier() && current().source == "final") { ++pos_;
+	skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (parse_gnu_attribute_suffix(suffix)) { continue; } if (at_gnu_asm()) { skip_gnu_asm(); continue; } if (at_identifier() && current().source == "override") { ++pos_; suffix.override_decl = true; continue; } if (at_identifier() && current().source == "final") { ++pos_;
 suffix.final_decl = true; continue; } if (consume(OP_ARROW)) { vector<Scope*> saved_scopes = scopes_; Scope* parameter_scope = pa11::create_child_scope(current_scope(), ScopeKind::Function, "");
 scopes_.push_back(parameter_scope); map<string, vector<Binding*> > parameter_packs; for (size_t i = 0; i < suffix.parameters.size(); ++i) { const ParameterInfo& parameter = suffix.parameters[i];
 if (!parameter.pack_expression_name.empty() && !parameter.pack_name.empty()) { TemplateArgument subst; if (find_template_value_substitution( parameter.pack_name, subst) && subst.kind == TemplateArgumentKind::Pack &&
@@ -261,6 +261,7 @@ ParameterInfo Parser::parse_parameter_declaration()
 						info.name = consume_identifier();
 					info.pack_expression_name = info.name;
 				}
+				skip_attributes();
 				if (consume(OP_ASS))
 				{
 					info.has_default = true;
@@ -311,6 +312,7 @@ ParameterInfo Parser::parse_parameter_declaration()
 				info.name = consume_identifier();
 			info.pack_expression_name = info.name;
 		}
+		skip_attributes();
 		if (consume(OP_ASS))
 		{
 			info.has_default = true;
@@ -324,22 +326,66 @@ ParameterInfo Parser::parse_parameter_declaration()
 
 bool Parser::starts_declaration()
 {
+	size_t attr_save = pos_;
+	skip_attributes();
+	bool skipped_attributes = pos_ != attr_save;
+	if (at_gnu_asm())
+	{
+		pos_ = attr_save;
+		return false;
+	}
 	if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
 	    at(KW_STATIC) || at(KW_DECLTYPE) || at(KW_TYPENAME) ||
 	    starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT))
+	{
+		pos_ = attr_save;
 		return true;
+	}
+	if (at_identifier() &&
+	    (current().source == "__extension__" ||
+	     current().source == "__decltype" ||
+	     current().source == "__decltype__" ||
+	     current().source == "__typeof__" ||
+	     current().source == "__typeof" ||
+	     current().source == "_Complex" ||
+	     current().source == "__complex__" ||
+	     current().source == "__complex"))
+	{
+		pos_ = attr_save;
+		return true;
+	}
 	if (at_simple_cv() || at_simple_builtin())
+	{
+		pos_ = attr_save;
 		return true;
+	}
+	if (at_identifier() &&
+	    (current().source == "__int128" ||
+	     current().source == "_BitInt" ||
+	     current().source == "_Atomic"))
+	{
+		pos_ = attr_save;
+		return true;
+	}
 	if (at_identifier() &&
 	    pos_ + 1 < tokens_.size() &&
 	    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier)
+	{
+		pos_ = attr_save;
 		return true;
+	}
 	if (!at_identifier() && !at(OP_COLON2) && !at(KW_TYPENAME))
+	{
+		pos_ = attr_save;
 		return false;
+	}
 	TypePtr type;
 	size_t save = pos_;
 	bool ok = try_parse_type_name(type);
 	pos_ = save;
+	pos_ = attr_save;
+	if (skipped_attributes && !ok)
+		return false;
 	return ok;
 }
 
@@ -418,29 +464,67 @@ bool Parser::starts_parenthesized_abstract_declarator() const
 
 bool Parser::at_simple_ignored_specifier() const
 {
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_storage_or_function_specifier(tokens_[pos_].type);
+	if (pos_ < tokens_.size() &&
+	    tokens_[pos_].kind == posttoken::TokenKind::Simple &&
+	    pa11::is_storage_or_function_specifier(tokens_[pos_].type))
+		return true;
+	return at_identifier() &&
+	       (current().source == "__inline" ||
+	        current().source == "__inline__" ||
+	        current().source == "__thread" ||
+	        current().source == "__extension__" ||
+	        current().source == "_Complex" ||
+	        current().source == "__complex__" ||
+	        current().source == "__complex");
 }
 
 bool Parser::at_simple_cv() const
 {
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_cv_token(tokens_[pos_].type);
+	if (pos_ < tokens_.size() &&
+	    tokens_[pos_].kind == posttoken::TokenKind::Simple &&
+	    pa11::is_cv_token(tokens_[pos_].type))
+		return true;
+	return at_identifier() &&
+	       (current().source == "__const" ||
+	        current().source == "__const__" ||
+	        current().source == "__volatile" ||
+	        current().source == "__volatile__");
 }
 
 bool Parser::at_simple_builtin() const
 {
-	return pos_ < tokens_.size() &&
-	       tokens_[pos_].kind == posttoken::TokenKind::Simple &&
-	       pa11::is_builtin_type_token(tokens_[pos_].type);
+	if (pos_ < tokens_.size() &&
+	    tokens_[pos_].kind == posttoken::TokenKind::Simple &&
+	    pa11::is_builtin_type_token(tokens_[pos_].type))
+		return true;
+	return at_identifier() &&
+	       (current().source == "__signed" ||
+	        current().source == "__signed__" ||
+	        current().source == "_Float16" ||
+	        current().source == "_Float32" ||
+	        current().source == "_Float64" ||
+	        current().source == "_Float128" ||
+	        current().source == "__float128");
 }
 
 unsigned Parser::consume_cv_flag()
 {
 	if (consume(KW_CONST))
 		return pa11::CV_CONST;
+	if (at_identifier() &&
+	    (current().source == "__const" ||
+	     current().source == "__const__"))
+	{
+		++pos_;
+		return pa11::CV_CONST;
+	}
+	if (at_identifier() &&
+	    (current().source == "__volatile" ||
+	     current().source == "__volatile__"))
+	{
+		++pos_;
+		return pa11::CV_VOLATILE;
+	}
 	expect(KW_VOLATILE);
 	return pa11::CV_VOLATILE;
 }

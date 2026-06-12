@@ -345,6 +345,13 @@ TypePtr Parser::substitute_template_type(TypePtr type) const
 					arguments.push_back(
 						raw_template_argument_from_instance_argument(
 							type->template_arguments[i]));
+				if (arguments.empty())
+				{
+					map<const void*, vector<TemplateArgument> >::const_iterator
+						stored = record_template_arguments_.find(type.get());
+					if (stored != record_template_arguments_.end())
+						arguments = stored->second;
+				}
 				TypePtr selected;
 				if (const_cast<Parser*>(this)->
 					    try_resolve_type_pack_element(arguments,

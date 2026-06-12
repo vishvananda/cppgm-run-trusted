@@ -228,7 +228,7 @@ Binding* fn = NULL; if (starts_with(init.line, "unary-expression") && init.has_o
 !init.children.empty() && init.children[0].binding != NULL && init.children[0].binding->kind == BindingKind::Function) fn = init.children[0].binding;
 else if (starts_with(init.line, "id-expression") && init.binding != NULL && init.binding->kind == BindingKind::Function && pa11::strip_cv(var.binding->type)->kind == TypeKind::Pointer &&
 pa11::strip_cv(var.binding->type)->base.get() != NULL && pa11::strip_cv(var.binding->type)->base->kind == TypeKind::Function) fn = init.binding; if (fn == NULL)
-return false; if (fn->is_inline_definition) program_.demand_inline_function(fn); string tmp = fresh_temp();
+return false; if (fn->is_inline_definition) program_.demand_inline_function(fn); program_.demand_function_declaration(fn); string tmp = fresh_temp();
 instr(tmp + " = addr @" + program_.symbol_for(fn)); program_.demand_global_declaration(var.binding); instr("store ptr " + tmp + ", @" + program_.symbol_for(var.binding)); return true;
 } bool FunctionLowerer::lower_static_member_storage_global_init(const Node& var, const Node& init) {
 if (var.binding == NULL || init.binding == NULL || !starts_with(init.line, "id-expression") || !init.binding->is_static_member)
