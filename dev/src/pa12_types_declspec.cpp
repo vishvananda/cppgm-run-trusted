@@ -143,7 +143,14 @@ bool Parser::parse_decl_storage_specifier(DeclSpecs& specs,
 {
 	if (starts_attribute())
 	{
-		skip_attributes(&specs.no_unique_address_decl);
+		Suffix attribute(SuffixKind::Attribute);
+		if (parse_gnu_attribute_suffix(attribute))
+		{
+			if (attribute.vector_size != 0)
+				specs.vector_size = attribute.vector_size;
+		}
+		else
+			skip_attributes(&specs.no_unique_address_decl);
 		saw_any = true;
 		return true;
 	}
@@ -318,6 +325,8 @@ TypePtr Parser::type_from_decl_specs(const DeclSpecs& specs)
 	TypePtr type = specs.named_type.get() != NULL ? specs.named_type :
 		specs.auto_decl ? pa11::make_fundamental(FT_VOID) :
 		pa11::make_fundamental(pa11::fundamental_from_specs(specs.builtin));
+	if (specs.vector_size != 0)
+		type = pa11::make_gnu_vector(type, specs.vector_size);
 	return pa11::make_cv(type, specs.cv);
 }
 

@@ -43,9 +43,11 @@ Conversion conv = convert_to(scalar_init, type); if (!conv.viable) throw runtime
 default_member_initializers_[variable] = conv.expr.node; add_child(var, conv.expr.node); if (pa11::type_has_const(type) && conv.expr.has_constant_value) {
 variable->has_constant = true; variable->constant_value = conv.expr.constant_value; } return;
 } if (record->kind == pa11::TypeKind::Record && record_has_aggregate_blocking_constructor(record)) {
-vector<Expr> args; for (size_t i = 0; i < init.node.children.size(); ++i) { Expr arg;
-arg.valid = true; arg.node = init.node.children[i]; arg.type = arg.node.type; arg.category = arg.node.category;
-arg.binding = arg.node.binding; arg.overloads = arg.node.overloads; arg.explicit_template_arguments = arg.node.explicit_template_arguments; args.push_back(arg); } try
+	vector<Expr> args; for (size_t i = 0; i < init.node.children.size(); ++i) { Expr arg;
+	arg.valid = true; arg.node = init.node.children[i]; arg.type = arg.node.type; arg.category = arg.node.category;
+	arg.binding = arg.node.binding; arg.overloads = arg.node.overloads; arg.explicit_template_arguments = arg.node.explicit_template_arguments; if (arg.category == ValueCategory::PRValue &&
+	arg.type.get() != NULL && pa11::strip_cv(expression_object_type(arg.type))->kind == pa11::TypeKind::Record) { TypePtr arg_record = pa11::strip_cv(expression_object_type(arg.type));
+	ensure_default_destructor(arg_record, !pa11::record_direct_bases(arg_record).empty()); } args.push_back(arg); } try
 { Expr constructed = make_constructor_init_expr(type, args, init.copy_initialization); list = constructed.node;
 } catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor")
 throw; } } if (record->kind == pa11::TypeKind::Record &&

@@ -59,6 +59,8 @@ bool node_calls_function_template(
 
 std::string template_type_spelling(TypePtr type);
 std::string template_type_key(TypePtr type);
+void clear_template_type_key_cache();
+void discard_template_type_key_cache(TypePtr type);
 std::string dependent_value_member_key(const TemplateArgument& arg);
 std::string template_argument_spelling(const TemplateArgument& argument);
 std::string template_argument_spelling(

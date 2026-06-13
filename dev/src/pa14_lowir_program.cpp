@@ -49,6 +49,63 @@ bool defer_static_constexpr_member_definition(const Node& node)
 	return bare->kind == TypeKind::Array || bare->kind == TypeKind::Record;
 }
 
+bool lowir_signature_needs_incomplete_record_layout(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	if (is_reference(type))
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	return bare->kind == TypeKind::Record && !bare->complete;
+}
+
+bool lowir_signature_needs_incomplete_record_layout(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return false;
+	if (lowir_signature_needs_incomplete_record_layout(binding->type->base))
+		return true;
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+		if (lowir_signature_needs_incomplete_record_layout(
+			    binding->type->parameters[i]))
+			return true;
+	return false;
+}
+
+bool synthesizable_noop_constructor(const Binding* binding)
+{
+	if (binding == NULL ||
+	    !is_class_constructor_binding(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.empty())
+		return false;
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return false;
+	if (binding->is_generated_default_constructor &&
+	    binding->is_noop_constructor &&
+	    !binding->is_object_root)
+		return false;
+	string primary = record->template_primary_name.empty()
+		? (record->scope != NULL ? record->scope->name : record->name)
+		: record->template_primary_name;
+	size_t qpos = primary.rfind("::");
+	if (qpos != string::npos)
+		primary = primary.substr(qpos + 2);
+	bool hosted_allocator_ctor =
+		primary == "allocator" &&
+		(binding->type->parameters.size() == 1 ||
+		 binding->type->parameters.size() == 2);
+	if (!binding->is_noop_constructor && !hosted_allocator_ctor)
+		return false;
+	return !record->is_polymorphic &&
+	       pa11::record_virtual_bases(record).empty();
+}
+
 bool synthesizable_defaulted_storage_copy_constructor(const Binding* binding)
 {
 	if (binding == NULL ||
@@ -745,29 +802,35 @@ void ProgramLowerer::collect_node(const Node& node)
 			return;
 		register_function_declaration(node);
 		return;
-	}
-	if (starts_with(node.line, "function-definition "))
-	{
-		if (node.binding != NULL && node.binding->is_inline_definition)
-		{
-			register_inline_definition(node);
-			if (node.binding->is_virtual)
+		}
+			if (starts_with(node.line, "function-definition "))
 			{
+				if (node.binding != NULL && node.binding->is_inline_definition)
+				{
+					register_inline_definition(node);
+				if (node.binding->is_virtual)
+				{
 				TypePtr record = class_record_for_member(node.binding);
 				if (record.get() != NULL)
 					demand_vtable(record);
+				}
+				return;
 			}
-			return;
-		}
-		if (node.binding != NULL && node.binding->is_virtual)
-		{
-			TypePtr record = class_record_for_member(node.binding);
-			if (record.get() != NULL)
+			if (node.binding != NULL)
+			{
+				string function_name = symbol_for(node.binding);
+				if (defined_functions.find(function_name) !=
+				    defined_functions.end())
+					return;
+				defined_functions.insert(function_name);
+			}
+			if (node.binding != NULL && node.binding->is_virtual)
+			{
+				TypePtr record = class_record_for_member(node.binding);
+				if (record.get() != NULL)
 				demand_vtable(record);
 		}
-		if (node.binding != NULL)
-			defined_functions.insert(symbol_for(node.binding));
-		FunctionLowerer lowerer(*this, node);
+			FunctionLowerer lowerer(*this, node);
 		FunctionOut lowered = lowerer.lower();
 			if (is_class_constructor(node.binding))
 			{
@@ -815,6 +878,8 @@ void ProgramLowerer::register_function_declaration(const Node& node)
 {
 	Binding* binding = node.binding;
 	if (binding == NULL)
+		return;
+	if (lowir_signature_needs_incomplete_record_layout(binding))
 		return;
 	string name = symbol_for(binding);
 	if (function_declarations_by_binding.find(binding) !=
@@ -880,19 +945,19 @@ void ProgramLowerer::register_function_declaration(const Node& node)
 		metadata.push_back("arity=variadic");
 	if (binding->language_linkage == "c")
 		metadata.push_back("linkage=c");
-		if (binding->unwind_no)
-			metadata.push_back("unwind=no");
-		metadata.push_back(binding_has_internal_linkage(binding)
-		                   ? "binding=internal" : "binding=strong");
-		if (binding->name != "main")
-		{
-			string object_symbol = binding->language_linkage == "c"
-				? binding->name
-				: pa12::internal::abi_binding_symbol(
-					binding, map<string, size_t>());
-			metadata.push_back("object=" + object_symbol);
-		}
-		out << metadata_suffix(metadata);
+	if (binding->unwind_no)
+		metadata.push_back("unwind=no");
+	metadata.push_back(binding_has_internal_linkage(binding)
+	                   ? "binding=internal" : "binding=strong");
+	if (binding->name != "main")
+	{
+		string object_symbol = binding->language_linkage == "c"
+			? binding->name
+			: pa12::internal::abi_binding_symbol(
+				binding, map<string, size_t>());
+		metadata.push_back("object=" + object_symbol);
+	}
+	out << metadata_suffix(metadata);
 	function_declarations_by_binding[binding] = out.str();
 }
 
@@ -1050,11 +1115,56 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 {
 	if (binding != NULL &&
 	    binding->kind == BindingKind::Function &&
-	    binding->aliased_binding != NULL &&
-	    binding->aliased_binding->is_inline_definition)
-		binding = binding->aliased_binding;
-	if (binding == NULL || !binding->is_inline_definition)
+	    binding->aliased_binding != NULL)
+	{
+		bool binding_has_body =
+			inline_definitions.find(binding) != inline_definitions.end() ||
+			synthetic_inline_definitions.find(binding) !=
+				synthetic_inline_definitions.end();
+		bool alias_has_body =
+			inline_definitions.find(binding->aliased_binding) !=
+				inline_definitions.end() ||
+			synthetic_inline_definitions.find(binding->aliased_binding) !=
+				synthetic_inline_definitions.end();
+		if (binding->aliased_binding->is_inline_definition ||
+		    (!binding_has_body && alias_has_body))
+			binding = binding->aliased_binding;
+	}
+	if (binding == NULL)
 		return;
+	bool has_recorded_body =
+		inline_definitions.find(binding) != inline_definitions.end() ||
+		synthetic_inline_definitions.find(binding) !=
+			synthetic_inline_definitions.end();
+	if (!has_recorded_body)
+	{
+		string wanted_name = symbol_for(binding);
+		for (map<const Binding*, const Node*>::const_iterator it =
+			     inline_definitions.begin();
+		     it != inline_definitions.end();
+		     ++it)
+		{
+			if (it->first == NULL ||
+			    it->first->kind != BindingKind::Function ||
+			    symbol_for(it->first) != wanted_name)
+				continue;
+			binding = it->first;
+			has_recorded_body = true;
+			break;
+		}
+	}
+	if (!binding->is_inline_definition)
+	{
+		if (!has_recorded_body && synthesizable_noop_constructor(binding))
+		{
+			string name = symbol_for(binding);
+			emit_generated_empty_constructor(
+				binding,
+				complete_entry ? name : name + "__base_entry");
+		}
+		if (!has_recorded_body)
+			return;
+	}
 	bool class_ctor = is_class_constructor(binding);
 	bool class_dtor = is_class_destructor_binding(binding);
 	if (complete_entry)
@@ -1092,6 +1202,14 @@ void ProgramLowerer::demand_inline_function(const Binding* binding,
 			return;
 	map<const Binding*, const Node*>::const_iterator found =
 		inline_definitions.find(binding);
+	if (found == inline_definitions.end() &&
+	    synthesizable_noop_constructor(binding))
+	{
+		emit_generated_empty_constructor(
+			binding,
+			complete_entry ? name : name + "__base_entry");
+		return;
+	}
 	if (found == inline_definitions.end() &&
 	    synthesizable_defaulted_storage_copy_constructor(binding))
 	{

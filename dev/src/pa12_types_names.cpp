@@ -1,12 +1,159 @@
 #include "pa12_types_support.h"
 
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 
 using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+void collect_alias_dependency_names_from_instance_argument(
+	const pa11::TemplateInstanceArgument& argument,
+	set<string>& names);
+void collect_alias_dependency_names_from_argument(const TemplateArgument& argument,
+                                                  set<string>& names);
+
+void collect_alias_dependency_names_from_type(TypePtr type, set<string>& names)
+{
+	if (type.get() == NULL)
+		return;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		if (type->is_dependent_typename)
+		{
+			for (size_t i = 0; i < type->template_arguments.size(); ++i)
+				collect_alias_dependency_names_from_instance_argument(
+					type->template_arguments[i],
+					names);
+			for (size_t i = 0;
+			     i < type->dependent_typename_template_argument_lists.size();
+			     ++i)
+				for (size_t j = 0;
+				     j < type->dependent_typename_template_argument_lists[i].size();
+				     ++j)
+					collect_alias_dependency_names_from_instance_argument(
+						type->dependent_typename_template_argument_lists[i][j],
+						names);
+		}
+		if (pa11::is_deducible_template_parameter_type(type))
+			names.insert(type->name);
+		return;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+	{
+		collect_alias_dependency_names_from_type(type->base, names);
+		return;
+	}
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		collect_alias_dependency_names_from_type(type->base, names);
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			collect_alias_dependency_names_from_type(type->parameters[i],
+			                                         names);
+		return;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+	{
+		collect_alias_dependency_names_from_type(type->member_class, names);
+		collect_alias_dependency_names_from_type(type->base, names);
+		return;
+	}
+	if (type->is_dependent_typename &&
+	    type->dependent_typename_template_id &&
+	    !type->template_primary_name.empty())
+		names.insert(type->template_primary_name);
+	if (type->is_template_specialization)
+		for (size_t i = 0; i < type->template_arguments.size(); ++i)
+			collect_alias_dependency_names_from_instance_argument(
+				type->template_arguments[i],
+				names);
+}
+
+void collect_alias_dependency_names_from_instance_argument(
+	const pa11::TemplateInstanceArgument& argument,
+	set<string>& names)
+{
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type)
+	{
+		collect_alias_dependency_names_from_type(argument.type, names);
+		return;
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		for (size_t i = 0;
+		     i < argument.value_owner_template_arguments.size();
+		     ++i)
+			collect_alias_dependency_names_from_instance_argument(
+				argument.value_owner_template_arguments[i],
+				names);
+		if (!argument.value_owner_template_name.empty())
+			names.insert(argument.value_owner_template_name);
+		if (argument.dependent && !argument.value_name.empty())
+			names.insert(argument.value_name);
+		collect_alias_dependency_names_from_type(argument.type, names);
+		return;
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Template)
+	{
+		if (argument.dependent && !argument.template_name.empty())
+			names.insert(argument.template_name);
+		return;
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			collect_alias_dependency_names_from_instance_argument(
+				argument.pack[i],
+				names);
+}
+
+void collect_alias_dependency_names_from_argument(const TemplateArgument& argument,
+                                                  set<string>& names)
+{
+	if (argument.kind == TemplateArgumentKind::Type)
+	{
+		collect_alias_dependency_names_from_type(argument.type, names);
+		return;
+	}
+	if (argument.kind == TemplateArgumentKind::Value)
+	{
+		for (size_t i = 0;
+		     i < argument.value_owner_template_arguments.size();
+		     ++i)
+			collect_alias_dependency_names_from_instance_argument(
+				argument.value_owner_template_arguments[i],
+				names);
+		if (!argument.value_owner_template_name.empty())
+			names.insert(argument.value_owner_template_name);
+		if (argument.dependent && !argument.value_name.empty())
+			names.insert(argument.value_name);
+		collect_alias_dependency_names_from_type(argument.type, names);
+		return;
+	}
+	if (argument.kind == TemplateArgumentKind::Template)
+	{
+		if (argument.template_declaration == NULL &&
+		    !argument.value_name.empty())
+			names.insert(argument.value_name);
+		return;
+	}
+	if (argument.kind == TemplateArgumentKind::Pack)
+	{
+		if (!argument.value_name.empty())
+			names.insert(argument.value_name);
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			collect_alias_dependency_names_from_argument(argument.pack[i],
+			                                             names);
+	}
+}
+
+}  // namespace
 
 bool Parser::try_parse_type_name(TypePtr& out)
 {
@@ -368,10 +515,14 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				pos_ = concrete_save;
 			}
 		}
-		if (have_type_subst &&
-		    pa11::strip_cv(subst)->kind ==
-		    pa11::TypeKind::TemplateParameter)
-			dependent_root = true;
+		if (have_type_subst)
+		{
+			TypePtr bare_subst = pa11::strip_cv(subst);
+			if (bare_subst->kind == pa11::TypeKind::TemplateParameter ||
+			    bare_subst->is_dependent_typename ||
+			    type_is_template_dependent(subst))
+				dependent_root = true;
+		}
 		if (dependent_base_qualifier)
 			dependent_root = true;
 		vector<TemplateArgument> root_arguments;
@@ -607,8 +758,12 @@ bool Parser::try_parse_type_name(TypePtr& out)
 		    (parsing_base_specifier_ &&
 		     (template_id_qualifier || dependent_base_qualifier)))
 		{
+				bool hosted_active_instantiation =
+					hosted_compatibility_ &&
+					!active_class_instantiations_.empty();
 				if (concrete_root_lookup_failed &&
 				    !validating_template_definition_ &&
+				    !hosted_active_instantiation &&
 				    (!template_type_substitutions_.empty() ||
 				     !template_value_substitutions_.empty()))
 				{
@@ -619,6 +774,7 @@ bool Parser::try_parse_type_name(TypePtr& out)
 				{
 					bool allow_dependent_fallback =
 						validating_template_definition_ ||
+						hosted_active_instantiation ||
 						!template_type_substitutions_.empty() ||
 						!template_value_substitutions_.empty();
 					if (!allow_dependent_fallback)
@@ -758,10 +914,10 @@ out->template_arguments = dependent_template_instance_arguments( arguments); rec
 out = instantiate_class_template( subst.template_declaration, arguments); } else { out = pa11::make_record_type(name + "<>", "struct", false, NULL); out->is_template_specialization = true;
 out->is_dependent_typename = true; out->dependent_typename_template_id = true; out->template_primary_name = name; out->template_arguments = dependent_template_instance_arguments(arguments);
 record_template_arguments_[out.get()] = arguments; } return true; } } TemplateDeclaration* alias = find_alias_template(qualifier, name); if (alias != NULL) { vector<TemplateArgument> arguments;
-parse_template_argument_list(arguments); bool dependent_arguments = template_arguments_dependent(arguments); bool dependent_pack_arguments = false; for (size_t ai = 0; ai < arguments.size(); ++ai) { string pack_name;
-if (((arguments[ai].kind == TemplateArgumentKind::Type && template_type_has_template_parameter_name( arguments[ai].type, pack_name)) || (arguments[ai].kind == TemplateArgumentKind::Value &&
-arguments[ai].type.get() != NULL && template_type_has_template_parameter_name( arguments[ai].type, pack_name))) && active_type_parameter_pack(pack_name)) dependent_pack_arguments = true; } if (dependent_arguments &&
-name != "conditional_t" && dependent_pack_arguments) { out = pa11::make_dependent_typename_type( name, qualifier != NULL, true, false); out->template_primary_name = name; out->template_arguments =
+	parse_template_argument_list(arguments); bool dependent_arguments = template_arguments_dependent(arguments); bool dependent_pack_arguments = false; for (size_t ai = 0; ai < arguments.size(); ++ai) { set<string> dependency_names;
+	collect_alias_dependency_names_from_argument(arguments[ai], dependency_names); for (set<string>::const_iterator ni = dependency_names.begin(); ni != dependency_names.end(); ++ni) if (active_type_parameter_pack(*ni))
+	dependent_pack_arguments = true; } if (dependent_arguments &&
+	name != "conditional_t" && dependent_pack_arguments) { out = pa11::make_dependent_typename_type( name, qualifier != NULL, true, false); out->template_primary_name = name; out->template_arguments =
 dependent_template_instance_arguments(arguments); record_template_arguments_[out.get()] = arguments; return true; } try { out = instantiate_alias_template(alias, arguments); } catch (const exception&) {
 if (!dependent_arguments && template_type_substitutions_.empty() && template_value_substitutions_.empty()) throw; out = pa11::make_dependent_typename_type( name, qualifier != NULL, true, false);
 out->template_primary_name = name; out->template_arguments = dependent_template_instance_arguments(arguments); record_template_arguments_[out.get()] = arguments; } return true; }
@@ -849,9 +1005,9 @@ return true; } }
 		if (binding->is_private &&
 		    !active_context_has_class_access(binding->owner))
 			throw runtime_error("private type access");
-		if (binding->is_protected_member &&
-		    !active_context_has_class_access(binding->owner))
-			throw runtime_error("protected type access");
+			if (binding->is_protected_member &&
+			    !active_context_has_class_access(binding->owner))
+				throw runtime_error("protected type access");
 	}
 	complete_member_class_template_record(binding);
 	out = qualifier != NULL

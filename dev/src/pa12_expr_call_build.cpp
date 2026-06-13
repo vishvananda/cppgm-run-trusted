@@ -1,4 +1,5 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -148,6 +149,51 @@ bool c11_atomic_builtin_name(const string& name)
 	       name == "__c11_atomic_signal_fence";
 }
 
+bool scope_is_namespace_named(Scope* scope, const string& name)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur->kind == ScopeKind::Namespace && cur->name == name)
+			return true;
+	return false;
+}
+
+bool hosted_std_tuple_record(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
+		return false;
+	if (bare->scope != NULL &&
+	    bare->scope->name == "tuple" &&
+	    scope_is_namespace_named(bare->scope->parent, "std"))
+		return true;
+	return bare->template_primary_name == "std::tuple" ||
+	       bare->template_primary_name == "tuple";
+}
+
+void complete_hosted_reference_tuple_layout(TypePtr type, size_t references)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != pa11::TypeKind::Record ||
+	    !hosted_std_tuple_record(bare) ||
+	    bare->complete)
+		return;
+	uint64_t size = references == 0 ? 1 : references * 8;
+	bare->complete = true;
+	bare->fields.clear();
+	bare->direct_bases.clear();
+	bare->direct_base_offsets.clear();
+	bare->direct_base_virtuals.clear();
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
+	bare->direct_base_offset = 0;
+	bare->record_size = size;
+	bare->record_align = references == 0 ? 1 : 8;
+	bare->nonvirtual_size = size;
+	bare->nonvirtual_align = bare->record_align;
+	bare->layout_valid = true;
+}
+
 bool gnu_atomic_builtin_name(const string& name)
 {
 	return name == "__atomic_load_n" ||
@@ -155,6 +201,8 @@ bool gnu_atomic_builtin_name(const string& name)
 	       name == "__atomic_store_n" ||
 	       name == "__atomic_store" ||
 	       name == "__atomic_exchange_n" ||
+	       name == "__atomic_compare_exchange" ||
+	       name == "__atomic_compare_exchange_n" ||
 	       name == "__atomic_fetch_add" ||
 	       name == "__atomic_fetch_sub" ||
 	       name == "__atomic_fetch_and" ||
@@ -167,6 +215,10 @@ bool gnu_atomic_builtin_name(const string& name)
 	       name == "__atomic_xor_fetch" ||
 	       name == "__atomic_always_lock_free" ||
 	       name == "__atomic_is_lock_free" ||
+	       name == "__atomic_thread_fence" ||
+	       name == "__atomic_signal_fence" ||
+	       name == "__atomic_test_and_set" ||
+	       name == "__atomic_clear" ||
 	       name == "__sync_lock_test_and_set" ||
 	       name == "__sync_lock_release";
 }
@@ -269,13 +321,14 @@ bool Parser::make_member_pointer_call_expr(const Expr& callee,
 	out.node = Node("call-expression " + value_category_name(out.category) +
 	                " " + pa11::describe_type(out.type));
 	add_child(out.node, callee.node);
-	for (size_t i = 0; i < converted.size(); ++i)
-		add_child(out.node, converted[i].node);
-	out.valid = true;
-	if (unevaluated_expression_depth_ == 0 &&
-	    out.category == ValueCategory::PRValue &&
-	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record)
-		ensure_default_destructor(out.type);
+		for (size_t i = 0; i < converted.size(); ++i)
+			add_child(out.node, converted[i].node);
+		out.valid = true;
+		if (unevaluated_expression_depth_ == 0 &&
+		    out.category == ValueCategory::PRValue &&
+		    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
+		    !type_is_template_dependent(out.type))
+			ensure_default_destructor(out.type);
 	annotate_expr_node(out);
 	return true;
 }
@@ -584,7 +637,14 @@ bool Parser::make_atomic_builtin_call_expr(const Expr& callee,
 		builtin == "__atomic_always_lock_free" ||
 		builtin == "__atomic_is_lock_free" ||
 		builtin == "__c11_atomic_is_lock_free";
+	bool bool_result_builtin =
+		constant_lock_free ||
+		builtin == "__atomic_test_and_set" ||
+		builtin == "__atomic_compare_exchange" ||
+		builtin == "__atomic_compare_exchange_n";
 	if (constant_lock_free)
+		result = pa11::make_fundamental(FT_BOOL);
+	if (bool_result_builtin)
 		result = pa11::make_fundamental(FT_BOOL);
 	else if (builtin == "__atomic_load_n" ||
 	         builtin == "__atomic_exchange_n" ||
@@ -614,6 +674,7 @@ bool Parser::make_atomic_builtin_call_expr(const Expr& callee,
 	else if (builtin == "__atomic_load" ||
 	         builtin == "__atomic_store" ||
 	         builtin == "__atomic_store_n" ||
+	         builtin == "__atomic_clear" ||
 	         builtin == "__sync_lock_release" ||
 	         builtin == "__c11_atomic_init" ||
 	         builtin == "__c11_atomic_store" ||
@@ -626,6 +687,14 @@ bool Parser::make_atomic_builtin_call_expr(const Expr& callee,
 		if (builtin == "__c11_atomic_compare_exchange_strong" ||
 		    builtin == "__c11_atomic_compare_exchange_weak")
 			result = pa11::make_fundamental(FT_BOOL);
+	}
+	if (builtin == "__atomic_test_and_set" ||
+	    builtin == "__atomic_compare_exchange" ||
+	    builtin == "__atomic_compare_exchange_n")
+	{
+		if (args.empty())
+			throw runtime_error("wrong argument count");
+		atomic_pointee_type(args[0]);
 	}
 	out = make_direct_builtin_call(callee.binding, result, args);
 	if (constant_lock_free)
@@ -728,20 +797,69 @@ Binding* Parser::resolve_call_direct_binding(const Expr& callee,
 Expr Parser::finish_bound_call_expr(const Expr& callee,
                                     Binding* direct,
                                     const vector<Expr>& converted)
-{
-	if (deleted_functions_.find(direct) != deleted_functions_.end())
-		throw runtime_error("call to deleted function");
-	if (unevaluated_expression_depth_ == 0)
+	{
+		if (deleted_functions_.find(direct) != deleted_functions_.end())
+			throw runtime_error("call to deleted function");
+		bool defer_hosted_body = defer_hosted_function_body(direct);
+	if (unevaluated_expression_depth_ == 0 && !defer_hosted_body)
 	{
 		parse_pending_function_body(direct);
 		parse_pending_member_body(direct);
 	}
 	Expr out;
 	out.type = direct->type->base;
+	if (hosted_compatibility_ &&
+		    direct->name == "forward_as_tuple" &&
+		    direct->owner != NULL &&
+		    direct->owner->kind == ScopeKind::Namespace &&
+		    direct->owner->name == "std" &&
+		    type_structurally_dependent(out.type))
+	{
+		map<Binding*, vector<TemplateArgument> >::const_iterator found_args =
+			function_template_specialization_arguments_.find(direct);
+		if (found_args != function_template_specialization_arguments_.end() &&
+		    found_args->second.size() == 1 &&
+		    found_args->second[0].kind == TemplateArgumentKind::Pack)
+			{
+				vector<TemplateArgument> tuple_args;
+				const vector<TemplateArgument>& pack = found_args->second[0].pack;
+				bool concrete_tuple_args = true;
+				for (size_t i = 0; i < pack.size(); ++i)
+				{
+					if (pack[i].kind != TemplateArgumentKind::Type)
+						break;
+					TypePtr elem = pack[i].type;
+					TypePtr bare = elem.get() != NULL
+						? pa11::strip_cv(elem) : TypePtr();
+					TypePtr ref =
+						bare.get() != NULL &&
+						bare->kind == pa11::TypeKind::LValueReference
+						? elem : pa11::make_rvalue_reference(elem);
+					if (type_structurally_dependent(ref))
+						concrete_tuple_args = false;
+					tuple_args.push_back(TemplateArgument::type_arg(ref));
+				}
+				if (concrete_tuple_args &&
+				    tuple_args.size() == pack.size())
+				{
+					TemplateDeclaration* tuple_template =
+						find_class_template(direct->owner, "tuple");
+					if (tuple_template != NULL)
+						out.type = instantiate_class_template(tuple_template,
+						                                      tuple_args);
+				}
+			}
+		}
+	if (hosted_compatibility_ &&
+	    direct->name == "forward_as_tuple" &&
+	    direct->owner != NULL &&
+	    direct->owner->kind == ScopeKind::Namespace &&
+	    direct->owner->name == "std")
+		complete_hosted_reference_tuple_layout(out.type, converted.size());
 	out.category = call_category(out.type);
 	out.node = Node("call-expression " + value_category_name(out.category) +
 	                " " + pa11::describe_type(out.type));
-	out.node.direct_call = direct;
+		out.node.direct_call = direct;
 	out.node.suppress_virtual_dispatch = callee.node.suppress_virtual_dispatch;
 	bool member_call =
 		callee.node.line.compare(0, 17, "member-expression") == 0 ||
@@ -756,16 +874,25 @@ Expr Parser::finish_bound_call_expr(const Expr& callee,
 	add_child(out.node, callee_node);
 	for (size_t i = 0; i < converted.size(); ++i)
 		add_child(out.node, converted[i].node);
+	bool hosted_forward_as_tuple_result =
+		hosted_compatibility_ &&
+		direct->name == "forward_as_tuple" &&
+		direct->owner != NULL &&
+		direct->owner->kind == ScopeKind::Namespace &&
+		direct->owner->name == "std";
 	if (unevaluated_expression_depth_ == 0 &&
+	    !hosted_forward_as_tuple_result &&
 	    out.category == ValueCategory::PRValue &&
-	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record)
+	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
+	    !type_is_template_dependent(out.type))
 		ensure_default_destructor(out.type);
 	out.valid = true;
 	vector<Node> constexpr_args;
 	for (size_t i = 0; i < converted.size(); ++i)
 		constexpr_args.push_back(converted[i].node);
 	ConstexprValue constexpr_value;
-	if (try_evaluate_constexpr_call(direct, constexpr_args, constexpr_value))
+	if (unevaluated_expression_depth_ == 0 &&
+	    try_evaluate_constexpr_call(direct, constexpr_args, constexpr_value))
 		apply_constexpr_value(out, constexpr_value);
 	annotate_expr_node(out);
 	return out;
@@ -806,7 +933,8 @@ Expr Parser::finish_indirect_call_expr(const Expr& callee,
 		add_child(out.node, converted[i].node);
 	if (unevaluated_expression_depth_ == 0 &&
 	    out.category == ValueCategory::PRValue &&
-	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record)
+	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
+	    !type_is_template_dependent(out.type))
 		ensure_default_destructor(out.type);
 	out.valid = true;
 	annotate_expr_node(out);

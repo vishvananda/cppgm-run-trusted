@@ -1,6 +1,8 @@
 #include "pa12_internal.h"
+#include "pa12_templates_function_support.h"
 #include <cstdlib>
 #include <limits>
+#include <sstream>
 using namespace std;
 namespace pa12 {
 namespace internal {
@@ -153,6 +155,59 @@ bool eval_node(Parser& parser,
                const Node& node,
                EvalState& state,
                ConstexprValue& out);
+void append_constexpr_value_cache_key(ostringstream& out,
+                                      const ConstexprValue& value)
+{
+	if (!value.valid)
+	{
+		out << "invalid";
+		return;
+	}
+	if (value.is_object)
+	{
+		out << "obj:" << value.object_type.get() << '{';
+		for (map<Binding*, ConstexprValue>::const_iterator it =
+			     value.fields.begin();
+		     it != value.fields.end();
+		     ++it)
+		{
+			out << it->first << '=';
+			append_constexpr_value_cache_key(out, it->second);
+			out << ';';
+		}
+		out << "}[" << value.elements.size() << ':';
+		for (size_t i = 0; i < value.elements.size(); ++i)
+		{
+			append_constexpr_value_cache_key(out, value.elements[i]);
+			out << ';';
+		}
+		out << ']';
+		return;
+	}
+	if (value.is_pointer)
+	{
+		out << "ptr:" << value.pointer_binding << ':' << value.pointer_index;
+		return;
+	}
+	if (value.is_float)
+	{
+		out << "float:" << value.float_value;
+		return;
+	}
+	out << "int:" << value.int_value;
+}
+string constexpr_call_cache_key(Binding* function,
+                                const vector<ConstexprValue>& args)
+{
+	ostringstream out;
+	out << function;
+	for (size_t i = 0; i < args.size(); ++i)
+	{
+		out << '|';
+		append_constexpr_value_cache_key(out, args[i]);
+	}
+	return out.str();
+}
 bool eval_lvalue_binding(const Node& node, Binding*& binding)
 {
 	if (node.binding != NULL)
@@ -377,6 +432,75 @@ bool eval_binary_value(ETokenType op,
 	default:
 		return false;
 	}
+}
+
+bool comparison_function_op(Binding* function, ETokenType& op)
+{
+	if (function == NULL)
+		return false;
+	if (function->name == "operator==")
+		op = OP_EQ;
+	else if (function->name == "operator!=")
+		op = OP_NE;
+	else if (function->name == "operator<")
+		op = OP_LT;
+	else if (function->name == "operator>")
+		op = OP_GT;
+	else if (function->name == "operator<=")
+		op = OP_LE;
+	else if (function->name == "operator>=")
+		op = OP_GE;
+	else
+		return false;
+	return true;
+}
+
+bool single_value_field(const ConstexprValue& object,
+                        Binding*& field,
+                        ConstexprValue& value)
+{
+	if (!object.is_object)
+		return false;
+	field = NULL;
+	for (map<Binding*, ConstexprValue>::const_iterator it =
+		     object.fields.begin();
+	     it != object.fields.end();
+	     ++it)
+	{
+		if (it->first == NULL || it->second.is_object || it->second.is_pointer)
+			return false;
+		if (field != NULL)
+			return false;
+		field = it->first;
+		value = it->second;
+	}
+	return field != NULL;
+}
+
+bool try_eval_single_field_comparison(Binding* function,
+                                      const vector<ConstexprValue>& args,
+                                      ConstexprValue& out)
+{
+	ETokenType op = OP_PLUS;
+	if (!comparison_function_op(function, op) || args.size() != 2)
+		return false;
+	Binding* left_field = NULL;
+	Binding* right_field = NULL;
+	ConstexprValue left;
+	ConstexprValue right;
+	if (!single_value_field(args[0], left_field, left) ||
+	    !single_value_field(args[1], right_field, right))
+		return false;
+	TypePtr field_type = left_field->type;
+	if (right_field != left_field &&
+	    (right_field->type.get() == NULL ||
+	     field_type.get() == NULL ||
+	     !pa11::same_type(pa11::strip_cv(field_type),
+	                      pa11::strip_cv(right_field->type))))
+		return false;
+	if (constexpr_integral_compare(op, field_type, left, right, out))
+		return true;
+	return eval_binary_value(op, left, right, out);
 }
 bool eval_expr_list(Parser& parser,
                     const vector<Node>& children,
@@ -1233,6 +1357,179 @@ bool Parser::try_evaluate_constexpr_call_values(Binding* function,
 		return false;
 	if (function == NULL)
 		return false;
+	if (hosted_compatibility_ &&
+	    try_eval_single_field_comparison(function, args, out))
+		return true;
+	string cache_key = constexpr_call_cache_key(function, args);
+	map<string, ConstexprValue>::const_iterator cached =
+		constexpr_call_result_cache_.find(cache_key);
+	if (cached != constexpr_call_result_cache_.end())
+	{
+		out = cached->second;
+		return true;
+	}
+	for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
+	{
+		if (cur->kind != BindingKind::Function)
+			break;
+		if (!cur->is_constexpr &&
+		    !cur->is_generated_default_constructor &&
+		    !cur->is_generated_aggregate_constructor &&
+		    !cur->is_defaulted)
+			continue;
+		size_t extra_before = extra_lowir_nodes_.size();
+		parse_pending_function_body(cur);
+		parse_pending_member_body(cur);
+		extra_lowir_nodes_.resize(extra_before);
+	}
+	auto replay_bodyless_constexpr_template =
+		[&](Binding* target) -> bool {
+			if (target == NULL ||
+			    function_bodies_.find(target) != function_bodies_.end())
+				return true;
+			map<Binding*, TemplateDeclaration*>::iterator templ =
+				function_template_placeholders_.find(target);
+			map<Binding*, vector<TemplateArgument> >::iterator arg_it =
+				function_template_specialization_arguments_.find(target);
+			if (templ == function_template_placeholders_.end() ||
+			    arg_it == function_template_specialization_arguments_.end())
+				return false;
+			TemplateDeclaration* declaration = templ->second;
+			if (declaration == NULL ||
+			    !declaration->has_definition ||
+			    !target->is_constexpr ||
+			    target->type.get() == NULL ||
+			    target->type->kind != pa11::TypeKind::Function)
+				return false;
+			size_t body_pos = declaration->decl_end;
+			for (size_t i = declaration->decl_begin;
+			     i < declaration->decl_end && i < tokens_.size();
+			     ++i)
+				if (tokens_[i].kind == posttoken::TokenKind::Simple &&
+				    tokens_[i].type == OP_LBRACE)
+				{
+					body_pos = i;
+					break;
+				}
+			if (body_pos == declaration->decl_end)
+				return false;
+			vector<string> names = declaration->function_parameter_names;
+			if (declaration->placeholder != NULL)
+			{
+				map<Binding*, vector<string> >::const_iterator saved =
+					function_parameter_names_.find(declaration->placeholder);
+				if (saved != function_parameter_names_.end())
+				{
+					if (names.empty())
+						names = saved->second;
+					else if (names.size() < saved->second.size())
+						names.insert(names.end(),
+						             saved->second.begin() + names.size(),
+						             saved->second.end());
+				}
+			}
+			vector<ParameterInfo> parameters;
+			size_t first_concrete_index =
+				target->owner != NULL &&
+				target->owner->kind == ScopeKind::Class &&
+				!target->is_static_member
+				? 1 : 0;
+			size_t concrete_index = first_concrete_index;
+			TypePtr generic = declaration->generic_function_type;
+			size_t generic_count =
+				generic.get() != NULL &&
+				generic->kind == pa11::TypeKind::Function
+				? generic->parameters.size() : 0;
+			for (size_t gi = concrete_index; gi < generic_count; ++gi)
+			{
+				TypePtr pattern = generic->parameters[gi];
+				string pname = gi < names.size() ? names[gi] : string();
+				if (first_concrete_index != 0 &&
+				    gi - first_concrete_index < names.size())
+					pname = names[gi - first_concrete_index];
+				string pack_name;
+				if (function_parameter_pack_name(declaration,
+				                                 pattern,
+				                                 pack_name))
+				{
+					size_t pack_size = 0;
+					for (size_t pi = 0;
+					     pi < declaration->parameters.size() &&
+					     pi < arg_it->second.size();
+					     ++pi)
+						if (declaration->parameters[pi].name == pack_name &&
+						    arg_it->second[pi].kind ==
+							    TemplateArgumentKind::Pack)
+							pack_size = arg_it->second[pi].pack.size();
+					if (pname.empty())
+						pname = pack_name;
+					if (pack_size == 0)
+					{
+						ParameterInfo parameter;
+						parameter.name = pname;
+						parameter.type = pattern;
+						parameter.pack_name = pack_name;
+						parameter.pack_expression_name = pname;
+						parameters.push_back(parameter);
+						continue;
+					}
+					for (size_t p = 0; p < pack_size; ++p)
+					{
+						if (concrete_index >=
+						    target->type->parameters.size())
+							return false;
+						ParameterInfo parameter;
+						parameter.name = p == 0
+							? pname
+							: pname + "__pack" + to_string(p + 1);
+						parameter.type =
+							target->type->parameters[concrete_index++];
+						parameter.pack_name = pack_name;
+						parameter.pack_expression_name = pname;
+						parameters.push_back(parameter);
+					}
+					continue;
+				}
+				if (concrete_index >= target->type->parameters.size())
+					return false;
+				ParameterInfo parameter;
+				parameter.name = pname;
+				parameter.type = target->type->parameters[concrete_index++];
+				parameters.push_back(parameter);
+			}
+			PendingFunctionBody pending;
+			pending.function = target;
+			pending.node = Node("function-definition " +
+			                    qualified_decl_name(target) + " " +
+			                    pa11::describe_type(target->type));
+			pending.node.binding = target;
+			pending.node.type = target->type;
+			pending.parameters = parameters;
+			pending.body_pos = body_pos;
+			pending.class_type =
+				target->owner != NULL
+				? pa11::record_type_for_scope(target->owner)
+				: TypePtr();
+			pending.scopes.clear();
+			pending.scopes.push_back(
+				declaration->lexical_scope != NULL
+				? declaration->lexical_scope
+				: declaration->owner);
+			pending.friend_class_scopes = active_friend_class_scopes_;
+			pending.type_substitutions = template_type_substitutions_;
+			pending.value_substitutions = template_value_substitutions_;
+			pending.pack_substitutions = template_type_parameter_packs_;
+			size_t extra_before = extra_lowir_nodes_.size();
+			parse_pending_member_body_now(pending);
+			extra_lowir_nodes_.resize(extra_before);
+			return function_bodies_.find(target) != function_bodies_.end();
+		};
+	for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
+	{
+		if (cur->kind != BindingKind::Function)
+			break;
+		replay_bodyless_constexpr_template(cur);
+	}
 	Binding* body_binding = function;
 	map<Binding*, Node>::const_iterator found = function_bodies_.end();
 	for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
@@ -1249,6 +1546,39 @@ bool Parser::try_evaluate_constexpr_call_values(Binding* function,
 		{
 			body_binding = cur;
 			break;
+		}
+	}
+	if (found == function_bodies_.end() || body_binding == NULL)
+	{
+		size_t extra_before = extra_lowir_nodes_.size();
+		for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
+		{
+			if (cur->kind != BindingKind::Function)
+				break;
+			if (!cur->is_constexpr &&
+			    !cur->is_generated_default_constructor &&
+			    !cur->is_generated_aggregate_constructor &&
+			    !cur->is_defaulted)
+				continue;
+			ensure_function_body_extra_node(cur);
+		}
+		extra_lowir_nodes_.resize(extra_before);
+		body_binding = function;
+		for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
+		{
+			if (cur->kind != BindingKind::Function)
+				break;
+			if (!cur->is_constexpr &&
+			    !cur->is_generated_default_constructor &&
+			    !cur->is_generated_aggregate_constructor &&
+			    !cur->is_defaulted)
+				continue;
+			found = function_bodies_.find(cur);
+			if (found != function_bodies_.end())
+			{
+				body_binding = cur;
+				break;
+			}
 		}
 	}
 	if (found == function_bodies_.end() || body_binding == NULL)
@@ -1284,10 +1614,12 @@ bool Parser::try_evaluate_constexpr_call_values(Binding* function,
 	}
 	if (body_index >= fn.children.size())
 		return false;
+
 	ConstexprValue result;
 	EvalFlow flow = eval_statement(*this, fn.children[body_index], state, result);
 	if (flow != EvalFlow::Return || !result.valid)
 		return false;
+	constexpr_call_result_cache_[cache_key] = result;
 	out = result;
 	return true;
 }
@@ -1302,6 +1634,21 @@ bool Parser::try_evaluate_constexpr_constructor(Binding* function,
 		return false;
 	if (function == NULL)
 		return false;
+	for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)
+	{
+		if (cur->kind != BindingKind::Function)
+			break;
+		if (!cur->is_constexpr &&
+		    !cur->is_generated_default_constructor &&
+		    !cur->is_generated_aggregate_constructor &&
+		    !cur->is_defaulted)
+			continue;
+		size_t extra_before = extra_lowir_nodes_.size();
+		parse_pending_function_body(cur);
+		parse_pending_member_body(cur);
+		ensure_function_body_extra_node(cur);
+		extra_lowir_nodes_.resize(extra_before);
+	}
 	Binding* body_binding = function;
 	map<Binding*, Node>::const_iterator found = function_bodies_.end();
 	for (Binding* cur = function; cur != NULL; cur = cur->aliased_binding)

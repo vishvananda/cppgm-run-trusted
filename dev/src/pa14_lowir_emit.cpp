@@ -4,12 +4,81 @@ namespace pa14 {
 namespace internal {
 namespace {
 
+	bool hosted_library_binding(const Binding* binding);
+
+		bool suppress_noop_generated_constructor_call(const Node& node)
+		{
+			const Binding* binding = node.direct_call;
+			return binding != NULL &&
+			       (starts_with(node.line, "base-init-action") ||
+			        starts_with(node.line, "member-init-action")) &&
+			       binding->is_generated_default_constructor &&
+			       binding->is_noop_constructor &&
+			       binding->unwind_no;
+		}
+
 	void collect_direct_calls(const Node& node, set<const Binding*>& out)
 	{
-		if (node.direct_call != NULL)
+		if (node.direct_call != NULL &&
+		    !suppress_noop_generated_constructor_call(node))
 			out.insert(node.direct_call);
 		for (size_t i = 0; i < node.children.size(); ++i)
 			collect_direct_calls(node.children[i], out);
+	}
+
+	void collect_addressed_functions(const Node& node,
+	                                 set<const Binding*>& out)
+	{
+		if (starts_with(node.line, "unary-expression") &&
+		    node.has_op &&
+		    node.op == OP_AMP &&
+		    !node.children.empty() &&
+		    node.children[0].binding != NULL &&
+		    node.children[0].binding->kind == BindingKind::Function &&
+		    !hosted_library_binding(node.children[0].binding))
+			out.insert(node.children[0].binding);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			collect_addressed_functions(node.children[i], out);
+	}
+
+	void collect_body_demand_calls(const Node& node,
+	                               set<const Binding*>& out)
+	{
+		if (starts_with(node.line, "function-definition ") &&
+		    hosted_library_binding(node.binding) &&
+		    !node.binding->is_object_root)
+			return;
+		if (node.direct_call != NULL &&
+		    !suppress_noop_generated_constructor_call(node))
+			out.insert(node.direct_call);
+		if (starts_with(node.line, "unary-expression") &&
+		    node.has_op &&
+		    node.op == OP_AMP &&
+		    !node.children.empty() &&
+		    node.children[0].binding != NULL &&
+		    node.children[0].binding->kind == BindingKind::Function &&
+		    !hosted_library_binding(node.children[0].binding))
+			out.insert(node.children[0].binding);
+		for (size_t i = 0; i < node.children.size(); ++i)
+			collect_body_demand_calls(node.children[i], out);
+	}
+
+	void mark_object_root_bindings(const set<const Binding*>& bindings,
+	                               bool hosted_compatibility)
+	{
+		for (set<const Binding*>::const_iterator it = bindings.begin();
+		     it != bindings.end();
+		     ++it)
+		{
+			Binding* binding = const_cast<Binding*>(*it);
+			if (binding == NULL)
+				continue;
+			if (hosted_compatibility && hosted_library_binding(binding))
+				continue;
+			binding->is_object_root = true;
+			if (binding->aliased_binding != NULL)
+				binding->aliased_binding->is_object_root = true;
+		}
 	}
 
 	void note_function_definitions(ProgramLowerer& program, const Node& node)
@@ -127,9 +196,21 @@ bool binding_mentions_template_specialization(const Binding* binding)
 
 bool same_binding_or_alias(const Binding* left, const Binding* right)
 {
-	return left == right ||
-	       (left != NULL && left->aliased_binding == right) ||
-	       (right != NULL && right->aliased_binding == left);
+	if (left == right ||
+	    (left != NULL && left->aliased_binding == right) ||
+	    (right != NULL && right->aliased_binding == left))
+		return true;
+	if (left == NULL || right == NULL ||
+	    left->kind != BindingKind::Function ||
+	    right->kind != BindingKind::Function)
+		return false;
+	string left_symbol = left->function_specialization_symbol;
+	string right_symbol = right->function_specialization_symbol;
+	if (left_symbol.empty() && left->aliased_binding != NULL)
+		left_symbol = left->aliased_binding->function_specialization_symbol;
+	if (right_symbol.empty() && right->aliased_binding != NULL)
+		right_symbol = right->aliased_binding->function_specialization_symbol;
+	return !left_symbol.empty() && left_symbol == right_symbol;
 }
 
 bool early_hidden_friend_definition(const Node& node,
@@ -177,15 +258,20 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 		program.collect_node(node);
 }
 
-bool referenced_extra_function(const Node& node,
-                               const set<const Binding*>& direct_calls)
-{
-	if (!starts_with(node.line, "function-definition ") ||
-	    node.binding == NULL ||
-	    node.binding->is_inline_definition)
-		return false;
-	if (node.binding->is_object_root)
-		return true;
+	bool referenced_extra_function(const Node& node,
+	                               const set<const Binding*>& direct_calls,
+	                               bool hosted_compatibility)
+	{
+		if (!starts_with(node.line, "function-definition ") ||
+		    node.binding == NULL ||
+		    node.binding->is_inline_definition)
+			return false;
+		if (hosted_compatibility &&
+		    hosted_library_binding(node.binding) &&
+		    !node.binding->is_object_root)
+			return false;
+		if (node.binding->is_object_root)
+			return true;
 	for (set<const Binding*>::const_iterator it = direct_calls.begin();
 	     it != direct_calls.end(); ++it)
 		if (same_binding_or_alias(node.binding, *it))
@@ -193,15 +279,18 @@ bool referenced_extra_function(const Node& node,
 	return false;
 }
 
-void collect_referenced_extra_functions(ProgramLowerer& program,
-                                        const vector<Node>& extra,
-                                        const set<const Binding*>& direct_calls)
-{
-	set<string> collected;
-	for (size_t i = 0; i < extra.size(); ++i)
+	void collect_referenced_extra_functions(ProgramLowerer& program,
+	                                        const vector<Node>& extra,
+	                                        const set<const Binding*>& direct_calls,
+	                                        bool hosted_compatibility)
 	{
-		if (!referenced_extra_function(extra[i], direct_calls))
-			continue;
+		set<string> collected;
+		for (size_t i = 0; i < extra.size(); ++i)
+		{
+			if (!referenced_extra_function(extra[i],
+			                               direct_calls,
+			                               hosted_compatibility))
+				continue;
 		string name = program.symbol_for(extra[i].binding);
 		if (program.defined_functions.find(name) !=
 		        program.defined_functions.end() ||
@@ -211,18 +300,61 @@ void collect_referenced_extra_functions(ProgramLowerer& program,
 	}
 }
 
-void demand_object_roots(ProgramLowerer& program, const vector<Node>& extra)
-{
-	for (size_t i = 0; i < extra.size(); ++i)
+	void demand_object_roots(ProgramLowerer& program,
+	                         const vector<Node>& extra,
+	                         const set<const Binding*>& root_definitions)
 	{
-		if (extra[i].binding == NULL ||
-		    (!extra[i].binding->is_object_root &&
-		     extra[i].token_text != "inline-object-root"))
-			continue;
-		program.demand_inline_function(extra[i].binding);
+		for (size_t i = 0; i < extra.size(); ++i)
+		{
+			if (extra[i].binding == NULL ||
+			    (!extra[i].binding->is_object_root &&
+			     extra[i].token_text != "inline-object-root"))
+				continue;
+			if (extra[i].token_text != "inline-object-root" &&
+			    root_definitions.count(extra[i].binding) != 0)
+				continue;
+			program.demand_inline_function(extra[i].binding);
+			program.emit_pending_inline_definitions();
+		}
+	}
+
+	bool skip_hosted_function_definition(const Node& node,
+	                                     bool hosted_compatibility)
+	{
+		return hosted_compatibility &&
+		       starts_with(node.line, "function-definition ") &&
+		       hosted_library_binding(node.binding) &&
+		       !node.binding->is_object_root &&
+		       node.token_text != "inline-object-root";
+	}
+
+	void collect_filtered_node(ProgramLowerer& program,
+	                           const Node& node,
+	                           bool hosted_compatibility)
+	{
+		if (skip_hosted_function_definition(node, hosted_compatibility))
+			return;
+		if (starts_with(node.line, "namespace-definition"))
+		{
+			for (size_t i = 0; i < node.children.size(); ++i)
+				collect_filtered_node(program,
+				                      node.children[i],
+				                      hosted_compatibility);
+			return;
+		}
+		program.collect_node(node);
+	}
+
+	void collect_translation_unit_filtered(ProgramLowerer& program,
+	                                       const Node& root,
+	                                       bool hosted_compatibility)
+	{
+		for (size_t i = 0; i < root.children.size(); ++i)
+			collect_filtered_node(program,
+			                      root.children[i],
+			                      hosted_compatibility);
 		program.emit_pending_inline_definitions();
 	}
-}
 
 void demand_early_hidden_friends(ProgramLowerer& program,
                                  const vector<Node>& extra,
@@ -257,7 +389,7 @@ const Node* extra_node_for_binding(const vector<Node>& extra,
                                    const Binding* binding)
 {
 	for (size_t i = 0; i < extra.size(); ++i)
-		if (extra[i].binding == binding)
+		if (same_binding_or_alias(extra[i].binding, binding))
 			return &extra[i];
 	return NULL;
 }
@@ -321,23 +453,153 @@ void demand_noop_generated_default_dependencies(
 		                                           seen);
 }
 
-void collect_parser_output(ProgramLowerer& program,
-                           pa12::internal::Parser& parser)
+bool hosted_library_binding(const Binding* binding)
 {
+	if (binding == NULL)
+		return false;
+	if (binding->name.compare(0, 10, "__builtin_") == 0)
+		return true;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+	{
+		if (scope->kind != ScopeKind::Namespace)
+			continue;
+		if (scope->name == "std" || scope->name == "__gnu_cxx")
+			return true;
+	}
+	return false;
+}
+
+void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
+                                      set<const Binding*>& direct_calls,
+                                      bool hosted_compatibility)
+{
+	set<const Binding*> processed;
+	set<const Binding*> scanned_bodies;
+	size_t scanned_extra = parser.extra_lowir_nodes().size();
+	for (;;)
+	{
+		bool progress = false;
+		vector<const Binding*> calls(direct_calls.begin(), direct_calls.end());
+		for (size_t i = 0; i < calls.size(); ++i)
+		{
+			if (!processed.insert(calls[i]).second)
+				continue;
+			progress = true;
+				Binding* object_root_call = const_cast<Binding*>(calls[i]);
+				if (hosted_compatibility && object_root_call != NULL)
+				{
+					object_root_call->is_object_root = true;
+					if (object_root_call->aliased_binding != NULL)
+						object_root_call->aliased_binding->is_object_root = true;
+				}
+				if (hosted_library_binding(calls[i]) &&
+				    calls[i]->function_specialization_symbol.empty() &&
+				    !calls[i]->is_inline_definition &&
+				    !calls[i]->is_object_root)
+					continue;
+				parser.demand_lowir_function_body(const_cast<Binding*>(calls[i]));
+				const vector<Node>& function_extra =
+					parser.extra_lowir_nodes();
+				const Node* body = extra_node_for_binding(function_extra,
+				                                          calls[i]);
+				if (body == NULL && calls[i]->aliased_binding != NULL)
+					body = extra_node_for_binding(function_extra,
+					                              calls[i]->aliased_binding);
+				if (body != NULL &&
+				    body->binding != NULL &&
+				    hosted_compatibility)
+				{
+					body->binding->is_object_root = true;
+					if (body->binding->aliased_binding != NULL)
+						body->binding->aliased_binding->is_object_root =
+							true;
+				}
+				if (body != NULL &&
+				    body->binding != NULL &&
+				    scanned_bodies.insert(body->binding).second)
+				{
+					collect_direct_calls(*body, direct_calls);
+					collect_addressed_functions(*body, direct_calls);
+				}
+		}
+		const vector<Node>& extra = parser.extra_lowir_nodes();
+		while (scanned_extra < extra.size())
+		{
+			const Node& node = extra[scanned_extra];
+			bool scan_extra = !hosted_compatibility;
+			if (!scan_extra &&
+			    node.binding != NULL &&
+			    node.binding->is_object_root)
+				scan_extra = true;
+			if (!scan_extra &&
+			    node.binding != NULL &&
+			    direct_calls.count(node.binding) != 0)
+				scan_extra = true;
+			if (!scan_extra &&
+			    node.binding != NULL &&
+			    node.binding->aliased_binding != NULL &&
+			    direct_calls.count(node.binding->aliased_binding) != 0)
+				scan_extra = true;
+			if (scan_extra)
+			{
+				collect_direct_calls(node, direct_calls);
+				collect_addressed_functions(node, direct_calls);
+				progress = true;
+			}
+			++scanned_extra;
+		}
+		if (!progress)
+			break;
+	}
+}
+
+	void collect_parser_output(ProgramLowerer& program,
+	                           pa12::internal::Parser& parser,
+	                           bool hosted_compatibility)
+	{
 		const vector<Node>& extra = parser.extra_lowir_nodes();
 		set<const Binding*> direct_calls;
-		collect_direct_calls(parser.root(), direct_calls);
+		set<const Binding*> body_demands;
+		set<const Binding*> root_definitions;
+		if (hosted_compatibility)
+			collect_body_demand_calls(parser.root(), direct_calls);
+		else
+		{
+			collect_direct_calls(parser.root(), direct_calls);
+			collect_addressed_functions(parser.root(), direct_calls);
+		}
+		if (hosted_compatibility)
+			mark_object_root_bindings(direct_calls, hosted_compatibility);
+		demand_parser_direct_call_bodies(parser,
+		                                 direct_calls,
+		                                 hosted_compatibility);
+		collect_body_demand_calls(parser.root(), body_demands);
+		if (hosted_compatibility)
+			mark_object_root_bindings(body_demands, hosted_compatibility);
+		demand_parser_direct_call_bodies(parser,
+		                                 body_demands,
+		                                 hosted_compatibility);
+		direct_calls.insert(body_demands.begin(), body_demands.end());
 		note_function_definitions(program, parser.root());
+		root_definitions = program.function_definition_bindings;
 		for (size_t i = 0; i < extra.size(); ++i)
 			note_function_definitions(program, extra[i]);
 		for (size_t i = 0; i < extra.size(); ++i)
 			program.register_inline_definition(extra[i]);
-	for (size_t i = 0; i < extra.size(); ++i)
-		collect_extra_variable(program, extra[i]);
-	demand_object_roots(program, extra);
-	demand_early_hidden_friends(program, extra, direct_calls);
-	program.collect_translation_unit(parser.root());
-	collect_referenced_extra_functions(program, extra, direct_calls);
+		for (size_t i = 0; i < extra.size(); ++i)
+			collect_extra_variable(program, extra[i]);
+		demand_object_roots(program, extra, root_definitions);
+		demand_early_hidden_friends(program, extra, direct_calls);
+		if (hosted_compatibility)
+			collect_translation_unit_filtered(program,
+			                                  parser.root(),
+			                                  hosted_compatibility);
+		else
+			program.collect_translation_unit(parser.root());
+		collect_referenced_extra_functions(program,
+		                                   extra,
+		                                   direct_calls,
+		                                   hosted_compatibility);
 	demand_noop_generated_default_dependencies(program, extra, direct_calls);
 	demand_generated_copy_move_dependencies(program, extra);
 	program.emit_pending_inline_definitions();
@@ -362,7 +624,9 @@ void emit_lowir(const vector<string>& srcfiles,
 		unique_ptr<pa12::internal::Parser> parser(
 			new pa12::internal::Parser(srcfiles[i], pa12_options));
 		parser->parse_translation_unit();
-		internal::collect_parser_output(program, *parser);
+		internal::collect_parser_output(program,
+		                                *parser,
+		                                options.hosted_compatibility);
 		parsers.push_back(std::move(parser));
 	}
 	program.emit_global_lifecycle_functions();

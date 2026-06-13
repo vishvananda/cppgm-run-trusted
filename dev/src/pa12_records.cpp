@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include <algorithm>
 #include <functional>
 #include <stdexcept>
 using namespace std; namespace pa12 { namespace internal { namespace {
@@ -12,14 +13,39 @@ zero.category = ValueCategory::PRValue; zero.token_text = "0"; zero.has_constant
 return zero; } Node empty_braced_value_node(TypePtr type) {
 Node init("braced-init-list"); init.type = type; init.category = ValueCategory::PRValue; return init;
 }
+bool implicit_generated_default_constructor(Binding* binding) { return binding != NULL && binding->kind == BindingKind::Function &&
+binding->type.get() != NULL && binding->type->kind == pa11::TypeKind::Function && binding->type->parameters.size() == 1 &&
+binding->is_generated_default_constructor && !binding->is_defaulted; }
+bool user_declared_constructor_binding(Binding* binding) { return binding != NULL && binding->kind == BindingKind::Function &&
+binding->type.get() != NULL && binding->type->kind == pa11::TypeKind::Function &&
+!binding->is_generated_aggregate_constructor && !binding->is_generated_copy_move_constructor &&
+!(binding->is_generated_default_constructor && !binding->is_defaulted); }
+bool record_has_user_declared_constructor(TypePtr type) { TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return false;
+map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end()) return false;
+for (size_t i = 0; i < found->second.size(); ++i) if (user_declared_constructor_binding(found->second[i])) return true; return false; }
 }  // namespace
 TypePtr Parser::make_member_function_type(Scope* class_scope, TypePtr type) { TypePtr class_type = pa11::record_type_for_scope(class_scope); if (class_type.get() == NULL)
 class_type = pa11::make_record_type(class_scope->name, "struct", true, class_scope);
 if (type->cv != pa11::CV_NONE) class_type = pa11::make_cv(class_type, type->cv); vector<TypePtr> params; params.push_back(pa11::make_pointer(class_type));
 for (size_t i = 0; i < type->parameters.size(); ++i) params.push_back(type->parameters[i]); return pa11::make_function(type->base, params, type->variadic); }
+void Parser::discard_implicit_default_constructor(TypePtr type, Binding* keep) { TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return; map<string, vector<Binding*> >::iterator found =
+bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end()) return; vector<Binding*> stale;
+for (size_t i = 0; i < found->second.size(); ++i) if (implicit_generated_default_constructor(found->second[i])) stale.push_back(found->second[i]);
+if (stale.empty()) return; generated_default_ctors_.erase(bare.get()); for (size_t s = 0; s < stale.size(); ++s) {
+Binding* binding = stale[s]; if (binding != keep) {
+found->second.erase(remove(found->second.begin(), found->second.end(), binding), found->second.end());
+bare->scope->binding_order.erase(remove(bare->scope->binding_order.begin(), bare->scope->binding_order.end(), binding), bare->scope->binding_order.end()); }
+function_bodies_.erase(binding); default_arguments_.erase(binding); function_parameter_names_.erase(binding); pending_function_bodies_.erase(binding);
+deleted_functions_.erase(binding); for (map<Scope*, vector<PendingFunctionBody> >::iterator it = pending_member_bodies_.begin(); it != pending_member_bodies_.end(); ++it)
+for (size_t i = 0; i < it->second.size(); ) { if (it->second[i].function == binding) it->second.erase(it->second.begin() + i); else ++i; }
+for (size_t i = 0; i < generated_nodes_.size(); ) { if (generated_nodes_[i].binding == binding) generated_nodes_.erase(generated_nodes_.begin() + i); else ++i; }
+for (size_t i = 0; i < extra_lowir_nodes_.size(); ) { if (extra_lowir_nodes_[i].binding == binding) extra_lowir_nodes_.erase(extra_lowir_nodes_.begin() + i); else ++i; } } }
 Binding* Parser::find_default_constructor(TypePtr type) const { TypePtr bare = pa11::strip_cv(type); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 return NULL; map<string, vector<Binding*> >::iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end())
-return NULL; for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];
+return NULL; bool has_user_declared_constructor = record_has_user_declared_constructor(bare); for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];
+if (has_user_declared_constructor && implicit_generated_default_constructor(binding)) continue;
 if (binding->kind == BindingKind::Function && binding->type->kind == pa11::TypeKind::Function && binding->type->parameters.size() == 1) return binding;
 if (binding->kind == BindingKind::Function && binding->type->kind == pa11::TypeKind::Function) { map<Binding*, vector<Expr> >::const_iterator defaults =
 default_arguments_.find(binding); if (defaults == default_arguments_.end()) continue; bool have_defaults = true;
@@ -32,7 +58,19 @@ bool have_extra_definition = false; for (size_t i = 0; i < extra_lowir_nodes_.si
 if (existing->is_generated_default_constructor && existing->is_inline_definition && !have_extra_definition && !bare->is_polymorphic) existing->is_inline_definition = false;
 bool stale_generated_default = !existing->is_inline_definition && existing->is_generated_default_constructor; if (!stale_generated_default)
 return existing; existing->is_generated_default_constructor = true; reemit_stale_generated_default = true; }
-pa11::layout_record_type(bare); vector<Node> init_actions; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare); vector<TypePtr> virtual_bases = pa11::record_virtual_bases(bare); bool has_virtual_bases = !virtual_bases.empty(); bool forced_nontrivial = false; if (!force_trivial || !bare->fields.empty() || !direct_bases.empty()) {
+map<const void*, TemplateDeclaration*>::iterator template_decl = record_template_declarations_.find(bare.get()); if (template_decl != record_template_declarations_.end()) { map<pair<TemplateDeclaration*, string>, vector<TemplateDeclaration*> >::iterator member_templates =
+member_function_templates_.find(make_pair(template_decl->second, bare->scope->name)); if (member_templates != member_function_templates_.end()) for (size_t i = 0; i < member_templates->second.size(); ++i)
+if (member_templates->second[i]->constructor_template) return NULL; }
+if (record_has_user_declared_constructor(bare)) return NULL;
+		TypePtr this_type = pa11::make_pointer(bare);
+	Scope* generated_function_scope =
+		pa11::create_child_scope(bare->scope, ScopeKind::Function, bare->scope->name);
+	Binding* generated_this_binding =
+		pa11::add_binding(generated_function_scope,
+		                  BindingKind::Parameter,
+		                  "this",
+		                  this_type);
+	pa11::layout_record_type(bare); vector<Node> init_actions; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare); vector<TypePtr> virtual_bases = pa11::record_virtual_bases(bare); bool has_virtual_bases = !virtual_bases.empty(); bool forced_nontrivial = false; if (!force_trivial || !bare->fields.empty() || !direct_bases.empty()) {
 for (size_t b = 0; b < virtual_bases.size(); ++b) { TypePtr virtual_base = virtual_bases[b].get() != NULL ? pa11::strip_cv(virtual_bases[b]) : TypePtr(); Binding* base_ctor = virtual_base.get() != NULL && virtual_base->kind == pa11::TypeKind::Record
 ? ensure_default_constructor(virtual_base) : NULL; if (virtual_base.get() != NULL && virtual_base->kind == pa11::TypeKind::Record && base_ctor != NULL) {
 bool base_noop = base_ctor->is_noop_constructor || (base_ctor->is_generated_default_constructor && base_ctor->unwind_no);
@@ -45,12 +83,12 @@ bool base_noop = base_ctor->is_noop_constructor || (base_ctor->is_generated_defa
 if (base_noop && !base_ctor->is_generated_default_constructor && (base_ctor->is_private || base_ctor->is_protected_member))
 forced_nontrivial = true;
 if ((!base_noop || direct_base->is_polymorphic || !pa11::record_virtual_bases(direct_base).empty())) init_actions.push_back(make_base_init_action(direct_base, NULL)); } } for (size_t i = 0; i < bare->fields.size(); ++i)
-{ Binding* field = bare->fields[i]; map<Binding*, Node>::const_iterator init = default_member_initializers_.find(field);
-if (init != default_member_initializers_.end()) init_actions.push_back(make_member_init_action(field, &init->second)); else {
+	{ Binding* field = bare->fields[i]; map<Binding*, Node>::const_iterator init = default_member_initializers_.find(field);
+	if (init != default_member_initializers_.end()) init_actions.push_back(make_member_init_action(field, &init->second, generated_this_binding)); else {
 TypePtr field_bare = pa11::strip_cv(field->type); Binding* field_ctor = ensure_default_constructor(field->type); Binding* elem_ctor = field_bare->kind == pa11::TypeKind::Array ? ensure_default_constructor(field_bare->base) : NULL;
 bool field_noop = field_ctor != NULL && field_ctor->is_generated_default_constructor && field_ctor->unwind_no; bool elem_noop = elem_ctor != NULL &&
 elem_ctor->is_generated_default_constructor && elem_ctor->unwind_no; if ((field_ctor != NULL && !field_noop) || (elem_ctor != NULL && !elem_noop))
-init_actions.push_back(make_member_init_action(field, NULL)); else if (field_ctor == NULL && elem_ctor == NULL && field_bare->kind == pa11::TypeKind::Record &&
+	init_actions.push_back(make_member_init_action(field, NULL, generated_this_binding)); else if (field_ctor == NULL && elem_ctor == NULL && field_bare->kind == pa11::TypeKind::Record &&
 field_bare->scope != NULL) { map<string, vector<Binding*> >::const_iterator ctors = field_bare->scope->members.find(field_bare->scope->name);
 bool has_user_ctor = false; if (ctors != field_bare->scope->members.end()) for (size_t j = 0; j < ctors->second.size(); ++j) {
 Binding* ctor = ctors->second[j]; if (ctor->kind == BindingKind::Function && !ctor->is_generated_default_constructor && !ctor->is_generated_aggregate_constructor &&
@@ -65,29 +103,29 @@ if (init_actions.empty() && !force_trivial && !empty_implicit_record && !bare->i
 } const void* key = bare.get(); if (generated_default_ctors_.find(key) != generated_default_ctors_.end()) {
 Binding* generated = find_default_constructor(bare); if (!(generated != NULL && generated->is_generated_default_constructor && !generated->is_inline_definition))
 return generated; existing = generated; } generated_default_ctors_.insert(key);
-TypePtr this_type = pa11::make_pointer(bare); vector<TypePtr> params; params.push_back(this_type); TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-params, false); Binding* ctor = existing != NULL ? existing
-: add_value(bare->scope, BindingKind::Function, bare->scope->name, fn_type); ctor->type = fn_type; ctor->is_inline_definition = true;
-if (reemit_stale_generated_default) ctor->is_inline_definition = false; ctor->is_generated_default_constructor = true; ctor->is_noop_constructor = init_actions.empty() && !bare->is_polymorphic && !has_virtual_bases;
+	vector<TypePtr> params; params.push_back(this_type); TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
+	params, false); Binding* ctor = existing != NULL ? existing
+		: add_value(bare->scope, BindingKind::Function, bare->scope->name, fn_type); ctor->type = fn_type; ctor->is_inline_definition = true;
+	if (reemit_stale_generated_default && init_actions.empty()) ctor->is_inline_definition = false; ctor->is_generated_default_constructor = true; ctor->is_noop_constructor = init_actions.empty() && !bare->is_polymorphic && !has_virtual_bases;
 ctor->unwind_no = init_actions.empty() && !forced_nontrivial; Node fn("function-definition " + qualified_decl_name(ctor) + " " + pa11::describe_type(fn_type)); fn.binding = ctor;
-fn.type = fn_type; Node param("parameter this " + pa11::describe_type(this_type)); param.type = this_type; add_child(fn, param);
+	fn.type = fn_type; Node param("parameter this " + pa11::describe_type(this_type)); param.binding = generated_this_binding; param.type = this_type; add_child(fn, param);
 Node body("compound-statement"); for (size_t i = 0; i < init_actions.size(); ++i) add_child(body, init_actions[i]); add_child(fn, body);
 remember_function_body(ctor, fn); generated_nodes_.push_back(fn); extra_lowir_nodes_.push_back(fn); return ctor;
 } Binding* Parser::ensure_aggregate_constructor(TypePtr type, size_t arg_count) { TypePtr bare = pa11::strip_cv(type);
-if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL || arg_count == 0) return NULL; map<string, vector<Binding*> >::const_iterator existing =
+if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL || arg_count == 0) return NULL; Binding* reusable_aggregate = NULL; map<string, vector<Binding*> >::const_iterator existing =
 bare->scope->members.find(bare->scope->name); if (existing != bare->scope->members.end()) { for (size_t i = 0; i < existing->second.size(); ++i)
 { Binding* binding = existing->second[i]; if (binding->kind == BindingKind::Function && binding->type->kind == pa11::TypeKind::Function &&
-binding->type->parameters.size() == arg_count + 1) return binding; } }
+binding->type->parameters.size() == arg_count + 1) { if (!binding->is_generated_aggregate_constructor || function_bodies_.find(binding) != function_bodies_.end()) return binding; reusable_aggregate = binding; break; } } }
 pa11::layout_record_type(bare); if (arg_count > bare->fields.size()) return NULL; pair<const void*, size_t> key(bare.get(), arg_count);
-if (generated_aggregate_ctors_.find(key) != generated_aggregate_ctors_.end()) { existing = bare->scope->members.find(bare->scope->name); if (existing != bare->scope->members.end())
-for (size_t i = 0; i < existing->second.size(); ++i) if (existing->second[i]->kind == BindingKind::Function && existing->second[i]->type->parameters.size() == arg_count + 1) return existing->second[i];
+if (generated_aggregate_ctors_.find(key) != generated_aggregate_ctors_.end() && reusable_aggregate == NULL) { existing = bare->scope->members.find(bare->scope->name); if (existing != bare->scope->members.end())
+for (size_t i = 0; i < existing->second.size(); ++i) if (existing->second[i]->kind == BindingKind::Function && existing->second[i]->type->parameters.size() == arg_count + 1 && (!existing->second[i]->is_generated_aggregate_constructor || function_bodies_.find(existing->second[i]) != function_bodies_.end())) return existing->second[i];
 return NULL; } generated_aggregate_ctors_.insert(key); if (arg_count > 0)
 ensure_default_constructor(bare); TypePtr this_type = pa11::make_pointer(bare); vector<TypePtr> params; vector<string> names;
 params.push_back(this_type); names.push_back("this"); for (size_t i = 0; i < arg_count; ++i) {
 params.push_back(bare->fields[i]->type); names.push_back(bare->fields[i]->name.empty() ? "__param" + to_string(i + 1) : bare->fields[i]->name);
 } TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID), params, false);
-Binding* ctor = add_value(bare->scope, BindingKind::Function, bare->scope->name, fn_type); ctor->is_inline_definition = true; ctor->is_generated_aggregate_constructor = true;
-ctor->unwind_no = true; function_parameter_names_[ctor] = names; Node fn("function-definition " + qualified_decl_name(ctor) + " " + pa11::describe_type(fn_type));
+Binding* ctor = reusable_aggregate != NULL ? reusable_aggregate : add_value(bare->scope, BindingKind::Function, bare->scope->name, fn_type); ctor->type = fn_type; ctor->is_inline_definition = true; ctor->is_generated_aggregate_constructor = true;
+ctor->unwind_no = true; function_parameter_names_[ctor] = names; ctor->function_parameter_names = names; Node fn("function-definition " + qualified_decl_name(ctor) + " " + pa11::describe_type(fn_type));
 fn.binding = ctor; fn.type = fn_type; Scope* function_scope = pa11::create_child_scope(bare->scope, ScopeKind::Function, ctor->name);
 Binding* this_binding = pa11::add_binding(function_scope, BindingKind::Parameter, "this",
 this_type); Node this_node("parameter this " + pa11::describe_type(this_type)); this_node.binding = this_binding; this_node.type = this_type;
@@ -330,20 +368,30 @@ return found->second[i]; return NULL; } bool destructor_needs_call(Binding* dtor
 { return dtor != NULL && !dtor->is_cleanup_only_destructor && (dtor->is_virtual || !dtor->is_noop_destructor); }
 bool destructor_forces_cleanup(Binding* dtor)
 { return dtor != NULL && (dtor->is_cleanup_only_destructor || (dtor->is_noop_destructor && !dtor->is_generated_default_destructor && (dtor->is_private || dtor->is_protected_member))); }
+bool hosted_library_function(Binding* binding)
+{
+	if (binding == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace &&
+		    (scope->name == "std" || scope->name == "__gnu_cxx"))
+			return true;
+	return false;
+}
 }  // namespace
-Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array)
-return ensure_default_destructor(bare->base, force_trivial); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return NULL; Binding* existing = find_destructor_binding(bare);
-if (existing != NULL) { parse_pending_member_body(existing); return existing;
+	Binding* Parser::ensure_default_destructor(TypePtr type, bool force_trivial) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array)
+	return ensure_default_destructor(bare->base, force_trivial); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return NULL; Binding* existing = find_destructor_binding(bare);
+if (existing != NULL) { if (!hosted_compatibility_ || !hosted_library_function(existing)) parse_pending_member_body(existing); return existing;
 } try { pa11::layout_record_type(bare);
 } catch (const runtime_error& err) { if ((string(err.what()) != "incomplete class type" &&
 string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw; return NULL;
 } vector<Node> fini_actions; vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
-bool forced_nontrivial = false; if (force_trivial) { for (size_t b = 0; b < direct_bases.size(); ++b) { TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record)
-{ Binding* base_dtor = ensure_default_destructor(direct_base); if (destructor_needs_call(base_dtor) || destructor_forces_cleanup(base_dtor)) forced_nontrivial = true; } } }
+	bool forced_nontrivial = false; if (force_trivial) { for (size_t b = 0; b < direct_bases.size(); ++b) { TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record)
+	{ Binding* base_dtor = ensure_default_destructor(direct_base, true); if (destructor_needs_call(base_dtor) || destructor_forces_cleanup(base_dtor)) forced_nontrivial = true; } } }
 if (!force_trivial || !bare->fields.empty() || !direct_bases.empty()) { for (size_t n = 0; n < bare->fields.size(); ++n) {
-size_t i = bare->fields.size() - 1 - n; Binding* field_dtor = ensure_default_destructor(bare->fields[i]->type); if (destructor_needs_call(field_dtor))
-fini_actions.push_back(make_member_fini_action(bare->fields[i])); } for (size_t n = 0; n < direct_bases.size(); ++n) { size_t b = direct_bases.size() - 1 - n; TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record)
-{ Binding* base_dtor = ensure_default_destructor(direct_base); if (destructor_forces_cleanup(base_dtor)) forced_nontrivial = true; if (destructor_needs_call(base_dtor)) fini_actions.push_back(make_base_fini_action(direct_base));
+	size_t i = bare->fields.size() - 1 - n; Binding* field_dtor = ensure_default_destructor(bare->fields[i]->type); if (destructor_needs_call(field_dtor))
+	fini_actions.push_back(make_member_fini_action(bare->fields[i], field_dtor)); } for (size_t n = 0; n < direct_bases.size(); ++n) { size_t b = direct_bases.size() - 1 - n; TypePtr direct_base = direct_bases[b].get() != NULL ? pa11::strip_cv(direct_bases[b]) : TypePtr(); if (direct_base.get() != NULL && direct_base->kind == pa11::TypeKind::Record)
+	{ Binding* base_dtor = ensure_default_destructor(direct_base); if (destructor_forces_cleanup(base_dtor)) forced_nontrivial = true; if (destructor_needs_call(base_dtor)) fini_actions.push_back(make_base_fini_action(direct_base, base_dtor));
 } } } if (fini_actions.empty() && !force_trivial && !forced_nontrivial) return NULL;
 const void* key = bare.get(); if (generated_dtors_.find(key) != generated_dtors_.end()) return find_destructor_binding(bare); generated_dtors_.insert(key);
 TypePtr this_type = pa11::make_pointer(bare); vector<TypePtr> params(1, this_type); TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID), params,
@@ -382,24 +430,71 @@ active_class_instantiations_.empty()) throw; return; }
 string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw; return;
 } size_t child_index = 0; { vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t b = 0; b < bases.size() && child_index < init.children.size(); ++b)
 ensure_aggregate_constructors_for_init(bases[b], init.children[child_index++]); } for (size_t i = 0; child_index < init.children.size() && i < bare->fields.size(); ++i) ensure_aggregate_constructors_for_init(bare->fields[i]->type, init.children[child_index++]);
-} Node Parser::make_member_init_action(Binding* field, const Node* init) { Node action("member-init-action " + field->name);
-action.binding = field; action.type = field->type; TypePtr bare = pa11::strip_cv(field->type); if (init != NULL)
-{ Node child = *init; if (child.line == "braced-init-list") {
-child.line += " lvalue " + pa11::describe_type(field->type); child.type = field->type; } add_child(action, child);
+	} Node Parser::make_member_init_action(Binding* field, const Node* init, Binding* this_binding) { Node action("member-init-action " + field->name);
+	action.binding = field; action.type = field->type; TypePtr bare = pa11::strip_cv(field->type); if (init != NULL)
+		{ Node child = *init; if (this_binding != NULL) {
+		function<void(Node&)> resolve_member_refs = [&](Node& node) {
+			if (node.binding == NULL &&
+			    node.line.compare(0, 13, "id-expression") == 0 &&
+			    !node.dependent_value_member_name.empty()) {
+				Expr this_expr;
+				this_expr.valid = true;
+				this_expr.binding = this_binding;
+				this_expr.type = this_binding->type;
+				this_expr.category = ValueCategory::LValue;
+				this_expr.node = Node("id-expression lvalue " +
+				                      pa11::describe_type(this_binding->type) +
+				                      " this");
+				this_expr.node.token_text = "this";
+				annotate_expr_node(this_expr);
+				try {
+					Expr member = make_member_expr(this_expr,
+					                              node.dependent_value_member_name,
+					                              "->");
+					if (member.valid &&
+					    member.binding != NULL &&
+					    member.binding->kind == BindingKind::Variable &&
+					    !member.binding->is_static_member)
+						node = member.node;
+				} catch (const runtime_error&) {
+				}
+			}
+			for (size_t i = 0; i < node.children.size(); ++i)
+				resolve_member_refs(node.children[i]);
+		};
+		resolve_member_refs(child);
+	} if (child.direct_call != NULL &&
+		child.direct_call->owner != NULL &&
+	child.direct_call->owner->kind == ScopeKind::Class &&
+	child.direct_call->name == child.direct_call->owner->name) {
+	parse_pending_function_body(child.direct_call);
+	parse_pending_member_body(child.direct_call);
+	if (child.direct_call->aliased_binding != NULL) {
+	parse_pending_function_body(child.direct_call->aliased_binding);
+	parse_pending_member_body(child.direct_call->aliased_binding); } } if (child.line == "braced-init-list") {
+	child.line += " lvalue " + pa11::describe_type(field->type); child.type = field->type; } add_child(action, child);
 } if (bare->kind == pa11::TypeKind::Record && init == NULL) { action.direct_call = ensure_default_constructor(field->type);
 if (init == NULL && action.direct_call != NULL) { map<Binding*, vector<Expr> >::const_iterator defaults = default_arguments_.find(action.direct_call);
 if (defaults != default_arguments_.end()) for (size_t j = 1; j < action.direct_call->type->parameters.size(); ++j) add_child(action, defaults->second[j].node);
 } } return action; }
-Node Parser::make_member_fini_action(Binding* field) { Node action("member-fini-action " + field->name); action.binding = field;
-action.type = field->type; return action; } Node Parser::make_base_init_action(TypePtr base, const Node* init)
+	Node Parser::make_member_fini_action(Binding* field, Binding* dtor) { Node action("member-fini-action " + field->name); action.binding = field;
+	action.type = field->type; action.direct_call = dtor; return action; } Node Parser::make_base_init_action(TypePtr base, const Node* init)
 { TypePtr bare = pa11::strip_cv(base); Node action("base-init-action " + bare->name); action.type = bare;
-if (init != NULL) { Node child = *init; add_child(action, child);
+	if (init != NULL) { Node child = *init; if (child.direct_call != NULL &&
+	child.direct_call->owner != NULL &&
+	child.direct_call->owner->kind == ScopeKind::Class &&
+	child.direct_call->name == child.direct_call->owner->name) {
+	parse_pending_function_body(child.direct_call);
+	parse_pending_member_body(child.direct_call);
+	if (child.direct_call->aliased_binding != NULL) {
+	parse_pending_function_body(child.direct_call->aliased_binding);
+	parse_pending_member_body(child.direct_call->aliased_binding); } } add_child(action, child);
 } else { Binding* ctor = find_default_constructor(bare);
 if (ctor != NULL) { action.direct_call = ctor; map<Binding*, vector<Expr> >::const_iterator defaults =
 default_arguments_.find(ctor); if (defaults != default_arguments_.end()) for (size_t j = 1; j < ctor->type->parameters.size(); ++j) add_child(action, defaults->second[j].node);
 } } return action; }
-Node Parser::make_base_fini_action(TypePtr base) { TypePtr bare = pa11::strip_cv(base); Node action("base-fini-action " + bare->name);
-action.type = bare; return action; } bool Parser::initializer_names_direct_base(Scope* class_scope,
+	Node Parser::make_base_fini_action(TypePtr base, Binding* dtor) { TypePtr bare = pa11::strip_cv(base); Node action("base-fini-action " + bare->name);
+	action.type = bare; action.direct_call = dtor; return action; } bool Parser::initializer_names_direct_base(Scope* class_scope,
 TypePtr direct_base, const string& name, const vector<TemplateArgument>* template_arguments) {
 TypePtr bare = pa11::strip_cv(direct_base); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return false; if (name == bare->scope->name)
 return true; TypePtr substituted; if (find_template_type_substitution(name, substituted) && pa11::same_type(pa11::strip_cv(substituted), bare))

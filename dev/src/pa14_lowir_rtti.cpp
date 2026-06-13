@@ -72,6 +72,7 @@ string typeinfo_builtin_part(TypePtr type)
 }
 
 string typeinfo_component_for_type(TypePtr type);
+string typeinfo_spelling_component_for_type(TypePtr type);
 
 bool typeinfo_argument_incomplete(
 	const pa11::TemplateInstanceArgument& arg);
@@ -125,7 +126,7 @@ string template_value_typeinfo_component(TypePtr type, uint64_t value)
 		return "L" + to_string(enum_name.size()) + enum_name +
 		       to_string(value) + "E";
 	}
-	string code = typeinfo_component_for_type(type);
+	string code = typeinfo_spelling_component_for_type(type);
 	if (code.empty())
 		code = "i";
 	return "L" + code + to_string(value) + "E";
@@ -136,7 +137,7 @@ string template_value_typeinfo_component(
 {
 	if (!arg.value_name.empty())
 	{
-		string code = typeinfo_component_for_type(arg.type);
+		string code = typeinfo_spelling_component_for_type(arg.type);
 		if (code.empty())
 			code = "i";
 		return "L" + code + "_" + arg.value_name + "E";
@@ -148,7 +149,7 @@ string typeinfo_component_for_argument(
 	const pa11::TemplateInstanceArgument& arg)
 {
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
-		return typeinfo_component_for_type(arg.type);
+		return typeinfo_spelling_component_for_type(arg.type);
 	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
 	{
 		if (arg.dependent)
@@ -196,6 +197,24 @@ string typeinfo_component_for_type(TypePtr type)
 		return "O" + typeinfo_component_for_type(type->base);
 	if (type->kind == TypeKind::Pointer)
 		return "P" + typeinfo_component_for_type(type->base);
+	if (type->kind == TypeKind::Function)
+	{
+		string out;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			out += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			out += "V";
+		out += "F" + typeinfo_component_for_type(type->base);
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			out += typeinfo_component_for_type(type->parameters[i]);
+		if (type->variadic)
+			out += "z";
+		out += "E";
+		return out;
+	}
+	if (type->kind == TypeKind::MemberPointer)
+		return "M" + typeinfo_component_for_type(type->member_class) +
+		       typeinfo_component_for_type(type->base);
 	if (type->kind == TypeKind::Array)
 		return "A" +
 		       (type->unknown_bound ? string("") : to_string(type->bound)) +
@@ -214,6 +233,42 @@ string typeinfo_component_for_type(TypePtr type)
 		return to_string(bare->name.size()) + bare->name;
 	string name = pa11::describe_type(bare);
 	return to_string(name.size()) + name;
+}
+
+string typeinfo_spelling_component_for_type(TypePtr type)
+{
+	if (type.get() == NULL)
+		return "";
+	if (type->kind == TypeKind::Cv)
+	{
+		string prefix;
+		if ((type->cv & pa11::CV_CONST) != 0)
+			prefix += "K";
+		if ((type->cv & pa11::CV_VOLATILE) != 0)
+			prefix += "V";
+		return prefix + typeinfo_spelling_component_for_type(type->base);
+	}
+	if (type->kind == TypeKind::LValueReference)
+		return "R" + typeinfo_spelling_component_for_type(type->base);
+	if (type->kind == TypeKind::RValueReference)
+		return "O" + typeinfo_spelling_component_for_type(type->base);
+	if (type->kind == TypeKind::Pointer)
+		return "P" + typeinfo_spelling_component_for_type(type->base);
+	if (type->kind == TypeKind::Array)
+		return "A" +
+		       (type->unknown_bound ? string("") : to_string(type->bound)) +
+		       "_" + typeinfo_spelling_component_for_type(type->base);
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == TypeKind::Function ||
+	    bare->kind == TypeKind::MemberPointer)
+	{
+		string name = pa11::describe_type(bare);
+		return to_string(name.size()) + name;
+	}
+	if (bare->kind == TypeKind::Record &&
+	    record_is_template_specialization(bare))
+		return template_typeinfo_component(bare);
+	return typeinfo_component_for_type(type);
 }
 
 string lambda_typeinfo_name_spelling(TypePtr record)
@@ -283,12 +338,17 @@ string typeinfo_name_spelling(TypePtr record)
 				continue;
 			}
 		}
-		string name = s->name == "<unnamed>" ? "_GLOBAL__N_1" : s->name;
-		parts.push_back(to_string(name.size()) + name);
-	}
-	if (parts.size() <= 1)
-		return typeinfo_component_for_type(bare);
-	string out = "N";
+			string name = s->name == "<unnamed>" ? "_GLOBAL__N_1" : s->name;
+			if (s->kind == ScopeKind::Namespace && name == "std")
+				parts.push_back("St");
+			else
+				parts.push_back(to_string(name.size()) + name);
+		}
+		if (parts.size() <= 1)
+			return typeinfo_component_for_type(bare);
+		if (parts.size() == 2 && parts[1] == "St")
+			return "St" + parts[0];
+		string out = "N";
 	for (size_t i = parts.size(); i > 0; --i)
 		out += parts[i - 1];
 	out += "E";
@@ -458,7 +518,7 @@ void append_typeinfo_name_global_for_type(vector<string>& globals,
                                           TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
-	string spelling = typeinfo_component_for_type(bare);
+	string spelling = typeinfo_spelling_component_for_type(bare);
 	ostringstream out;
 	out << "global @" << typeinfo_name_symbol_for_type(bare)
 	    << " [storage=readonly, binding=weak";
@@ -754,6 +814,34 @@ Binding* find_vtable_overrider(TypePtr record, Binding* fn)
 	return best;
 }
 
+Binding* inline_definition_for_vtable_target(ProgramLowerer& program,
+                                             Binding* target)
+{
+	if (target == NULL)
+		return target;
+	if (target->aliased_binding != NULL &&
+	    target->aliased_binding->is_inline_definition)
+		return target->aliased_binding;
+	if (program.inline_definitions.find(target) !=
+	    program.inline_definitions.end())
+		return target;
+	for (map<const Binding*, const Node*>::const_iterator it =
+		     program.inline_definitions.begin();
+	     it != program.inline_definitions.end();
+	     ++it)
+	{
+		Binding* candidate = const_cast<Binding*>(it->first);
+		if (candidate == NULL ||
+		    candidate->kind != BindingKind::Function ||
+		    candidate->is_static_member ||
+		    candidate->owner != target->owner)
+			continue;
+		if (vtable_signature_matches(target, candidate))
+			return candidate;
+	}
+	return target;
+}
+
 string pure_virtual_entry(ProgramLowerer& program, Binding* fn)
 {
 	if (program.declared_functions.insert("__cxa_pure_virtual").second)
@@ -849,6 +937,7 @@ string vtable_entry_symbol(ProgramLowerer& program,
 	if (fn == NULL)
 		return "";
 	Binding* target = find_vtable_overrider(record, fn);
+	target = inline_definition_for_vtable_target(program, target);
 	if (target->is_pure_virtual)
 		return pure_virtual_entry(program, target);
 	TypePtr owner = class_record_for_member(target);

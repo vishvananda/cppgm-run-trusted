@@ -7,6 +7,75 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+namespace {
+
+bool forwarding_reference_parameter(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != pa11::TypeKind::RValueReference)
+		return false;
+	TypePtr base = pa11::strip_cv(bare->base);
+	return base.get() != NULL &&
+	       (base->kind == pa11::TypeKind::TemplateParameter ||
+	        base->is_dependent_typename);
+}
+
+bool function_template_has_forwarding_reference_parameter(
+	const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL ||
+	    declaration->generic_function_type.get() == NULL ||
+	    declaration->generic_function_type->kind != pa11::TypeKind::Function)
+		return false;
+	for (size_t i = 0;
+	     i < declaration->generic_function_type->parameters.size();
+	     ++i)
+		if (forwarding_reference_parameter(
+			    declaration->generic_function_type->parameters[i]))
+			return true;
+	return false;
+}
+
+bool function_template_body_mentions_std(
+	const vector<Token>& tokens,
+	const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return false;
+	for (size_t i = declaration->decl_begin;
+	     i < declaration->decl_end && i < tokens.size();
+	     ++i)
+		if (tokens[i].source == "std")
+			return true;
+	return false;
+}
+
+bool defer_hosted_forwarding_template_validation(
+	const vector<Token>& tokens,
+	const TemplateDeclaration* declaration)
+{
+	return function_template_has_forwarding_reference_parameter(declaration) &&
+	       function_template_body_mentions_std(tokens, declaration);
+}
+
+bool hosted_library_template_declaration(const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return false;
+	Scope* scope =
+		declaration->placeholder != NULL
+		? declaration->placeholder->owner
+		: declaration->owner;
+	for (; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace &&
+		    (scope->name == "std" || scope->name == "__gnu_cxx"))
+			return true;
+	return false;
+}
+
+}  // namespace
+
 struct TemplateValidationState
 {
 	size_t pos;
@@ -27,10 +96,12 @@ struct TemplateValidationState
 	int range_for_counter;
 	bool force_new_function_binding;
 	bool defer_function_template_bodies;
+	bool force_function_template_body_instantiation;
 	bool validating_template_definition;
 	bool override_function_parameter_names;
 	bool parsing_default_template_argument;
 	int function_template_candidate_instantiation_depth;
+	int direct_template_call_depth;
 	vector<string> function_parameter_name_override;
 	set<const void*> generated_default_ctors;
 	set<pair<const void*, size_t> > generated_aggregate_ctors;
@@ -50,9 +121,11 @@ struct TemplateValidationState
 	map<Scope*, vector<TypePtr> > class_friend_classes;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies;
 	map<Binding*, PendingFunctionBody> pending_function_bodies;
+	map<Binding*, Node> function_bodies;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes;
 	vector<Binding*> defaulted_move_assignments;
 		int template_argument_expression_depth;
+		int constexpr_value_expression_depth;
 		int unevaluated_expression_depth;
 		int short_circuit_static_member_demand_depth;
 		size_t template_declaration_count;
@@ -123,6 +196,8 @@ void TemplateValidationState::save_core(Parser& parser,
 	range_for_counter = parser.range_for_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
 	defer_function_template_bodies = parser.defer_function_template_bodies_;
+	force_function_template_body_instantiation =
+		parser.force_function_template_body_instantiation_;
 	validating_template_definition = parser.validating_template_definition_;
 	override_function_parameter_names =
 		parser.override_function_parameter_names_;
@@ -130,10 +205,13 @@ void TemplateValidationState::save_core(Parser& parser,
 		parser.parsing_default_template_argument_;
 	function_template_candidate_instantiation_depth =
 		parser.function_template_candidate_instantiation_depth_;
+	direct_template_call_depth = parser.direct_template_call_depth_;
 	function_parameter_name_override =
 		parser.function_parameter_name_override_;
 	template_argument_expression_depth =
 		parser.template_argument_expression_depth_;
+	constexpr_value_expression_depth =
+		parser.constexpr_value_expression_depth_;
 		unevaluated_expression_depth =
 			parser.unevaluated_expression_depth_;
 		short_circuit_static_member_demand_depth =
@@ -168,6 +246,7 @@ void TemplateValidationState::save_semantic_tables(Parser& parser)
 	class_friend_classes = parser.class_friend_classes_;
 	pending_member_bodies = parser.pending_member_bodies_;
 	pending_function_bodies = parser.pending_function_bodies_;
+	function_bodies = parser.function_bodies_;
 	deferred_nested_member_body_scopes =
 		parser.deferred_nested_member_body_scopes_;
 	defaulted_move_assignments = parser.defaulted_move_assignments_;
@@ -228,6 +307,8 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.range_for_counter_ = range_for_counter;
 	parser.force_new_function_binding_ = force_new_function_binding;
 	parser.defer_function_template_bodies_ = defer_function_template_bodies;
+	parser.force_function_template_body_instantiation_ =
+		force_function_template_body_instantiation;
 	parser.validating_template_definition_ = validating_template_definition;
 	parser.override_function_parameter_names_ =
 		override_function_parameter_names;
@@ -235,10 +316,13 @@ void TemplateValidationState::restore_core(Parser& parser)
 		parsing_default_template_argument;
 	parser.function_template_candidate_instantiation_depth_ =
 		function_template_candidate_instantiation_depth;
+	parser.direct_template_call_depth_ = direct_template_call_depth;
 	parser.function_parameter_name_override_ =
 		function_parameter_name_override;
 	parser.template_argument_expression_depth_ =
 		template_argument_expression_depth;
+	parser.constexpr_value_expression_depth_ =
+		constexpr_value_expression_depth;
 		parser.unevaluated_expression_depth_ =
 			unevaluated_expression_depth;
 		parser.short_circuit_static_member_demand_depth_ =
@@ -274,6 +358,7 @@ void TemplateValidationState::restore_semantic_tables(Parser& parser)
 	parser.class_friend_classes_ = class_friend_classes;
 	parser.pending_member_bodies_ = pending_member_bodies;
 	parser.pending_function_bodies_ = pending_function_bodies;
+	parser.function_bodies_ = function_bodies;
 	parser.deferred_nested_member_body_scopes_ =
 		deferred_nested_member_body_scopes;
 	parser.defaulted_move_assignments_ = defaulted_move_assignments;
@@ -489,6 +574,16 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 	    !declaration->has_definition ||
 	    declaration->function_definition_validated)
 		return;
+	if (function_template_candidate_instantiation_depth_ != 0)
+		return;
+	if (hosted_compatibility_ &&
+	    (hosted_library_template_declaration(declaration) ||
+	     defer_hosted_forwarding_template_validation(declaration_tokens_,
+	                                                 declaration)))
+	{
+		declaration->function_definition_validated = true;
+		return;
+	}
 
 	TemplateValidationState saved(*this, declaration);
 	declaration->function_definition_validated = true;

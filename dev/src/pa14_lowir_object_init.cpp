@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_expr_semantics_support.h"
 
 namespace pa14 {
 namespace internal {
@@ -85,6 +86,106 @@ bool same_template_family(TypePtr left, TypePtr right)
 	       l->is_template_specialization &&
 	       r->is_template_specialization &&
 	       template_family_name(l) == template_family_name(r);
+}
+
+bool same_record_object_type(TypePtr left, TypePtr right)
+{
+	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	return l.get() != NULL &&
+	       r.get() != NULL &&
+	       l->kind == TypeKind::Record &&
+	       r->kind == TypeKind::Record &&
+	       (pa11::same_type(l, r) ||
+	        pa12::internal::same_template_specialization_record(l, r));
+}
+
+bool scope_has_namespace_named(Scope* scope, const string& name)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur->kind == ScopeKind::Namespace && cur->name == name)
+			return true;
+	return false;
+}
+
+string unqualified_template_primary_name(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t pos = primary.rfind("::");
+	return pos == string::npos ? primary : primary.substr(pos + 2);
+}
+
+bool template_instance_type_argument(TypePtr record, size_t index, TypePtr& out)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || index >= bare->template_arguments.size())
+		return false;
+	const pa11::TemplateInstanceArgument& arg =
+		bare->template_arguments[index];
+	if (arg.kind != pa11::TemplateInstanceArgumentKind::Type)
+		return false;
+	out = arg.type;
+	return true;
+}
+
+bool hosted_normal_iterator_arguments(TypePtr type,
+                                      TypePtr& iterator,
+                                      TypePtr& container)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    unqualified_template_primary_name(bare) != "__normal_iterator" ||
+	    !scope_has_namespace_named(bare->scope, "__gnu_cxx") ||
+	    !template_instance_type_argument(bare, 0, iterator) ||
+	    !template_instance_type_argument(bare, 1, container))
+		return false;
+	return iterator.get() != NULL && container.get() != NULL;
+}
+
+unsigned direct_cv_flags(TypePtr type)
+{
+	return type.get() != NULL && type->kind == TypeKind::Cv
+		? type->cv : pa11::CV_NONE;
+}
+
+bool pointer_qualification_conversion(TypePtr source, TypePtr target)
+{
+	TypePtr src = source.get() != NULL ? pa11::strip_cv(source) : TypePtr();
+	TypePtr dst = target.get() != NULL ? pa11::strip_cv(target) : TypePtr();
+	if (src.get() == NULL || dst.get() == NULL ||
+	    src->kind != TypeKind::Pointer ||
+	    dst->kind != TypeKind::Pointer)
+		return false;
+	TypePtr src_pointee = src->base;
+	TypePtr dst_pointee = dst->base;
+	if (!pa11::same_type(pa11::strip_cv(src_pointee),
+	                     pa11::strip_cv(dst_pointee)))
+		return false;
+	return (direct_cv_flags(src_pointee) & ~direct_cv_flags(dst_pointee)) == 0;
+}
+
+bool hosted_normal_iterator_conversion(TypePtr source, TypePtr target)
+{
+	TypePtr source_iterator;
+	TypePtr source_container;
+	TypePtr target_iterator;
+	TypePtr target_container;
+	if (!hosted_normal_iterator_arguments(source,
+	                                      source_iterator,
+	                                      source_container) ||
+	    !hosted_normal_iterator_arguments(target,
+	                                      target_iterator,
+	                                      target_container))
+		return false;
+	return (pa11::same_type(source_container, target_container) ||
+	        same_template_family(source_container, target_container)) &&
+	       pointer_qualification_conversion(source_iterator, target_iterator);
 }
 
 bool function_template_specialization_binding(const Binding* binding)
@@ -762,6 +863,41 @@ bool FunctionLowerer::lower_record_base_cast_init(
 	return true;
 }
 
+bool FunctionLowerer::lower_hosted_normal_iterator_conversion_init(
+	const function<Value()>& addr_for,
+	TypePtr type,
+	const Node& init)
+{
+	if (!starts_with(init.line, "cast-expression") || init.children.size() != 1)
+		return false;
+	TypePtr src_record = pa11::strip_cv(object_type(init.children[0].type));
+	TypePtr dst_record = pa11::strip_cv(type);
+	if (src_record->kind != TypeKind::Record ||
+	    dst_record->kind != TypeKind::Record ||
+	    pa11::same_type(src_record, dst_record) ||
+	    !hosted_normal_iterator_conversion(src_record, dst_record))
+		return false;
+	Value target = addr_for();
+	Value source;
+	if (init.children[0].category == ValueCategory::LValue ||
+	    init.children[0].category == ValueCategory::XValue)
+		source = ensure_pointer(emit_lvalue_addr(init.children[0]));
+	else
+	{
+		string slot = fresh_aux_slot("tmpobj", scalar_lowir_type(src_record));
+		string addr_name = fresh_temp();
+		instr(addr_name + " = addr $" + slot);
+		source = Value("ptr", addr_name);
+		function<Value()> source_addr = [source]() { return source; };
+		lower_object_init(source_addr, src_record, init.children[0]);
+	}
+	if (record_has_storage_copy(type))
+		instr("copyobj " + to_string(pa11::type_size(type)) + "x" +
+		      to_string(pa11::type_align(type)) + " " + source.text +
+		      ", " + target.text);
+	return true;
+}
+
 bool FunctionLowerer::lower_record_conditional_init(
 	const function<Value()>& addr_for,
 	TypePtr type,
@@ -872,8 +1008,7 @@ bool FunctionLowerer::lower_record_same_type_init(
 		return false;
 	TypePtr src_record = pa11::strip_cv(object_type(init.type));
 	TypePtr dst_record = pa11::strip_cv(type);
-	if (src_record->kind != TypeKind::Record ||
-	    !pa11::same_type(src_record, dst_record))
+	if (!same_record_object_type(src_record, dst_record))
 		return false;
 	bool returned_prvalue =
 		init.category == ValueCategory::PRValue &&
@@ -948,6 +1083,8 @@ void FunctionLowerer::lower_record_object_init(
 	const Node& init)
 {
 	if (lower_record_base_cast_init(addr_for, type, init))
+		return;
+	if (lower_hosted_normal_iterator_conversion_init(addr_for, type, init))
 		return;
 	if (lower_record_conditional_init(addr_for, type, init))
 		return;
@@ -1224,6 +1361,8 @@ void FunctionLowerer::lower_default_init(const function<Value()>& addr_for,
 		Binding* ctor = find_constructor(type, 0);
 		if (ctor != NULL)
 		{
+			if (default_init_no_op(type))
+				return;
 			vector<const Node*> args;
 			lower_constructor_call(addr_for, ctor, args);
 			return;

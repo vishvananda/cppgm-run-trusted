@@ -197,16 +197,94 @@ bool match_dependent_alias_projection(
 	return false;
 }
 
-bool match_template_argument_sequence_pattern_from(
+namespace {
+
+string sequence_match_deduced_key(
+	const map<string, TemplateArgument>& deduced)
+{
+	ostringstream out;
+	for (map<string, TemplateArgument>::const_iterator it = deduced.begin();
+	     it != deduced.end();
+	     ++it)
+		out << it->first << "=" << template_argument_key_part(it->second)
+		    << ";";
+	return out.str();
+}
+
+struct SequenceMatchMemoKey
+{
+	const vector<TemplateArgument>* pattern;
+	const vector<TemplateArgument>* actual;
+	const map<const void*, vector<TemplateArgument> >* record_arguments;
+	Parser* parser;
+	const vector<TemplateParameterInfo>* parameters;
+	size_t pattern_index;
+	size_t actual_index;
+	string deduced;
+
+	bool operator<(const SequenceMatchMemoKey& other) const
+	{
+		if (pattern != other.pattern)
+			return pattern < other.pattern;
+		if (actual != other.actual)
+			return actual < other.actual;
+		if (record_arguments != other.record_arguments)
+			return record_arguments < other.record_arguments;
+		if (parser != other.parser)
+			return parser < other.parser;
+		if (parameters != other.parameters)
+			return parameters < other.parameters;
+		if (pattern_index != other.pattern_index)
+			return pattern_index < other.pattern_index;
+		if (actual_index != other.actual_index)
+			return actual_index < other.actual_index;
+		return deduced < other.deduced;
+	}
+};
+
+struct SequenceMatchMemoValue
+{
+	bool matched;
+	map<string, TemplateArgument> deduced;
+};
+
+typedef map<SequenceMatchMemoKey, SequenceMatchMemoValue> SequenceMatchMemo;
+
+bool match_template_argument_sequence_pattern_from_memo(
 	const vector<TemplateArgument>& pattern,
 	size_t pattern_index,
 	const vector<TemplateArgument>& actual,
 	size_t actual_index,
 	map<string, TemplateArgument>& deduced,
-	const map<const void*, vector<TemplateArgument> >& record_arguments)
+	const map<const void*, vector<TemplateArgument> >& record_arguments,
+	SequenceMatchMemo& memo)
 {
+	SequenceMatchMemoKey memo_key;
+	memo_key.pattern = &pattern;
+	memo_key.actual = &actual;
+	memo_key.record_arguments = &record_arguments;
+	memo_key.parser = active_template_match_parser;
+	memo_key.parameters = active_template_match_parameters;
+	memo_key.pattern_index = pattern_index;
+	memo_key.actual_index = actual_index;
+	memo_key.deduced = sequence_match_deduced_key(deduced);
+	SequenceMatchMemo::const_iterator memoized = memo.find(memo_key);
+	if (memoized != memo.end())
+	{
+		if (memoized->second.matched)
+			deduced = memoized->second.deduced;
+		return memoized->second.matched;
+	}
+	SequenceMatchMemoValue memo_value;
+	memo_value.matched = false;
 	if (pattern_index == pattern.size())
-		return actual_index == actual.size();
+	{
+		memo_value.matched = actual_index == actual.size();
+		if (memo_value.matched)
+			memo_value.deduced = deduced;
+		memo[memo_key] = memo_value;
+		return memo_value.matched;
+	}
 	const TemplateArgument& current = pattern[pattern_index];
 	string pack_pattern_name;
 	if (current.pack_expansion ||
@@ -222,22 +300,30 @@ bool match_template_argument_sequence_pattern_from(
 			                                  local,
 			                                  record_arguments))
 				continue;
-			if (match_template_argument_sequence_pattern_from(
+			if (match_template_argument_sequence_pattern_from_memo(
 				    pattern,
 				    pattern_index + 1,
 				    actual,
 				    end,
 				    local,
-				    record_arguments))
+				    record_arguments,
+				    memo))
 			{
 				deduced = local;
+				memo_value.matched = true;
+				memo_value.deduced = deduced;
+				memo[memo_key] = memo_value;
 				return true;
 			}
 		}
+		memo[memo_key] = memo_value;
 		return false;
 	}
 		if (actual_index == actual.size())
+		{
+			memo[memo_key] = memo_value;
 			return false;
+		}
 		bool current_active_template_template_pattern =
 			current.kind == TemplateArgumentKind::Type &&
 			current.type.get() != NULL &&
@@ -261,13 +347,14 @@ bool match_template_argument_sequence_pattern_from(
 		if (!actual_plain_template_parameter)
 		{
 			map<string, TemplateArgument> local = deduced;
-			if (match_template_argument_sequence_pattern_from(
+			if (match_template_argument_sequence_pattern_from_memo(
 				    pattern,
 				    pattern_index + 1,
 				    actual,
 				    actual_index + 1,
 				    local,
-				    record_arguments))
+				    record_arguments,
+				    memo))
 			{
 				try
 				{
@@ -283,6 +370,9 @@ bool match_template_argument_sequence_pattern_from(
 						    record_arguments))
 					{
 						deduced = local;
+						memo_value.matched = true;
+						memo_value.deduced = deduced;
+						memo[memo_key] = memo_value;
 						return true;
 					}
 				}
@@ -295,6 +385,9 @@ bool match_template_argument_sequence_pattern_from(
 				                                     record_arguments))
 				{
 					deduced = local;
+					memo_value.matched = true;
+					memo_value.deduced = deduced;
+					memo[memo_key] = memo_value;
 					return true;
 				}
 			}
@@ -305,16 +398,46 @@ bool match_template_argument_sequence_pattern_from(
 	                                     actual[actual_index],
 	                                     local,
 	                                     record_arguments))
+	{
+		memo[memo_key] = memo_value;
 		return false;
-	if (!match_template_argument_sequence_pattern_from(pattern,
-	                                                   pattern_index + 1,
-	                                                   actual,
-	                                                   actual_index + 1,
-	                                                   local,
-	                                                   record_arguments))
+	}
+	if (!match_template_argument_sequence_pattern_from_memo(pattern,
+	                                                        pattern_index + 1,
+	                                                        actual,
+	                                                        actual_index + 1,
+	                                                        local,
+	                                                        record_arguments,
+	                                                        memo))
+	{
+		memo[memo_key] = memo_value;
 		return false;
+	}
 	deduced = local;
+	memo_value.matched = true;
+	memo_value.deduced = deduced;
+	memo[memo_key] = memo_value;
 	return true;
+}
+
+}  // namespace
+
+bool match_template_argument_sequence_pattern_from(
+	const vector<TemplateArgument>& pattern,
+	size_t pattern_index,
+	const vector<TemplateArgument>& actual,
+	size_t actual_index,
+	map<string, TemplateArgument>& deduced,
+	const map<const void*, vector<TemplateArgument> >& record_arguments)
+{
+	SequenceMatchMemo memo;
+	return match_template_argument_sequence_pattern_from_memo(pattern,
+	                                                          pattern_index,
+	                                                          actual,
+	                                                          actual_index,
+	                                                          deduced,
+	                                                          record_arguments,
+	                                                          memo);
 }
 
 bool match_template_argument_sequence_pattern(

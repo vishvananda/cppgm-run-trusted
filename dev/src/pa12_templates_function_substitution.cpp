@@ -61,10 +61,10 @@ namespace internal {
 			saved_names != function_parameter_names_.end() &&
 			!saved_names->second.empty() &&
 			saved_names->second[0] == "this";
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-		{
-			TypePtr pattern = type->parameters[i];
-			string pack_name;
+			for (size_t i = 0; i < type->parameters.size(); ++i)
+			{
+				TypePtr pattern = type->parameters[i];
+				string pack_name;
 			TemplateArgument subst;
 			size_t name_index = i;
 			if (generic_has_owner_parameter &&
@@ -109,7 +109,7 @@ namespace internal {
 				}
 				continue;
 			}
-			TypePtr substituted = substitute_template_type(pattern);
+				TypePtr substituted = substitute_template_type(pattern);
 			params.push_back(substituted);
 			replay_parameter_pack_names.push_back(string());
 			replay_parameter_names.push_back(replay_pack_name);

@@ -164,46 +164,52 @@ TypePtr Parser::expand_alias_template_for_match(
 				pa11::make_template_parameter_type(it->first);
 		}
 	}
-	map<string, TypePtr> subst;
-	map<string, TemplateArgument> value_subst;
-	set<string> pack_subst;
-	for (size_t i = 0; i < full_args.size() &&
-	     i < alias->parameters.size(); ++i)
-		if (!alias->parameters[i].name.empty())
+		TypePtr out;
+		try
 		{
-			const string& name = alias->parameters[i].name;
-			if (alias->parameters[i].kind == TemplateParameterKind::Type)
-			{
-				if (alias->parameters[i].is_pack)
-				{
-					subst[name] = pa11::make_template_parameter_type(name);
-					value_subst[name] = full_args[i];
-					pack_subst.insert(name);
-				}
-				else
-					subst[name] = full_args[i].type;
-			}
-			else
-				value_subst[name] = full_args[i];
-		}
-
-	TypePtr out;
-	try
-	{
-		template_type_substitutions_.push_back(deduced_subst);
-		template_value_substitutions_.push_back(deduced_value_subst);
+			template_type_substitutions_.push_back(deduced_subst);
+			template_value_substitutions_.push_back(deduced_value_subst);
 		template_type_parameter_packs_.push_back(deduced_pack_subst);
 		template_type_substitutions_.insert(
 			template_type_substitutions_.end(),
 			alias->outer_type_substitutions.begin(),
 			alias->outer_type_substitutions.end());
-		template_value_substitutions_.insert(
-			template_value_substitutions_.end(),
-			alias->outer_value_substitutions.begin(),
-			alias->outer_value_substitutions.end());
-		template_type_substitutions_.push_back(subst);
-		template_value_substitutions_.push_back(value_subst);
-		template_type_parameter_packs_.push_back(pack_subst);
+			template_value_substitutions_.insert(
+				template_value_substitutions_.end(),
+				alias->outer_value_substitutions.begin(),
+				alias->outer_value_substitutions.end());
+
+			vector<TemplateArgument> substituted_full_args = full_args;
+			for (size_t i = 0; i < substituted_full_args.size(); ++i)
+				substituted_full_args[i] =
+					substitute_template_argument(substituted_full_args[i]);
+
+			map<string, TypePtr> subst;
+			map<string, TemplateArgument> value_subst;
+			set<string> pack_subst;
+			for (size_t i = 0; i < substituted_full_args.size() &&
+			     i < alias->parameters.size(); ++i)
+				if (!alias->parameters[i].name.empty())
+				{
+					const string& name = alias->parameters[i].name;
+					if (alias->parameters[i].kind == TemplateParameterKind::Type)
+					{
+						if (alias->parameters[i].is_pack)
+						{
+							subst[name] =
+								pa11::make_template_parameter_type(name);
+							value_subst[name] = substituted_full_args[i];
+							pack_subst.insert(name);
+						}
+						else
+							subst[name] = substituted_full_args[i].type;
+					}
+					else
+						value_subst[name] = substituted_full_args[i];
+				}
+			template_type_substitutions_.push_back(subst);
+			template_value_substitutions_.push_back(value_subst);
+			template_type_parameter_packs_.push_back(pack_subst);
 		scopes_.clear();
 		scopes_.push_back(alias->lexical_scope != NULL
 		                  ? alias->lexical_scope
@@ -261,13 +267,46 @@ TemplateDeclaration* Parser::class_template_declaration_for_match(
 		record_template_declarations_.find(bare.get());
 	if (found != record_template_declarations_.end())
 		return found->second;
-	Scope* owner = bare->scope != NULL ? bare->scope->parent : NULL;
-	if (owner == NULL || bare->template_primary_name.empty())
+	if (bare->template_primary_name.empty())
 		return NULL;
-	return const_cast<Parser*>(this)->find_class_template(
-		owner,
-		bare->template_primary_name);
-}
+	Scope* owner = bare->scope != NULL ? bare->scope->parent : NULL;
+		if (owner != NULL)
+		{
+			TemplateDeclaration* resolved =
+				const_cast<Parser*>(this)->find_class_template(
+					owner,
+					bare->template_primary_name);
+			if (resolved != NULL)
+				return resolved;
+		}
+		{
+			Scope* qualifier = NULL;
+			string name = bare->template_primary_name;
+		const_cast<Parser*>(this)->resolve_template_name_spelling(
+			bare->template_primary_name,
+			qualifier,
+			name);
+		TemplateDeclaration* resolved =
+			const_cast<Parser*>(this)->find_class_template(qualifier, name);
+		if (resolved != NULL)
+			return resolved;
+		TemplateDeclaration* unique = NULL;
+		for (map<Scope*, map<string, TemplateDeclaration*> >::const_iterator
+			     sit = class_templates_.begin();
+		     sit != class_templates_.end();
+		     ++sit)
+		{
+			map<string, TemplateDeclaration*>::const_iterator it =
+				sit->second.find(name);
+			if (it == sit->second.end())
+				continue;
+			if (unique != NULL && unique != it->second)
+				return NULL;
+			unique = it->second;
+			}
+			return unique;
+		}
+	}
 
 TemplateArgument Parser::template_argument_from_instance_argument(
 	const pa11::TemplateInstanceArgument& argument) const
@@ -419,6 +458,7 @@ bool Parser::dependent_typename_template_argument_list(
 			return false;
 		const vector<pa11::TemplateInstanceArgument>& stored =
 			type->dependent_typename_template_argument_lists[index++];
+		arguments.reserve(stored.size());
 		for (size_t i = 0; i < stored.size(); ++i)
 			arguments.push_back(
 				template_argument_from_instance_argument(stored[i]));
@@ -426,6 +466,7 @@ bool Parser::dependent_typename_template_argument_list(
 	}
 	if (type->template_arguments.empty())
 		return false;
+	arguments.reserve(type->template_arguments.size());
 	for (size_t i = 0; i < type->template_arguments.size(); ++i)
 		arguments.push_back(
 			template_argument_from_instance_argument(

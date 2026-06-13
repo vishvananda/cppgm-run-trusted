@@ -164,8 +164,9 @@ struct Binding
 	bool is_namespace_static;
 	string local_static_discriminator;
 		Binding* local_static_function_owner;
-			string function_specialization_symbol;
-			vector<string> abi_tags;
+	string function_specialization_symbol;
+	vector<string> function_parameter_names;
+	vector<string> abi_tags;
 			bool is_inline_definition;
 		bool is_declared_inline;
 		bool is_generated_default_constructor;
@@ -232,6 +233,7 @@ struct Scope
 	Scope* unnamed_namespace;
 	vector<Scope*> using_directives;
 	bool is_inline_namespace;
+	TypePtr record_type;
 
 	Scope(ScopeKind k, const string& n, Scope* p);
 };
@@ -265,6 +267,7 @@ TypePtr make_pointer(TypePtr base);
 TypePtr make_lvalue_reference(TypePtr base);
 TypePtr make_rvalue_reference(TypePtr base);
 TypePtr make_array(TypePtr element, bool unknown, uint64_t bound);
+TypePtr make_gnu_vector(TypePtr element, uint64_t bytes);
 TypePtr make_function(TypePtr result,
                       const vector<TypePtr>& parameters,
                       bool variadic);
@@ -292,6 +295,7 @@ TypePtr strip_cv(TypePtr type);
 bool type_has_const(const TypePtr& type);
 bool is_void_type(const TypePtr& type);
 bool is_reference_type(const TypePtr& type);
+bool is_gnu_vector_type(const TypePtr& type);
 bool is_integral_or_bool_type(const TypePtr& type);
 bool same_type(const TypePtr& left, const TypePtr& right);
 string describe_type(const TypePtr& type);
@@ -325,6 +329,7 @@ Binding* add_using_declaration(Scope* scope,
 Binding* find_owned_binding(Scope* scope,
                             const string& name,
                             BindingKind kind);
+size_t binding_generation();
 Binding* lookup_unqualified(Scope* start, const string& name, int mask);
 Binding* lookup_qualified(Scope* scope, const string& name, int mask);
 Scope* binding_qualifier_scope(const Binding* binding);

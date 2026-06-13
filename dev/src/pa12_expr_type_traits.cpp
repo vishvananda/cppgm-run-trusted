@@ -410,11 +410,14 @@ bool Parser::is_constructible_type_trait(const vector<TypePtr>& types)
 		try
 		{
 			complete_template_record(bare);
+			++unevaluated_expression_depth_;
 			make_constructor_init_expr(target, args, false);
+			--unevaluated_expression_depth_;
 			return true;
 		}
 		catch (const runtime_error&)
 		{
+			--unevaluated_expression_depth_;
 			return false;
 		}
 	}

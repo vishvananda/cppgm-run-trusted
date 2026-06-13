@@ -799,7 +799,7 @@ Expr Parser::parse_unary_expression()
 						Expr constructed =
 							make_constructor_init_expr(target, args, false);
 						bool force_dtor =
-							pa11::strip_cv(target)->base.get() != NULL;
+							!pa11::record_direct_bases(pa11::strip_cv(target)).empty();
 						ensure_default_destructor(target, force_dtor);
 						return parse_postfix_suffixes(constructed);
 					}
@@ -816,7 +816,7 @@ Expr Parser::parse_unary_expression()
 					if (init.node.children.empty())
 						init.node.direct_call = ctor;
 					bool force_dtor =
-						pa11::strip_cv(target)->base.get() != NULL;
+						!pa11::record_direct_bases(pa11::strip_cv(target)).empty();
 					ensure_default_destructor(target, force_dtor);
 				}
 			}

@@ -26,56 +26,39 @@ void emit_empty_this_function(ProgramLowerer& program,
                               const string& name,
                               const Binding* binding)
 {
-	FunctionOut fn;
-	fn.binding = binding;
-	fn.name = name;
-	fn.header = "function @" + name + "(%this : ptr) -> void";
-	fn.slots.push_back("  slot $this : ptr");
-	Block entry("entry");
-	entry.instrs.push_back("    store ptr %this, $this");
-	TypePtr record = class_record_for_member(binding);
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	if (record.get() != NULL &&
-	    record->kind == TypeKind::Record &&
-	    record->is_polymorphic)
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return;
+	Node node("function-definition");
+	node.binding = const_cast<Binding*>(binding);
+	node.type = binding->type;
+	const Binding* parameter_name_binding = binding;
+	if (parameter_name_binding->function_parameter_names.empty() &&
+	    binding->aliased_binding != NULL)
+		parameter_name_binding = binding->aliased_binding;
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
 	{
-		program.demand_vtable(record);
-		entry.instrs.push_back("    %t1 = load ptr $this");
-		entry.instrs.push_back("    %t2 = addr @" +
-		                       vtable_symbol_for_record(record));
-		entry.instrs.push_back(
-			"    %t3 = index i8 %t2, " +
-			to_string(vtable_address_point_offset(record)));
-		entry.instrs.push_back("    store ptr %t3, %t1");
-		vector<pair<TypePtr, uint64_t> > views =
-			vtt_ordered_vtable_views(record);
-		for (size_t i = 0; i < views.size(); ++i)
-		{
-			string base = "%t" + to_string(4 + i * 3);
-			string table = "%t" + to_string(5 + i * 3);
-			string view = table;
-			entry.instrs.push_back(
-				"    " + base + " = index i8 [projection=base_subobject] %t1, " +
-				to_string(views[i].second));
-			entry.instrs.push_back(
-				"    " + table + " = addr @" +
-				vtable_view_symbol_for_record(record,
-				                              views[i].first,
-				                              views[i].second));
-			if (vtable_address_point_offset(record) != 16)
-			{
-				view = "%t" + to_string(6 + i * 3);
-				entry.instrs.push_back(
-					"    " + view + " = index i8 " + table + ", " +
-					to_string(vtable_address_point_offset(record)));
-			}
-			entry.instrs.push_back("    store ptr " + view + ", " + base);
-		}
+		string pname =
+			i < parameter_name_binding->function_parameter_names.size()
+			? parameter_name_binding->function_parameter_names[i] : string();
+		if (pname.empty())
+			pname = i == 0 ? "this" : "__param" + to_string(i);
+		Node param("parameter " + pname + " " +
+		           pa11::describe_type(binding->type->parameters[i]));
+		param.type = binding->type->parameters[i];
+		node.children.push_back(param);
 	}
-	entry.instrs.push_back("    return void");
-	entry.terminated = true;
-	fn.blocks.push_back(entry);
-	program.functions.push_back(fn);
+	node.children.push_back(Node("compound-statement"));
+	FunctionLowerer lowerer(program, node);
+	FunctionOut lowered = lowerer.lower();
+	lowered.name = name;
+	string from = "function @" + program.symbol_for(binding) + "(";
+	string to = "function @" + name + "(";
+	size_t pos = lowered.header.find(from);
+	if (pos != string::npos)
+		lowered.header.replace(pos, from.size(), to);
+	program.functions.push_back(lowered);
 }
 
 bool demand_builtin_declaration(ProgramLowerer& program,
@@ -210,6 +193,10 @@ bool demand_generated_empty_constructor(ProgramLowerer& program,
 {
 	if (!generated_empty_constructor_binding(binding))
 		return false;
+	if (binding->is_generated_default_constructor &&
+	    binding->is_noop_constructor &&
+	    !binding->is_object_root)
+		return false;
 	if (binding->is_inline_definition &&
 	    program.inline_definitions.find(binding) != program.inline_definitions.end())
 	{
@@ -298,6 +285,50 @@ string ordinary_function_declaration(ProgramLowerer& program,
 	}
 	out << metadata_suffix(metadata);
 	return out.str();
+}
+
+string lifecycle_base_entry_declaration(ProgramLowerer& program,
+                                        const Binding* binding,
+                                        const string& name)
+{
+	string declaration = ordinary_function_declaration(program, binding, name);
+	size_t close = declaration.find(") ->");
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if ((is_class_constructor_binding(binding) ||
+	     (!program.native_lowering &&
+	      is_class_destructor_binding(binding))) &&
+	    record.get() != NULL &&
+	    record->kind == TypeKind::Record &&
+	    record->is_polymorphic &&
+	    record_uses_virtual_base_vtt(record))
+	{
+		size_t this_pos = declaration.find("%arg0 : ptr");
+		if (this_pos != string::npos)
+			declaration.insert(this_pos + string("%arg0 : ptr").size(),
+			                   ", %__vtt : ptr");
+		close = declaration.find(") ->");
+		vector<TypePtr> vbases = hidden_virtual_bases_for_record(record);
+		if (close != string::npos)
+		{
+			ostringstream hidden;
+			for (size_t i = 0; i < vbases.size(); ++i)
+				hidden << ", %__vbptr" << i << " : ptr";
+			declaration.insert(close, hidden.str());
+		}
+	}
+	size_t object_pos = declaration.find("object=");
+	if (object_pos != string::npos)
+	{
+		const char* complete = is_class_constructor_binding(binding)
+			? "C1" : "D1";
+		const char* base = is_class_constructor_binding(binding)
+			? "C2" : "D2";
+		size_t entry_pos = declaration.find(complete, object_pos);
+		if (entry_pos != string::npos)
+			declaration.replace(entry_pos, 2, base);
+	}
+	return declaration;
 }
 
 void write_function_out(ostream& out, const FunctionOut& fn)
@@ -481,6 +512,33 @@ bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
 	       !output_references_function(program, fn.name, function_index);
 }
 
+string function_header_symbol(const FunctionOut& fn)
+{
+	size_t at = fn.header.find('@');
+	size_t lp = fn.header.find('(', at);
+	if (at == string::npos || lp == string::npos || lp <= at + 1)
+		return fn.name;
+	return fn.header.substr(at + 1, lp - at - 1);
+}
+
+bool skip_unreferenced_generated_noop_default(const ProgramLowerer& program,
+                                              size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
+	const FunctionOut& fn = program.functions[function_index];
+	string symbol = function_header_symbol(fn);
+	bool referenced = output_references_function(program,
+	                                            symbol,
+	                                            function_index);
+	return fn.binding != NULL &&
+	       fn.binding->is_generated_default_constructor &&
+	       !fn.binding->is_defaulted &&
+	       fn.binding->is_noop_constructor &&
+	       !fn.binding->is_object_root &&
+	       !referenced;
+}
+
 }  // namespace
 
 void ProgramLowerer::emit_generated_empty_constructor(const Binding* binding,
@@ -495,12 +553,55 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	if (binding == NULL)
 		return;
 	if (binding->kind == BindingKind::Function &&
-	    binding->aliased_binding != NULL &&
-	    binding->aliased_binding->is_inline_definition)
-		binding = binding->aliased_binding;
+	    binding->aliased_binding != NULL)
+	{
+		bool binding_has_body =
+			inline_definitions.find(binding) != inline_definitions.end() ||
+			synthetic_inline_definitions.find(binding) !=
+				synthetic_inline_definitions.end();
+		bool alias_has_body =
+			inline_definitions.find(binding->aliased_binding) !=
+				inline_definitions.end() ||
+			synthetic_inline_definitions.find(binding->aliased_binding) !=
+				synthetic_inline_definitions.end();
+		if (binding->aliased_binding->is_inline_definition ||
+		    (!binding_has_body && alias_has_body))
+			binding = binding->aliased_binding;
+	}
+	if (inline_definitions.find(binding) == inline_definitions.end() &&
+	    synthetic_inline_definitions.find(binding) ==
+		    synthetic_inline_definitions.end())
+	{
+		string wanted_name = symbol_for(binding);
+		for (map<const Binding*, const Node*>::const_iterator it =
+			     inline_definitions.begin();
+		     it != inline_definitions.end();
+		     ++it)
+		{
+			if (it->first == NULL ||
+			    it->first->kind != BindingKind::Function ||
+			    symbol_for(it->first) != wanted_name)
+				continue;
+			binding = it->first;
+			break;
+		}
+	}
 	if (binding->is_inline_definition)
 	{
 		demand_inline_function(binding, true);
+		string name = symbol_for(binding);
+		if (defined_functions.find(name) != defined_functions.end() ||
+		    inline_definitions.find(binding) != inline_definitions.end() ||
+		    find(pending_inline_definitions.begin(),
+		         pending_inline_definitions.end(),
+		         binding) != pending_inline_definitions.end())
+			return;
+		if (declared_functions.find(name) != declared_functions.end())
+			return;
+		if (demand_builtin_declaration(*this, binding, name))
+			return;
+		declared_functions.insert(name);
+		declares.push_back(ordinary_function_declaration(*this, binding, name));
 		return;
 	}
 	if (inline_definitions.find(binding) != inline_definitions.end())
@@ -529,6 +630,28 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		return;
 	declared_functions.insert(name);
 	declares.push_back(ordinary_function_declaration(*this, binding, name));
+}
+
+void ProgramLowerer::demand_lifecycle_base_entry_declaration(
+	const Binding* binding)
+{
+	if (binding == NULL ||
+	    (!is_class_constructor_binding(binding) &&
+	     !is_class_destructor_binding(binding)))
+		return;
+	string name = is_class_constructor_binding(binding)
+		? constructor_symbol_for(binding, true)
+		: destructor_symbol_for(binding, true);
+	if (defined_functions.find(name) != defined_functions.end() ||
+	    declared_functions.find(name) != declared_functions.end())
+		return;
+	if (find(pending_inline_definitions.begin(),
+	         pending_inline_definitions.end(),
+	         binding) != pending_inline_definitions.end())
+		return;
+	declared_functions.insert(name);
+	declares.push_back(
+		lifecycle_base_entry_declaration(*this, binding, name));
 }
 
 
@@ -673,8 +796,11 @@ void ProgramLowerer::write(const string& outfile) const
 		if (skip_unreferenced_generated_copy_move(*this,
 		                                          function_order[order_i]))
 			continue;
+		if (skip_unreferenced_generated_noop_default(*this,
+		                                             function_order[order_i]))
+			continue;
 		if (wrote_function)
-			out << "\n\n";
+			out << "\n";
 		const FunctionOut& fn = functions[function_order[order_i]];
 		write_function_out(out, fn);
 		string alias = complete_lifecycle_alias_object(fn);

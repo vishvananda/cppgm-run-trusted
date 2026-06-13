@@ -586,17 +586,28 @@ void Parser::prepare_member_call(Expr& callee, vector<Expr>& args)
 		    candidate->owner->kind == ScopeKind::Class &&
 		    !candidate->is_static_member)
 		{
+			TypePtr this_param =
+				candidate->type->parameters.empty()
+				? TypePtr() : candidate->type->parameters[0];
+			TypePtr this_object =
+				this_param.get() != NULL &&
+				pa11::strip_cv(this_param)->kind ==
+				pa11::TypeKind::Pointer
+				? pa11::strip_cv(this_param)->base : TypePtr();
+			TypePtr object_type = expression_object_type(object.type);
+			TypePtr object_bare = object_type.get() != NULL
+				? pa11::strip_cv(object_type) : TypePtr();
+			if (object_bare.get() != NULL &&
+			    object_bare->kind == pa11::TypeKind::Pointer)
+				object_type = object_bare->base;
+			if (this_object.get() != NULL &&
+			    object_type.get() != NULL &&
+			    pa11::type_has_const(object_type) &&
+			    !pa11::type_has_const(this_object))
+				continue;
 			if (candidate->ref_qualifier == 1 &&
 			    object.category != ValueCategory::LValue)
 			{
-				TypePtr this_param =
-					candidate->type->parameters.empty()
-					? TypePtr() : candidate->type->parameters[0];
-				TypePtr this_object =
-					this_param.get() != NULL &&
-					pa11::strip_cv(this_param)->kind ==
-					pa11::TypeKind::Pointer
-					? pa11::strip_cv(this_param)->base : TypePtr();
 				if (this_object.get() == NULL ||
 				    !pa11::type_has_const(this_object))
 					continue;

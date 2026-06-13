@@ -7,6 +7,19 @@ if (starts_with(node.line, "call-expression")) return true; for (size_t i = 0; i
 return true; return false; } bool node_contains_return_statement(const Node& node)
 { if (starts_with(node.line, "return-statement")) return true; for (size_t i = 0; i < node.children.size(); ++i)
 if (node_contains_return_statement(node.children[i])) return true; return false; }
+bool node_may_throw_for_noexcept_wrapper(const Node& node)
+{
+	if (starts_with(node.line, "throw-expression"))
+		return true;
+	if (starts_with(node.line, "call-expression"))
+		return node.direct_call == NULL || !node.direct_call->unwind_no;
+	if (node.direct_call != NULL && !node.direct_call->unwind_no)
+		return true;
+	for (size_t i = 0; i < node.children.size(); ++i)
+		if (node_may_throw_for_noexcept_wrapper(node.children[i]))
+			return true;
+	return false;
+}
 void demand_host_eh_declarations(ProgramLowerer& program, bool catch_runtime) { if (program.declared_functions.insert( "__external_runtime___Unwind_Resume").second)
 program.declares.push_back( "declare function @__external_runtime___Unwind_Resume() -> void " "[return=noreturn, role=eh_resume, linkage=c, " "binding=strong, object=_Unwind_Resume]");
 if (catch_runtime && program.declared_functions.insert( "__external_runtime____cxa_begin_catch").second) program.declares.push_back(
@@ -342,6 +355,11 @@ out_.returns_pointer_result = !indirect_result && scalar_lowir_type(fn_type->bas
 		starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : "";
 		size_t space = pname.find(' ');
 		pname = space == string::npos ? pname : pname.substr(0, space);
+		if ((pname.empty() || pname.compare(0, 7, "__param") == 0) &&
+		    i < binding->function_parameter_names.size() &&
+		    !binding->function_parameter_names[i].empty() &&
+		    binding->function_parameter_names[i].compare(0, 7, "__param") != 0)
+			pname = binding->function_parameter_names[i];
 		raw_parameter_names.push_back(pname);
 		if (!pname.empty())
 			++raw_parameter_counts[pname];
@@ -370,7 +388,10 @@ binding->owner->kind == ScopeKind::Class) { TypePtr record = pa11::record_type_f
 Binding* ctor = find_record_copy_move_constructor(record->fields[i]->type, true); if (ctor != NULL && ctor->is_inline_definition)
 program_.demand_inline_function(ctor); } } }
 cleanups_.push_back(vector<Cleanup>()); lower_params(); start_block("entry"); lower_param_stores();
-bool noexcept_terminate = program_.host_object_lowering && binding->unwind_no;
+bool noexcept_terminate =
+	program_.host_object_lowering &&
+	binding->unwind_no &&
+	node_may_throw_for_noexcept_wrapper(fn_);
 string noexcept_dispatch;
 if (noexcept_terminate) {
 ensure_noexcept_terminate_helper();
@@ -467,6 +488,7 @@ void FunctionLowerer::lower_deleting_destructor_nonvirtual_bases(TypePtr record)
 		program_.demand_function_declaration(base_dtor);
 		string base_callee = program_.destructor_symbol_for(base_dtor, true);
 		program_.demand_inline_function(base_dtor, false);
+		program_.demand_lifecycle_base_entry_declaration(base_dtor);
 		string reload = fresh_temp();
 		instr(reload + " = load ptr $this");
 		string base_addr = fresh_temp();

@@ -196,11 +196,21 @@ private:
 		return tokens_[pos_++].text;
 	}
 
-	void expect(const string& text)
+	string take_metadata_value()
 	{
-		if (!match(text))
-			throw runtime_error("expected '" + text + "'");
+		if (check("<eof>") || check(",") || check("]"))
+			throw runtime_error("expected metadata value");
+		string value;
+		while (!check("<eof>") && !check(",") && !check("]"))
+			value += take();
+		return value;
 	}
+
+		void expect(const string& text)
+		{
+			if (!match(text))
+				throw runtime_error("expected '" + text + "'");
+		}
 
 	void parse_top_level(Program& program)
 	{
@@ -390,7 +400,7 @@ private:
 				MetadataItem item;
 				item.key = take();
 				expect("=");
-				item.value = take();
+				item.value = take_metadata_value();
 				item.global_value = !item.value.empty() && item.value[0] == '@';
 				metadata.push_back(item);
 			} while (match(","));

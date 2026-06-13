@@ -16,6 +16,7 @@ using pa11::BindingKind;
 using pa11::Scope;
 using pa11::ScopeKind;
 using pa11::TypePtr;
+
 enum class ValueCategory
 {
 	LValue,
@@ -32,7 +33,8 @@ enum class PtrKind
 enum class SuffixKind
 {
 	Array,
-	Function
+	Function,
+	Attribute
 };
 enum class TemplateParameterKind
 {
@@ -157,6 +159,7 @@ struct DeclSpecs
 	bool int128_decl;
 	bool bitint_decl;
 	bool no_unique_address_decl;
+	uint64_t vector_size;
 	unsigned cv;
 	vector<ETokenType> builtin;
 	TypePtr named_type;
@@ -193,11 +196,12 @@ struct Suffix
 	int ref_qualifier;
 	bool noexcept_decl;
 	bool override_decl;
-		bool final_decl;
-		TypePtr trailing_return;
-		vector<string> abi_tags;
-		explicit Suffix(SuffixKind k);
-	};
+	bool final_decl;
+	TypePtr trailing_return;
+	vector<string> abi_tags;
+	uint64_t vector_size;
+	explicit Suffix(SuffixKind k);
+};
 struct Declarator
 {
 	vector<PtrOp> prefix;
@@ -325,6 +329,7 @@ public:
 	const Node& root() const;
 	const vector<Node>& generated_nodes() const;
 	const vector<Node>& extra_lowir_nodes() const;
+	bool demand_lowir_function_body(Binding* function);
 	TypePtr substitute_type_for_template_match( TypePtr type, const map<string, TemplateArgument>& deduced);
 	TypePtr expand_alias_template_for_match( TypePtr type, const map<string, TemplateArgument>& deduced);
 	TypePtr resolve_dependent_typename_for_template_match(TypePtr type) const;
@@ -356,6 +361,7 @@ public:
 	int range_for_counter_;
 	bool force_new_function_binding_;
 	bool defer_function_template_bodies_;
+	bool force_function_template_body_instantiation_;
 	bool suppress_implicit_template_base_init_;
 	bool parsing_base_specifier_;
 	bool validating_template_definition_;
@@ -365,7 +371,9 @@ public:
 	bool single_linkage_specification_declaration_;
 	int defer_class_template_completion_depth_;
 	int function_template_candidate_instantiation_depth_;
+	int direct_template_call_depth_;
 	int template_argument_expression_depth_;
+	int constexpr_value_expression_depth_;
 	int unevaluated_expression_depth_;
 	int suppress_qualifier_template_member_instantiation_depth_;
 	int short_circuit_static_member_demand_depth_;
@@ -383,10 +391,14 @@ public:
 	vector<string> function_parameter_name_override_;
 	set<Binding*> override_function_parameter_name_bindings_;
 	set<Binding*> deleted_functions_;
+	set<Binding*> provisional_initializer_bindings_;
 	map<const void*, Scope*> enum_owner_scopes_;
 	map<const void*, Scope*> record_owner_scopes_;
 	map<Scope*, vector<Binding*> > class_friend_functions_;
 	map<Scope*, vector<TypePtr> > class_friend_classes_;
+	map<pair<Scope*, string>, vector<Binding*> > namespace_lookup_cache_;
+	map<pair<pair<Scope*, string>, int>,
+	    pair<size_t, vector<Binding*> > > unqualified_lookup_cache_;
 	map<Scope*, vector<PendingFunctionBody> > pending_member_bodies_;
 	map<Binding*, PendingFunctionBody> pending_function_bodies_;
 	map<Scope*, vector<Scope*> > deferred_nested_member_body_scopes_;
@@ -412,10 +424,14 @@ public:
 	map<Binding*, vector<Node> > lambda_capture_initializers_;
 	map<const void*, TemplateDeclaration*> record_template_declarations_;
 	map<const void*, vector<TemplateArgument> > record_template_arguments_;
+	map<pair<TemplateDeclaration*, string>, TypePtr> alias_template_specializations_;
 		map<TemplateDeclaration*, map<string, Binding*> > variable_template_specializations_;
 		set<pair<TemplateDeclaration*, string> > active_variable_template_specializations_;
 		set<const void*> candidate_only_class_template_specializations_;
 		set<const void*> demanded_class_template_specializations_;
+		set<pair<const void*, bool> > active_member_function_template_records_;
+		map<pair<const void*, bool>, size_t> completed_member_function_template_records_;
+		size_t member_function_template_generation_;
 		set<TemplateDeclaration*> class_templates_with_dependent_base_;
 	set<const void*> record_dependent_base_lookup_skips_;
 	vector<map<string, TypePtr> > template_type_substitutions_;
@@ -424,10 +440,17 @@ public:
 	vector<map<string, vector<Binding*> > > function_parameter_pack_substitutions_;
 	vector<TemplateDeclaration*> completing_class_template_arguments_;
 	vector<ActiveClassInstantiation> active_class_instantiations_;
+	vector<TypePtr> active_class_virtual_completions_;
 	mutable vector<string> active_dependent_type_substitution_keys_;
+	mutable vector<string> active_template_argument_substitution_keys_;
 	mutable vector<string> active_dependent_value_member_keys_;
 	mutable vector<string> active_dependent_value_expression_keys_;
-	vector<TypePtr> active_record_conversion_targets_;
+	mutable map<string, TemplateArgument> dependent_value_member_argument_cache_;
+	mutable map<string, TemplateArgument> dependent_value_expression_argument_cache_;
+		mutable set<string> dependent_value_expression_argument_fail_cache_;
+		map<string, ConstexprValue> constexpr_call_result_cache_;
+		vector<pair<TypePtr, TypePtr> > active_conversion_attempts_;
+		vector<TypePtr> active_record_conversion_targets_;
 	map<Binding*, Node> function_bodies_;
 	Scope* current_scope() const;
 	Scope* global_scope() const;
@@ -504,6 +527,7 @@ public:
 	void mark_template_argument_demanded(const TemplateArgument& argument);
 	void complete_member_class_template_record(Binding* binding);
 			void instantiate_member_function_templates(TypePtr type, bool object_root = false);
+			void add_member_function_template(std::vector<TemplateDeclaration*>& members, TemplateDeclaration* declaration);
 	void instantiate_member_variable_templates(TypePtr type);
 			void validate_class_template_definition(TemplateDeclaration* declaration);
 			void validate_function_template_definition(TemplateDeclaration* declaration);
@@ -593,7 +617,8 @@ public:
 	Declarator parse_abstract_declarator();
 		void parse_noptr_declarator_root(Declarator& declarator, bool abstract_allowed);
 	void parse_ptr_prefix(vector<PtrOp>& ops);
-	void parse_suffixes(vector<Suffix>& suffixes);
+	void parse_suffixes(vector<Suffix>& suffixes,
+	                    bool qualified_declarator = false);
 	Suffix parse_array_suffix();
 	Suffix parse_function_suffix();
 	void parse_function_suffix_tail(Suffix& suffix);
@@ -615,10 +640,13 @@ public:
 	void enqueue_pending_function_body(PendingFunctionBody pending);
 	void push_pending_owner_template_substitutions( const PendingFunctionBody& pending);
 	void push_pending_function_template_substitutions( const PendingFunctionBody& pending);
-	void parse_pending_member_body_now(const PendingFunctionBody& pending);
-		bool parse_pending_function_body(Binding* function);
-		bool parse_pending_member_body(Binding* function);
-		void ensure_function_body_extra_node(Binding* function);
+	bool parse_pending_member_body_now(const PendingFunctionBody& pending,
+	                                   bool force_hosted_body = false);
+			bool parse_pending_function_body(Binding* function);
+			bool parse_pending_member_body(Binding* function);
+			bool defer_hosted_function_body(Binding* function) const;
+			void ensure_function_body_extra_node(Binding* function,
+			                                     bool force_hosted_body = false);
 		void parse_pending_member_bodies(Scope* class_scope);
 	void parse_deferred_nested_member_bodies(Scope* class_scope);
 	Node parse_compound_statement();
@@ -715,7 +743,9 @@ public:
 	TypePtr add_record(Scope* scope, const string& name, const string& tag, bool complete, Scope* class_scope);
 	TypePtr add_enum(Scope* scope, const string& name, bool scoped, EFundamentalType underlying, bool complete, bool create_scope);
 	void inject_anonymous_union_members(Scope* class_scope, Binding* storage);
-		Binding* ensure_default_constructor(TypePtr type, bool force_trivial = false);
+			Binding* ensure_default_constructor(TypePtr type, bool force_trivial = false);
+			void discard_implicit_default_constructor(TypePtr type,
+			                                          Binding* keep = NULL);
 		bool aggregate_omitted_field_requires_argument(TypePtr type);
 		void complete_aggregate_constructor_args(TypePtr type,
 		                                         vector<Expr>& args);
@@ -728,15 +758,16 @@ public:
 	Binding* ensure_default_destructor(TypePtr type, bool force_trivial = false);
 	Binding* find_default_constructor(TypePtr type) const;
 		TypePtr make_member_function_type(Scope* class_scope, TypePtr type);
-		Node make_member_init_action(Binding* field, const Node* init);
+			Node make_member_init_action(Binding* field, const Node* init,
+			                             Binding* this_binding = NULL);
 		Node make_base_init_action(TypePtr base, const Node* init);
 		void append_constructor_base_init_actions(
 			TypePtr class_type,
 			const vector<TypePtr>& direct_bases,
 			const vector<Node>& explicit_base_actions,
 			Node& body);
-		Node make_member_fini_action(Binding* field);
-		Node make_base_fini_action(TypePtr base);
+		Node make_member_fini_action(Binding* field, Binding* dtor = NULL);
+		Node make_base_fini_action(TypePtr base, Binding* dtor = NULL);
 		void mark_suppressed_generated_constructor_dependencies(Binding* ctor);
 		bool initializer_names_direct_base(Scope* class_scope, TypePtr direct_base, const string& name, const vector<TemplateArgument>* template_arguments = NULL);
 		Node default_constructor_action(Binding* variable, bool force_trivial = false);
@@ -861,9 +892,10 @@ public:
 		bool member_access_allowed(Binding* member, TypePtr object_record) const;
 		bool is_pointer_arithmetic(const Expr& lhs, const Expr& rhs) const;
 	bool is_pointer_difference(const Expr& lhs, const Expr& rhs) const;
-		int scalar_conversion_rank(TypePtr source, TypePtr target) const;
-		bool ranks_better(const vector<int>& lhs, const vector<int>& rhs) const;
-		void ensure_copy_move_constructor_for_single_arg( TypePtr record, const vector<Expr>& args);
+			int scalar_conversion_rank(TypePtr source, TypePtr target) const;
+			bool ranks_better(const vector<int>& lhs, const vector<int>& rhs) const;
+			int explicit_template_argument_match_score(Binding* fn, const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments) const;
+			void ensure_copy_move_constructor_for_single_arg( TypePtr record, const vector<Expr>& args);
 		void add_variadic_argument_ranks(Binding* fn, size_t arg_count, vector<int>& ranks) const;
 		void prepare_member_call(Expr& callee, vector<Expr>& args);
 		TypePtr pointer_arithmetic_type(ETokenType op, const Expr& lhs, const Expr& rhs) const;

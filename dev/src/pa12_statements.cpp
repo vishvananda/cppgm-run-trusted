@@ -9,6 +9,22 @@ static bool same_return_template_arguments(
 	const vector<pa11::TemplateInstanceArgument>& right)
 { size_t common = min(left.size(), right.size()); for (size_t i = 0; i < common; ++i) if (!same_return_template_argument(left[i], right[i])) return false; return common == left.size() || common == right.size(); }
 static bool same_return_record_type(TypePtr left, TypePtr right);
+static bool force_global_pending_member_body(Binding* binding);
+static bool same_member_function_signature(Binding* left, Binding* right)
+{
+	if (left == right)
+		return true;
+	if (left == NULL || right == NULL)
+		return false;
+	if (left->kind != BindingKind::Function ||
+	    right->kind != BindingKind::Function)
+		return false;
+	if (left->owner != right->owner || left->name != right->name)
+		return false;
+	if (left->type.get() == NULL || right->type.get() == NULL)
+		return left->type.get() == right->type.get();
+	return pa11::same_type(left->type, right->type);
+}
 static bool same_return_template_argument(
 	const pa11::TemplateInstanceArgument& left,
 	const pa11::TemplateInstanceArgument& right)
@@ -28,7 +44,67 @@ out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_
 out.has_constant_value = node.has_constant_value; out.constant_value = node.constant_value; out.dependent_value_name = node.dependent_value_name; out.dependent_value_owner_template_name =
 node.dependent_value_owner_template_name; out.dependent_value_member_name = node.dependent_value_member_name; out.dependent_value_negated = node.dependent_value_negated; out.dependent_value_owner_template_arguments =
 node.dependent_value_owner_template_arguments; out.braced_init_list = node.line.compare(0, 16, "braced-init-list") == 0; return out;
-	} TypePtr Parser::deduce_auto_return_type(Binding* function, const Expr& expr) { map<Binding*, TypePtr>::const_iterator found =
+	}
+static Scope* reusable_pending_function_scope(const vector<Scope*>& scopes,
+                                              Binding* function)
+{
+	for (size_t s = scopes.size(); s > 0; --s)
+	{
+		Scope* scope = scopes[s - 1];
+		if (scope == NULL || scope->kind != ScopeKind::Function)
+			continue;
+		if (function != NULL && !function->name.empty() &&
+		    scope->name != function->name)
+			continue;
+		for (size_t i = 0; i < scope->binding_order.size(); ++i)
+			if (scope->binding_order[i]->kind == BindingKind::Parameter &&
+			    scope->binding_order[i]->name != "this")
+				return scope;
+	}
+	return NULL;
+}
+static vector<ParameterInfo> parameters_from_replay_scope(Binding* function,
+                                                          Scope* scope)
+{
+	vector<ParameterInfo> out;
+	if (function == NULL || scope == NULL ||
+	    function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function)
+		return out;
+	size_t first = function->owner != NULL &&
+	               function->owner->kind == ScopeKind::Class &&
+	               !function->is_static_member ? 1 : 0;
+	size_t index = first;
+	for (size_t i = 0; i < scope->binding_order.size(); ++i)
+	{
+		Binding* binding = scope->binding_order[i];
+		if (binding->kind != BindingKind::Parameter)
+			continue;
+		if (first != 0 && binding->name == "this")
+			continue;
+		if (index >= function->type->parameters.size())
+			break;
+		ParameterInfo parameter;
+		parameter.name = binding->name;
+		parameter.type = function->type->parameters[index++];
+		out.push_back(parameter);
+	}
+	return out;
+}
+static Binding* find_parameter_binding(Scope* scope, const string& name)
+{
+	if (scope == NULL || name.empty())
+		return NULL;
+	map<string, vector<Binding*> >::iterator found =
+		scope->members.find(name);
+	if (found == scope->members.end())
+		return NULL;
+	for (size_t i = 0; i < found->second.size(); ++i)
+		if (found->second[i]->kind == BindingKind::Parameter)
+			return found->second[i];
+	return NULL;
+}
+TypePtr Parser::deduce_auto_return_type(Binding* function, const Expr& expr) { map<Binding*, TypePtr>::const_iterator found =
 auto_return_patterns_.find(function); if (found == auto_return_patterns_.end()) throw runtime_error("auto return pattern missing"); TypePtr pattern = found->second;
 TypePtr bare = pa11::strip_cv(pattern); TypePtr deduced; if (bare->kind == pa11::TypeKind::LValueReference) deduced = pa11::make_lvalue_reference(
 pa11::make_cv(expression_object_type(expr.type), pattern->base->kind == pa11::TypeKind::Cv ? pattern->base->cv : pa11::CV_NONE)); else if (bare->kind == pa11::TypeKind::RValueReference)
@@ -42,22 +118,26 @@ parameters = suffix->parameters; parse_function_body_from_parameters(function, p
 	Binding* function, const vector<ParameterInfo>& parameters, Node& function_node) {
 	vector<Scope*> saved_scopes = scopes_;
 	if (function_node.children.empty()) throw runtime_error("missing function node"); Node& fn = function_node.children.back(); Scope* lexical_parent =
-	function->owner != NULL && function->owner->kind == ScopeKind::Class ? function->owner : current_scope(); Scope* function_scope = pa11::create_child_scope(lexical_parent, ScopeKind::Function, function->name);
+	function->owner != NULL && function->owner->kind == ScopeKind::Class ? function->owner : current_scope(); Scope* replay_function_scope = hosted_compatibility_ ? reusable_pending_function_scope(scopes_, function) : NULL; vector<ParameterInfo> effective_parameters = parameters;
+		size_t first_parameter = function->owner != NULL && function->owner->kind == ScopeKind::Class && !function->is_static_member ? 1 : 0; size_t expected_parameters =
+		function->type.get() != NULL && function->type->kind == pa11::TypeKind::Function && function->type->parameters.size() >= first_parameter ? function->type->parameters.size() - first_parameter : effective_parameters.size();
+		if (replay_function_scope != NULL && effective_parameters.size() < expected_parameters) { vector<ParameterInfo> replay_parameters = parameters_from_replay_scope(function, replay_function_scope); if (replay_parameters.size() >= effective_parameters.size()) effective_parameters = replay_parameters; }
+	bool reuse_function_scope = replay_function_scope != NULL && effective_parameters.size() >= expected_parameters; Scope* function_scope = reuse_function_scope ? replay_function_scope : pa11::create_child_scope(lexical_parent, ScopeKind::Function, function->name);
 if (function->owner != NULL && function->owner->kind == ScopeKind::Class && !function->is_static_member) {
 if (function->type->parameters.empty()) throw runtime_error("member function missing this parameter"); TypePtr this_type = function->type->parameters[0]; Binding* this_binding =
-pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
+reuse_function_scope ? find_parameter_binding(function_scope, "this") : NULL; if (this_binding == NULL) this_binding = pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
 Node this_node("parameter this " + pa11::describe_type(this_type)); this_node.binding = this_binding; this_node.type = this_type; add_child(fn, this_node);
 } map<Binding*, vector<string> >::const_iterator saved_names = function_parameter_names_.find(function); size_t saved_name_offset =
 function->owner != NULL && function->owner->kind == ScopeKind::Class && !function->is_static_member ? 1 : 0; map<string, vector<Binding*> > parameter_packs;
-for (size_t i = 0; i < parameters.size(); ++i) { if (!parameters[i].pack_expression_name.empty() && !parameters[i].pack_name.empty())
-{ TemplateArgument subst; if (find_template_value_substitution(parameters[i].pack_name, subst) &&
-subst.kind == TemplateArgumentKind::Pack && subst.pack.empty()) { parameter_packs[parameters[i].pack_expression_name];
-continue; } } TypePtr parameter_type = parameters[i].type.get() != NULL
-? substitute_template_type(parameters[i].type) : TypePtr(); if (parameter_type.get() == NULL) { if (!parameters[i].pack_expression_name.empty())
-parameter_packs[parameters[i].pack_expression_name]; continue; } string name = parameters[i].name;
+	for (size_t i = 0; i < effective_parameters.size(); ++i) { if (!effective_parameters[i].pack_expression_name.empty() && !effective_parameters[i].pack_name.empty())
+{ TemplateArgument subst; if (find_template_value_substitution(effective_parameters[i].pack_name, subst) &&
+subst.kind == TemplateArgumentKind::Pack && subst.pack.empty()) { parameter_packs[effective_parameters[i].pack_expression_name];
+continue; } } TypePtr parameter_type = effective_parameters[i].type.get() != NULL
+? substitute_template_type(effective_parameters[i].type) : TypePtr(); if (parameter_type.get() == NULL) { if (!effective_parameters[i].pack_expression_name.empty())
+parameter_packs[effective_parameters[i].pack_expression_name]; continue; } string name = effective_parameters[i].name;
 string node_name = name; size_t saved_name_index = saved_name_offset + i; bool force_saved_name = override_function_parameter_name_bindings_.count(function) != 0; bool saved_name_reused_later = false; bool later_parameter_has_name = false;
-for (size_t j = i + 1; j < parameters.size(); ++j)
-	if (!parameters[j].name.empty())
+for (size_t j = i + 1; j < effective_parameters.size(); ++j)
+	if (!effective_parameters[j].name.empty())
 		later_parameter_has_name = true;
 if (saved_names != function_parameter_names_.end() && saved_name_index < saved_names->second.size())
 	for (size_t j = saved_name_index + 1; j < saved_names->second.size(); ++j)
@@ -67,12 +147,12 @@ if (saved_names != function_parameter_names_.end() && saved_name_index < saved_n
 if ((force_saved_name || (node_name.empty() && !saved_name_reused_later && !later_parameter_has_name)) && saved_names != function_parameter_names_.end() && saved_name_index < saved_names->second.size() && !saved_names->second[saved_name_index].empty() &&
 !(function->is_static_member && saved_name_index == 0 && saved_names->second[saved_name_index] == "this")) node_name = saved_names->second[saved_name_index];
 string binding_name = !name.empty() ? name : node_name; if (!binding_name.empty()) { Binding* param =
-pa11::add_binding(function_scope, BindingKind::Parameter, binding_name, parameter_type);
-if (!parameters[i].pack_expression_name.empty()) parameter_packs[parameters[i].pack_expression_name] .push_back(param); Node param_node("parameter " + node_name + " " +
+reuse_function_scope ? find_parameter_binding(function_scope, binding_name) : NULL; if (param == NULL) param = pa11::add_binding(function_scope, BindingKind::Parameter, binding_name, parameter_type);
+if (!effective_parameters[i].pack_expression_name.empty()) parameter_packs[effective_parameters[i].pack_expression_name] .push_back(param); Node param_node("parameter " + node_name + " " +
 pa11::describe_type(parameter_type)); param_node.binding = param; param_node.type = parameter_type; add_child(fn, param_node);
 } else { Node param_node("parameter " + node_name + " " +
 pa11::describe_type(parameter_type)); param_node.type = parameter_type; add_child(fn, param_node); }
-	} scopes_.push_back(function_scope); bool auto_return = auto_return_functions_.count(function) != 0; function_returns_.push_back(auto_return ? TypePtr() : function->type->base);
+	} if (current_scope() != function_scope) scopes_.push_back(function_scope); bool auto_return = auto_return_functions_.count(function) != 0; function_returns_.push_back(auto_return ? TypePtr() : function->type->base);
 	active_functions_.push_back(function); function_parameter_pack_substitutions_.push_back(parameter_packs); try { if (at(KW_TRY)) { Node body("compound-statement"); add_child(body, parse_try_statement()); add_child(fn, body); } else add_child(fn, parse_compound_statement()); } catch (...) { function_parameter_pack_substitutions_.pop_back(); active_functions_.pop_back();
 	function_returns_.pop_back(); scopes_ = saved_scopes; throw; } if (auto_return)
 { map<Binding*, TypePtr>::const_iterator deduced = auto_return_deduced_.find(function); if (deduced == auto_return_deduced_.end())
@@ -82,8 +162,7 @@ function->type->base = pa11::make_fundamental(FT_VOID); else function->type->bas
 { if (function != NULL) function_bodies_[function] = function_node; }
 void Parser::enqueue_pending_member_body(Scope* class_scope, PendingFunctionBody pending) { pending.scopes = scopes_;
 pending.friend_class_scopes = active_friend_class_scopes_; pending.type_substitutions = template_type_substitutions_; pending.value_substitutions = template_value_substitutions_; pending.pack_substitutions = template_type_parameter_packs_;
-pending_member_bodies_[class_scope].push_back(pending); } void Parser::enqueue_pending_function_body(PendingFunctionBody pending) {
-pending.scopes = scopes_; pending.friend_class_scopes = active_friend_class_scopes_; pending.type_substitutions = template_type_substitutions_; pending.value_substitutions = template_value_substitutions_;
+pending_member_bodies_[class_scope].push_back(pending); } void Parser::enqueue_pending_function_body(PendingFunctionBody pending) { pending.scopes = scopes_; pending.friend_class_scopes = active_friend_class_scopes_; pending.type_substitutions = template_type_substitutions_; pending.value_substitutions = template_value_substitutions_;
 pending.pack_substitutions = template_type_parameter_packs_; pending_function_bodies_[pending.function] = pending; } void Parser::push_pending_owner_template_substitutions(
 const PendingFunctionBody& pending) { TypePtr owner_record = pending.function != NULL && pending.function->owner != NULL
 ? pa11::record_type_for_scope(pending.function->owner) : TypePtr(); owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr();
@@ -108,10 +187,12 @@ if (parameter.kind == TemplateParameterKind::Type) { if (parameter.is_pack) {
 subst[parameter.name] = pa11::make_template_parameter_type(parameter.name); value_subst[parameter.name] = function_args->second[i]; pack_subst.insert(parameter.name);
 } else subst[parameter.name] = function_args->second[i].type; }
 else value_subst[parameter.name] = function_args->second[i]; } template_type_substitutions_.push_back(subst);
-template_value_substitutions_.push_back(value_subst); template_type_parameter_packs_.push_back(pack_subst); } void Parser::parse_pending_member_body_now(const PendingFunctionBody& pending)
+template_value_substitutions_.push_back(value_subst); template_type_parameter_packs_.push_back(pack_subst); } static bool pending_body_has_unnamed_parameters(const PendingFunctionBody& pending)
+{ for (size_t i = 0; i < pending.parameters.size(); ++i) if (pending.parameters[i].type.get() != NULL && pending.parameters[i].name.empty()) return true; return false; } bool Parser::parse_pending_member_body_now(const PendingFunctionBody& pending, bool force_hosted_body)
 { if (pending.prebuilt_node) { if (pending.function != NULL &&
 pending.node.line.compare(0, 19, "function-definition") == 0) pending.function->is_inline_definition = true; extra_lowir_nodes_.push_back(pending.node); if (pending.node.line.compare(0, 19, "function-definition") == 0)
-remember_function_body(pending.function, pending.node); return; } size_t saved_pos = pos_;
+remember_function_body(pending.function, pending.node); return true; } if (pending.function != NULL && function_bodies_.find(pending.function) != function_bodies_.end()) return true; bool pending_inline_definition = pending.function != NULL && (pending.function->is_inline_definition || pending.node.line.compare(0, 19, "function-definition") == 0); bool pending_class_constructor = pending.function != NULL && pending.function->owner != NULL && pending.function->owner->kind == ScopeKind::Class && pending.function->name == pending.function->owner->name; bool pending_simple_return_body = pending.body_pos + 1 < tokens_.size() && tokens_[pending.body_pos].type == OP_LBRACE && tokens_[pending.body_pos + 1].type == KW_RETURN; if (!force_hosted_body && hosted_compatibility_ && pending.function != NULL && pending.function->owner != NULL && pending.function->owner->kind == ScopeKind::Class && !pending.function->is_object_root && !pending_class_constructor && pending_body_has_unnamed_parameters(pending)) return false; if (!force_hosted_body && hosted_compatibility_ && pending_inline_definition && !pending.function->is_object_root && !pending_class_constructor && !pending_simple_return_body)
+return false; size_t saved_pos = pos_;
 vector<Scope*> saved_scopes = scopes_; vector<Scope*> saved_friend_class_scopes = active_friend_class_scopes_; vector<map<string, TypePtr> > saved_type_substitutions = template_type_substitutions_;
 vector<map<string, TemplateArgument> > saved_value_substitutions = template_value_substitutions_; vector<set<string> > saved_pack_substitutions = template_type_parameter_packs_;
 pos_ = pending.body_pos; scopes_ = pending.scopes; active_friend_class_scopes_ = pending.friend_class_scopes; template_type_substitutions_ = pending.type_substitutions;
@@ -121,36 +202,329 @@ pending.function->is_inline_definition = true; if (pending.function != NULL)
 active_function_body_replays_.insert(pending.function); try { if (pending.constructor_body)
 parse_constructor_body_from_parameters(pending.function, pending.class_type, pending.parameters, wrapper);
 else parse_function_body_from_parameters(pending.function, pending.parameters, wrapper);
-} catch (...) { if (pending.function != NULL)
+} catch (const runtime_error& err) { if (pending.function != NULL)
+active_function_body_replays_.erase(pending.function); template_value_substitutions_ = saved_value_substitutions;
+template_type_substitutions_ = saved_type_substitutions; template_type_parameter_packs_ = saved_pack_substitutions; active_friend_class_scopes_ = saved_friend_class_scopes; scopes_ = saved_scopes;
+pos_ = saved_pos; if (pending.function != NULL && !pending.function->is_object_root && function_template_placeholders_.find(pending.function) != function_template_placeholders_.end() && string(err.what()).compare(0, 16, "name not found: ") == 0) return false; if (hosted_compatibility_ && pending.function != NULL && pending.function->owner != NULL && pending.function->owner->kind == ScopeKind::Class && (string(err.what()).compare(0, 18, "name not found: __") == 0 || string(err.what()).compare(0, 28, "cannot resolve call overload") == 0)) return false; throw; } catch (...) { if (pending.function != NULL)
 active_function_body_replays_.erase(pending.function); template_value_substitutions_ = saved_value_substitutions;
 template_type_substitutions_ = saved_type_substitutions; template_type_parameter_packs_ = saved_pack_substitutions; active_friend_class_scopes_ = saved_friend_class_scopes; scopes_ = saved_scopes;
 pos_ = saved_pos; throw; } if (!wrapper.children.empty())
 mark_empty_destructor(pending.function, wrapper.children.back()); if (pending.function != NULL)
 active_function_body_replays_.erase(pending.function); if (!wrapper.children.empty()) extra_lowir_nodes_.push_back(wrapper.children.back()); template_value_substitutions_ = saved_value_substitutions;
 template_type_substitutions_ = saved_type_substitutions; template_type_parameter_packs_ = saved_pack_substitutions; active_friend_class_scopes_ = saved_friend_class_scopes; scopes_ = saved_scopes;
-pos_ = saved_pos; } bool Parser::parse_pending_function_body(Binding* function) {
+pos_ = saved_pos; return true; } static bool same_pending_member_function(Binding* pending, Binding* function)
+{ return same_member_function_signature(pending, function); }
+static bool force_global_pending_member_body(Binding* binding)
+{ if (binding == NULL || binding->owner == NULL || binding->owner->kind != ScopeKind::Class) return false; if (!binding->function_specialization_symbol.empty()) return false; TypePtr owner = pa11::record_type_for_scope(binding->owner); owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr(); if (owner.get() == NULL || owner->kind != pa11::TypeKind::Record || owner->is_template_specialization) return false; for (Scope* scope = binding->owner->parent; scope != NULL; scope = scope->parent) if (scope->kind == ScopeKind::Namespace && !scope->name.empty()) return false; return true; }
+bool Parser::parse_pending_function_body(Binding* function) {
 if (function == NULL) return false; if (function_template_candidate_instantiation_depth_ != 0) return false;
-map<Binding*, PendingFunctionBody>::iterator found = pending_function_bodies_.find(function); if (found == pending_function_bodies_.end()) return false;
-PendingFunctionBody body = found->second; pending_function_bodies_.erase(found); parse_pending_member_body_now(body); return true;
+map<Binding*, PendingFunctionBody>::iterator found = pending_function_bodies_.find(function);
+if (found == pending_function_bodies_.end())
+	for (map<Binding*, PendingFunctionBody>::iterator it =
+		     pending_function_bodies_.begin();
+	     it != pending_function_bodies_.end();
+	     ++it)
+		if (same_pending_member_function(it->first, function))
+		{
+			found = it;
+			break;
+		}
+if (found == pending_function_bodies_.end()) return false;
+PendingFunctionBody body = found->second; pending_function_bodies_.erase(found); return parse_pending_member_body_now(body, true);
 } bool Parser::parse_pending_member_body(Binding* function) { if (function == NULL)
-return false; if (function_template_candidate_instantiation_depth_ != 0) return false; for (map<Scope*, vector<PendingFunctionBody> >::iterator it =
+return false; if (function_template_candidate_instantiation_depth_ != 0) return false;
+for (map<Scope*, vector<PendingFunctionBody> >::iterator it =
 pending_member_bodies_.begin(); it != pending_member_bodies_.end(); ++it) {
-vector<PendingFunctionBody>& pending = it->second; for (size_t i = 0; i < pending.size(); ++i) { if (pending[i].function != function)
+vector<PendingFunctionBody>& pending = it->second; for (size_t i = 0; i < pending.size(); ++i) { if (!(pending[i].function == function || same_pending_member_function(pending[i].function, function)))
 continue; PendingFunctionBody body = pending[i]; pending.erase(pending.begin() + i); if (pending.empty())
-pending_member_bodies_.erase(it); parse_pending_member_body_now(body); return true; }
-} return false; } void Parser::ensure_function_body_extra_node(Binding* function)
-{ if (function == NULL) return; if (function_bodies_.find(function) == function_bodies_.end())
-{ map<Binding*, TemplateDeclaration*>::iterator template_it = function_template_placeholders_.find(function); map<Binding*, vector<TemplateArgument> >::iterator args_it =
-function_template_specialization_arguments_.find(function); if (template_it != function_template_placeholders_.end() && args_it != function_template_specialization_arguments_.end()) {
-TemplateDeclaration* declaration = template_it->second; if (!declaration->has_definition && declaration->placeholder != NULL) {
-map<Binding*, TemplateDeclaration*>::iterator placeholder = function_template_placeholders_.find( declaration->placeholder); if (placeholder != function_template_placeholders_.end() &&
-placeholder->second->has_definition) declaration = placeholder->second; } if (declaration->has_definition)
-{ function_template_placeholders_[function] = declaration; vector<TemplateArgument> selected_args = args_it->second; Binding* instantiated =
-instantiate_function_template(declaration, selected_args); if (instantiated != NULL && instantiated != function) {
-function->aliased_binding = instantiated; function = instantiated; } }
-} } for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i) if (extra_lowir_nodes_[i].binding == function)
+pending_member_bodies_.erase(it); return parse_pending_member_body_now(body, true); }
+	} return false; } bool Parser::demand_lowir_function_body(Binding* function)
+	{
+		if (function == NULL || function_template_candidate_instantiation_depth_ != 0)
+			return false;
+		if (defer_hosted_function_body(function))
+			return false;
+		size_t before = extra_lowir_nodes_.size();
+	parse_pending_function_body(function);
+	parse_pending_member_body(function);
+	if (function->aliased_binding != NULL)
+	{
+		parse_pending_function_body(function->aliased_binding);
+		parse_pending_member_body(function->aliased_binding);
+	}
+	ensure_function_body_extra_node(function, true);
+	if (function->aliased_binding != NULL)
+		ensure_function_body_extra_node(function->aliased_binding, true);
+	return extra_lowir_nodes_.size() != before;
+	} bool Parser::defer_hosted_function_body(Binding* function) const
+		{
+			if (!hosted_compatibility_ || function == NULL)
+				return false;
+			if (function->owner != NULL &&
+			    function->owner->kind == ScopeKind::Namespace &&
+			    function->owner->name == "std" &&
+			    (function->name == "forward_as_tuple" ||
+			     function->name == "forward" ||
+			     function->name == "get" ||
+			     function->name == "make_shared"))
+				return true;
+			if (function->owner != NULL &&
+			    function->owner->kind == ScopeKind::Namespace &&
+			    function->owner->name == "__gnu_cxx" &&
+			    function->name == "__stoa")
+				return true;
+			if (function->is_object_root)
+				return false;
+			if (function->owner != NULL &&
+			    function->owner->kind == ScopeKind::Class &&
+			    function->name == function->owner->name)
+				return false;
+			for (Scope* scope = function->owner;
+			     scope != NULL;
+			     scope = scope->parent)
+				if (scope->kind == ScopeKind::Namespace &&
+				    (scope->name == "std" ||
+				     scope->name == "__gnu_cxx"))
+					return true;
+		if (function->is_inline_definition)
+			return true;
+		Binding* probes[2] = { function, function->aliased_binding };
+		for (size_t i = 0; i < 2; ++i)
+		{
+			Binding* probe = probes[i];
+			if (probe == NULL || probe->is_object_root)
+				continue;
+			map<Binding*, TemplateDeclaration*>::const_iterator it =
+				function_template_placeholders_.find(probe);
+			if (it != function_template_placeholders_.end() &&
+			    it->second != NULL &&
+			    it->second->has_definition &&
+			    !it->second->constructor_template)
+				return true;
+		}
+		return false;
+	}
+	void Parser::ensure_function_body_extra_node(Binding* function,
+	                                             bool force_hosted_body)
+	{
+		if (function == NULL)
+			return;
+		bool have_body = function_bodies_.find(function) != function_bodies_.end();
+		if (!have_body && function->aliased_binding != NULL)
+			have_body =
+				function_bodies_.find(function->aliased_binding) !=
+				function_bodies_.end();
+		if (!have_body)
+			for (map<Binding*, Node>::const_iterator it =
+				     function_bodies_.begin();
+			     it != function_bodies_.end();
+			     ++it)
+				if (same_member_function_signature(it->first, function))
+				{
+					have_body = true;
+					break;
+				}
+		if (!have_body &&
+		    !force_hosted_body &&
+		    defer_hosted_function_body(function))
+			return;
+		if (function_bodies_.find(function) == function_bodies_.end())
+		{
+			map<Binding*, TemplateDeclaration*>::iterator template_it =
+				function_template_placeholders_.find(function);
+			map<Binding*, vector<TemplateArgument> >::iterator args_it =
+				function_template_specialization_arguments_.find(function);
+			if (template_it != function_template_placeholders_.end() &&
+			    args_it != function_template_specialization_arguments_.end())
+			{
+				TemplateDeclaration* declaration = template_it->second;
+				if (!declaration->has_definition &&
+				    declaration->placeholder != NULL)
+				{
+					map<Binding*, TemplateDeclaration*>::iterator
+						placeholder = function_template_placeholders_.find(
+							declaration->placeholder);
+					if (placeholder !=
+						    function_template_placeholders_.end() &&
+					    placeholder->second->has_definition)
+						declaration = placeholder->second;
+				}
+				vector<TemplateArgument> selected_args = args_it->second;
+				bool saved_force_body_instantiation =
+					force_function_template_body_instantiation_;
+				if (force_hosted_body)
+					force_function_template_body_instantiation_ = true;
+				Binding* instantiated = NULL;
+				try
+				{
+					if (!declaration->has_definition &&
+					    hosted_compatibility_)
+					{
+						for (map<Scope*,
+						         map<string,
+						             vector<TemplateDeclaration*> > >::
+							     iterator scope_it =
+							     function_templates_.begin();
+						     instantiated == NULL &&
+						     scope_it != function_templates_.end();
+						     ++scope_it)
+						{
+							map<string, vector<TemplateDeclaration*> >::
+								iterator name_it =
+									scope_it->second.find(
+										declaration->name);
+							if (name_it == scope_it->second.end())
+								continue;
+							for (size_t ri = 0;
+							     ri < name_it->second.size();
+							     ++ri)
+							{
+								TemplateDeclaration* candidate =
+									name_it->second[ri];
+								if (candidate == NULL ||
+								    candidate == declaration ||
+								    !candidate->has_definition)
+									continue;
+								size_t required_arguments = 0;
+								for (size_t pi = 0;
+								     pi < candidate->parameters.size();
+								     ++pi)
+									if (!candidate->parameters[pi].has_default &&
+									    !candidate->parameters[pi].is_pack)
+										++required_arguments;
+								if (selected_args.size() <
+								    required_arguments)
+									continue;
+								try
+								{
+									complete_template_arguments(
+										candidate,
+										selected_args);
+									Binding* alternate =
+										instantiate_function_template(
+											candidate,
+											selected_args);
+									bool same_signature =
+										alternate != NULL &&
+										same_member_function_signature(
+											alternate,
+											function);
+									if (!same_signature &&
+									    function->aliased_binding != NULL)
+										same_signature =
+											same_member_function_signature(
+												alternate,
+												function->aliased_binding);
+									if (same_signature)
+									{
+										declaration = candidate;
+										instantiated = alternate;
+										break;
+									}
+								}
+								catch (const exception&)
+								{
+								}
+								catch (...)
+								{
+								}
+							}
+						}
+					}
+					if (instantiated == NULL &&
+					    declaration->has_definition)
+					{
+						function_template_placeholders_[function] =
+							declaration;
+						instantiated =
+							instantiate_function_template(declaration,
+							                              selected_args);
+					}
+				}
+				catch (...)
+				{
+					bool recovered = false;
+					if (hosted_compatibility_)
+					{
+						map<Scope*,
+						    map<string,
+						        vector<TemplateDeclaration*> > >::iterator
+							scope_it =
+								function_templates_.find(
+									declaration->owner);
+						if (scope_it != function_templates_.end())
+						{
+							map<string, vector<TemplateDeclaration*> >::
+								iterator name_it =
+									scope_it->second.find(
+										declaration->name);
+							if (name_it != scope_it->second.end())
+							{
+								for (size_t ri = 0;
+								     ri < name_it->second.size();
+								     ++ri)
+								{
+									TemplateDeclaration* candidate =
+										name_it->second[ri];
+									if (candidate == NULL ||
+									    candidate == declaration ||
+									    !candidate->has_definition)
+										continue;
+									try
+									{
+										Binding* alternate =
+											instantiate_function_template(
+												candidate,
+												selected_args);
+										bool same_signature =
+											alternate != NULL &&
+											same_member_function_signature(
+												alternate,
+												function);
+										if (same_signature)
+										{
+											declaration = candidate;
+											instantiated = alternate;
+											recovered = true;
+											break;
+										}
+									}
+									catch (const exception&)
+									{
+									}
+									catch (...)
+									{
+									}
+								}
+							}
+						}
+					}
+					if (!recovered)
+					{
+						force_function_template_body_instantiation_ =
+							saved_force_body_instantiation;
+						throw;
+					}
+				}
+				force_function_template_body_instantiation_ =
+					saved_force_body_instantiation;
+				if (instantiated != NULL && instantiated != function)
+				{
+					function_template_placeholders_[function] =
+						declaration;
+					function->aliased_binding = instantiated;
+					function = instantiated;
+				}
+			}
+		}
+for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i) if (extra_lowir_nodes_[i].binding == function)
 return; map<Binding*, Node>::const_iterator found = function_bodies_.find(function); if (found == function_bodies_.end() &&
-function->aliased_binding != NULL) found = function_bodies_.find(function->aliased_binding); if (found != function_bodies_.end()) extra_lowir_nodes_.push_back(found->second);
+function->aliased_binding != NULL) found = function_bodies_.find(function->aliased_binding); if (found == function_bodies_.end())
+for (map<Binding*, Node>::const_iterator it = function_bodies_.begin(); it != function_bodies_.end(); ++it)
+if (same_member_function_signature(it->first, function)) { found = it; break; }
+if (found != function_bodies_.end()) { if (found->first != function && same_member_function_signature(found->first, function)) {
+Node body = found->second; body.binding = function; body.type = function->type; function_bodies_[function] = body; extra_lowir_nodes_.push_back(body);
+} else extra_lowir_nodes_.push_back(found->second); }
 } static bool function_body_empty(const Node& fn) { if (fn.children.empty())
 return true; const Node& body = fn.children.back(); return body.line == "compound-statement" && body.children.empty(); }
 static void mark_empty_destructor(Binding* function, const Node& fn) { if (function == NULL || function->name.empty() ||
@@ -160,12 +534,14 @@ map<string, vector<Binding*> >::iterator found = owner->members.find(function->n
 for (size_t i = 0; i < found->second.size(); ++i) { Binding* candidate = found->second[i]; if (candidate->kind == BindingKind::Function &&
 pa11::same_type(candidate->type, function->type)) candidate->is_noop_destructor = true; } }
 void Parser::parse_pending_member_bodies(Scope* class_scope) { map<Scope*, vector<PendingFunctionBody> >::iterator found = pending_member_bodies_.find(class_scope);
+if (function_template_candidate_instantiation_depth_ != 0) return;
 if (found == pending_member_bodies_.end()) return; if (!active_class_instantiations_.empty() && !validating_template_definition_)
 return; vector<PendingFunctionBody> pending = found->second; pending_member_bodies_.erase(found); vector<PendingFunctionBody> still_pending;
-for (size_t i = 0; i < pending.size(); ++i) { if (pending[i].function != NULL && function_template_placeholders_.find(pending[i].function) !=
-function_template_placeholders_.end()) { still_pending.push_back(pending[i]); continue;
-} parse_pending_member_body_now(pending[i]); } if (!still_pending.empty())
-pending_member_bodies_[class_scope] = still_pending; } void Parser::parse_deferred_nested_member_bodies(Scope* class_scope) {
+	for (size_t i = 0; i < pending.size(); ++i) { if (pending[i].function != NULL && function_template_placeholders_.find(pending[i].function) !=
+	function_template_placeholders_.end()) { still_pending.push_back(pending[i]); continue;
+	} bool parsed = parse_pending_member_body_now(pending[i]); if (!parsed && force_global_pending_member_body(pending[i].function)) parsed = parse_pending_member_body_now(pending[i], true);
+	if (!parsed) still_pending.push_back(pending[i]); } if (!still_pending.empty())
+	pending_member_bodies_[class_scope] = still_pending; } void Parser::parse_deferred_nested_member_bodies(Scope* class_scope) {
 map<Scope*, vector<Scope*> >::iterator found = deferred_nested_member_body_scopes_.find(class_scope); if (found == deferred_nested_member_body_scopes_.end()) return;
 vector<Scope*> nested = found->second; deferred_nested_member_body_scopes_.erase(found); for (size_t i = 0; i < nested.size(); ++i) {
 parse_pending_member_bodies(nested[i]); parse_deferred_nested_member_bodies(nested[i]); } }
@@ -186,7 +562,7 @@ size_t attr_save = pos_; skip_attributes(); bool definitely_declaration = at_sim
 at(KW_CONSTEXPR) || at(KW_EXTERN) || at(KW_STATIC) || at(KW_DECLTYPE) ||
 at(KW_TYPENAME) || starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT) ||
 (at_identifier() && (current().source == "__int128" || current().source == "_BitInt" || current().source == "_Atomic" || current().source == "__extension__" || current().source == "__decltype" || current().source == "__decltype__" || current().source == "__typeof" || current().source == "__typeof__" || current().source == "_Complex" || current().source == "__complex__" || current().source == "__complex")) ||
-(at_identifier() && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier); pos_ = attr_save; if (!definitely_declaration && (at_identifier() || at(OP_COLON2)))
+(at_identifier() && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier); pos_ = attr_save; if (definitely_declaration && at_identifier() && pos_ + 4 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier && tokens_[pos_ + 2].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 2].type == OP_LPAREN && tokens_[pos_ + 3].kind == posttoken::TokenKind::Identifier && tokens_[pos_ + 4].kind == posttoken::TokenKind::Simple && tokens_[pos_ + 4].type == OP_RPAREN && pa11::lookup_unqualified(current_scope(), tokens_[pos_ + 3].source, pa11::LOOKUP_VALUE) != NULL) definitely_declaration = false; if (!definitely_declaration && (at_identifier() || at(OP_COLON2)))
 { size_t type_save = pos_; TypePtr type_probe; if (try_parse_type_name(type_probe) &&
 (starts_declarator() || at_identifier())) { bool parenthesized_this_argument = at(OP_LPAREN) &&
 pos_ + 2 < tokens_.size() && tokens_[pos_ + 1].kind == posttoken::TokenKind::Simple && (tokens_[pos_ + 1].type == OP_STAR || tokens_[pos_ + 1].type == OP_AMP) &&
@@ -208,7 +584,12 @@ if (at(KW_DO)) return parse_do_statement(); if (at(KW_FOR)) return parse_for_sta
 if (at(KW_TRY)) return parse_try_statement(); if (at(KW_RETURN) || at(KW_BREAK) || at(KW_CONTINUE) || at(KW_GOTO)) return parse_jump_statement();
 if ((at_identifier() && lookahead(OP_COLON, 1)) || at(KW_CASE) || at(KW_DEFAULT)) return parse_labeled_statement(); return parse_expression_statement();
 } void Parser::skip_constexpr_if_statement()
-{ skip_attributes(); if (at(OP_LBRACE)) { skip_balanced(OP_LBRACE, OP_RBRACE); return; } if (at(KW_IF)) { ++pos_; if (at(KW_CONSTEXPR)) ++pos_; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); skip_constexpr_if_statement(); if (consume(KW_ELSE)) skip_constexpr_if_statement(); return; } while (!at_eof() && !consume(OP_SEMICOLON)) ++pos_; }
+{ skip_attributes(); if (at(OP_LBRACE)) { skip_balanced(OP_LBRACE, OP_RBRACE); return; } if (at(KW_IF)) { ++pos_; if (at(KW_CONSTEXPR)) ++pos_; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); skip_constexpr_if_statement(); if (consume(KW_ELSE)) skip_constexpr_if_statement(); return; }
+if (at(KW_FOR) || at(KW_WHILE) || at(KW_SWITCH)) { ++pos_; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); skip_constexpr_if_statement(); return; }
+if (at(KW_DO)) { ++pos_; skip_constexpr_if_statement(); if (consume(KW_WHILE) && at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); consume(OP_SEMICOLON); return; }
+if (at(KW_CASE) || at(KW_DEFAULT)) { ++pos_; while (!at_eof() && !consume(OP_COLON)) { if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); else ++pos_; } skip_constexpr_if_statement(); return; }
+if (at_identifier() && lookahead(OP_COLON, 1)) { pos_ += 2; skip_constexpr_if_statement(); return; }
+while (!at_eof()) { if (at(OP_LBRACE)) skip_balanced(OP_LBRACE, OP_RBRACE); else if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); else if (at(OP_LSQUARE)) skip_balanced(OP_LSQUARE, OP_RSQUARE); else if (consume(OP_SEMICOLON)) break; else ++pos_; } }
 Node Parser::parse_if_statement() { expect(KW_IF);
 bool constexpr_if = consume(KW_CONSTEXPR); Node node("if-statement"); expect(OP_LPAREN); if (top_level_semicolon_before_rparen(tokens_, pos_))
 { Node init_node("if-init-statement"); if (at(KW_USING)) parse_using_family(init_node); else if (starts_declaration()) parse_simple_or_function_declaration(init_node, true); else init_node = parse_expression_statement();
@@ -301,20 +682,24 @@ vector<Expr> args; for (size_t i = 0; i < expr.node.children.size(); ++i) { Expr
 arg.valid = true; arg.node = expr.node.children[i]; arg.type = arg.node.type; arg.category = arg.node.category;
 arg.binding = arg.node.binding; arg.has_constant_value = arg.node.has_constant_value; arg.constant_value = arg.node.constant_value; arg.null_pointer_constant =
 arg.has_constant_value && arg.constant_value == 0 && pa11::is_integral_or_bool_type(arg.type); args.push_back(arg);
-} complete_aggregate_constructor_args(result_record, args); Binding* aggregate_ctor = ensure_aggregate_constructor(result_record, args.size());
-if (aggregate_ctor == NULL) { try {
-return make_constructor_init_expr(result, args, true); } catch (const runtime_error&) {
-Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
+	} complete_aggregate_constructor_args(result_record, args); Binding* aggregate_ctor = ensure_aggregate_constructor(result_record, args.size());
+	if (aggregate_ctor == NULL && args.empty() && result_record->fields.empty() &&
+	    pa11::record_direct_bases(result_record).empty() &&
+	    !record_has_aggregate_blocking_constructor(result_record))
+		return expr;
+	if (aggregate_ctor == NULL) { try {
+	return make_constructor_init_expr(result, args, true); } catch (const runtime_error&) {
+	Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
 } } Expr constructed; constructed.valid = true;
 constructed.type = result; constructed.category = ValueCategory::PRValue; constructed.braced_init_list = true; constructed.copy_initialization = true;
 constructed.node = Node("braced-init-list"); constructed.node.token_text = "force-constructor"; constructed.node.type = result; constructed.node.category = constructed.category;
 constructed.node.direct_call = aggregate_ctor; for (size_t i = 0; i < args.size(); ++i) { Conversion conv =
-convert_to(args[i], aggregate_ctor->type->parameters[i + 1]); if (!conv.viable) throw runtime_error("invalid return conversion"); add_child(constructed.node, conv.expr.node);
+	convert_to(args[i], aggregate_ctor->type->parameters[i + 1]); if (!conv.viable) throw runtime_error("invalid return conversion"); add_child(constructed.node, conv.expr.node);
 } annotate_expr_node(constructed); constructed.node.direct_call = aggregate_ctor; return constructed;
 } Expr Parser::convert_record_constructor_return_expression(Expr expr, TypePtr result) {
 vector<Expr> args; args.push_back(expr); try {
-return make_constructor_init_expr(result, args, true); } catch (const runtime_error&) {
-Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
+	return make_constructor_init_expr(result, args, true); } catch (const runtime_error&) {
+	Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
 } } void Parser::validate_same_record_return_expression(const Expr& expr, TypePtr result)
 { bool local_return = expr.binding != NULL && expr.binding->kind == BindingKind::Variable &&
 expr.binding->owner != NULL && expr.binding->owner->kind != ScopeKind::Namespace && expr.binding->owner->kind != ScopeKind::Class; bool use_move = expr.category != ValueCategory::LValue || local_return;
@@ -339,7 +724,7 @@ expr.binding->kind == BindingKind::Variable && expr.binding->owner != NULL && ex
 copy_move_constructor_available(result, true)) { expr.category = ValueCategory::XValue; expr.type = pa11::make_rvalue_reference(result);
 expr.node = Node("id-expression xvalue " + pa11::describe_type(expr.type) + " " + expr.binding->name); expr.node.binding = expr.binding;
 annotate_expr_node(expr); } return expr; }
-Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
+	Conversion conv = convert_to(expr, result); if (!conv.viable) throw runtime_error("invalid return conversion"); return conv.expr;
 } Node Parser::parse_jump_statement() { if (consume(KW_BREAK))
 { expect(OP_SEMICOLON); return Node("break-statement"); }
 if (consume(KW_CONTINUE)) { expect(OP_SEMICOLON); return Node("continue-statement");

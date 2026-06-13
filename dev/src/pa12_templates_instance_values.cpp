@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -13,6 +14,112 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+size_t value_eval_hash_combine(size_t seed, size_t value)
+{
+	return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) +
+	               (seed >> 2));
+}
+
+size_t value_eval_string_hash(const string& value)
+{
+	return value_eval_hash_combine(value.size(), hash<string>()(value));
+}
+
+size_t value_eval_type_hash(TypePtr type)
+{
+	type = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (type.get() == NULL)
+		return 0;
+	size_t out = reinterpret_cast<uintptr_t>(type.get());
+	out = value_eval_hash_combine(out, static_cast<size_t>(type->kind));
+	out = value_eval_hash_combine(out, type->is_template_specialization);
+	out = value_eval_hash_combine(out, type->is_dependent_typename);
+	out = value_eval_hash_combine(
+		out,
+		value_eval_string_hash(type->template_primary_name));
+	return out;
+}
+
+size_t value_eval_instance_arg_hash(const pa11::TemplateInstanceArgument& arg,
+                                    int depth);
+
+size_t value_eval_template_arg_hash(const TemplateArgument& arg, int depth)
+{
+	size_t out = static_cast<size_t>(arg.kind);
+	if (depth > 8)
+		return value_eval_hash_combine(out, 0xace);
+	out = value_eval_hash_combine(out, value_eval_type_hash(arg.type));
+	out = value_eval_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(arg.template_declaration));
+	out = value_eval_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(arg.value_binding));
+	out = value_eval_hash_combine(out,
+	                              value_eval_string_hash(arg.value_name));
+	out = value_eval_hash_combine(
+		out,
+		value_eval_string_hash(arg.value_owner_template_name));
+	out = value_eval_hash_combine(
+		out,
+		value_eval_string_hash(arg.value_member_name));
+	out = value_eval_hash_combine(out, arg.value);
+	out = value_eval_hash_combine(out, arg.dependent);
+	out = value_eval_hash_combine(out, arg.value_negated);
+	out = value_eval_hash_combine(out, arg.pack_expansion);
+	out = value_eval_hash_combine(out, arg.value_expr_begin);
+	out = value_eval_hash_combine(out, arg.value_expr_end);
+	for (size_t i = 0; i < arg.value_owner_template_arguments.size(); ++i)
+		out = value_eval_hash_combine(
+			out,
+			value_eval_instance_arg_hash(
+				arg.value_owner_template_arguments[i],
+				depth + 1));
+	for (size_t i = 0; i < arg.pack.size(); ++i)
+		out = value_eval_hash_combine(
+			out,
+			value_eval_template_arg_hash(arg.pack[i], depth + 1));
+	return out;
+}
+
+size_t value_eval_instance_arg_hash(const pa11::TemplateInstanceArgument& arg,
+                                    int depth)
+{
+	size_t out = static_cast<size_t>(arg.kind);
+	if (depth > 8)
+		return value_eval_hash_combine(out, 0xbad);
+	out = value_eval_hash_combine(out, value_eval_type_hash(arg.type));
+	out = value_eval_hash_combine(out,
+	                              value_eval_string_hash(arg.template_name));
+	out = value_eval_hash_combine(out,
+	                              value_eval_string_hash(arg.value_name));
+	out = value_eval_hash_combine(
+		out,
+		value_eval_string_hash(arg.value_owner_template_name));
+	out = value_eval_hash_combine(
+		out,
+		value_eval_string_hash(arg.value_member_name));
+	out = value_eval_hash_combine(out, arg.value);
+	out = value_eval_hash_combine(out, arg.dependent);
+	out = value_eval_hash_combine(out, arg.value_negated);
+	out = value_eval_hash_combine(out, arg.value_expr_begin);
+	out = value_eval_hash_combine(out, arg.value_expr_end);
+	for (size_t i = 0; i < arg.value_owner_template_arguments.size(); ++i)
+		out = value_eval_hash_combine(
+			out,
+			value_eval_instance_arg_hash(
+				arg.value_owner_template_arguments[i],
+				depth + 1));
+	for (size_t i = 0; i < arg.pack.size(); ++i)
+		out = value_eval_hash_combine(
+			out,
+			value_eval_instance_arg_hash(arg.pack[i], depth + 1));
+	return out;
+}
+
+}  // namespace
 
 bool Parser::template_value_argument_matches_for_template_match(
 	TemplateDeclaration* specialization,
@@ -59,7 +166,6 @@ bool Parser::try_evaluate_template_value_argument_for_template_match(
 	    pattern.value_expr_end <= pattern.value_expr_begin)
 		return false;
 	size_t save_pos = pos_;
-	vector<Token> save_tokens = tokens_;
 	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
 	vector<map<string, TemplateArgument> > save_value_subst =
@@ -133,7 +239,6 @@ bool Parser::try_evaluate_template_value_argument_for_template_match(
 	template_value_substitutions_ = save_value_subst;
 	template_type_parameter_packs_ = save_pack_subst;
 	scopes_ = save_scopes;
-	tokens_ = save_tokens;
 	pos_ = save_pos;
 	return result;
 }
@@ -156,6 +261,57 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 	         active_dependent_value_expression_keys_.end(),
 	         active_key) != active_dependent_value_expression_keys_.end())
 		return false;
+	size_t cache_hash = value_eval_template_arg_hash(arg, 0);
+	cache_hash = value_eval_hash_combine(
+		cache_hash,
+		reinterpret_cast<uintptr_t>(current_scope()));
+	cache_hash = value_eval_hash_combine(cache_hash,
+	                                     validating_template_definition_);
+	cache_hash = value_eval_hash_combine(
+		cache_hash,
+		function_template_candidate_instantiation_depth_);
+	for (size_t si = 0; si < template_type_substitutions_.size(); ++si)
+	{
+		cache_hash = value_eval_hash_combine(cache_hash, si);
+		for (map<string, TypePtr>::const_iterator it =
+			     template_type_substitutions_[si].begin();
+		     it != template_type_substitutions_[si].end();
+		     ++it)
+		{
+			cache_hash = value_eval_hash_combine(
+				cache_hash,
+				value_eval_string_hash(it->first));
+			cache_hash = value_eval_hash_combine(
+				cache_hash,
+				value_eval_type_hash(it->second));
+		}
+	}
+	for (size_t si = 0; si < template_value_substitutions_.size(); ++si)
+	{
+		cache_hash = value_eval_hash_combine(cache_hash, si);
+		for (map<string, TemplateArgument>::const_iterator it =
+			     template_value_substitutions_[si].begin();
+		     it != template_value_substitutions_[si].end();
+		     ++it)
+		{
+			cache_hash = value_eval_hash_combine(
+				cache_hash,
+				value_eval_string_hash(it->first));
+			cache_hash = value_eval_hash_combine(
+				cache_hash,
+				value_eval_template_arg_hash(it->second, 0));
+		}
+	}
+	string cache_key = to_string(cache_hash);
+	map<string, TemplateArgument>::const_iterator cached =
+		dependent_value_expression_argument_cache_.find(cache_key);
+	if (cached != dependent_value_expression_argument_cache_.end())
+	{
+		out = cached->second;
+		return true;
+	}
+	if (dependent_value_expression_argument_fail_cache_.count(cache_key) != 0)
+		return false;
 	struct ActiveDependentValueExpression
 	{
 		vector<string>& keys;
@@ -172,30 +328,64 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 		active_dependent_value_expression_keys_,
 		active_key);
 	size_t save_pos = pos_;
-	vector<Token> save_tokens = tokens_;
+	vector<Token> save_tokens;
+	vector<Token> replay_tokens;
+	bool switched_tokens = arg.value_expr_end > tokens_.size();
+	if (switched_tokens)
+	{
+		if (arg.value_expr_end > declaration_tokens_.size())
+		{
+			dependent_value_expression_argument_fail_cache_.insert(cache_key);
+			return false;
+		}
+		replay_tokens.reserve(arg.value_expr_end - arg.value_expr_begin + 1);
+		for (size_t i = arg.value_expr_begin; i < arg.value_expr_end; ++i)
+			replay_tokens.push_back(declaration_tokens_[i]);
+		if (!declaration_tokens_.empty())
+			replay_tokens.push_back(declaration_tokens_.back());
+		tokens_.swap(save_tokens);
+		tokens_.swap(replay_tokens);
+	}
+	size_t parse_begin = switched_tokens ? 0 : arg.value_expr_begin;
+	size_t parse_end = switched_tokens
+		? arg.value_expr_end - arg.value_expr_begin
+		: arg.value_expr_end;
 	int save_expression_depth = template_argument_expression_depth_;
 	bool result = false;
 	try
 		{
-			if (arg.value_expr_end > tokens_.size())
-				tokens_ = declaration_tokens_;
-			pos_ = arg.value_expr_begin;
+			pos_ = parse_begin;
 			++template_argument_expression_depth_;
 			Expr expr = parse_assignment_expression();
 			template_argument_expression_depth_ = save_expression_depth;
-			if (pos_ == arg.value_expr_end)
-			{
-				if (expr.pack_expansion)
+			if (pos_ == parse_end)
 				{
-				vector<TemplateArgument> pack;
-				bool pack_ok = true;
+					auto try_evaluate_value_expression =
+						[&](const Node& node, ConstexprValue& value) -> bool {
+							return try_evaluate_constexpr_expr(node, value);
+						};
+					bool defer_template_call =
+						expr.valid &&
+						function_template_candidate_instantiation_depth_ != 0 &&
+						node_calls_function_template(
+							expr.node,
+							function_template_placeholders_);
+					if (defer_template_call)
+					{
+						out = arg;
+						result = true;
+					}
+					if (!result && expr.pack_expansion)
+					{
+					vector<TemplateArgument> pack;
+					bool pack_ok = true;
 				for (size_t i = 0; i < expr.pack.size(); ++i)
 				{
 					Expr elem = expr.pack[i];
 					if (elem.valid && !elem.has_constant_value)
 					{
 						ConstexprValue value;
-						if (try_evaluate_constexpr_expr(elem.node, value) &&
+						if (try_evaluate_value_expression(elem.node, value) &&
 						    !value.is_object)
 							apply_constexpr_value(elem, value);
 					}
@@ -211,7 +401,7 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 							    !conv.expr.has_constant_value)
 							{
 								ConstexprValue value;
-								if (try_evaluate_constexpr_expr(
+								if (try_evaluate_value_expression(
 									    conv.expr.node,
 									    value))
 									apply_constexpr_value(conv.expr,
@@ -240,28 +430,16 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 					result = true;
 				}
 			}
-				if (expr.valid && !expr.has_constant_value)
-				{
-					ConstexprValue value;
-					if (try_evaluate_constexpr_expr(expr.node, value) &&
-				    !value.is_object)
-					apply_constexpr_value(expr, value);
-			}
-				bool defer_template_call =
-					expr.valid &&
-					!expr.has_constant_value &&
-					function_template_candidate_instantiation_depth_ != 0 &&
-					node_calls_function_template(
-						expr.node,
-						function_template_placeholders_);
-				if (defer_template_call)
-				{
-					out = arg;
-					result = true;
+					if (!result && expr.valid && !expr.has_constant_value)
+					{
+						ConstexprValue value;
+						if (try_evaluate_value_expression(expr.node, value) &&
+					    !value.is_object)
+						apply_constexpr_value(expr, value);
 				}
-				if (expr.valid && !expr.has_constant_value &&
-				    !expr.dependent_value_name.empty())
-				{
+					if (!result && expr.valid && !expr.has_constant_value &&
+					    !expr.dependent_value_name.empty())
+					{
 					TemplateArgument dependent_value =
 						TemplateArgument::dependent_value_arg(
 							expression_object_type(expr.type));
@@ -270,12 +448,14 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 						expr.dependent_value_owner_template_name;
 					dependent_value.value_member_name =
 						expr.dependent_value_member_name;
-						dependent_value.value_owner_template_arguments =
-							expr.dependent_value_owner_template_arguments;
-						dependent_value.value_negated = expr.dependent_value_negated;
-						TemplateArgument resolved_value;
-						bool resolved_dependent_value =
-							resolve_dependent_value_member_argument(
+					dependent_value.value_owner_template_arguments =
+						expr.dependent_value_owner_template_arguments;
+					dependent_value.value_negated = expr.dependent_value_negated;
+					dependent_value.value_expr_begin = arg.value_expr_begin;
+					dependent_value.value_expr_end = arg.value_expr_end;
+					TemplateArgument resolved_value;
+					bool resolved_dependent_value =
+						resolve_dependent_value_member_argument(
 								dependent_value,
 								resolved_value);
 						if (resolved_dependent_value)
@@ -290,8 +470,8 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 					expr.node.op == OP_AMP &&
 					!expr.node.children.empty() &&
 					expr.node.children[0].binding != NULL;
-				if (expr.valid && arg.type.get() != NULL &&
-				    (!expr.has_constant_value || member_pointer_address))
+					if (!result && expr.valid && arg.type.get() != NULL &&
+					    (!expr.has_constant_value || member_pointer_address))
 				{
 				try
 				{
@@ -327,8 +507,8 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 					if (conv.viable && !conv.expr.has_constant_value)
 					{
 						ConstexprValue value;
-						if (try_evaluate_constexpr_expr(conv.expr.node,
-						                                value))
+						if (try_evaluate_value_expression(conv.expr.node,
+						                                  value))
 							apply_constexpr_value(conv.expr, value);
 					}
 					if (conv.viable && conv.expr.has_constant_value)
@@ -356,8 +536,16 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 		result = false;
 	}
 	template_argument_expression_depth_ = save_expression_depth;
-	tokens_ = save_tokens;
+	if (switched_tokens)
+	{
+		tokens_.swap(replay_tokens);
+		tokens_.swap(save_tokens);
+	}
 	pos_ = save_pos;
+	if (result)
+		dependent_value_expression_argument_cache_[cache_key] = out;
+	else
+		dependent_value_expression_argument_fail_cache_.insert(cache_key);
 	return result;
 }
 

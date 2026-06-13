@@ -490,7 +490,7 @@ void ProgramLowerer::place_record_return_before_matching_constructor(
 			object_type(pending->type->parameters[1]));
 		if (param.get() != NULL &&
 		    param->kind == TypeKind::Record &&
-		    pa11::same_type(param, result))
+		    same_record_or_template_family(param, result))
 		{
 			pos = it;
 			break;
@@ -571,10 +571,12 @@ void ProgramLowerer::place_constructor_after_pending_record_operator(
 		TypePtr pending_result = function_record_result(*it);
 		bool same_owner =
 			pending_record.get() != NULL &&
-			pa11::same_type(pa11::strip_cv(pending_record), param_record);
+			same_record_or_template_family(pa11::strip_cv(pending_record),
+			                               param_record);
 		bool same_result =
 			pending_result.get() != NULL &&
-			pa11::same_type(pa11::strip_cv(pending_result), param_record);
+			same_record_or_template_family(pa11::strip_cv(pending_result),
+			                               param_record);
 		if (same_owner || same_result)
 			pos = it + 1;
 	}
@@ -1376,7 +1378,7 @@ active_inline_dependency_insert_count; active_inline_definition = binding; activ
 ++generated_assignment_emit_depth; FunctionOut lowered = lowerer.lower(); if (binding->is_generated_copy_move_assignment) --generated_assignment_emit_depth; FunctionOut destructor_base_lowered; if (class_dtor && need_base) { FunctionLowerer base_lowerer(*this, *found->second, true); destructor_base_lowered = base_lowerer.lower(); } active_inline_definition = saved_active;
 active_inline_dependency_insert_count = saved_dependency_insert_count; if (!binding->name.empty() && binding->name[0] == '~' && !binding_has_template_specialization_context(binding)) emit_pending_inline_definitions();
 if (class_ctor && need_complete) { TypePtr active_record = first_this_record(binding); bool emit_member_ctor_dependencies = false; for (PendingInlineIterator it = pending_inline_definitions.begin(); it != pending_inline_definitions.end(); ++it) { if (!is_class_constructor(*it)) continue; TypePtr pending_record = first_this_record(*it); if (active_record.get() != NULL && pending_record.get() != NULL && record_has_base(active_record, pending_record)) continue; emit_member_ctor_dependencies = true; break; } if (emit_member_ctor_dependencies) emit_pending_inline_definitions(); }
-if (need_base) functions.push_back(class_dtor ? make_destructor_base_entry(destructor_base_lowered, name, native_lowering) : make_constructor_base_entry(lowered, name)); if (need_complete) { bool inserted = false; if (class_ctor && constructor_has_no_explicit_parameters(binding) && class_member_of_local_class(binding)) { for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending != NULL && pending->owner == binding->owner && is_class_constructor(pending) && pending->type.get() != NULL && pending->type->kind == TypeKind::Function && pending->type->parameters.size() > binding->type->parameters.size()) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted) functions.push_back(lowered); } emit_pending_synthetic_assignment_functions(); } }
+if (need_base) functions.push_back(class_dtor ? make_destructor_base_entry(destructor_base_lowered, name, native_lowering) : make_constructor_base_entry(lowered, name)); if (need_complete) { bool inserted = false; if (function_returns_record(binding)) { TypePtr result = function_record_result(binding); for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending == NULL || !is_class_constructor(pending) || pending->type.get() == NULL || pending->type->kind != TypeKind::Function || pending->type->parameters.size() < 2) continue; TypePtr param = pa11::strip_cv(object_type(pending->type->parameters[1])); if (param.get() != NULL && param->kind == TypeKind::Record && same_record_or_template_family(param, result)) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted && class_ctor && constructor_has_no_explicit_parameters(binding) && class_member_of_local_class(binding)) { for (vector<FunctionOut>::iterator it = functions.begin(); it != functions.end(); ++it) { const Binding* pending = it->binding; if (pending != NULL && pending->owner == binding->owner && is_class_constructor(pending) && pending->type.get() != NULL && pending->type->kind == TypeKind::Function && pending->type->parameters.size() > binding->type->parameters.size()) { functions.insert(it, lowered); inserted = true; break; } } } if (!inserted) functions.push_back(lowered); } emit_pending_synthetic_assignment_functions(); } }
 
 }  // namespace internal
 

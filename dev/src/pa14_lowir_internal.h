@@ -265,6 +265,7 @@ struct ProgramLowerer
 	void emit_generated_empty_constructor(const Binding* binding,
 	                                      const string& name);
 	void demand_function_declaration(const Binding* binding);
+	void demand_lifecycle_base_entry_declaration(const Binding* binding);
 	void demand_global_declaration(const Binding* binding);
 	bool demand_deferred_global_definition(const Binding* binding);
 	bool template_static_member_constant_load_required(
@@ -560,6 +561,10 @@ private:
 		bool lower_record_base_cast_init(const function<Value()>& addr_for,
 		                                 TypePtr type,
 		                                 const Node& init);
+		bool lower_hosted_normal_iterator_conversion_init(
+			const function<Value()>& addr_for,
+			TypePtr type,
+			const Node& init);
 		bool lower_record_conditional_init(const function<Value()>& addr_for,
 		                                   TypePtr type,
 		                                   const Node& init);

@@ -28,17 +28,24 @@ vector<ParameterInfo> concrete_member_body_parameters(
 	size_t first = function->owner != NULL &&
 	               function->owner->kind == ScopeKind::Class &&
 	               !function->is_static_member ? 1 : 0;
-	map<Binding*, vector<string> >::const_iterator names =
-		function_parameter_names.find(function);
-	for (size_t i = first; i < function->type->parameters.size(); ++i)
-	{
-		ParameterInfo parameter;
-		parameter.type = function->type->parameters[i];
-		if (names != function_parameter_names.end() &&
-		    i < names->second.size())
-			parameter.name = names->second[i];
-		parameters.push_back(parameter);
-	}
+		map<Binding*, vector<string> >::const_iterator names =
+			function_parameter_names.find(function);
+		for (size_t i = first; i < function->type->parameters.size(); ++i)
+		{
+			ParameterInfo parameter;
+			parameter.type = function->type->parameters[i];
+			if (names != function_parameter_names.end())
+			{
+				size_t name_index = i;
+				if (first != 0 &&
+				    names->second.size() + first ==
+				    function->type->parameters.size())
+					name_index = i - first;
+				if (name_index < names->second.size())
+					parameter.name = names->second[name_index];
+			}
+			parameters.push_back(parameter);
+		}
 	return parameters;
 }
 
@@ -122,8 +129,13 @@ bool member_template_definition_matches_owner(
 				parser, primary, declaration, primary_args, record_arguments);
 	}
 	if (matches && declaration != NULL && declaration->class_specialization)
-		matches = matching_member_template_class_specialization(
-			parser, primary, declaration, primary_args, record_arguments);
+		matches = owner_is_class_specialization &&
+		          matching_member_template_class_specialization(
+			          parser,
+			          primary,
+			          declaration,
+			          primary_args,
+			          record_arguments);
 	return matches;
 }
 

@@ -41,6 +41,38 @@ bool append_anonymous_storage_member_initializers(
 	return emitted;
 }
 
+bool token_is_simple(const vector<Token>& tokens, size_t pos, ETokenType type)
+{
+	return pos < tokens.size() &&
+	       tokens[pos].kind == posttoken::TokenKind::Simple &&
+	       tokens[pos].type == type;
+}
+
+bool deferred_compound_body_is_empty(const vector<Token>& tokens, size_t pos)
+{
+	return token_is_simple(tokens, pos, OP_LBRACE) &&
+	       token_is_simple(tokens, pos + 1, OP_RBRACE);
+}
+
+void mark_noop_destructor(Binding* dtor,
+                          Scope* class_scope,
+                          const string& dtor_name)
+{
+	if (dtor == NULL || dtor->is_virtual)
+		return;
+	dtor->is_noop_destructor = true;
+	if (class_scope == NULL)
+		return;
+	map<string, vector<Binding*> >::iterator found =
+		class_scope->members.find(dtor_name);
+	if (found == class_scope->members.end())
+		return;
+	for (size_t i = 0; i < found->second.size(); ++i)
+		if (found->second[i]->kind == BindingKind::Function &&
+		    pa11::same_type(found->second[i]->type, dtor->type))
+			found->second[i]->is_noop_destructor = true;
+}
+
 }  // namespace
 bool record_has_reference_field(TypePtr type) {
 	TypePtr bare = pa11::strip_cv(type);
@@ -205,6 +237,8 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node) {
 		pending.function = dtor;
 		pending.node = fn;
 		pending.body_pos = pos_;
+		if (deferred_compound_body_is_empty(tokens_, pos_))
+			mark_noop_destructor(dtor, class_scope, dtor_name);
 		skip_balanced(OP_LBRACE, OP_RBRACE);
 		enqueue_pending_member_body(class_scope, pending);
 		return true; }
@@ -230,15 +264,8 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node) {
 		active_functions_.pop_back();
 		function_returns_.pop_back();
 		scopes_.pop_back(); }
-	if (body.children.empty() && !dtor->is_virtual) {
-		dtor->is_noop_destructor = true;
-		map<string, vector<Binding*> >::iterator found =
-			class_scope->members.find(dtor_name);
-		if (found != class_scope->members.end())
-			for (size_t i = 0; i < found->second.size(); ++i)
-				if (found->second[i]->kind == BindingKind::Function &&
-				    pa11::same_type(found->second[i]->type, dtor->type))
-					found->second[i]->is_noop_destructor = true; }
+	if (body.children.empty())
+		mark_noop_destructor(dtor, class_scope, dtor_name);
 	add_child(fn, body);
 	if (emit_node)
 		add_child(out, fn);
@@ -373,6 +400,14 @@ void Parser::parse_constructor_body_from_parameters(
 			if (at(OP_LT)) {
 				parse_template_argument_list(init_template_args);
 				have_init_template_args = true; }
+			while (consume(OP_COLON2)) {
+				consume(KW_TEMPLATE);
+				name = consume_identifier();
+				init_template_args.clear();
+				have_init_template_args = false;
+				if (at(OP_LT)) {
+					parse_template_argument_list(init_template_args);
+					have_init_template_args = true; } }
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        name,
 			                                        pa11::LOOKUP_VARIABLE);
@@ -513,8 +548,8 @@ void Parser::parse_constructor_body_from_parameters(
 				add_child(body, action);
 				delegating = true; }
 			else if (field != NULL && have_init) {
-				explicit_member_initializers[field] =
-					make_member_init_action(field, &init.node); }
+					explicit_member_initializers[field] =
+						make_member_init_action(field, &init.node, this_binding); }
 			else if (have_init) {
 				Node action("member-init-action " + name);
 				action.token_text = name;
@@ -551,11 +586,11 @@ void Parser::parse_constructor_body_from_parameters(
 		map<Binding*, Node>::const_iterator init =
 			default_member_initializers_.find(field);
 		if (init != default_member_initializers_.end())
-			add_child(body, make_member_init_action(field, &init->second));
+				add_child(body, make_member_init_action(field, &init->second, this_binding));
 		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
 			try {
 				if (ensure_default_constructor(field->type) != NULL)
-					add_child(body, make_member_init_action(field, NULL)); }
+						add_child(body, make_member_init_action(field, NULL, this_binding)); }
 			catch (const runtime_error& err) {
 				if (string(err.what()) !=
 				    "member has no default constructor")
@@ -689,16 +724,24 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		return false; }
 	vector<TypePtr> fn_params;
 	fn_params.push_back(pa11::make_pointer(class_type));
+	vector<size_t> signature_parameter_indices;
 	for (size_t i = 0; i < parameters.size(); ++i)
+	{
+		if (parameters[i].type.get() == NULL)
+			continue;
+		signature_parameter_indices.push_back(i);
 		fn_params.push_back(parameters[i].type);
+	}
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      fn_params,
 	                                      variadic);
 	fn_type = substitute_template_type(fn_type);
 	for (size_t i = 0;
-	     i < parameters.size() && i + 1 < fn_type->parameters.size();
+	     i < signature_parameter_indices.size() &&
+	     i + 1 < fn_type->parameters.size();
 	     ++i)
-		parameters[i].type = fn_type->parameters[i + 1];
+		parameters[signature_parameter_indices[i]].type =
+			fn_type->parameters[i + 1];
 	Binding* existing_ctor = NULL;
 	map<string, vector<Binding*> >::iterator existing_it =
 		class_scope->members.find(class_scope->name);
@@ -713,13 +756,24 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		suffix.noexcept_decl;
 	if (existing_ctor != NULL &&
 	    existing_ctor->unwind_no != suffix.noexcept_decl)
+	{
+		if (!hosted_compatibility_)
 		throw runtime_error("function exception specification mismatch");
-	Binding* ctor = existing_ctor != NULL
-		? existing_ctor
-		: add_function_binding(class_scope, class_scope->name, fn_type, false);
-	for (size_t i = 0; i < parameters.size(); ++i)
-		if (parameters[i].has_default)
-			ctor->has_default_arguments = true;
+	}
+		bool reused_implicit_default_ctor =
+			existing_ctor != NULL &&
+			existing_ctor->is_generated_default_constructor &&
+			!existing_ctor->is_defaulted;
+		Binding* ctor = existing_ctor != NULL
+			? existing_ctor
+			: add_function_binding(class_scope, class_scope->name, fn_type, false);
+		discard_implicit_default_constructor(class_type, ctor);
+		if (reused_implicit_default_ctor) {
+			ctor->is_generated_default_constructor = false;
+			ctor->is_noop_constructor = false; }
+		for (size_t i = 0; i < signature_parameter_indices.size(); ++i)
+			if (parameters[signature_parameter_indices[i]].has_default)
+				ctor->has_default_arguments = true;
 	ctor->unwind_no = merged_noexcept;
 	ctor->is_constexpr = ctor->is_constexpr || constexpr_spec;
 	ctor->is_inline_definition =
@@ -734,7 +788,8 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 			ctor->abi_tags = suffix.abi_tags;
 		if (defaulted) {
 		ctor->is_defaulted = true;
-		ctor->is_generated_default_constructor = parameters.empty(); }
+		ctor->is_generated_default_constructor =
+			signature_parameter_indices.empty(); }
 	if (!active_class_instantiation_dependent())
 		stamp_template_member_function_symbol(ctor);
 	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
@@ -750,7 +805,7 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		 !template_value_substitutions_.empty());
 	if (dependent_template_member_definition)
 		ctor->is_inline_definition = true;
-	if (ctor->is_inline_definition) {
+	if (!defaulted && ctor->is_inline_definition) {
 		if ((force_new_function_binding_ ||
 		     qualified_inline_object_root) &&
 		    active_class_instantiations_.empty()) {
@@ -786,6 +841,13 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 			skip_balanced(OP_LPAREN, OP_RPAREN);
 			skip_balanced(OP_LBRACE, OP_RBRACE); }
 		enqueue_pending_member_body(class_scope, pending);
+		if (force_new_function_binding_ && defer_function_template_bodies_)
+		{
+			if (emit_node)
+				add_child(out, fn);
+			else
+				extra_lowir_nodes_.push_back(fn);
+		}
 		return true; }
 	Scope* function_scope =
 		pa11::create_child_scope(class_scope, ScopeKind::Function, ctor->name);
@@ -798,18 +860,20 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 	this_node.binding = this_binding;
 	this_node.type = fn_params[0];
 	add_child(fn, this_node);
-	for (size_t i = 0; i < parameters.size(); ++i) {
-		string pname = parameters[i].name.empty()
-			? "__param" + to_string(i + 1) : parameters[i].name;
+	for (size_t i = 0; i < signature_parameter_indices.size(); ++i) {
+		ParameterInfo& parameter =
+			parameters[signature_parameter_indices[i]];
+		string pname = parameter.name.empty()
+			? "__param" + to_string(i + 1) : parameter.name;
 		Binding* param =
 			pa11::add_binding(function_scope,
 			                  BindingKind::Parameter,
 			                  pname,
-			                  parameters[i].type);
+			                  parameter.type);
 		Node param_node("parameter " + pname + " " +
-		                pa11::describe_type(parameters[i].type));
+		                pa11::describe_type(parameter.type));
 		param_node.binding = param;
-		param_node.type = parameters[i].type;
+		param_node.type = parameter.type;
 		add_child(fn, param_node); }
 	if (!defaulted) {
 		scopes_.push_back(function_scope);
@@ -825,12 +889,20 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		? pa11::strip_cv(direct_bases[0]) : TypePtr();
 	if (!defaulted && consume(OP_COLON)) {
 		for (;;) {
-			string init_name = consume_identifier();
-			vector<TemplateArgument> init_template_args;
-			bool have_init_template_args = false;
-			if (at(OP_LT)) {
-				parse_template_argument_list(init_template_args);
-				have_init_template_args = true; }
+				string init_name = consume_identifier();
+				vector<TemplateArgument> init_template_args;
+				bool have_init_template_args = false;
+				if (at(OP_LT)) {
+					parse_template_argument_list(init_template_args);
+					have_init_template_args = true; }
+				while (consume(OP_COLON2)) {
+					consume(KW_TEMPLATE);
+					init_name = consume_identifier();
+					init_template_args.clear();
+					have_init_template_args = false;
+					if (at(OP_LT)) {
+						parse_template_argument_list(init_template_args);
+						have_init_template_args = true; } }
 			Binding* field = pa11::lookup_qualified(class_scope,
 			                                        init_name,
 			                                        pa11::LOOKUP_VARIABLE);
@@ -971,8 +1043,8 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 				add_child(body, action);
 				delegating = true; }
 			else if (field != NULL && have_init)
-				explicit_member_initializers[field] =
-					make_member_init_action(field, &init.node);
+					explicit_member_initializers[field] =
+						make_member_init_action(field, &init.node, this_binding);
 			else if (have_init) {
 				Node action("member-init-action " + init_name);
 				action.token_text = init_name;
@@ -1009,11 +1081,11 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		map<Binding*, Node>::const_iterator init =
 			default_member_initializers_.find(field);
 		if (init != default_member_initializers_.end())
-			add_child(body, make_member_init_action(field, &init->second));
+				add_child(body, make_member_init_action(field, &init->second, this_binding));
 		else if (pa11::strip_cv(field->type)->kind == pa11::TypeKind::Record) {
 			try {
 				if (ensure_default_constructor(field->type) != NULL)
-					add_child(body, make_member_init_action(field, NULL)); }
+						add_child(body, make_member_init_action(field, NULL, this_binding)); }
 			catch (const runtime_error& err) {
 				if (string(err.what()) !=
 				    "member has no default constructor")
@@ -1292,6 +1364,8 @@ bool Parser::parse_destructor_like_member() {
 		pending.function = dtor;
 		pending.node = fn;
 		pending.body_pos = pos_;
+		if (deferred_compound_body_is_empty(tokens_, pos_))
+			mark_noop_destructor(dtor, class_scope, dtor_name);
 		skip_balanced(OP_LBRACE, OP_RBRACE);
 		enqueue_pending_member_body(class_scope, pending);
 		return true; }
@@ -1310,15 +1384,8 @@ bool Parser::parse_destructor_like_member() {
 	active_functions_.pop_back();
 	function_returns_.pop_back();
 	scopes_.pop_back();
-	if (body.children.empty() && !dtor->is_virtual) {
-		dtor->is_noop_destructor = true;
-		map<string, vector<Binding*> >::iterator found =
-			class_scope->members.find(dtor_name);
-		if (found != class_scope->members.end())
-			for (size_t i = 0; i < found->second.size(); ++i)
-				if (found->second[i]->kind == BindingKind::Function &&
-				    pa11::same_type(found->second[i]->type, dtor->type))
-					found->second[i]->is_noop_destructor = true; }
+	if (body.children.empty())
+		mark_noop_destructor(dtor, class_scope, dtor_name);
 	add_child(fn, body);
 	extra_lowir_nodes_.push_back(fn);
 	return true; }

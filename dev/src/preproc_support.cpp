@@ -1,8 +1,8 @@
 #include "preproc_support.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -224,6 +224,10 @@ const char* const kBuiltinProbeNames[] = {
 	"__builtin_huge_val",
 	"__builtin_huge_valf",
 	"__builtin_huge_vall",
+	"__builtin_ia32_emms",
+	"__builtin_ia32_femms",
+	"__builtin_ia32_pause",
+	"__builtin_ia32_sfence",
 	"__builtin_inf",
 	"__builtin_inff",
 	"__builtin_infl",
@@ -251,6 +255,7 @@ const char* const kBuiltinProbeNames[] = {
 	"__builtin_popcountl",
 	"__builtin_popcountll",
 	"__builtin_prefetch",
+	"__builtin_vsnprintf",
 	"__builtin_strchr",
 	"__builtin_strcmp",
 	"__builtin_strlen",
@@ -262,6 +267,9 @@ const char* const kBuiltinProbeNames[] = {
 	"__atomic_add_fetch",
 	"__atomic_always_lock_free",
 	"__atomic_and_fetch",
+	"__atomic_clear",
+	"__atomic_compare_exchange",
+	"__atomic_compare_exchange_n",
 	"__atomic_exchange_n",
 	"__atomic_fetch_add",
 	"__atomic_fetch_and",
@@ -272,9 +280,12 @@ const char* const kBuiltinProbeNames[] = {
 	"__atomic_load",
 	"__atomic_load_n",
 	"__atomic_or_fetch",
+	"__atomic_signal_fence",
 	"__atomic_store",
 	"__atomic_store_n",
 	"__atomic_sub_fetch",
+	"__atomic_test_and_set",
+	"__atomic_thread_fence",
 	"__atomic_xor_fetch",
 	"__c11_atomic_compare_exchange_strong",
 	"__c11_atomic_compare_exchange_weak",
@@ -346,6 +357,8 @@ const char* const kBuiltinProbeNames[] = {
 
 bool HasBuiltinProbe(const string& name)
 {
+	if (name.compare(0, 15, "__builtin_ia32_") == 0)
+		return true;
 	return NameInList(name,
 	                  kBuiltinProbeNames,
 	                  sizeof(kBuiltinProbeNames) /
@@ -426,6 +439,90 @@ void AppendHostStandardIncludePaths(vector<string>& out)
 		out.push_back(cppgm_builtin_host_config::kStandardIncludePaths[i]);
 }
 
+bool NextLogicalLine(const vector<PPToken>& tokens,
+                     size_t& pos,
+                     vector<PPToken>& line)
+{
+	line.clear();
+	while (pos < tokens.size())
+	{
+		const PPToken& token = tokens[pos++];
+		if (token.kind == PPTokenKind::EndOfFile)
+			return !line.empty();
+		if (IsNewLine(token))
+			return true;
+		if (IsRealToken(token))
+			line.push_back(token);
+	}
+	return !line.empty();
+}
+
+bool IsIfDirectiveName(const string& name)
+{
+	return name == "if" || name == "ifdef" || name == "ifndef";
+}
+
+bool DetectWholeFileIncludeGuard(const vector<PPToken>& tokens,
+                                 string& guard_name)
+{
+	size_t pos = 0;
+	vector<PPToken> line;
+	bool found_ifndef = false;
+	while (NextLogicalLine(tokens, pos, line))
+	{
+		if (line.empty())
+			continue;
+		if (line.size() != 3 ||
+		    !IsHash(line[0]) ||
+		    !IsIdentifier(line[1], "ifndef") ||
+		    !IsIdentifier(line[2]))
+			return false;
+		guard_name = line[2].text;
+		found_ifndef = true;
+		break;
+	}
+	if (!found_ifndef)
+		return false;
+	bool found_define = false;
+	while (NextLogicalLine(tokens, pos, line))
+	{
+		if (line.empty())
+			continue;
+		if (line.size() < 3 ||
+		    !IsHash(line[0]) ||
+		    !IsIdentifier(line[1], "define") ||
+		    !IsIdentifier(line[2], guard_name))
+			return false;
+		found_define = true;
+		break;
+	}
+	if (!found_define)
+		return false;
+	int depth = 1;
+	while (NextLogicalLine(tokens, pos, line))
+	{
+		if (line.empty())
+			continue;
+		if (!IsHash(line[0]) || line.size() < 2 || !IsIdentifier(line[1]))
+			continue;
+		const string directive = line[1].text;
+		if (IsIfDirectiveName(directive))
+			++depth;
+		else if (directive == "endif")
+		{
+			--depth;
+			if (depth == 0)
+			{
+				while (NextLogicalLine(tokens, pos, line))
+					if (!line.empty())
+						return false;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 class Preprocessor
 {
 public:
@@ -446,25 +543,26 @@ public:
 		forced_includes_ = options.forced_includes;
 	}
 
-	void process_source_file(const string& srcfile, vector<PPToken>& output)
-	{
-		for (size_t i = 0; i < forced_includes_.size(); ++i)
-			process_forced_include(srcfile, forced_includes_[i], output);
-		process_file(srcfile, kNoIncludePathIndex, output);
-		if (!if_stack_.empty())
-			throw runtime_error("File completed with unmatched #if");
-	}
+		void process_source_file(const string& srcfile, vector<PPToken>& output)
+		{
+			for (size_t i = 0; i < forced_includes_.size(); ++i)
+				process_forced_include(srcfile, forced_includes_[i], output);
+			process_file(srcfile, kNoIncludePathIndex, output);
+			if (!if_stack_.empty())
+				throw runtime_error("File completed with unmatched #if");
+		}
 
 private:
 	macro::MacroProcessor macros_;
 	set<PA5FileId> once_files_;
+	map<PA5FileId, string> include_guard_macros_;
 	vector<string> include_paths_;
 	vector<string> forced_includes_;
-	vector<IfFrame> if_stack_;
-	string current_file_;
-	size_t current_include_path_index_;
-	int line_delta_;
-	bool import_host_predefined_macros_;
+		vector<IfFrame> if_stack_;
+		string current_file_;
+		size_t current_include_path_index_;
+		int line_delta_;
+		bool import_host_predefined_macros_;
 
 	bool is_active() const
 	{
@@ -595,19 +693,22 @@ private:
 		current_include_path_index_ = saved_index;
 
 		PA5FileId file_id;
-		if (PA5GetFileId(path, file_id) &&
-		    once_files_.find(file_id) != once_files_.end())
+		if (PA5GetFileId(path, file_id) && should_skip_file(file_id))
 			return;
 		process_file(path, include_path_index, output);
 	}
 
-	void process_file(const string& path,
-	                  size_t include_path_index,
-	                  vector<PPToken>& output)
-	{
-		ifstream in(path.c_str());
-		if (!in)
-			throw runtime_error("include file not found");
+		void process_file(const string& path,
+		                  size_t include_path_index,
+		                  vector<PPToken>& output)
+		{
+			PA5FileId file_id;
+			const bool have_file_id = PA5GetFileId(path, file_id);
+			if (have_file_id && should_skip_file(file_id))
+				return;
+			ifstream in(path.c_str());
+			if (!in)
+				throw runtime_error("include file not found");
 
 		PPTokenCollector collector;
 		collector.source_file = path;
@@ -639,10 +740,25 @@ private:
 		flush_text(text, output);
 		if (if_stack_.size() != base_depth)
 			throw runtime_error("File completed with unmatched #if");
+		string guard_name;
+			if (have_file_id &&
+			    DetectWholeFileIncludeGuard(collector.tokens, guard_name) &&
+			    is_defined_name(guard_name))
+				include_guard_macros_[file_id] = guard_name;
 
 		current_file_ = saved_file;
 		current_include_path_index_ = saved_include_path_index;
 		line_delta_ = saved_delta;
+	}
+
+	bool should_skip_file(const PA5FileId& file_id) const
+	{
+		if (once_files_.find(file_id) != once_files_.end())
+			return true;
+		map<PA5FileId, string>::const_iterator guard =
+			include_guard_macros_.find(file_id);
+		return guard != include_guard_macros_.end() &&
+		       is_defined_name(guard->second);
 	}
 
 	void process_line(const vector<PPToken>& raw_line,
@@ -982,12 +1098,11 @@ private:
 		size_t include_path_index = kNoIncludePathIndex;
 		const string include_path =
 			resolve_include(spec, include_next, include_path_index);
-		PA5FileId file_id;
-		if (PA5GetFileId(include_path, file_id) &&
-		    once_files_.find(file_id) != once_files_.end())
-			return;
-		process_file(include_path, include_path_index, output);
-	}
+			PA5FileId file_id;
+			if (PA5GetFileId(include_path, file_id) && should_skip_file(file_id))
+				return;
+			process_file(include_path, include_path_index, output);
+		}
 
 	IncludeSpec include_spec_from_tokens(const vector<PPToken>& tokens)
 	{

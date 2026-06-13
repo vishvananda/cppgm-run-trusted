@@ -1,4 +1,5 @@
 #include "pa12_templates_function_support.h"
+#include "pa12_templates_instance_support.h"
 
 #include <algorithm>
 #include <functional>
@@ -8,7 +9,6 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
-
 bool Parser::deduce_template_type(TypePtr pattern,
                                   TypePtr argument,
                                   map<string, TypePtr>& deduced,
@@ -37,6 +37,23 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		                            deduced,
 		                            fixed,
 		                            deduced_arguments);
+	}
+	if (pattern->is_dependent_typename &&
+	    !pattern->dependent_typename_qualified &&
+	    !pattern->dependent_typename_template_id &&
+	    !pattern->dependent_typename_decltype &&
+	    !pattern->name.empty())
+	{
+		if (fixed != NULL && fixed->find(pattern->name) != fixed->end())
+			return pa11::same_type(fixed->find(pattern->name)->second,
+			                       argument);
+		map<string, TypePtr>::iterator found = deduced.find(pattern->name);
+		if (found == deduced.end())
+		{
+			deduced[pattern->name] = argument;
+			return true;
+		}
+		return pa11::same_type(found->second, argument);
 	}
 	if (pattern->kind == pa11::TypeKind::TemplateParameter)
 	{
@@ -144,21 +161,217 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		                            deduced_arguments);
 	if (pattern->kind == pa11::TypeKind::Function)
 	{
-		if (pattern->parameters.size() != argument->parameters.size())
-			return false;
 		if (!deduce_template_type(pattern->base,
 		                          argument->base,
 		                          deduced,
 		                          fixed,
 		                          deduced_arguments))
 			return false;
-		for (size_t i = 0; i < pattern->parameters.size(); ++i)
-			if (!deduce_template_type(pattern->parameters[i],
-			                          argument->parameters[i],
-			                          deduced,
-			                          fixed,
-			                          deduced_arguments))
+		function<bool(TypePtr, string&)> function_parameter_pack_name;
+		function_parameter_pack_name =
+			[&](TypePtr type, string& name) -> bool
+		{
+			if (type.get() == NULL)
 				return false;
+			TypePtr bare = pa11::strip_cv(type);
+			if (bare->kind == pa11::TypeKind::Pointer ||
+			    bare->kind == pa11::TypeKind::LValueReference ||
+			    bare->kind == pa11::TypeKind::RValueReference ||
+			    bare->kind == pa11::TypeKind::Array)
+			{
+				TypePtr base = bare->base.get() != NULL
+					? pa11::strip_cv(bare->base) : TypePtr();
+				if (base.get() != NULL &&
+				    base->kind == pa11::TypeKind::Function)
+					return false;
+				return function_parameter_pack_name(bare->base, name);
+			}
+			if (bare->kind == pa11::TypeKind::Function)
+				return false;
+			if (bare->kind == pa11::TypeKind::MemberPointer)
+			{
+				TypePtr base = bare->base.get() != NULL
+					? pa11::strip_cv(bare->base) : TypePtr();
+				if (base.get() != NULL &&
+				    base->kind == pa11::TypeKind::Function)
+					return false;
+				return function_parameter_pack_name(bare->member_class,
+				                                    name) ||
+				       function_parameter_pack_name(bare->base, name);
+			}
+			if (bare->kind == pa11::TypeKind::TemplateParameter &&
+			    pa11::is_deducible_template_parameter_type(bare) &&
+			    active_type_parameter_pack(bare->name))
+			{
+				name = bare->name;
+				return true;
+			}
+			return false;
+		};
+		auto merge_type_deductions =
+			[fixed](map<string, TypePtr>& target,
+			        const map<string, TypePtr>& source) -> bool
+		{
+			for (map<string, TypePtr>::const_iterator it = source.begin();
+			     it != source.end();
+			     ++it)
+			{
+				if (fixed != NULL)
+				{
+					map<string, TypePtr>::const_iterator fit =
+						fixed->find(it->first);
+					if (fit != fixed->end() &&
+					    !pa11::same_type(fit->second, it->second))
+						return false;
+				}
+				map<string, TypePtr>::iterator found =
+					target.find(it->first);
+				if (found == target.end())
+					target[it->first] = it->second;
+				else if (!pa11::same_type(found->second, it->second))
+					return false;
+			}
+			return true;
+		};
+		auto merge_argument_deductions =
+			[](map<string, TemplateArgument>& target,
+			   const map<string, TemplateArgument>& source) -> bool
+		{
+			for (map<string, TemplateArgument>::const_iterator it =
+				     source.begin();
+			     it != source.end();
+			     ++it)
+			{
+				map<string, TemplateArgument>::iterator found =
+					target.find(it->first);
+				if (found == target.end())
+					target[it->first] = it->second;
+				else if (!same_deduced_template_argument(found->second,
+				                                         it->second))
+					return false;
+			}
+			return true;
+		};
+		function<bool(size_t,
+		              size_t,
+		              map<string, TypePtr>&,
+		              map<string, TemplateArgument>&)> match_parameters;
+		match_parameters =
+			[&](size_t p_index,
+			    size_t a_index,
+			    map<string, TypePtr>& local_deduced,
+			    map<string, TemplateArgument>& local_arguments) -> bool
+		{
+			if (p_index == pattern->parameters.size())
+				return a_index == argument->parameters.size();
+			string pack_name;
+			if (function_parameter_pack_name(pattern->parameters[p_index],
+			                                 pack_name))
+			{
+				if (deduced_arguments == NULL)
+					return false;
+				for (size_t end = a_index;
+				     end <= argument->parameters.size();
+				     ++end)
+				{
+					map<string, TypePtr> merged_deduced =
+						local_deduced;
+					map<string, TemplateArgument> merged_arguments =
+						local_arguments;
+					vector<TemplateArgument> pack;
+					bool ok = true;
+					for (size_t ai = a_index; ai < end; ++ai)
+					{
+						map<string, TypePtr> per_deduced =
+							merged_deduced;
+						map<string, TemplateArgument> per_arguments =
+							merged_arguments;
+						if (!deduce_template_type(
+							    pattern->parameters[p_index],
+							    argument->parameters[ai],
+							    per_deduced,
+							    fixed,
+							    &per_arguments))
+						{
+							ok = false;
+							break;
+						}
+						map<string, TemplateArgument>::iterator ait =
+							per_arguments.find(pack_name);
+						map<string, TypePtr>::iterator tit =
+							per_deduced.find(pack_name);
+						if (ait != per_arguments.end())
+						{
+							pack.push_back(ait->second);
+							per_arguments.erase(ait);
+						}
+						else if (tit != per_deduced.end())
+						{
+							pack.push_back(
+								TemplateArgument::type_arg(tit->second));
+							per_deduced.erase(tit);
+						}
+						else
+						{
+							ok = false;
+							break;
+						}
+						if (!merge_type_deductions(merged_deduced,
+						                           per_deduced) ||
+						    !merge_argument_deductions(merged_arguments,
+						                               per_arguments))
+						{
+							ok = false;
+							break;
+						}
+					}
+					if (!ok)
+						continue;
+					if (!bind_deduced_pack_argument(&merged_arguments,
+					                                pack_name,
+					                                pack))
+						continue;
+					if (match_parameters(p_index + 1,
+					                     end,
+					                     merged_deduced,
+					                     merged_arguments))
+					{
+						local_deduced = merged_deduced;
+						local_arguments = merged_arguments;
+						return true;
+					}
+				}
+				return false;
+			}
+			if (a_index == argument->parameters.size())
+				return false;
+			map<string, TypePtr> trial_deduced = local_deduced;
+			map<string, TemplateArgument> trial_arguments = local_arguments;
+			if (!deduce_template_type(pattern->parameters[p_index],
+			                          argument->parameters[a_index],
+			                          trial_deduced,
+			                          fixed,
+			                          &trial_arguments))
+				return false;
+			if (!match_parameters(p_index + 1,
+			                      a_index + 1,
+			                      trial_deduced,
+			                      trial_arguments))
+				return false;
+			local_deduced = trial_deduced;
+			local_arguments = trial_arguments;
+			return true;
+		};
+		map<string, TypePtr> local_deduced = deduced;
+		map<string, TemplateArgument> local_arguments =
+			deduced_arguments != NULL
+			? *deduced_arguments
+			: map<string, TemplateArgument>();
+		if (!match_parameters(0, 0, local_deduced, local_arguments))
+			return false;
+		deduced = local_deduced;
+		if (deduced_arguments != NULL)
+			*deduced_arguments = local_arguments;
 		return true;
 	}
 	if (pattern->kind == pa11::TypeKind::MemberPointer)
@@ -174,10 +387,10 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		                            deduced,
 		                            fixed,
 		                            deduced_arguments);
-	}
-	if (pattern->kind == pa11::TypeKind::Record)
-	{
-		auto merge_type_deductions =
+		}
+		if (pattern->kind == pa11::TypeKind::Record)
+		{
+			auto merge_type_deductions =
 			[fixed](map<string, TypePtr>& target,
 			        const map<string, TypePtr>& source) -> bool
 		{
@@ -316,6 +529,18 @@ bool Parser::deduce_template_type(TypePtr pattern,
 				return true;
 			return false;
 		};
+		auto direct_dependent_argument_type =
+			[](TypePtr type) -> bool
+		{
+			TypePtr bare = type.get() != NULL
+				? pa11::strip_cv(type) : TypePtr();
+			return bare.get() != NULL &&
+			       bare->is_dependent_typename &&
+			       !bare->dependent_typename_qualified &&
+			       !bare->dependent_typename_template_id &&
+			       !bare->dependent_typename_decltype &&
+			       !bare->name.empty();
+		};
 		function<bool(const TemplateArgument&,
 		              const TemplateArgument&,
 		              map<string, TypePtr>&,
@@ -337,22 +562,37 @@ bool Parser::deduce_template_type(TypePtr pattern,
 			    const TemplateArgument& a_arg,
 			    map<string, TypePtr>& local_deduced,
 			    map<string, TemplateArgument>& local_arguments) -> bool
-		{
-			if (p_arg.kind == TemplateArgumentKind::Type &&
-			    a_arg.kind == TemplateArgumentKind::Type)
-			{
-				if (!template_type_has_template_parameter(
-					    p_arg.type,
-					    record_template_arguments_) &&
-				    !same_nondependent_argument_type(p_arg.type,
-				                                     a_arg.type))
-					return false;
-				return deduce_template_type(p_arg.type,
-				                            a_arg.type,
-				                            local_deduced,
-				                            fixed,
-				                            &local_arguments);
-			}
+				{
+					if (p_arg.kind == TemplateArgumentKind::Type &&
+					    a_arg.kind == TemplateArgumentKind::Pack)
+					{
+						TypePtr p_type = p_arg.type.get() != NULL
+							? pa11::strip_cv(p_arg.type) : TypePtr();
+						if (p_type.get() != NULL &&
+						    p_type->kind == pa11::TypeKind::TemplateParameter &&
+						    pa11::is_deducible_template_parameter_type(p_type) &&
+						    active_type_parameter_pack(p_type->name))
+							return bind_deduced_pack_argument(
+								&local_arguments,
+								p_type->name,
+								a_arg.pack);
+					}
+					if (p_arg.kind == TemplateArgumentKind::Type &&
+					    a_arg.kind == TemplateArgumentKind::Type)
+					{
+					if (!template_type_has_template_parameter(
+						    p_arg.type,
+						    record_template_arguments_) &&
+					    !direct_dependent_argument_type(p_arg.type) &&
+					    !same_nondependent_argument_type(p_arg.type,
+					                                     a_arg.type))
+						return false;
+					return deduce_template_type(p_arg.type,
+					                            a_arg.type,
+					                            local_deduced,
+					                            fixed,
+					                            &local_arguments);
+				}
 			if (p_arg.kind == TemplateArgumentKind::Value &&
 			    a_arg.kind == TemplateArgumentKind::Value)
 				return match_or_deduce_value_argument(p_arg,
@@ -479,10 +719,10 @@ bool Parser::deduce_template_type(TypePtr pattern,
 			local_arguments = merged_arguments;
 			return true;
 		};
-		match_sequence =
-			[&](const vector<TemplateArgument>& p_args,
-			    size_t p_index,
-			    const vector<TemplateArgument>& a_args,
+			match_sequence =
+				[&](const vector<TemplateArgument>& p_args,
+				    size_t p_index,
+				    const vector<TemplateArgument>& a_args,
 			    size_t a_index,
 			    map<string, TypePtr>& local_deduced,
 			    map<string, TemplateArgument>& local_arguments) -> bool
@@ -548,27 +788,79 @@ bool Parser::deduce_template_type(TypePtr pattern,
 			                    trial_arguments))
 				return false;
 			local_deduced = trial_deduced;
-			local_arguments = trial_arguments;
-			return true;
-		};
-			TemplateDeclaration* pattern_template =
-				const_cast<Parser*>(this)->
-					class_template_declaration_for_match(pattern);
+				local_arguments = trial_arguments;
+				return true;
+			};
+			auto instance_template_arguments =
+				[&](TypePtr type) -> vector<TemplateArgument>
+			{
+				vector<TemplateArgument> out;
+				if (type.get() == NULL)
+					return out;
+				for (size_t i = 0; i < type->template_arguments.size(); ++i)
+					out.push_back(
+						template_argument_from_instance_argument(
+							type->template_arguments[i]));
+				return out;
+			};
+			auto pattern_match_arguments =
+				[&](TypePtr type,
+				    map<const void*, vector<TemplateArgument> >::const_iterator
+					    stored) -> vector<TemplateArgument>
+			{
+				bool have_instance_args =
+					type.get() != NULL && !type->template_arguments.empty();
+				vector<TemplateArgument> instance_args =
+					have_instance_args
+					? instance_template_arguments(type)
+					: vector<TemplateArgument>();
+				bool have_stored = stored != record_template_arguments_.end();
+				bool compatible_stored =
+					have_stored &&
+					(!have_instance_args ||
+					 stored->second.size() == instance_args.size());
+				if (compatible_stored)
+					return stored->second;
+				if (have_instance_args)
+					return instance_args;
+				if (have_stored)
+					return stored->second;
+				return vector<TemplateArgument>();
+			};
+			auto actual_match_arguments =
+				[&](TypePtr type,
+				    map<const void*, vector<TemplateArgument> >::const_iterator
+					    stored) -> vector<TemplateArgument>
+			{
+				bool have_instance_args =
+					type.get() != NULL && !type->template_arguments.empty();
+				vector<TemplateArgument> instance_args =
+					have_instance_args
+					? instance_template_arguments(type)
+					: vector<TemplateArgument>();
+					if (have_instance_args)
+						return instance_args;
+					if (stored != record_template_arguments_.end())
+						return stored->second;
+				return vector<TemplateArgument>();
+			};
+				TemplateDeclaration* pattern_template =
+					const_cast<Parser*>(this)->
+						class_template_declaration_for_match(pattern);
 			bool pattern_template_parameter =
 				pattern->is_template_specialization &&
 				!pattern->template_primary_name.empty() &&
 				pattern_template == NULL;
-					if (pattern_template_parameter &&
-					    argument->is_template_specialization)
+						if (pattern_template_parameter &&
+						    argument->is_template_specialization &&
+						    pattern->template_primary_name !=
+							    argument->template_primary_name)
 				{
-					TemplateDeclaration* actual_template =
-						const_cast<Parser*>(this)->
-							class_template_declaration_for_match(argument);
-					if (actual_template == NULL)
-					{
-						return false;
-					}
-					if (actual_template->class_specialization)
+						TemplateDeclaration* actual_template =
+							const_cast<Parser*>(this)->
+								class_template_declaration_for_match(argument);
+						if (actual_template != NULL &&
+						    actual_template->class_specialization)
 					{
 					TemplateDeclaration* primary =
 						const_cast<Parser*>(this)->find_class_template(
@@ -581,28 +873,12 @@ bool Parser::deduce_template_type(TypePtr pattern,
 					record_template_arguments_.find(pattern.get());
 				map<const void*, vector<TemplateArgument> >::const_iterator ait =
 					record_template_arguments_.find(argument.get());
-				vector<TemplateArgument> p_args;
-				vector<TemplateArgument> a_args;
+					vector<TemplateArgument> p_args;
+					vector<TemplateArgument> a_args;
 				try
 				{
-					if (!pattern->template_arguments.empty())
-						for (size_t i = 0;
-						     i < pattern->template_arguments.size();
-						     ++i)
-							p_args.push_back(
-								template_argument_from_instance_argument(
-									pattern->template_arguments[i]));
-					else if (pit != record_template_arguments_.end())
-						p_args = pit->second;
-					if (!argument->template_arguments.empty())
-						for (size_t i = 0;
-						     i < argument->template_arguments.size();
-						     ++i)
-							a_args.push_back(
-								template_argument_from_instance_argument(
-									argument->template_arguments[i]));
-					else if (ait != record_template_arguments_.end())
-						a_args = ait->second;
+					p_args = pattern_match_arguments(pattern, pit);
+					a_args = actual_match_arguments(argument, ait);
 				}
 				catch (const runtime_error&)
 				{
@@ -612,19 +888,21 @@ bool Parser::deduce_template_type(TypePtr pattern,
 						deduced_arguments != NULL
 						? *deduced_arguments
 						: map<string, TemplateArgument>();
-						if (!bind_deduced_template_argument(
-							    &local_arguments,
-							    pattern->template_primary_name,
-							    actual_template))
-							return false;
+							if (actual_template != NULL &&
+							    !bind_deduced_template_argument(
+								    &local_arguments,
+								    pattern->template_primary_name,
+								    actual_template))
+								return false;
 						vector<TemplateArgument> match_a_args =
 							argument_sequence_has_pack_pattern(p_args)
 							? flatten_argument_packs(a_args)
 							: a_args;
-						bool matched_template_parameter_sequence =
-							match_sequence(p_args,
-							               0,
-							               match_a_args,
+							bool matched_template_parameter_sequence =
+								actual_template != NULL &&
+								match_sequence(p_args,
+								               0,
+								               match_a_args,
 							               0,
 							               local_deduced,
 							               local_arguments);
@@ -644,27 +922,38 @@ bool Parser::deduce_template_type(TypePtr pattern,
 		    at != record_template_declarations_.end() &&
 		    pt->second == at->second)
 		{
-					const vector<TemplateArgument>& p_args =
-						record_template_arguments_.find(pattern.get())->second;
-					const vector<TemplateArgument>& a_args =
-						record_template_arguments_.find(argument.get())->second;
+						vector<TemplateArgument> p_args =
+							pattern_match_arguments(pattern, pt == record_template_declarations_.end()
+							                         ? record_template_arguments_.end()
+							                         : record_template_arguments_.find(pattern.get()));
+						vector<TemplateArgument> a_args;
+						try
+						{
+							a_args = actual_match_arguments(
+								argument,
+								record_template_arguments_.find(argument.get()));
+						}
+						catch (const runtime_error&)
+						{
+							a_args.clear();
+					}
 					map<string, TypePtr> local_deduced = deduced;
 						map<string, TemplateArgument> local_arguments =
 							deduced_arguments != NULL
 							? *deduced_arguments
 							: map<string, TemplateArgument>();
-						vector<TemplateArgument> match_a_args =
-							argument_sequence_has_pack_pattern(p_args)
-							? flatten_argument_packs(a_args)
-							: a_args;
-						bool matched_template_parameter_sequence =
-							match_sequence(p_args,
-							               0,
-							               match_a_args,
-							               0,
-							               local_deduced,
-							               local_arguments);
-						if (matched_template_parameter_sequence)
+							vector<TemplateArgument> match_a_args =
+								argument_sequence_has_pack_pattern(p_args)
+								? flatten_argument_packs(a_args)
+								: a_args;
+							bool matched_template_parameter_sequence =
+								match_sequence(p_args,
+								               0,
+								               match_a_args,
+								               0,
+								               local_deduced,
+								               local_arguments);
+							if (matched_template_parameter_sequence)
 					{
 						deduced = local_deduced;
 						if (deduced_arguments != NULL)
@@ -672,37 +961,68 @@ bool Parser::deduce_template_type(TypePtr pattern,
 					return true;
 				}
 			}
-		Scope* pattern_owner =
-			pattern->scope != NULL ? pattern->scope->parent : NULL;
-		Scope* argument_owner =
-			argument->scope != NULL ? argument->scope->parent : NULL;
-		if (pt != record_template_declarations_.end() &&
-		    at != record_template_declarations_.end() &&
-		    pattern->is_template_specialization &&
-		    argument->is_template_specialization &&
-		    pattern->template_primary_name == argument->template_primary_name &&
-		    (pattern_owner == NULL || argument_owner == NULL ||
-		     pattern_owner == argument_owner))
+			Scope* pattern_owner =
+				pattern->scope != NULL ? pattern->scope->parent : NULL;
+			Scope* argument_owner =
+				argument->scope != NULL ? argument->scope->parent : NULL;
+			auto canonical_class_template =
+				[&](TemplateDeclaration* declaration) -> TemplateDeclaration*
+			{
+				if (declaration != NULL &&
+				    declaration->class_specialization)
+				{
+					TemplateDeclaration* primary =
+						const_cast<Parser*>(this)->find_class_template(
+							declaration->owner,
+							declaration->name);
+					if (primary != NULL)
+						return primary;
+				}
+				return declaration;
+			};
+			TemplateDeclaration* pattern_match_template =
+				canonical_class_template(pattern_template);
+			TemplateDeclaration* argument_match_template =
+				canonical_class_template(
+					const_cast<Parser*>(this)->
+						class_template_declaration_for_match(argument));
+			bool same_record_template =
+				pattern_match_template != NULL &&
+				pattern_match_template == argument_match_template;
+			if (pt != record_template_declarations_.end() &&
+			    at != record_template_declarations_.end() &&
+			    pattern->is_template_specialization &&
+			    argument->is_template_specialization &&
+			    pattern->template_primary_name == argument->template_primary_name &&
+			    (pattern_owner == NULL || argument_owner == NULL ||
+			     pattern_owner == argument_owner ||
+			     same_record_template))
 		{
-				const vector<TemplateArgument>& p_args =
-					record_template_arguments_.find(pattern.get())->second;
-				const vector<TemplateArgument>& a_args =
-					record_template_arguments_.find(argument.get())->second;
+					vector<TemplateArgument> p_args =
+						pattern_match_arguments(
+							pattern,
+							record_template_arguments_.find(pattern.get()));
+					vector<TemplateArgument> a_args =
+						actual_match_arguments(
+							argument,
+							record_template_arguments_.find(argument.get()));
 				map<string, TypePtr> local_deduced = deduced;
 					map<string, TemplateArgument> local_arguments =
 						deduced_arguments != NULL
 						? *deduced_arguments
 						: map<string, TemplateArgument>();
-					vector<TemplateArgument> match_a_args =
-						argument_sequence_has_pack_pattern(p_args)
-						? flatten_argument_packs(a_args)
-						: a_args;
-					if (match_sequence(p_args,
-					                   0,
-					                   match_a_args,
-					                   0,
-					                   local_deduced,
-					                   local_arguments))
+							vector<TemplateArgument> match_a_args =
+								argument_sequence_has_pack_pattern(p_args)
+								? flatten_argument_packs(a_args)
+								: a_args;
+							bool matched_template_parameter_sequence =
+								match_sequence(p_args,
+								               0,
+								               match_a_args,
+								               0,
+								               local_deduced,
+								               local_arguments);
+							if (matched_template_parameter_sequence)
 				{
 					deduced = local_deduced;
 					if (deduced_arguments != NULL)
@@ -710,48 +1030,47 @@ bool Parser::deduce_template_type(TypePtr pattern,
 					return true;
 				}
 			}
-			if (pattern->is_template_specialization &&
-			    argument->is_template_specialization &&
-			    pattern->template_primary_name == argument->template_primary_name &&
-			    (pattern_owner == NULL || argument_owner == NULL ||
-			     pattern_owner == argument_owner))
+				if (pattern->is_template_specialization &&
+				    argument->is_template_specialization &&
+				    pattern->template_primary_name == argument->template_primary_name &&
+				    (pattern_owner == NULL || argument_owner == NULL ||
+				     pattern_owner == argument_owner ||
+				     same_record_template))
 			{
 				vector<TemplateArgument> p_args;
 				vector<TemplateArgument> a_args;
+				map<const void*, vector<TemplateArgument> >::const_iterator pit =
+					record_template_arguments_.find(pattern.get());
+				map<const void*, vector<TemplateArgument> >::const_iterator ait =
+					record_template_arguments_.find(argument.get());
 				try
 				{
-					for (size_t i = 0; i < pattern->template_arguments.size(); ++i)
-						p_args.push_back(
-							template_argument_from_instance_argument(
-								pattern->template_arguments[i]));
-					for (size_t i = 0; i < argument->template_arguments.size(); ++i)
-						a_args.push_back(
-							template_argument_from_instance_argument(
-								argument->template_arguments[i]));
+						p_args = pattern_match_arguments(pattern, pit);
+						a_args = actual_match_arguments(argument, ait);
 				}
 				catch (const runtime_error&)
 				{
 					p_args.clear();
 					a_args.clear();
 				}
-				map<string, TypePtr> local_deduced = deduced;
-					map<string, TemplateArgument> local_arguments =
-						deduced_arguments != NULL
-						? *deduced_arguments
-						: map<string, TemplateArgument>();
-					vector<TemplateArgument> match_a_args =
-						argument_sequence_has_pack_pattern(p_args)
-						? flatten_argument_packs(a_args)
-						: a_args;
-						bool matched_instance_sequence =
-							!p_args.empty() &&
-							match_sequence(p_args,
+					map<string, TypePtr> local_deduced = deduced;
+						map<string, TemplateArgument> local_arguments =
+							deduced_arguments != NULL
+							? *deduced_arguments
+							: map<string, TemplateArgument>();
+								vector<TemplateArgument> match_a_args =
+									argument_sequence_has_pack_pattern(p_args)
+									? flatten_argument_packs(a_args)
+									: a_args;
+								bool matched_instance_sequence =
+									!p_args.empty() &&
+								match_sequence(p_args,
 							               0,
 							               match_a_args,
-							               0,
-							               local_deduced,
-							               local_arguments);
-					if (matched_instance_sequence)
+								               0,
+								               local_deduced,
+								               local_arguments);
+						if (matched_instance_sequence)
 				{
 					deduced = local_deduced;
 					if (deduced_arguments != NULL)
@@ -759,11 +1078,11 @@ bool Parser::deduce_template_type(TypePtr pattern,
 					return true;
 				}
 			}
-			if (argument->kind == pa11::TypeKind::Record)
-			{
-				if (pattern_template_parameter)
-					return false;
-				const_cast<Parser*>(this)->complete_template_record(argument);
+		if (argument->kind == pa11::TypeKind::Record)
+		{
+			if (pattern_template_parameter)
+				return false;
+			const_cast<Parser*>(this)->complete_template_record(argument);
 				TypePtr base = argument->base.get() != NULL
 					? pa11::strip_cv(argument->base) : TypePtr();
 			if (base.get() != NULL &&

@@ -17,17 +17,43 @@ bool Parser::parse_friend_declaration()
 		ETokenType key = current().type;
 		++pos_;
 		QualifiedName name = parse_id_expression_name();
+		if (at(OP_LT) && !name.has_template_arguments)
+		{
+			name.has_template_arguments = true;
+			parse_template_argument_list(name.template_arguments);
+		}
 		Scope* target = name.qualifier != NULL
 			? name.qualifier : nearest_namespace_scope(class_scope);
-		vector<Binding*> found = lookup_qualified_set(target,
-		                                              name.name,
-		                                              pa11::LOOKUP_TYPE);
 		TypePtr friend_type;
-		if (!found.empty() &&
-		    found[0]->type.get() != NULL &&
-		    pa11::strip_cv(found[0]->type)->kind == pa11::TypeKind::Record)
-			friend_type = found[0]->type;
-		else
+		if (name.has_template_arguments)
+		{
+			TemplateDeclaration* class_template = NULL;
+			if (name.qualifier == NULL)
+				class_template = find_class_template(class_scope,
+				                                     name.name);
+			if (class_template == NULL)
+				class_template = find_class_template(target, name.name);
+			if (class_template != NULL)
+				friend_type = instantiate_class_template(
+					class_template,
+					name.template_arguments);
+		}
+		if (friend_type.get() == NULL)
+		{
+			vector<Binding*> found = name.qualifier != NULL
+				? lookup_qualified_set(target,
+				                       name.name,
+				                       pa11::LOOKUP_TYPE)
+				: lookup_unqualified_set(class_scope,
+				                         name.name,
+				                         pa11::LOOKUP_TYPE);
+			if (!found.empty() &&
+			    found[0]->type.get() != NULL &&
+			    pa11::strip_cv(found[0]->type)->kind ==
+			    pa11::TypeKind::Record)
+				friend_type = found[0]->type;
+		}
+		if (friend_type.get() == NULL)
 			friend_type = add_record(target,
 			                         name.name,
 			                         class_tag(key),

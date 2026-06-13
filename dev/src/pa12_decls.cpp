@@ -8,6 +8,7 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
 namespace {
 
 bool record_has_nonpublic_field(TypePtr record)
@@ -26,6 +27,109 @@ bool record_has_nonpublic_field(TypePtr record)
 bool is_destructor_binding(Binding* binding)
 {
 	return binding != NULL && !binding->name.empty() && binding->name[0] == '~';
+}
+
+bool same_virtual_instance_type(TypePtr left, TypePtr right);
+
+void append_normalized_virtual_instance_arguments(
+	vector<pa11::TemplateInstanceArgument>& out,
+	const vector<pa11::TemplateInstanceArgument>& arguments)
+{
+	for (size_t i = 0; i < arguments.size(); ++i)
+	{
+		if (arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack)
+		{
+			append_normalized_virtual_instance_arguments(
+				out,
+				arguments[i].pack);
+			continue;
+		}
+		out.push_back(arguments[i]);
+	}
+}
+
+bool same_virtual_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right);
+
+bool same_virtual_instance_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return same_virtual_instance_type(left.type, right.type);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+		return left.dependent == right.dependent &&
+		       left.value_negated == right.value_negated &&
+		       left.value == right.value &&
+		       left.value_name == right.value_name &&
+		       left.value_owner_template_name ==
+			       right.value_owner_template_name &&
+		       left.value_member_name == right.value_member_name &&
+		       same_virtual_instance_type(left.type, right.type) &&
+		       same_virtual_instance_arguments(
+			       left.value_owner_template_arguments,
+			       right.value_owner_template_arguments);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!same_virtual_instance_argument(left.pack[i], right.pack[i]))
+			return false;
+	return true;
+}
+
+bool same_virtual_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	vector<pa11::TemplateInstanceArgument> flat_left;
+	vector<pa11::TemplateInstanceArgument> flat_right;
+	append_normalized_virtual_instance_arguments(flat_left, left);
+	append_normalized_virtual_instance_arguments(flat_right, right);
+	if (flat_left.size() != flat_right.size())
+		return false;
+	for (size_t i = 0; i < flat_left.size(); ++i)
+		if (!same_virtual_instance_argument(flat_left[i], flat_right[i]))
+			return false;
+	return true;
+}
+
+bool same_virtual_instance_type(TypePtr left, TypePtr right)
+{
+	if (pa11::same_type(left, right))
+		return true;
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
+	       !l->template_primary_name.empty() &&
+	       l->template_primary_name == r->template_primary_name &&
+	       same_virtual_instance_arguments(l->template_arguments,
+	                                       r->template_arguments);
+}
+
+bool same_virtual_completion_record(TypePtr left, TypePtr right)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (left.get() == right.get())
+		return true;
+	return same_virtual_instance_type(left, right);
+}
+
+bool virtual_completion_active(const vector<TypePtr>& active, TypePtr type)
+{
+	for (size_t i = 0; i < active.size(); ++i)
+		if (same_virtual_completion_record(active[i], type))
+			return true;
+	return false;
 }
 
 void stamp_template_member_function_symbol(Binding* binding)
@@ -452,7 +556,7 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	if (parse_constructor_like_member())
 		return;
 	size_t decl_start = pos_;
-		DeclSpecs specs = parse_decl_specifier_seq(false);
+	DeclSpecs specs = parse_decl_specifier_seq(false);
 	specs.no_unique_address_decl =
 		specs.no_unique_address_decl || declaration_no_unique_address;
 	TypePtr base = type_from_decl_specs(specs);
@@ -602,7 +706,8 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			if (current_scope()->kind == ScopeKind::Class)
 			{
 				if (force_new_function_binding_ &&
-				    active_class_instantiations_.empty())
+				    active_class_instantiations_.empty() &&
+				    function_template_candidate_instantiation_depth_ == 0)
 				{
 					parse_function_body(function, declarator, node);
 					if (emit_node && !node.children.empty())
@@ -759,6 +864,21 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				add_child(fn, param);
 			}
 			add_child(fn, Node("compound-statement"));
+			Scope* member_scope =
+				function->owner != NULL &&
+				function->owner->kind == ScopeKind::Class
+				? function->owner : qname.qualifier;
+			if (member_scope != NULL &&
+			    member_scope->kind == ScopeKind::Class &&
+			    function->type.get() != NULL &&
+			    function->type->kind == pa11::TypeKind::Function)
+			{
+				if (function->name == member_scope->name &&
+				    function->type->parameters.size() == 1)
+					function->is_noop_constructor = true;
+				if (function->name == "~" + member_scope->name)
+					function->is_noop_destructor = true;
+			}
 		}
 		if (function != NULL &&
 		    current_scope()->kind == ScopeKind::Class &&
@@ -830,6 +950,38 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
+	const QualifiedName& init_qname = declarator_name(declarator);
+	bool initializer_ahead = at(OP_ASS) ||
+	                         at(OP_LBRACE) ||
+	                         (at(OP_LPAREN) && !declares_function);
+	if (initializer_ahead &&
+	    current_scope()->kind != ScopeKind::Namespace &&
+	    current_scope()->kind != ScopeKind::Class &&
+	    !specs.typedef_decl &&
+	    !specs.auto_decl &&
+	    !declares_function &&
+	    init_qname.qualifier == NULL &&
+	    !init_qname.name.empty())
+	{
+		TypePtr provisional_type = declared_type;
+		if (specs.constexpr_decl &&
+		    !pa11::is_reference_type(provisional_type) &&
+		    provisional_type->kind != pa11::TypeKind::Function)
+			provisional_type = pa11::make_cv(provisional_type,
+			                                 pa11::CV_CONST);
+		TypePtr provisional_bare = pa11::strip_cv(provisional_type);
+		if (!(provisional_bare->kind == pa11::TypeKind::Array &&
+		      provisional_bare->unknown_bound))
+		{
+			Binding* provisional_initializer_binding =
+				add_value(current_scope(),
+				          BindingKind::Variable,
+				          init_qname.name,
+				          provisional_type);
+			provisional_initializer_bindings_.insert(
+				provisional_initializer_binding);
+		}
+	}
 	vector<Scope*> saved_initializer_scopes;
 	bool pushed_initializer_scope = false;
 	if (declarator_scope != NULL && !declares_function)
@@ -1116,6 +1268,30 @@ void Parser::complete_class_virtuals(TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
+	if (virtual_completion_active(active_class_virtual_completions_, bare))
+		return;
+	active_class_virtual_completions_.push_back(bare);
+	struct ActiveVirtualCompletionGuard
+	{
+		vector<TypePtr>& active;
+		TypePtr key;
+		ActiveVirtualCompletionGuard(vector<TypePtr>& active_records,
+		                             TypePtr active_key)
+			: active(active_records), key(active_key)
+		{
+		}
+		~ActiveVirtualCompletionGuard()
+		{
+			for (size_t i = active.size(); i > 0; --i)
+			{
+				if (same_virtual_completion_record(active[i - 1], key))
+				{
+					active.erase(active.begin() + (i - 1));
+					return;
+				}
+			}
+		}
+	} active_guard(active_class_virtual_completions_, bare);
 	vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
 	bool dependent_base_validation =
 		validating_template_definition_ &&
@@ -1410,9 +1586,9 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 				names.push_back(parameter_name);
 			}
 			default_arguments_[function] = defaults;
-		function_parameter_names_[function] = names;
-		if (use_parameter_name_override)
-			override_function_parameter_name_bindings_.insert(function);
+			function_parameter_names_[function] = names;
+			if (use_parameter_name_override)
+				override_function_parameter_name_bindings_.insert(function);
 	}
 	string keyword = function_definition ? "function-definition " :
 		"function-declaration ";

@@ -324,9 +324,9 @@ void validate_call(const Function& fn, const Program& program, const Instruction
 {
 	if (ins.a.kind != ValueKind::Function && !ins.signature.present)
 		throw runtime_error("indirect call missing signature");
-	if (ins.a.kind == ValueKind::Function &&
-	    program.function_by_name.find(ins.a.text) == program.function_by_name.end())
-		throw runtime_error("undefined function");
+			if (ins.a.kind == ValueKind::Function &&
+			    program.function_by_name.find(ins.a.text) == program.function_by_name.end())
+				throw runtime_error("undefined function");
 	for (size_t i = 0; i < ins.args.size(); ++i)
 		validate_symbol_value(fn, program, ins.args[i]);
 	for (size_t i = 0; i < ins.signature.params.size(); ++i)
@@ -434,9 +434,9 @@ void validate_instruction_operands(Function& fn,
 		validate_symbol_value(fn, program, ins.b);
 		validate_symbol_value(fn, program, ins.c);
 		break;
-	case InstrKind::Convert:
-		validate_symbol_value(fn, program, ins.a);
-		validate_conversion(ins);
+		case InstrKind::Convert:
+			validate_symbol_value(fn, program, ins.a);
+			validate_conversion(ins);
 		fn.needs_convert_scratch = true;
 		break;
 	case InstrKind::Call:

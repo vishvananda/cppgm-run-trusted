@@ -9,15 +9,50 @@ const Node& lhs = init.children[0]; const Node& rhs = init.children[1]; return (
 TypePtr bare = pa11::strip_cv(type); if (var.children.empty()) return type_contains_record(type) && !default_init_no_op(type); if (starts_with(var.children[0].line, "no-op-initializer"))
 return false; if (bare->kind == TypeKind::Array || bare->kind == TypeKind::Record || is_reference(type))
 return true; return !scalar_static_init_known_constant(var.children[0]); }
+bool function_definition_body_empty(const Node& node)
+{
+	return !node.children.empty() &&
+	       starts_with(node.children.back().line, "compound-statement") &&
+	       node.children.back().children.empty();
+}
+
+bool inline_empty_nonvirtual_destructor_body(const ProgramLowerer& program,
+                                             const Binding* dtor)
+{
+	if (dtor != NULL &&
+	    dtor->aliased_binding != NULL &&
+	    dtor->aliased_binding->is_inline_definition)
+		dtor = dtor->aliased_binding;
+	if (dtor == NULL || dtor->is_virtual || !dtor->is_inline_definition)
+		return false;
+	if (dtor->is_cleanup_only_destructor)
+		return false;
+	const Node* fn = NULL;
+	map<const Binding*, const Node*>::const_iterator found =
+		program.inline_definitions.find(dtor);
+	if (found != program.inline_definitions.end())
+		fn = found->second;
+	map<const Binding*, Node>::const_iterator synthetic =
+		program.synthetic_inline_definitions.find(dtor);
+	if (fn == NULL && synthetic != program.synthetic_inline_definitions.end())
+		fn = &synthetic->second;
+	return fn != NULL && function_definition_body_empty(*fn);
+}
+
 }  // namespace
 Binding* find_constructor(TypePtr type, size_t arg_count) { TypePtr bare = pa11::strip_cv(type); if (bare->kind != TypeKind::Record || bare->scope == NULL)
 return NULL; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name); if (found == bare->scope->members.end())
 return NULL; for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];
 if (binding->kind == BindingKind::Function && binding->type->kind == TypeKind::Function && binding->type->parameters.size() == arg_count + 1) return binding;
 } return NULL; } const Node* record_prvalue_child_for_xvalue(const Node& arg)
-{ if (arg.category != ValueCategory::XValue || arg.children.empty()) return NULL; if (!starts_with(arg.line, "cast-expression"))
-return NULL; const Node& child = arg.children[0]; if (child.category == ValueCategory::LValue || child.category == ValueCategory::XValue)
-return NULL; if (pa11::strip_cv(object_type(child.type))->kind != TypeKind::Record) return NULL; return &child;
+{ if (arg.children.empty()) return NULL; if (starts_with(arg.line, "cast-expression") &&
+(arg.category == ValueCategory::XValue || is_reference(arg.type))) { const Node* child = record_prvalue_child_for_xvalue(arg.children[0]); if (child != NULL)
+return child; if (arg.category != ValueCategory::XValue) return NULL; const Node& direct_child = arg.children[0]; if (direct_child.category == ValueCategory::LValue || direct_child.category == ValueCategory::XValue)
+return NULL; if (pa11::strip_cv(object_type(direct_child.type))->kind != TypeKind::Record) return NULL; return &direct_child; }
+if (starts_with(arg.line, "base-subobject-expression")) { const Node* child = record_prvalue_child_for_xvalue(arg.children[0]); if (child != NULL)
+return child; const Node& direct_child = arg.children[0]; if (direct_child.category == ValueCategory::LValue || direct_child.category == ValueCategory::XValue)
+return NULL; if (pa11::strip_cv(object_type(direct_child.type))->kind != TypeKind::Record) return NULL; return &direct_child; }
+return NULL;
 } Binding* find_any_copy_move_constructor(TypePtr type, bool move) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record || bare->scope == NULL) return NULL; map<string, vector<Binding*> >::const_iterator found = bare->scope->members.find(bare->scope->name);
 if (found == bare->scope->members.end()) return NULL; for (size_t i = 0; i < found->second.size(); ++i) {
@@ -63,18 +98,18 @@ for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->se
 binding->type->kind == TypeKind::Function) return binding; } return NULL;
 } bool type_needs_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind == TypeKind::Array) return type_needs_destructor(bare->base); if (bare->kind != TypeKind::Record) return false;
-	Binding* dtor = find_destructor(bare); if (dtor != NULL && !dtor->is_noop_destructor) return true; pa11::layout_record_type(bare);
+	Binding* dtor = find_destructor(bare); if (dtor != NULL && (dtor->is_virtual || !dtor->is_noop_destructor)) return true; pa11::layout_record_type(bare);
 	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
 	if (type_needs_destructor(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i) if (type_needs_destructor(bare->fields[i]->type))
 	return true; return false; } bool type_contains_record(TypePtr type)
 { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Record) return true;
 if (bare->kind == TypeKind::Array) return type_contains_record(bare->base); return false; }
-bool default_init_no_op(TypePtr type) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array)
-return default_init_no_op(bare->base); if (bare->kind != TypeKind::Record) return false; Binding* ctor = find_constructor(bare, 0);
-	if (ctor != NULL && !ctor->is_generated_default_constructor) return ctor->is_noop_constructor; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare);
+bool default_init_no_op_impl(TypePtr type, bool subobject) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array)
+return default_init_no_op_impl(bare->base, subobject); if (bare->kind != TypeKind::Record) return false; Binding* ctor = find_constructor(bare, 0);
+	if (ctor != NULL && !ctor->is_generated_default_constructor) return subobject && ctor->is_noop_constructor; pa11::layout_record_type(bare); vector<TypePtr> bases = pa11::record_direct_bases(bare);
 	if (!pa11::record_virtual_bases(bare).empty()) return false;
-	for (size_t i = 0; i < bases.size(); ++i) if (!default_init_no_op(bases[i])) return false; for (size_t i = 0; i < bare->fields.size(); ++i) if (!default_init_no_op(bare->fields[i]->type)) return false;
-	return true; } bool no_op_generated_default_constructor(Binding* ctor, TypePtr type) {
+	for (size_t i = 0; i < bases.size(); ++i) if (!default_init_no_op_impl(bases[i], true)) return false; for (size_t i = 0; i < bare->fields.size(); ++i) if (!default_init_no_op_impl(bare->fields[i]->type, true)) return false;
+	return true; } bool default_init_no_op(TypePtr type) { return default_init_no_op_impl(type, false); } bool no_op_generated_default_constructor(Binding* ctor, TypePtr type) {
 	if (ctor == NULL || !ctor->is_generated_default_constructor) return false; TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Record && bare->is_polymorphic)
 	return false; if (bare->kind == TypeKind::Record && !pa11::record_direct_bases(bare).empty()) return false; if (ctor->unwind_no)
 	return true; return default_init_no_op(type); } bool has_inline_constructor(TypePtr type)
@@ -280,10 +315,11 @@ string decay = fresh_temp(); instr(decay + " = unary decay ptr " + base.text); s
 } string addr = fresh_temp(); instr(addr + " = index i8 [projection=array_element] " + decay + ", " + scaled);
 return Value("ptr", addr); }; lower_destructor_for_object(elem_addr, elem); }
 return; } if (bare->kind != TypeKind::Record) return;
-Binding* dtor = find_destructor(bare); if (dtor != NULL && !dtor->is_noop_destructor) { program_.demand_function_declaration(dtor);
+Binding* dtor = find_destructor(bare); if (dtor != NULL && (dtor->is_virtual || !dtor->is_noop_destructor)) {
+if (!inline_empty_nonvirtual_destructor_body(program_, dtor)) { program_.demand_function_declaration(dtor);
 program_.demand_inline_function(dtor); Value target = addr_for(); string arg = target.text; if (!arg.empty() && (arg[0] == '@' || arg[0] == '$'))
 { string tmp = fresh_temp(); instr(tmp + " = addr " + arg); arg = tmp;
-} instr("call void @" + program_.symbol_for(dtor) + "(" + arg + ")"); return;
+} instr("call void @" + program_.symbol_for(dtor) + "(" + arg + ")"); return; }
 } pa11::layout_record_type(bare); for (size_t n = 0; n < bare->fields.size(); ++n) {
 size_t i = bare->fields.size() - 1 - n; Binding* field = bare->fields[i]; function<Value()> field_addr = [this, addr_for, field]() { Value base = addr_for();
 string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + base.text + ", " + to_string(field->member_offset)); return Value("ptr", addr);
@@ -306,7 +342,7 @@ string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + thi
 { if (node.type.get() == NULL) return; TypePtr source = class_record_for_member(fn_.binding);
 function<Value()> base_addr = [this, source, &node]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this"); string addr = fresh_temp(); instr(addr + " = index i8 [projection=base_subobject] " + this_ptr + ", " + to_string(base_subobject_offset(source, node.type))); return Value("ptr", addr); }; Binding* dtor = find_destructor(node.type);
 	if (dtor != NULL && dtor->is_virtual) { program_.demand_function_declaration(dtor); string callee = program_.destructor_symbol_for(dtor, true);
-	program_.demand_inline_function(dtor, false); Value target = base_addr(); vector<string> args; args.push_back(target.text);
+	program_.demand_inline_function(dtor, false); program_.demand_lifecycle_base_entry_declaration(dtor); Value target = base_addr(); vector<string> args; args.push_back(target.text);
 	if (!program_.native_lowering) {
 		TypePtr current = source.get() != NULL ? pa11::strip_cv(source) : TypePtr();
 		TypePtr base = node.type.get() != NULL ? pa11::strip_cv(node.type) : TypePtr();

@@ -150,6 +150,9 @@ Value FunctionLowerer::emit_gnu_atomic_builtin(const Node& expr)
 	if (expr.direct_call == NULL)
 		throw runtime_error("invalid atomic builtin");
 	const string& name = expr.direct_call->name;
+	if (name == "__atomic_thread_fence" ||
+	    name == "__atomic_signal_fence")
+		return Value("void", "");
 	if (name == "__atomic_always_lock_free" ||
 	    name == "__atomic_is_lock_free")
 		return Value(scalar_lowir_type(expr.type), "1");
@@ -166,6 +169,15 @@ Value FunctionLowerer::emit_gnu_atomic_builtin(const Node& expr)
 		string loaded = fresh_temp();
 		instr(loaded + " = load " + low_type + " " + ptr.text);
 		return Value(low_type, loaded);
+	}
+	if (name == "__atomic_test_and_set")
+	{
+		string oldv = fresh_temp();
+		instr(oldv + " = load " + low_type + " " + ptr.text);
+		instr("store " + low_type + " 1, " + ptr.text);
+		return convert_value(Value(low_type, oldv),
+		                     object,
+		                     pa11::make_fundamental(FT_BOOL));
 	}
 	if (name == "__atomic_load")
 	{
@@ -196,10 +208,60 @@ Value FunctionLowerer::emit_gnu_atomic_builtin(const Node& expr)
 		instr("store " + low_type + " " + loaded + ", " + ptr.text);
 		return Value("void", "");
 	}
+	if (name == "__atomic_clear")
+	{
+		instr("store " + low_type + " 0, " + ptr.text);
+		return Value("void", "");
+	}
 	if (name == "__sync_lock_release")
 	{
 		instr("store " + low_type + " 0, " + ptr.text);
 		return Value("void", "");
+	}
+	if (name == "__atomic_compare_exchange" ||
+	    name == "__atomic_compare_exchange_n")
+	{
+		if (expr.children.size() < 4)
+			throw runtime_error("invalid atomic compare exchange");
+		Value expected_ptr = ensure_pointer(emit_rvalue(expr.children[2]));
+		Value desired = name == "__atomic_compare_exchange_n"
+			? convert_value(emit_rvalue(expr.children[3]),
+			                expr.children[3].type,
+			                object)
+			: Value();
+		if (name == "__atomic_compare_exchange")
+		{
+			Value desired_ptr = ensure_pointer(emit_rvalue(expr.children[3]));
+			string loaded_desired = fresh_temp();
+			instr(loaded_desired + " = load " + low_type + " " +
+			      desired_ptr.text);
+			desired = Value(low_type, loaded_desired);
+		}
+		string cur = fresh_temp();
+		instr(cur + " = load " + low_type + " " + ptr.text);
+		string expected = fresh_temp();
+		instr(expected + " = load " + low_type + " " + expected_ptr.text);
+		string ok = fresh_temp();
+		instr(ok + " = cmp eq " + low_type + " " + cur + ", " + expected);
+		string success = fresh_block("atomic_cas_success");
+		string failure = fresh_block("atomic_cas_failure");
+		string end = fresh_block("atomic_cas_end");
+		string slot = fresh_aux_slot("atomic_cas",
+		                             scalar_lowir_type(expr.type));
+		terminate("branch " + ok + ", ^" + success + ", ^" + failure);
+		start_block(success);
+		instr("store " + low_type + " " + desired.text + ", " + ptr.text);
+		instr("store " + scalar_lowir_type(expr.type) + " 1, $" + slot);
+		terminate("jump ^" + end);
+		start_block(failure);
+		instr("store " + low_type + " " + cur + ", " + expected_ptr.text);
+		instr("store " + scalar_lowir_type(expr.type) + " 0, $" + slot);
+		terminate("jump ^" + end);
+		start_block(end);
+		string result = fresh_temp();
+		instr(result + " = load " + scalar_lowir_type(expr.type) +
+		      " $" + slot);
+		return Value(scalar_lowir_type(expr.type), result);
 	}
 	if (name == "__atomic_exchange_n" ||
 	    name == "__sync_lock_test_and_set")

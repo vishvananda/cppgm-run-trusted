@@ -10,7 +10,8 @@ namespace {
 
 TypePtr adjust_parameter_type(TypePtr type)
 {
-	if (type->kind == pa11::TypeKind::Array)
+	if (type->kind == pa11::TypeKind::Array &&
+	    !pa11::is_gnu_vector_type(type))
 		return pa11::make_pointer(type->base);
 	if (type->kind == pa11::TypeKind::Function)
 		return pa11::make_pointer(type);
@@ -27,6 +28,11 @@ TypePtr adjust_parameter_type(TypePtr type)
 		return name == "__abi_tag__" || name == "abi_tag";
 	}
 
+	bool is_vector_size_attribute_name(const string& name)
+	{
+		return name == "__vector_size__" || name == "vector_size";
+	}
+
 	string string_literal_payload(const string& token)
 	{
 		size_t first = token.find('"');
@@ -40,7 +46,9 @@ TypePtr adjust_parameter_type(TypePtr type)
 
 	bool Parser::parse_gnu_attribute_suffix(Suffix& suffix)
 	{
-		if (!at_identifier() || current().source != "__attribute__")
+		if (!at_identifier() ||
+		    (current().source != "__attribute__" &&
+		     current().source != "__attribute"))
 			return false;
 		++pos_;
 		if (!consume(OP_LPAREN))
@@ -54,7 +62,19 @@ TypePtr adjust_parameter_type(TypePtr type)
 		while (!at_eof() && !at(OP_RPAREN))
 		{
 			if (at_identifier() &&
-			    is_abi_tag_attribute_name(current().source))
+			    is_vector_size_attribute_name(current().source))
+			{
+				++pos_;
+				if (consume(OP_LPAREN))
+				{
+					Expr size = parse_expression();
+					if (size.has_constant_value)
+						suffix.vector_size = size.constant_value;
+					expect(OP_RPAREN);
+				}
+			}
+			else if (at_identifier() &&
+			         is_abi_tag_attribute_name(current().source))
 			{
 				++pos_;
 				if (consume(OP_LPAREN))
@@ -224,44 +244,58 @@ ParameterInfo Parser::parse_parameter_declaration()
 	size_t save = pos_;
 	if (starts_declarator())
 	{
+		Declarator declarator;
 		try
 		{
-			Declarator declarator = parse_declarator(true);
+			declarator = parse_declarator(true);
 			info.type = adjust_parameter_type(apply_declarator(declarator, base));
+		}
+		catch (const exception&)
+		{
+			pos_ = save;
+		}
+		if (info.type.get() != NULL)
+			{
 				if (declarator_has_name(declarator))
 					info.name = declarator_name(declarator).name;
+				if (info.name.empty() && at_identifier() &&
+				    (lookahead(OP_COMMA, 1) ||
+				     lookahead(OP_RPAREN, 1) ||
+				     lookahead(OP_ASS, 1) ||
+				     lookahead(OP_DOTS, 1)))
+					info.name = consume_identifier();
 				string pack_name;
-				bool pack_expansion =
-					at(OP_DOTS) &&
-					type_contains_template_parameter_name(info.type,
-					                                      pack_name) &&
-					parameter_pack_expansion_name(pack_name);
-				if (!pack_expansion && at(OP_DOTS) && pos_ > 0 &&
-				    parameter_pack_expansion_name(tokens_[pos_ - 1].source))
-				{
-					pack_name = tokens_[pos_ - 1].source;
-					pack_expansion = true;
-				}
-				if (!pack_expansion && at(OP_DOTS))
-				{
-					for (size_t i = parameter_begin; i < pos_; ++i)
-						if (parameter_pack_expansion_name(tokens_[i].source))
-						{
-							pack_name = tokens_[i].source;
-							pack_expansion = true;
-							break;
-						}
-				}
-				if (pack_expansion)
-				{
-					expect(OP_DOTS);
-					info.is_pack_expansion = true;
-					info.pack_name = pack_name;
-					if (info.name.empty() && at_identifier())
-						info.name = consume_identifier();
-					info.pack_expression_name = info.name;
-				}
-				skip_attributes();
+			bool pack_expansion =
+				at(OP_DOTS) &&
+				type_contains_template_parameter_name(info.type,
+				                                      pack_name) &&
+				parameter_pack_expansion_name(pack_name);
+			if (!pack_expansion && at(OP_DOTS) && pos_ > 0 &&
+			    parameter_pack_expansion_name(tokens_[pos_ - 1].source))
+			{
+				pack_name = tokens_[pos_ - 1].source;
+				pack_expansion = true;
+			}
+			if (!pack_expansion && at(OP_DOTS))
+			{
+				for (size_t i = parameter_begin; i < pos_; ++i)
+					if (parameter_pack_expansion_name(tokens_[i].source))
+					{
+						pack_name = tokens_[i].source;
+						pack_expansion = true;
+						break;
+					}
+			}
+			if (pack_expansion)
+			{
+				expect(OP_DOTS);
+				info.is_pack_expansion = true;
+				info.pack_name = pack_name;
+				if (info.name.empty() && at_identifier())
+					info.name = consume_identifier();
+				info.pack_expression_name = info.name;
+			}
+			skip_attributes();
 				if (consume(OP_ASS))
 				{
 					info.has_default = true;
@@ -270,19 +304,21 @@ ParameterInfo Parser::parse_parameter_declaration()
 					info.default_value.source_begin = default_begin;
 					info.default_value.source_end = pos_;
 				}
-			return info;
-		}
-		catch (const exception&)
-		{
-			pos_ = save;
-		}
+				return info;
+			}
 	}
 	if (starts_abstract_declarator())
 		info.type = adjust_parameter_type(
 			apply_declarator(parse_abstract_declarator(), base));
-		else
-			info.type = adjust_parameter_type(base);
-		string pack_name;
+			else
+				info.type = adjust_parameter_type(base);
+			if (info.name.empty() && at_identifier() &&
+			    (lookahead(OP_COMMA, 1) ||
+			     lookahead(OP_RPAREN, 1) ||
+			     lookahead(OP_ASS, 1) ||
+			     lookahead(OP_DOTS, 1)))
+				info.name = consume_identifier();
+			string pack_name;
 		bool pack_expansion =
 			at(OP_DOTS) &&
 			type_contains_template_parameter_name(info.type, pack_name) &&
@@ -313,16 +349,16 @@ ParameterInfo Parser::parse_parameter_declaration()
 			info.pack_expression_name = info.name;
 		}
 		skip_attributes();
-		if (consume(OP_ASS))
-		{
-			info.has_default = true;
-			size_t default_begin = pos_;
-			info.default_value = parse_assignment_expression();
-			info.default_value.source_begin = default_begin;
-			info.default_value.source_end = pos_;
-		}
-	return info;
-}
+			if (consume(OP_ASS))
+			{
+				info.has_default = true;
+				size_t default_begin = pos_;
+				info.default_value = parse_assignment_expression();
+				info.default_value.source_begin = default_begin;
+				info.default_value.source_end = pos_;
+			}
+		return info;
+	}
 
 bool Parser::starts_declaration()
 {

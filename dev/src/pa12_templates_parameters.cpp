@@ -6,6 +6,101 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool simple_token_is_one_of(const Token& token,
+                            const initializer_list<ETokenType>& types)
+{
+	if (token.kind != posttoken::TokenKind::Simple)
+		return false;
+	for (initializer_list<ETokenType>::const_iterator it = types.begin();
+	     it != types.end();
+	     ++it)
+		if (token.type == *it)
+			return true;
+	return false;
+}
+
+bool token_can_follow_template_id_in_default(const vector<Token>& tokens,
+                                             size_t close)
+{
+	if (close + 1 >= tokens.size())
+		return true;
+	const Token& next = tokens[close + 1];
+	return simple_token_is_one_of(next,
+	                              { OP_COLON2,
+	                                OP_LPAREN,
+	                                OP_LBRACE,
+	                                OP_LSQUARE,
+	                                OP_COMMA,
+	                                OP_GT,
+	                                OP_RPAREN,
+	                                OP_RSQUARE,
+	                                OP_RBRACE,
+	                                OP_DOTS,
+	                                OP_SEMICOLON });
+}
+
+bool token_can_precede_template_id_angle(const vector<Token>& tokens,
+                                         size_t lt)
+{
+	if (lt == 0)
+		return false;
+	const Token& prev = tokens[lt - 1];
+	if (prev.kind == posttoken::TokenKind::Identifier)
+		return true;
+	return simple_token_is_one_of(prev,
+	                              { OP_GT,
+	                                KW_OPERATOR,
+	                                KW_DECLTYPE,
+	                                KW_TEMPLATE });
+}
+
+bool top_level_lt_opens_template_id_in_default(const vector<Token>& tokens,
+                                               size_t lt)
+{
+	if (lt >= tokens.size() ||
+	    tokens[lt].kind != posttoken::TokenKind::Simple ||
+	    tokens[lt].type != OP_LT ||
+	    !token_can_precede_template_id_angle(tokens, lt))
+		return false;
+	int depth = 0;
+	int paren = 0;
+	int square = 0;
+	int brace = 0;
+	for (size_t p = lt; p < tokens.size(); ++p)
+	{
+		const Token& tok = tokens[p];
+		if (tok.kind != posttoken::TokenKind::Simple)
+			continue;
+		if (tok.type == OP_LPAREN)
+			++paren;
+		else if (tok.type == OP_RPAREN && paren > 0)
+			--paren;
+		else if (tok.type == OP_LSQUARE)
+			++square;
+		else if (tok.type == OP_RSQUARE && square > 0)
+			--square;
+		else if (tok.type == OP_LBRACE)
+			++brace;
+		else if (tok.type == OP_RBRACE && brace > 0)
+			--brace;
+		else if (paren == 0 && square == 0 && brace == 0 &&
+		         tok.type == OP_LT)
+			++depth;
+		else if (paren == 0 && square == 0 && brace == 0 &&
+		         tok.type == OP_GT)
+		{
+			--depth;
+			if (depth == 0)
+				return token_can_follow_template_id_in_default(tokens, p);
+		}
+	}
+	return false;
+}
+
+}  // namespace
+
 bool typename_starts_qualified_type(const vector<Token>& tokens, size_t pos)
 {
 	if (pos >= tokens.size() ||
@@ -247,26 +342,29 @@ void Parser::skip_template_parameter_default(TemplateParameterInfo& parameter)
 		if (angle == 0 && paren == 0 && square == 0 && brace == 0 &&
 		    (at(OP_COMMA) || at(OP_GT)))
 			break;
-		if (at(OP_LT))
-			++angle;
-		else if (at(OP_GT))
-		{
-			if (angle == 0)
-				break;
-			--angle;
-		}
-		else if (at(OP_LPAREN))
+		if (at(OP_LPAREN))
 			++paren;
-		else if (at(OP_RPAREN))
+		else if (at(OP_RPAREN) && paren > 0)
 			--paren;
 		else if (at(OP_LSQUARE))
 			++square;
-		else if (at(OP_RSQUARE))
+		else if (at(OP_RSQUARE) && square > 0)
 			--square;
 		else if (at(OP_LBRACE))
 			++brace;
-		else if (at(OP_RBRACE))
+		else if (at(OP_RBRACE) && brace > 0)
 			--brace;
+		else if (paren == 0 && square == 0 && brace == 0 && at(OP_LT) &&
+		         (angle > 0 ||
+		          top_level_lt_opens_template_id_in_default(tokens_, pos_)))
+			++angle;
+		else if (paren == 0 && square == 0 && brace == 0 && at(OP_GT))
+		{
+			if (angle == 0 && paren == 0 && square == 0 && brace == 0)
+				break;
+			if (angle > 0)
+				--angle;
+		}
 		++pos_;
 	}
 	parameter.default_end = pos_;

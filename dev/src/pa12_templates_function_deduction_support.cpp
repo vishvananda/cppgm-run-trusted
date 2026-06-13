@@ -476,7 +476,12 @@ TypePtr remove_pattern_cv_from_argument(TypePtr argument, unsigned cv)
 		TypePtr base = remove_pattern_cv_from_argument(argument->base, cv);
 		if (base.get() == argument->base.get())
 			return argument;
-		return pa11::make_array(base, argument->unknown_bound, argument->bound);
+		TypePtr out = pa11::make_array(base,
+		                               argument->unknown_bound,
+		                               argument->bound);
+		out->name = argument->name;
+		out->tag = argument->tag;
+		return out;
 	}
 	return argument;
 }

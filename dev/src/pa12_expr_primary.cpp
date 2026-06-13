@@ -160,7 +160,7 @@ if (at_identifier() && current().source == "__null")
 					ensure_aggregate_constructors_for_init(compound_type,
 					                                       init.node);
 					ensure_default_destructor(compound_type,
-					                          bare->base.get() != NULL);
+					                          !pa11::record_direct_bases(bare).empty());
 				}
 			}
 			annotate_expr_node(init);
@@ -418,7 +418,7 @@ parsed_type_id = true; } catch (const exception&) {
 		{
 		complete_template_record(bare);
 		ensure_aggregate_constructors_for_init(target, init.node);
-		ensure_default_destructor(target, bare->base.get() != NULL);
+		ensure_default_destructor(target, !pa11::record_direct_bases(bare).empty());
 		}
 	annotate_expr_node(init); return parse_postfix_suffixes(init);
 } if (!parsed_type_id || at(OP_RPAREN) || at(OP_COMMA) ||
@@ -429,20 +429,30 @@ expect(OP_RPAREN); } catch (...) {
 template_argument_expression_depth_ = save_template_argument_depth; throw; }
 template_argument_expression_depth_ = save_template_argument_depth; return parse_postfix_suffixes(inner); } Expr inner = parse_unary_expression();
 return make_cast_expr(target, "OP_LPAREN:", inner); } Expr Parser::parse_functional_cast(TypePtr target) {
-expect(OP_LPAREN); if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record) { vector<Expr> args;
-if (!at(OP_RPAREN)) args = parse_argument_list(); expect(OP_RPAREN); if (!type_is_template_dependent(target))
+	expect(OP_LPAREN); if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record) { vector<Expr> args;
+	if (!at(OP_RPAREN)) args = parse_argument_list(); expect(OP_RPAREN); bool dependent_args = false;
+	for (size_t i = 0; i < args.size(); ++i)
+	if (type_is_template_dependent(args[i].type) || args[i].pack_expansion)
+	dependent_args = true;
+	if (!type_is_template_dependent(target) && !dependent_args)
 { TypePtr target_record = pa11::strip_cv(target); bool active_incomplete_default = false; if (target_record->kind == pa11::TypeKind::Record)
 { try { complete_template_record(target_record);
 } catch (const runtime_error& err) { if (!args.empty() ||
 (string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw;
-active_incomplete_default = true; } } if (!args.empty())
-return make_constructor_init_expr(target, args, false); Expr init; init.valid = true; init.type = target;
+	active_incomplete_default = true; } } if (!args.empty()) {
+	try { return make_constructor_init_expr(target, args, false); }
+	catch (const runtime_error& err) {
+	if (args.size() != 1 || string(err.what()) != "no matching constructor") throw;
+	++explicit_conversion_context_; Conversion conv;
+	try { conv = convert_to(args[0], target); }
+	catch (...) { --explicit_conversion_context_; throw; }
+	--explicit_conversion_context_; if (!conv.viable) throw; return conv.expr; } } Expr init; init.valid = true; init.type = target;
 init.category = ValueCategory::PRValue; init.braced_init_list = true; init.node = Node("braced-init-list"); if (!active_incomplete_default)
 { try { init.node.direct_call =
 ensure_default_constructor(target, true); } catch (const runtime_error& err) {
 if ((string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") || active_class_instantiations_.empty()) throw;
 active_incomplete_default = true; } } if (init.node.direct_call == NULL &&
-!active_incomplete_default) throw runtime_error("no matching constructor"); bool force_dtor = pa11::strip_cv(target)->base.get() != NULL;
+!active_incomplete_default) throw runtime_error("no matching constructor"); bool force_dtor = !pa11::record_direct_bases(pa11::strip_cv(target)).empty();
 try { ensure_default_destructor(target, force_dtor); }
 catch (const runtime_error& err) { if ((string(err.what()) != "incomplete class type" && string(err.what()) != "incomplete object type") ||
 active_class_instantiations_.empty()) throw; } annotate_expr_node(init);
@@ -493,7 +503,7 @@ init.valid = true; init.braced_init_list = true; init.node = Node("braced-init-l
 		continue; } for (size_t i = 0; i < child.pack.size(); ++i) add_child(init.node, child.pack[i].node);
 		if (!consume(OP_COMMA)) break; continue; }
 		if (child.category == ValueCategory::PRValue) { TypePtr object = pa11::strip_cv(expression_object_type(child.type));
-		if (object->kind == pa11::TypeKind::Record && object->base.get() != NULL) ensure_default_destructor(object, true); }
+		if (object->kind == pa11::TypeKind::Record && !pa11::record_direct_bases(object).empty()) ensure_default_destructor(object, true); }
 		add_child(init.node, child.node);
 		}
 	if (!consume(OP_COMMA)) break;

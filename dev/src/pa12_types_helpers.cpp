@@ -236,9 +236,12 @@ bool skip_template_id_syntax(const vector<Token>& tokens, size_t& pos)
 bool internal_type_transform_name(const string& name)
 {
 	return name == "__decay" ||
+	       name == "__decay_t" ||
 	       name == "__remove_reference_t" ||
 	       name == "__remove_cv" ||
+	       name == "__remove_cv_t" ||
 	       name == "__remove_cvref" ||
+	       name == "__remove_cvref_t" ||
 	       name == "__add_lvalue_reference" ||
 	       name == "__add_rvalue_reference" ||
 	       name == "__add_pointer" ||
@@ -251,13 +254,13 @@ bool internal_type_transform_name(const string& name)
 
 TypePtr apply_internal_type_transform(const string& name, TypePtr inner)
 {
-	if (name == "__decay")
+	if (name == "__decay" || name == "__decay_t")
 		return decay_type(inner);
 	if (name == "__remove_reference_t")
 		return remove_reference_type(inner);
-	if (name == "__remove_cv")
+	if (name == "__remove_cv" || name == "__remove_cv_t")
 		return remove_cv_type(inner);
-	if (name == "__remove_cvref")
+	if (name == "__remove_cvref" || name == "__remove_cvref_t")
 		return remove_cvref_type(inner);
 	if (name == "__add_lvalue_reference")
 		return pa11::is_void_type(inner) ? inner :

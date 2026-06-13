@@ -19,17 +19,20 @@ Expr Parser::parse_direct_call_postfix_expression()
 {
 	size_t direct_call_save = pos_;
 	QualifiedName name;
+	++direct_template_call_depth_;
 	try
 	{
 		name = parse_id_expression_name();
 	}
 	catch (const exception&)
 	{
+		--direct_template_call_depth_;
 		pos_ = direct_call_save;
 		return parse_postfix_suffixes(parse_primary_expression());
 	}
 	if (!at(OP_LPAREN))
 	{
+		--direct_template_call_depth_;
 		pos_ = direct_call_save;
 		return parse_postfix_suffixes(parse_primary_expression());
 	}
@@ -49,8 +52,9 @@ Expr Parser::parse_direct_call_postfix_expression()
 			members.push_back(consume_identifier());
 		}
 		expect(OP_RPAREN);
-		return parse_postfix_suffixes(
-			make_builtin_offsetof_expr(record, members));
+		Expr out = make_builtin_offsetof_expr(record, members);
+		--direct_template_call_depth_;
+		return parse_postfix_suffixes(out);
 	}
 	if (!name.qualified && name.name == "__builtin_va_arg")
 	{
@@ -59,14 +63,26 @@ Expr Parser::parse_direct_call_postfix_expression()
 		expect(OP_COMMA);
 		TypePtr result = parse_type_id();
 		expect(OP_RPAREN);
-		return parse_postfix_suffixes(make_builtin_va_arg_expr(list, result));
+		Expr out = make_builtin_va_arg_expr(list, result);
+		--direct_template_call_depth_;
+		return parse_postfix_suffixes(out);
 	}
 	expect(OP_LPAREN);
 	vector<Expr> args;
 	if (!at(OP_RPAREN))
 		args = parse_argument_list();
 	expect(OP_RPAREN);
-	return parse_postfix_suffixes(make_direct_named_call_expr(name, args));
+	try
+	{
+		Expr call = make_direct_named_call_expr(name, args);
+		--direct_template_call_depth_;
+		return parse_postfix_suffixes(call);
+	}
+	catch (...)
+	{
+		--direct_template_call_depth_;
+		throw;
+	}
 }
 
 void Parser::add_adl_call_candidates(const QualifiedName& name,
@@ -368,7 +384,18 @@ Expr Parser::parse_member_access_postfix_suffix(Expr expr, const string& op)
 		return make_pseudo_destructor_suffix(expr, op);
 	bool template_disambiguator = consume(KW_TEMPLATE);
 	reject_missing_template_disambiguator(expr, template_disambiguator);
-	QualifiedName member_name = parse_id_expression_name();
+	QualifiedName member_name;
+	++direct_template_call_depth_;
+	try
+	{
+		member_name = parse_id_expression_name();
+	}
+	catch (...)
+	{
+		--direct_template_call_depth_;
+		throw;
+	}
+	--direct_template_call_depth_;
 	if (member_name.qualifier != NULL)
 		expr = make_qualified_member_suffix_expr(expr, member_name, op);
 	else

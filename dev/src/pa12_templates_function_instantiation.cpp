@@ -1,3 +1,4 @@
+#include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_support.h"
 #include "pa12_types_support.h"
 
@@ -21,6 +22,47 @@ size_t function_template_body_start(const vector<Token>& tokens,
 		    tokens[i].type == OP_LBRACE)
 			return i;
 	return end;
+}
+
+bool disabled_enable_if_typename(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	if (!type->is_dependent_typename || type->template_arguments.empty())
+		return false;
+	const pa11::TemplateInstanceArgument& condition =
+		type->template_arguments[0];
+	if (condition.kind != pa11::TemplateInstanceArgumentKind::Value ||
+	    condition.dependent || condition.value != 0)
+		return false;
+	string root_name = type->name;
+	size_t type_suffix = root_name.find("::type");
+	if (type_suffix != string::npos)
+		root_name = root_name.substr(0, type_suffix);
+	size_t template_suffix = root_name.find('<');
+	if (template_suffix != string::npos)
+		root_name = root_name.substr(0, template_suffix);
+	size_t qualifier = root_name.rfind("::");
+	if (qualifier != string::npos)
+		root_name = root_name.substr(qualifier + 2);
+	return root_name == "enable_if" || root_name == "__enable_if_t";
+}
+
+bool template_arguments_contain_disabled_enable_if(
+	const vector<TemplateArgument>& arguments)
+{
+	for (size_t i = 0; i < arguments.size(); ++i)
+	{
+		const TemplateArgument& arg = arguments[i];
+		if (arg.kind == TemplateArgumentKind::Type &&
+		    disabled_enable_if_typename(arg.type))
+			return true;
+		if (arg.kind == TemplateArgumentKind::Pack &&
+		    template_arguments_contain_disabled_enable_if(arg.pack))
+			return true;
+	}
+	return false;
 }
 
 vector<ParameterInfo> function_body_parameters_from_type(
@@ -64,6 +106,14 @@ vector<ParameterInfo> function_body_parameters_from_type(
 				parameters[j].pack_expression_name = base_name;
 	}
 	return parameters;
+}
+
+bool parameter_names_have_non_this(const vector<string>& names)
+{
+	for (size_t i = 0; i < names.size(); ++i)
+		if (!names[i].empty() && names[i] != "this")
+			return true;
+	return false;
 }
 
 void normalize_member_function_parameter_names(Binding* function,
@@ -170,6 +220,106 @@ void expand_function_template_pack_parameter_names(
 		names = expanded;
 }
 
+void apply_replayed_function_type(Node& fn, TypePtr type)
+{
+	if (fn.binding == NULL ||
+	    type.get() == NULL ||
+	    type->kind != pa11::TypeKind::Function)
+		return;
+	fn.binding->type = type;
+	if (fn.binding->aliased_binding != NULL)
+		fn.binding->aliased_binding->type = type;
+	fn.type = type;
+	size_t param_index = 0;
+	for (size_t i = 0; i < fn.children.size() &&
+	     param_index < type->parameters.size(); ++i)
+	{
+		if (fn.children[i].line.compare(0, 10, "parameter ") != 0)
+			continue;
+		string text = fn.children[i].line.substr(10);
+		size_t space = text.find(' ');
+		string name = space == string::npos ? text : text.substr(0, space);
+		TypePtr param_type = type->parameters[param_index++];
+		fn.children[i].type = param_type;
+		if (fn.children[i].binding != NULL)
+			fn.children[i].binding->type = param_type;
+		fn.children[i].line =
+			"parameter " + name + " " + pa11::describe_type(param_type);
+	}
+}
+
+bool hosted_internal_function_name(const string& name)
+{
+	return name.size() >= 2 && name[0] == '_' && name[1] == '_';
+}
+
+bool scope_has_namespace_named(Scope* scope, const string& name)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur->kind == ScopeKind::Namespace && cur->name == name)
+			return true;
+	return false;
+}
+
+bool hosted_std_template_declaration(const TemplateDeclaration* declaration,
+                                     const string& name)
+{
+	if (declaration == NULL || declaration->name != name)
+		return false;
+	Scope* scope =
+		declaration->placeholder != NULL
+		? declaration->placeholder->owner
+		: declaration->owner;
+	return scope_has_namespace_named(scope, "std");
+}
+
+string unqualified_template_primary_name(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t pos = primary.rfind("::");
+	return pos == string::npos ? primary : primary.substr(pos + 2);
+}
+
+bool hosted_std_template_record(TypePtr type, const string& primary)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->kind == pa11::TypeKind::Record &&
+	       bare->is_template_specialization &&
+	       unqualified_template_primary_name(bare) == primary &&
+	       scope_has_namespace_named(bare->scope, "std");
+}
+
+bool hosted_std_member_template_declaration(
+	const TemplateDeclaration* declaration,
+	const string& owner_primary,
+	const string& name)
+{
+	if (declaration == NULL ||
+	    declaration->name != name ||
+	    declaration->owner == NULL ||
+	    declaration->owner->kind != ScopeKind::Class)
+		return false;
+	return hosted_std_template_record(
+		pa11::record_type_for_scope(declaration->owner),
+		owner_primary);
+}
+
+TypePtr hosted_forwarding_argument_parameter(TypePtr argument)
+{
+	if (argument.get() == NULL)
+		return argument;
+	TypePtr bare = pa11::strip_cv(argument);
+	if (bare->kind == pa11::TypeKind::LValueReference ||
+	    bare->kind == pa11::TypeKind::RValueReference)
+		return argument;
+	return pa11::make_rvalue_reference(argument);
+}
+
 }  // namespace
 
 Binding* Parser::instantiate_function_template(
@@ -179,6 +329,7 @@ Binding* Parser::instantiate_function_template(
 	bool defer_completed_value_expression_arguments =
 		function_template_candidate_instantiation_depth_ == 0 &&
 		arguments.size() == declaration->parameters.size();
+	bool deferred_value_expression_completion_context = false;
 	bool have_deferred_value_expression_argument = false;
 	for (size_t i = 0;
 	     defer_completed_value_expression_arguments && i < arguments.size();
@@ -198,37 +349,149 @@ Binding* Parser::instantiate_function_template(
 		defer_completed_value_expression_arguments &&
 		have_deferred_value_expression_argument;
 	if (defer_completed_value_expression_arguments)
+	{
 		++function_template_candidate_instantiation_depth_;
+		deferred_value_expression_completion_context = true;
+	}
 	vector<TemplateArgument> full_args;
 	try
 	{
 		full_args = complete_template_arguments(declaration, arguments);
 	}
-	catch (...)
+	catch (const runtime_error& err)
 	{
 		if (defer_completed_value_expression_arguments)
+		{
 			--function_template_candidate_instantiation_depth_;
-		throw;
-	}
+			defer_completed_value_expression_arguments = false;
+		}
+			if ((!deferred_value_expression_completion_context &&
+			     function_template_candidate_instantiation_depth_ == 0) ||
+			    string(err.what()) != "dependent typename not resolved" ||
+			    arguments.size() != declaration->parameters.size() ||
+			    (!deferred_value_expression_completion_context &&
+			     template_arguments_contain_disabled_enable_if(arguments)))
+				throw;
+			full_args = arguments;
+		}
 	if (defer_completed_value_expression_arguments)
 		--function_template_candidate_instantiation_depth_;
 	string key = template_argument_key(full_args);
+		if (!declaration->has_definition)
+		{
+			for (map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
+				     sit = function_templates_.begin();
+			     sit != function_templates_.end(); ++sit)
+			{
+				map<string, vector<TemplateDeclaration*> >::iterator nit =
+					sit->second.find(declaration->name);
+				if (nit == sit->second.end())
+					continue;
+				for (size_t di = 0; di < nit->second.size(); ++di)
+				{
+					TemplateDeclaration* candidate = nit->second[di];
+					if (candidate == declaration ||
+					    candidate == NULL ||
+					    !candidate->has_definition ||
+					    candidate->generic_function_type.get() == NULL ||
+					    declaration->generic_function_type.get() == NULL ||
+					    !same_template_signature_type(
+						    candidate->generic_function_type,
+						    declaration->generic_function_type))
+						continue;
+					size_t required_arguments = 0;
+					for (size_t pi = 0;
+					     pi < candidate->parameters.size();
+					     ++pi)
+						if (!candidate->parameters[pi].has_default &&
+						    !candidate->parameters[pi].is_pack)
+							++required_arguments;
+					if (arguments.size() < required_arguments)
+						continue;
+					try
+					{
+						complete_template_arguments(candidate,
+						                            arguments);
+					}
+					catch (const exception&)
+					{
+						continue;
+					}
+					return instantiate_function_template(candidate,
+					                                     arguments);
+				}
+			}
+		}
 	validate_function_template_definition(declaration);
 	bool full_args_dependent = template_arguments_dependent(full_args);
 	map<string, Binding*>::iterator existing =
 		declaration->function_specializations.find(key);
-	Binding* replaced_specialization = NULL;
-	if (existing != declaration->function_specializations.end())
+	if (existing == declaration->function_specializations.end())
 	{
-		bool existing_still_dependent =
-			type_structurally_dependent(existing->second->type);
-		bool existing_usable =
-			full_args_dependent || !existing_still_dependent;
-		if (function_template_candidate_instantiation_depth_ != 0 &&
-		    existing_usable)
-			return existing->second;
-		bool existing_has_body =
-			function_bodies_.find(existing->second) != function_bodies_.end();
+		for (map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
+			     sit = function_templates_.begin();
+		     sit != function_templates_.end();
+		     ++sit)
+		{
+			map<string, vector<TemplateDeclaration*> >::iterator nit =
+				sit->second.find(declaration->name);
+			if (nit == sit->second.end())
+				continue;
+			for (size_t di = 0; di < nit->second.size(); ++di)
+			{
+				TemplateDeclaration* candidate = nit->second[di];
+				if (candidate == declaration ||
+				    candidate == NULL ||
+				    !same_function_template_declaration_family(
+					    declaration,
+					    candidate))
+					continue;
+				map<string, Binding*>::iterator found =
+					candidate->function_specializations.find(key);
+				if (found == candidate->function_specializations.end())
+					continue;
+				declaration->function_specializations[key] =
+					found->second;
+				existing = declaration->function_specializations.find(key);
+				break;
+			}
+			if (existing != declaration->function_specializations.end())
+				break;
+		}
+	}
+	Binding* replaced_specialization = NULL;
+		if (existing != declaration->function_specializations.end())
+		{
+			if (active_function_body_replays_.count(existing->second) != 0)
+				return existing->second;
+			bool existing_still_dependent =
+				type_structurally_dependent(existing->second->type);
+			bool existing_usable =
+				full_args_dependent || !existing_still_dependent;
+			bool existing_has_body =
+				function_bodies_.find(existing->second) !=
+				function_bodies_.end();
+			if (existing_has_body &&
+			    function_template_placeholders_.find(existing->second) ==
+				    function_template_placeholders_.end())
+				return existing->second;
+			bool need_constexpr_value_body =
+				(template_argument_expression_depth_ != 0 ||
+				 constexpr_value_expression_depth_ != 0) &&
+				declaration->has_definition &&
+				existing->second->is_constexpr &&
+				!existing_has_body;
+			if (!need_constexpr_value_body &&
+			    function_template_candidate_instantiation_depth_ != 0 &&
+			    hosted_compatibility_ &&
+			    !existing->second->is_object_root &&
+			    hosted_internal_function_name(existing->second->name) &&
+			    defer_hosted_function_body(existing->second))
+				return existing->second;
+			if (function_template_candidate_instantiation_depth_ != 0 &&
+			    existing_usable &&
+			    !need_constexpr_value_body)
+				return existing->second;
 		if (!existing_usable &&
 		    !full_args_dependent &&
 		    !declaration->class_template_member &&
@@ -239,13 +502,13 @@ Binding* Parser::instantiate_function_template(
 			existing->second->type.get() != NULL &&
 			existing->second->type->kind == pa11::TypeKind::Function &&
 			type_is_template_dependent(existing->second->type->base);
-		if (!declaration->has_definition && !existing_dependent_return &&
-		    existing_usable)
-			return existing->second;
-		if (existing_usable &&
-		    ((existing->second->is_inline_definition && existing_has_body) ||
-		     existing->second->is_object_root))
-			return existing->second;
+			if (!declaration->has_definition && !existing_dependent_return &&
+			    existing_usable)
+				return existing->second;
+			if (existing_usable &&
+			    ((existing->second->is_inline_definition && existing_has_body) ||
+			     existing->second->is_object_root))
+				return existing->second;
 		replaced_specialization = existing->second;
 		declaration->function_specializations.erase(existing);
 	}
@@ -362,15 +625,15 @@ Binding* Parser::instantiate_function_template(
 	{
 			TypePtr type;
 			try
-			{
-				type = substitute_function_template_type(
-					declaration,
-					declaration->generic_function_type);
-			}
+				{
+					type = substitute_function_template_type(
+						declaration,
+						declaration->generic_function_type);
+				}
 				catch (const runtime_error& err)
 				{
-					if (function_template_candidate_instantiation_depth_ == 0 ||
-					    string(err.what()) != "dependent typename not resolved" ||
+				if (function_template_candidate_instantiation_depth_ == 0 ||
+				    string(err.what()) != "dependent typename not resolved" ||
 					    declaration->generic_function_type.get() == NULL ||
 					    declaration->generic_function_type->kind !=
 						    pa11::TypeKind::Function)
@@ -442,12 +705,12 @@ Binding* Parser::instantiate_function_template(
 		declaration->function_specializations[key] = binding;
 		if (declaration->friend_class_scope != NULL)
 			add_friend_function(declaration->friend_class_scope, binding);
-		function_template_placeholders_[binding] = declaration;
-		function_template_specialization_arguments_[binding] = full_args;
-		declaration->completing_specializations.erase(key);
-		template_type_substitutions_ = save_subst;
-		template_value_substitutions_ = save_value_subst;
-		template_type_parameter_packs_ = save_pack_subst;
+			function_template_placeholders_[binding] = declaration;
+			function_template_specialization_arguments_[binding] = full_args;
+			declaration->completing_specializations.erase(key);
+			template_type_substitutions_ = save_subst;
+			template_value_substitutions_ = save_value_subst;
+			template_type_parameter_packs_ = save_pack_subst;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		force_new_function_binding_ = save_force_new_function_binding;
@@ -475,9 +738,9 @@ Binding* Parser::instantiate_function_template(
 				declaration->has_definition &&
 				declaration->decl_begin < declaration->decl_end &&
 				has_template_parameter_default;
-		if (!declaration->constructor_template &&
-		    !replay_candidate_signature &&
-		    ((!declaration->has_definition &&
+			if (!declaration->constructor_template &&
+			    !replay_candidate_signature &&
+			    ((!declaration->has_definition &&
 		      (replaying_dependent_decltype_ ||
 		       (function_template_candidate_instantiation_depth_ != 0 &&
 	        !generic_return_is_decltype))) ||
@@ -568,25 +831,145 @@ Binding* Parser::instantiate_function_template(
 				type->cv = declaration->generic_function_type->cv;
 				type->ref_qualifier =
 					declaration->generic_function_type->ref_qualifier;
-				deferred_candidate_return = true;
+					deferred_candidate_return = true;
+				}
 			}
-		}
-			bool invalid_substituted_type = deferred_candidate_return
-			    ? !substituted_function_parameter_types_are_valid(type)
-			    : !substituted_type_is_valid(type);
+			if (hosted_compatibility_ &&
+			    function_template_candidate_instantiation_depth_ != 0 &&
+			    hosted_std_template_declaration(declaration, "__write") &&
+			    type.get() != NULL &&
+			    type->kind == pa11::TypeKind::Function &&
+			    (type_structurally_dependent(type) ||
+			     !substituted_type_is_valid(type)) &&
+			    !full_args.empty() &&
+			    full_args[0].kind == TemplateArgumentKind::Type &&
+			    full_args[0].type.get() != NULL &&
+			    !type_structurally_dependent(full_args[0].type))
+			{
+				TypePtr char_type = full_args[0].type;
+				TypePtr out_iter;
+				if (full_args.size() == 1)
+				{
+					TemplateDeclaration* iter_template =
+						find_class_template(declaration->owner,
+						                    "ostreambuf_iterator");
+					if (iter_template != NULL)
+					{
+						vector<TemplateArgument> iter_args;
+						iter_args.push_back(
+							TemplateArgument::type_arg(char_type));
+						try
+						{
+							out_iter = instantiate_class_template(
+								iter_template,
+								iter_args);
+						}
+						catch (const exception&)
+						{
+							out_iter = TypePtr();
+						}
+					}
+				}
+				else if (full_args.size() >= 2 &&
+				         full_args[1].kind == TemplateArgumentKind::Type &&
+				         full_args[1].type.get() != NULL &&
+				         !type_structurally_dependent(full_args[1].type))
+				{
+					out_iter = full_args[1].type;
+				}
+				if (out_iter.get() != NULL &&
+				    !type_structurally_dependent(out_iter))
+				{
+					vector<TypePtr> params;
+					params.push_back(out_iter);
+					params.push_back(pa11::make_pointer(pa11::make_cv(
+						char_type,
+						pa11::CV_CONST)));
+					params.push_back(pa11::make_fundamental(FT_INT));
+					TypePtr modeled =
+						pa11::make_function(out_iter, params, false);
+					modeled->cv = type->cv;
+					modeled->ref_qualifier = type->ref_qualifier;
+					type = modeled;
+				}
+			}
+			if (hosted_compatibility_ &&
+			    function_template_candidate_instantiation_depth_ != 0 &&
+			    type.get() != NULL &&
+			    type->kind == pa11::TypeKind::Function &&
+			    (type_structurally_dependent(type) ||
+			     !substituted_type_is_valid(type)) &&
+			    hosted_std_member_template_declaration(declaration,
+			                                           "function",
+			                                           "operator=") &&
+			    !full_args.empty() &&
+			    full_args[0].kind == TemplateArgumentKind::Type &&
+			    full_args[0].type.get() != NULL &&
+			    !type_structurally_dependent(full_args[0].type))
+			{
+				TypePtr owner_record =
+					pa11::record_type_for_scope(declaration->owner);
+				owner_record = owner_record.get() != NULL
+					? pa11::strip_cv(owner_record) : TypePtr();
+				if (hosted_std_template_record(owner_record, "function") &&
+				    type->parameters.size() == 2)
+				{
+					vector<TypePtr> params;
+					params.push_back(type->parameters[0]);
+					params.push_back(hosted_forwarding_argument_parameter(
+						full_args[0].type));
+					TypePtr modeled = pa11::make_function(
+						pa11::make_lvalue_reference(owner_record),
+						params,
+						false);
+					modeled->cv = type->cv;
+					modeled->ref_qualifier = type->ref_qualifier;
+					type = modeled;
+				}
+			}
+			if (hosted_compatibility_ &&
+			    function_template_candidate_instantiation_depth_ != 0 &&
+			    type.get() != NULL &&
+			    type->kind == pa11::TypeKind::Function &&
+			    (type_structurally_dependent(type) ||
+			     !substituted_type_is_valid(type)) &&
+			    hosted_std_member_template_declaration(declaration,
+			                                           "vector",
+			                                           "insert") &&
+			    !full_args.empty() &&
+			    full_args[0].kind == TemplateArgumentKind::Type &&
+			    full_args[0].type.get() != NULL &&
+			    !type_structurally_dependent(full_args[0].type) &&
+			    type->parameters.size() == 4)
+			{
+				vector<TypePtr> params = type->parameters;
+				params[2] = full_args[0].type;
+				params[3] = full_args[0].type;
+				TypePtr modeled = pa11::make_function(type->base,
+				                                      params,
+				                                      false);
+				modeled->cv = type->cv;
+				modeled->ref_qualifier = type->ref_qualifier;
+				if (!type_structurally_dependent(modeled))
+					type = modeled;
+			}
+					bool invalid_substituted_type = deferred_candidate_return
+				    ? !substituted_function_parameter_types_are_valid(type)
+				    : !substituted_type_is_valid(type);
 			if (invalid_substituted_type &&
 			    function_template_candidate_instantiation_depth_ != 0 &&
 		    type.get() != NULL &&
 		    type->kind == pa11::TypeKind::Function &&
+		    deferred_candidate_return &&
 		    ((type_is_template_dependent(type->base) &&
 		      substituted_function_parameter_types_are_valid(type)) ||
 		     substituted_candidate_function_parameter_types_are_valid(type)))
 			invalid_substituted_type = false;
-		if (invalid_substituted_type)
-		{
-			declaration->completing_specializations.erase(key);
-			template_type_substitutions_ = save_subst;
-			template_value_substitutions_ = save_value_subst;
+			if (invalid_substituted_type)
+			{
+				declaration->completing_specializations.erase(key);
+				template_type_substitutions_ = save_subst;
+				template_value_substitutions_ = save_value_subst;
 			template_type_parameter_packs_ = save_pack_subst;
 			scopes_ = save_scopes;
 			pos_ = save_pos;
@@ -800,11 +1183,15 @@ Binding* Parser::instantiate_function_template(
 		{
 			Binding* binding = declaration->placeholder;
 			vector<string> names;
-				map<Binding*, vector<string> >::const_iterator saved_names =
-					function_parameter_names_.find(binding);
-				if (saved_names != function_parameter_names_.end())
-					names = saved_names->second;
-				normalize_member_function_parameter_names(binding, names);
+					map<Binding*, vector<string> >::const_iterator saved_names =
+						function_parameter_names_.find(binding);
+					if (saved_names != function_parameter_names_.end())
+						names = saved_names->second;
+					if (!parameter_names_have_non_this(names) &&
+					    parameter_names_have_non_this(
+						    declaration->function_parameter_names))
+						names = declaration->function_parameter_names;
+					normalize_member_function_parameter_names(binding, names);
 				expand_function_template_pack_parameter_names(
 					declaration,
 					binding,
@@ -814,6 +1201,7 @@ Binding* Parser::instantiate_function_template(
 				    names.size() < binding->type->parameters.size())
 					names.resize(binding->type->parameters.size());
 			function_parameter_names_[binding] = names;
+			binding->function_parameter_names = names;
 			declaration->function_specializations[key] = binding;
 			function_template_placeholders_[binding] = declaration;
 			function_template_specialization_arguments_[binding] =
@@ -841,15 +1229,30 @@ Binding* Parser::instantiate_function_template(
 			pending.type_substitutions = template_type_substitutions_;
 			pending.value_substitutions = template_value_substitutions_;
 			pending.pack_substitutions = template_type_parameter_packs_;
-			try
+			if (function_template_candidate_instantiation_depth_ == 0)
 			{
-				parse_pending_member_body_now(pending);
+				try
+				{
+					bool parsed = parse_pending_member_body_now(
+						pending,
+						force_function_template_body_instantiation_);
+					if (!parsed)
+					{
+						if (binding->owner != NULL)
+							pending_member_bodies_[binding->owner].
+								push_back(pending);
+						else
+							pending_function_bodies_[binding] = pending;
+					}
+				}
+				catch (...)
+				{
+					restore_instantiation_state();
+					throw;
+				}
 			}
-			catch (...)
-			{
-				restore_instantiation_state();
-				throw;
-			}
+			else if (binding->owner != NULL)
+				pending_member_bodies_[binding->owner].push_back(pending);
 			restore_instantiation_state();
 			return binding;
 		}
@@ -867,12 +1270,12 @@ Binding* Parser::instantiate_function_template(
 			{
 				restore_instantiation_state();
 				throw;
-			}
-			if (!substituted_type_is_valid(type))
-			{
-				restore_instantiation_state();
-				throw runtime_error("invalid substituted function type");
-			}
+				}
+					if (!substituted_type_is_valid(type))
+					{
+						restore_instantiation_state();
+						throw runtime_error("invalid substituted function type");
+					}
 			Binding* binding =
 				add_value(declaration->owner,
 				          BindingKind::Function,
@@ -896,16 +1299,20 @@ Binding* Parser::instantiate_function_template(
 					declaration->placeholder->ref_qualifier;
 				binding->unwind_no =
 					declaration->placeholder->unwind_no;
-				if (declaration->placeholder->
-				    reserve_primary_function_symbol)
-					binding->reserve_primary_function_symbol = true;
-				map<Binding*, vector<string> >::const_iterator saved_names =
-					function_parameter_names_.find(
-						declaration->placeholder);
-				if (saved_names != function_parameter_names_.end())
-					names = saved_names->second;
-				map<Binding*, vector<Expr> >::const_iterator defaults =
-					default_arguments_.find(declaration->placeholder);
+					if (declaration->placeholder->
+					    reserve_primary_function_symbol)
+						binding->reserve_primary_function_symbol = true;
+					map<Binding*, vector<string> >::const_iterator saved_names =
+						function_parameter_names_.find(
+							declaration->placeholder);
+					if (saved_names != function_parameter_names_.end())
+						names = saved_names->second;
+					if (!parameter_names_have_non_this(names) &&
+					    parameter_names_have_non_this(
+						    declaration->function_parameter_names))
+						names = declaration->function_parameter_names;
+					map<Binding*, vector<Expr> >::const_iterator defaults =
+						default_arguments_.find(declaration->placeholder);
 					if (defaults != default_arguments_.end())
 						default_arguments_[binding] = defaults->second;
 				}
@@ -919,6 +1326,7 @@ Binding* Parser::instantiate_function_template(
 				    names.size() < type->parameters.size())
 					names.resize(type->parameters.size());
 			function_parameter_names_[binding] = names;
+			binding->function_parameter_names = names;
 			if (replaced_specialization != NULL &&
 			    replaced_specialization != binding)
 				replaced_specialization->aliased_binding = binding;
@@ -971,15 +1379,30 @@ Binding* Parser::instantiate_function_template(
 			pending.type_substitutions = template_type_substitutions_;
 			pending.value_substitutions = template_value_substitutions_;
 			pending.pack_substitutions = template_type_parameter_packs_;
-			try
+			if (function_template_candidate_instantiation_depth_ == 0)
 			{
-				parse_pending_member_body_now(pending);
+				try
+				{
+					bool parsed = parse_pending_member_body_now(
+						pending,
+						force_function_template_body_instantiation_);
+					if (!parsed)
+					{
+						if (binding->owner != NULL)
+							pending_member_bodies_[binding->owner].
+								push_back(pending);
+						else
+							pending_function_bodies_[binding] = pending;
+					}
+				}
+				catch (...)
+				{
+					restore_instantiation_state();
+					throw;
+				}
 			}
-			catch (...)
-			{
-				restore_instantiation_state();
-				throw;
-			}
+			else if (binding->owner != NULL)
+				pending_member_bodies_[binding->owner].push_back(pending);
 			restore_instantiation_state();
 			return binding;
 		}
@@ -990,7 +1413,8 @@ Binding* Parser::instantiate_function_template(
 	                  : declaration->owner);
 	pos_ = declaration->decl_begin;
 	force_new_function_binding_ = true;
-	defer_function_template_bodies_ = true;
+	defer_function_template_bodies_ =
+		!force_function_template_body_instantiation_;
 	if (declaration->placeholder != NULL &&
 	    declaration->generic_function_type.get() != NULL &&
 	    declaration->generic_function_type->kind == pa11::TypeKind::Function)
@@ -1120,6 +1544,7 @@ Binding* Parser::instantiate_function_template(
 				active_friend_class_scopes_.push_back(it->first);
 	size_t replay_extra_begin = extra_lowir_nodes_.size();
 	Node node;
+	TypePtr replay_substituted_function_type;
 	++suppress_qualifier_template_member_instantiation_depth_;
 	try
 	{
@@ -1176,6 +1601,7 @@ Binding* Parser::instantiate_function_template(
 				names.push_back(pname);
 			}
 			function_parameter_names_[binding] = names;
+			binding->function_parameter_names = names;
 			node = Node("function-definition " + qualified_decl_name(binding) +
 			            " " + pa11::describe_type(fn_type));
 			node.binding = binding;
@@ -1268,6 +1694,13 @@ Binding* Parser::instantiate_function_template(
 				extra_lowir_nodes_.pop_back();
 			}
 		}
+		if (declaration->generic_function_type.get() != NULL &&
+		    declaration->generic_function_type->kind ==
+			    pa11::TypeKind::Function)
+			replay_substituted_function_type =
+				substitute_function_template_type(
+					declaration,
+					declaration->generic_function_type);
 	}
 	catch (const exception&)
 	{
@@ -1371,6 +1804,9 @@ Binding* Parser::instantiate_function_template(
 		else if (placeholder_names != function_parameter_names_.end())
 			declaration->function_parameter_names = placeholder_names->second;
 	}
+	if (!substituted_type_is_valid(fn.binding->type) &&
+	    substituted_type_is_valid(replay_substituted_function_type))
+		apply_replayed_function_type(fn, replay_substituted_function_type);
 	if (declaration->class_template_member)
 	{
 		fn.binding->function_specialization_symbol =
@@ -1394,11 +1830,11 @@ Binding* Parser::instantiate_function_template(
 				: abi_binding_symbol(fn.binding->aliased_binding,
 				                     map<string, size_t>());
 	}
-	if (!substituted_type_is_valid(fn.binding->type))
-	{
-		declaration->completing_specializations.erase(key);
-		throw runtime_error("invalid substituted function type");
-	}
+		if (!substituted_type_is_valid(fn.binding->type))
+		{
+			declaration->completing_specializations.erase(key);
+			throw runtime_error("invalid substituted function type");
+		}
 	if (declaration->placeholder != NULL &&
 	    declaration->placeholder->reserve_primary_function_symbol)
 		fn.binding->reserve_primary_function_symbol = true;
@@ -1431,19 +1867,20 @@ Binding* Parser::instantiate_function_template(
 		function_template_placeholders_[fn.binding] = declaration;
 		function_template_specialization_arguments_[fn.binding] =
 			full_args;
-		if (declaration->has_definition &&
-		    unevaluated_expression_depth_ == 0 &&
-		    function_template_candidate_instantiation_depth_ == 0)
-		{
-			parse_pending_function_body(fn.binding);
-			parse_pending_member_body(fn.binding);
-		}
+			if (declaration->has_definition &&
+			    unevaluated_expression_depth_ == 0 &&
+			    function_template_candidate_instantiation_depth_ == 0 &&
+			    !defer_hosted_function_body(fn.binding))
+			{
+				parse_pending_function_body(fn.binding);
+				parse_pending_member_body(fn.binding);
+			}
 		declaration->function_specializations[key] = fn.binding;
-		if (declaration->friend_class_scope != NULL)
-			add_friend_function(declaration->friend_class_scope, fn.binding);
-		declaration->completing_specializations.erase(key);
-		return fn.binding;
-	}
+			if (declaration->friend_class_scope != NULL)
+				add_friend_function(declaration->friend_class_scope, fn.binding);
+			declaration->completing_specializations.erase(key);
+			return fn.binding;
+		}
 	fn.binding->is_inline_definition = true;
 	if (!declaration->class_template_member)
 		fn.binding->function_specialization_symbol =
@@ -1470,12 +1907,25 @@ Binding* Parser::instantiate_function_template(
 			replaced_specialization->aliased_binding = fn.binding;
 		if (function_template_candidate_instantiation_depth_ != 0)
 		{
-			function_bodies_.erase(fn.binding);
+			bool keep_constexpr_body_for_value_expression =
+				(template_argument_expression_depth_ != 0 ||
+				 constexpr_value_expression_depth_ != 0) &&
+				fn.binding != NULL &&
+				fn.binding->is_constexpr;
+			if (!keep_constexpr_body_for_value_expression)
+				function_bodies_.erase(fn.binding);
 			for (size_t i = replay_extra_begin;
 			     i < extra_lowir_nodes_.size();
 			     ++i)
 				if (extra_lowir_nodes_[i].binding != NULL)
-					function_bodies_.erase(extra_lowir_nodes_[i].binding);
+				{
+					bool keep_extra_constexpr_body =
+						keep_constexpr_body_for_value_expression &&
+						extra_lowir_nodes_[i].binding != NULL &&
+						extra_lowir_nodes_[i].binding->is_constexpr;
+					if (!keep_extra_constexpr_body)
+						function_bodies_.erase(extra_lowir_nodes_[i].binding);
+				}
 			extra_lowir_nodes_.resize(replay_extra_begin);
 		}
 		else
@@ -1485,11 +1935,11 @@ Binding* Parser::instantiate_function_template(
 		{
 			add_friend_function(declaration->friend_class_scope, fn.binding);
 		}
-		function_template_placeholders_[fn.binding] = declaration;
-		function_template_specialization_arguments_[fn.binding] = full_args;
-	declaration->completing_specializations.erase(key);
-	return fn.binding;
-}
+				function_template_placeholders_[fn.binding] = declaration;
+				function_template_specialization_arguments_[fn.binding] = full_args;
+			declaration->completing_specializations.erase(key);
+			return fn.binding;
+	}
 
 }  // namespace internal
 }  // namespace pa12

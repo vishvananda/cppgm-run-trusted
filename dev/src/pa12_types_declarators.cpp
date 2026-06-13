@@ -24,18 +24,65 @@ bool ignored_pointer_qualifier_name(const string& name)
 
 Declarator Parser::parse_declarator(bool abstract_allowed)
 {
+	size_t declarator_begin = pos_;
 	Declarator declarator;
 	parse_ptr_prefix(declarator.prefix);
 	parse_noptr_declarator_root(declarator, abstract_allowed);
+	bool textual_qualified_declarator = false;
+	for (size_t ti = declarator_begin; ti < pos_ && ti < tokens_.size(); ++ti)
+		if (tokens_[ti].kind == posttoken::TokenKind::Simple &&
+		    tokens_[ti].type == OP_COLON2)
+		{
+			textual_qualified_declarator = true;
+			break;
+		}
+	bool qualified_declarator =
+		declarator.has_name &&
+		(declarator.name.qualified || textual_qualified_declarator);
 	if (declarator.has_name &&
 	    declarator.name.qualifier != NULL &&
 	    declarator.name.qualifier->kind == ScopeKind::Class)
 	{
+		Scope* suffix_scope = declarator.name.qualifier;
+		TypePtr qualifier_record =
+			pa11::record_type_for_scope(declarator.name.qualifier);
+		if (qualifier_record.get() != NULL)
+		{
+			complete_template_record(qualifier_record);
+			TypePtr bare_qualifier = pa11::strip_cv(qualifier_record);
+			map<const void*, TemplateDeclaration*>::const_iterator decl =
+				record_template_declarations_.find(bare_qualifier.get());
+			TemplateDeclaration* qualifier_template =
+				decl != record_template_declarations_.end()
+				? decl->second : NULL;
+			if (qualifier_template == NULL)
+				qualifier_template =
+					find_class_template(declarator.name.qualifier->parent,
+					                    declarator.name.qualifier->name);
+			if (qualifier_template == NULL)
+				qualifier_template =
+					find_class_template(current_scope(),
+					                    declarator.name.qualifier->name);
+			if (qualifier_template != NULL && suffix_scope->members.empty())
+			{
+				Binding* primary =
+					pa11::lookup_qualified(qualifier_template->owner,
+					                       qualifier_template->name,
+					                       pa11::LOOKUP_TYPE);
+				TypePtr primary_record =
+					primary != NULL && primary->type.get() != NULL
+					? pa11::strip_cv(primary->type) : TypePtr();
+				if (primary_record.get() != NULL &&
+				    primary_record->kind == pa11::TypeKind::Record &&
+				    primary_record->scope != NULL)
+					suffix_scope = primary_record->scope;
+			}
+		}
 		vector<Scope*> saved_scopes = scopes_;
-		scopes_.push_back(declarator.name.qualifier);
+		scopes_.push_back(suffix_scope);
 		try
 		{
-			parse_suffixes(declarator.suffixes);
+			parse_suffixes(declarator.suffixes, qualified_declarator);
 		}
 		catch (...)
 		{
@@ -45,7 +92,7 @@ Declarator Parser::parse_declarator(bool abstract_allowed)
 		scopes_ = saved_scopes;
 	}
 	else
-		parse_suffixes(declarator.suffixes);
+		parse_suffixes(declarator.suffixes, qualified_declarator);
 	return declarator;
 }
 
@@ -202,23 +249,48 @@ void Parser::parse_ptr_prefix(vector<PtrOp>& ops)
 	}
 }
 
-void Parser::parse_suffixes(vector<Suffix>& suffixes)
+void Parser::parse_suffixes(vector<Suffix>& suffixes,
+                            bool qualified_declarator)
 {
 	for (;;)
 	{
 		if (starts_attribute())
-			skip_attributes();
+		{
+			Suffix attribute(SuffixKind::Attribute);
+			if (parse_gnu_attribute_suffix(attribute))
+			{
+				if (attribute.vector_size != 0)
+					suffixes.push_back(attribute);
+			}
+			else
+				skip_attributes();
+		}
 		else if (at(OP_LSQUARE))
 			suffixes.push_back(parse_array_suffix());
 		else if (at(OP_LPAREN))
 		{
-			if (pos_ + 1 < tokens_.size() &&
-			    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier &&
-			    pa11::lookup_unqualified(current_scope(),
-			                             tokens_[pos_ + 1].source,
-			                             pa11::LOOKUP_VARIABLE |
-			                             pa11::LOOKUP_PARAMETER) != NULL)
-				return;
+			if (!qualified_declarator &&
+			    pos_ + 1 < tokens_.size() &&
+			    tokens_[pos_ + 1].kind == posttoken::TokenKind::Identifier)
+			{
+				const string& name = tokens_[pos_ + 1].source;
+				Binding* type =
+					pa11::lookup_unqualified(current_scope(),
+					                         name,
+					                         pa11::LOOKUP_TYPE);
+				Binding* value =
+					pa11::lookup_unqualified(current_scope(),
+					                         name,
+					                         pa11::LOOKUP_VARIABLE |
+					                         pa11::LOOKUP_PARAMETER);
+				bool local_value_hides_type =
+					value != NULL &&
+					value->owner != NULL &&
+					(value->owner->kind == ScopeKind::Function ||
+					 value->owner->kind == ScopeKind::Block);
+				if ((type == NULL && value != NULL) || local_value_hides_type)
+					return;
+			}
 			size_t save = pos_;
 				try
 				{
@@ -250,6 +322,41 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes)
 					}
 					if (trailing_return)
 						throw;
+					if (qualified_declarator)
+					{
+						int body_depth = 0;
+						size_t close = save;
+						for (; close < tokens_.size(); ++close)
+						{
+							if (tokens_[close].kind != posttoken::TokenKind::Simple)
+								continue;
+							if (tokens_[close].type == OP_LPAREN)
+								++body_depth;
+							else if (tokens_[close].type == OP_RPAREN)
+							{
+								--body_depth;
+								if (body_depth == 0)
+								{
+									++close;
+									while (close < tokens_.size() &&
+									       tokens_[close].kind ==
+									       posttoken::TokenKind::Simple &&
+									       (tokens_[close].type == KW_CONST ||
+									        tokens_[close].type == KW_VOLATILE ||
+									        tokens_[close].type == OP_AMP ||
+									        tokens_[close].type == OP_LAND))
+										++close;
+									if (close < tokens_.size() &&
+									    tokens_[close].kind ==
+									    posttoken::TokenKind::Simple &&
+									    (tokens_[close].type == OP_LBRACE ||
+									     tokens_[close].type == KW_TRY))
+										throw;
+									break;
+								}
+							}
+						}
+					}
 					if (save + 1 < tokens_.size() &&
 					    tokens_[save + 1].kind == posttoken::TokenKind::Simple &&
 				    tokens_[save + 1].type == OP_RPAREN)
@@ -275,7 +382,19 @@ Suffix Parser::parse_array_suffix()
 	string dependent_bound_name;
 	if (at_identifier() && lookahead(OP_RSQUARE, 1))
 		dependent_bound_name = current().source;
-	Expr bound = parse_expression();
+	Expr bound;
+	int saved_constexpr_value_depth = constexpr_value_expression_depth_;
+	++constexpr_value_expression_depth_;
+	try
+	{
+		bound = parse_expression();
+	}
+	catch (...)
+	{
+		constexpr_value_expression_depth_ = saved_constexpr_value_depth;
+		throw;
+	}
+	constexpr_value_expression_depth_ = saved_constexpr_value_depth;
 	ConstexprValue value;
 	if (try_evaluate_constexpr_expr(bound.node, value) &&
 	    value.valid &&

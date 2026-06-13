@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_templates_instance_support.h"
 
 #include <stdexcept>
 
@@ -223,6 +224,47 @@ void collect_template_pack_names_from_argument(const TemplateArgument& argument,
                                                set<string>& names,
                                                const map<const void*, vector<TemplateArgument> >* record_arguments = NULL);
 
+bool type_is_pack_element_builtin(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	type = pa11::strip_cv(type);
+	return type->template_primary_name == "__type_pack_element" ||
+	       type->name == "__type_pack_element";
+}
+
+bool type_pack_element_arguments(
+	TypePtr type,
+	const map<const void*, vector<TemplateArgument> >& record_arguments,
+	vector<TemplateArgument>& arguments)
+{
+	if (type.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	if (!type_is_pack_element_builtin(bare))
+		return false;
+	const void* keys[2] = {
+		type.get(),
+		bare.get()
+	};
+	for (size_t k = 0; k < 2; ++k)
+	{
+		map<const void*, vector<TemplateArgument> >::const_iterator found =
+			record_arguments.find(keys[k]);
+		if (found != record_arguments.end())
+		{
+			arguments = found->second;
+			return true;
+		}
+	}
+	if (bare->template_arguments.empty())
+		return false;
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		arguments.push_back(raw_template_argument_from_instance_argument(
+			bare->template_arguments[i]));
+	return true;
+}
+
 void collect_template_pack_names_from_type(
 	TypePtr type,
 	set<string>& names,
@@ -443,6 +485,27 @@ void collect_template_pack_names_from_argument(const TemplateArgument& argument,
 	                                              size_t index,
 	                                              size_t pack_size,
 	                                              const set<string>& names);
+
+	bool dependent_typename_disabled_enable_if_argument(
+		TypePtr type,
+		const vector<TemplateArgument>& arguments)
+	{
+		if (type.get() == NULL || arguments.empty() ||
+		    arguments[0].kind != TemplateArgumentKind::Value ||
+		    arguments[0].dependent || arguments[0].value != 0)
+			return false;
+		string root_name = type->name;
+		size_t type_suffix = root_name.find("::type");
+		if (type_suffix != string::npos)
+			root_name = root_name.substr(0, type_suffix);
+		size_t template_suffix = root_name.find('<');
+		if (template_suffix != string::npos)
+			root_name = root_name.substr(0, template_suffix);
+		size_t qualifier = root_name.rfind("::");
+		if (qualifier != string::npos)
+			root_name = root_name.substr(qualifier + 2);
+		return root_name == "enable_if" || root_name == "__enable_if_t";
+	}
 
 	pa11::TemplateInstanceArgument select_template_instance_pack_argument_element(
 		const pa11::TemplateInstanceArgument& argument,
@@ -689,6 +752,43 @@ vector<TemplateArgument> Parser::expand_template_argument_pack(
 		collect_template_pack_names_from_type(argument.type,
 		                                      names,
 		                                      &record_template_arguments_);
+		if (names.empty() && type_is_pack_element_builtin(argument.type))
+		{
+			vector<TemplateArgument> pack_element_arguments;
+			if (type_pack_element_arguments(argument.type,
+			                                record_template_arguments_,
+			                                pack_element_arguments) &&
+			    !pack_element_arguments.empty())
+			{
+				TemplateArgument index =
+					substitute_template_argument(
+						pack_element_arguments[0]);
+				if (index.kind == TemplateArgumentKind::Pack)
+				{
+					vector<TemplateArgument> out;
+					for (size_t i = 0; i < index.pack.size(); ++i)
+					{
+						vector<TemplateArgument> selected_arguments =
+							pack_element_arguments;
+						selected_arguments[0] =
+							substitute_template_argument(
+								index.pack[i]);
+						TypePtr selected;
+						if (!const_cast<Parser*>(this)->
+							    try_resolve_type_pack_element(
+								    selected_arguments,
+								    selected) ||
+						    selected.get() == NULL)
+							throw runtime_error(
+								"invalid __type_pack_element");
+						TemplateArgument element =
+							TemplateArgument::type_arg(selected);
+						out.push_back(element);
+					}
+					return out;
+				}
+			}
+		}
 		if (names.empty() &&
 		    !template_type_has_template_parameter_name(argument.type,
 		                                               pack_name))
@@ -1212,28 +1312,91 @@ void Parser::append_completed_template_pack_argument(
 	const vector<TemplateArgument>& explicit_expanded,
 	size_t& explicit_index,
 	vector<TemplateArgument>& out)
-{ const TemplateParameterInfo& parameter = declaration->parameters[parameter_index]; if (explicit_index < explicit_expanded.size() && explicit_expanded[explicit_index].kind == TemplateArgumentKind::Pack) {
-TemplateArgument arg = explicit_expanded[explicit_index++]; vector<TemplateArgument> flat_pack; for (size_t i = 0; i < arg.pack.size(); ++i) { if (arg.pack[i].kind == TemplateArgumentKind::Pack) {
-flat_pack.insert(flat_pack.end(), arg.pack[i].pack.begin(), arg.pack[i].pack.end()); continue; } flat_pack.push_back(arg.pack[i]); } vector<TemplateArgument> pack; for (size_t i = 0; i < flat_pack.size(); ++i) {
-vector<TemplateArgument> expanded = expand_template_argument_pack(flat_pack[i]); for (size_t e = 0; e < expanded.size(); ++e) { TemplateArgument substituted = substitute_template_argument(expanded[e]);
-vector<TemplateArgument> elements; if (substituted.kind == TemplateArgumentKind::Pack) elements = substituted.pack; else elements.push_back(substituted); for (size_t j = 0; j < elements.size(); ++j) {
-TemplateArgument elem = elements[j]; if (parameter.kind == TemplateParameterKind::Type && elem.kind == TemplateArgumentKind::Value && elem.type.get() != NULL && (elem.dependent || pa11::strip_cv(elem.type)->kind !=
-pa11::TypeKind::Fundamental)) elem = TemplateArgument::type_arg(elem.type); if (!template_argument_kind_matches_parameter(elem, parameter)) throw runtime_error("template pack argument kind mismatch");
-elem = convert_completed_non_type_template_argument(elem, parameter_type); if (elem.kind == TemplateArgumentKind::Value && !template_argument_has_template_parameter(elem, record_template_arguments_)) elem.pack_expansion = false; pack.push_back(elem); } } } TemplateArgument completed_pack = TemplateArgument::pack_arg(pack); completed_pack.value_name = parameter.name; out.push_back(completed_pack); return; } size_t required_after = 0; for (size_t j = parameter_index + 1;
-j < declaration->parameters.size(); ++j) if (!declaration->parameters[j].is_pack && !declaration->parameters[j].has_default) ++required_after; if (explicit_index + required_after > explicit_expanded.size())
-{ throw runtime_error("missing template argument"); } size_t take = explicit_expanded.size() - explicit_index - required_after; vector<TemplateArgument> pack; for (size_t i = 0; i < take; ++i) {
-TemplateArgument arg = explicit_expanded[explicit_index++]; if (arg.kind == TemplateArgumentKind::Pack) { for (size_t p = 0; p < arg.pack.size(); ++p) { vector<TemplateArgument> expanded =
-expand_template_argument_pack(arg.pack[p]); for (size_t e = 0; e < expanded.size(); ++e) { TemplateArgument substituted = substitute_template_argument(expanded[e]); vector<TemplateArgument> elements;
-if (substituted.kind == TemplateArgumentKind::Pack) elements = substituted.pack; else elements.push_back(substituted); for (size_t j = 0; j < elements.size(); ++j) { TemplateArgument elem = elements[j];
-if (parameter.kind == TemplateParameterKind::Type && elem.kind == TemplateArgumentKind::Value && elem.type.get() != NULL && (elem.dependent || pa11::strip_cv(elem.type)->kind != pa11::TypeKind::Fundamental))
-elem = TemplateArgument::type_arg(elem.type); if (!template_argument_kind_matches_parameter(elem, parameter)) throw runtime_error("template pack argument kind mismatch"); elem = convert_completed_non_type_template_argument(elem,
-parameter_type); if (elem.kind == TemplateArgumentKind::Value && !template_argument_has_template_parameter(elem, record_template_arguments_)) elem.pack_expansion = false; pack.push_back(elem); } } } continue; } vector<TemplateArgument> expanded = expand_template_argument_pack(arg); for (size_t e = 0; e < expanded.size(); ++e) {
-TemplateArgument elem = substitute_template_argument(expanded[e]); if (elem.kind == TemplateArgumentKind::Pack) { for (size_t p = 0; p < elem.pack.size(); ++p) { TemplateArgument pack_elem = elem.pack[p];
-if (parameter.kind == TemplateParameterKind::Type && pack_elem.kind == TemplateArgumentKind::Value && pack_elem.type.get() != NULL && (pack_elem.dependent || pa11::strip_cv(pack_elem.type)->kind !=
-pa11::TypeKind::Fundamental)) pack_elem = TemplateArgument::type_arg(pack_elem.type); if (!template_argument_kind_matches_parameter(pack_elem, parameter)) throw runtime_error("template pack argument kind mismatch");
-pack_elem = convert_completed_non_type_template_argument(pack_elem, parameter_type); if (pack_elem.kind == TemplateArgumentKind::Value && !template_argument_has_template_parameter(pack_elem, record_template_arguments_)) pack_elem.pack_expansion = false; pack.push_back(pack_elem); } continue; } if (parameter.kind == TemplateParameterKind::Type && elem.kind == TemplateArgumentKind::Value &&
-elem.type.get() != NULL && (elem.dependent || pa11::strip_cv(elem.type)->kind != pa11::TypeKind::Fundamental)) elem = TemplateArgument::type_arg(elem.type); if (!template_argument_kind_matches_parameter(elem, parameter))
-throw runtime_error("template pack argument kind mismatch"); elem = convert_completed_non_type_template_argument(elem, parameter_type); if (elem.kind == TemplateArgumentKind::Value && !template_argument_has_template_parameter(elem, record_template_arguments_)) elem.pack_expansion = false; pack.push_back(elem); } } TemplateArgument completed_pack = TemplateArgument::pack_arg(pack); completed_pack.value_name = parameter.name; out.push_back(completed_pack); }
+{
+	const TemplateParameterInfo& parameter =
+		declaration->parameters[parameter_index];
+	vector<TemplateArgument> pack;
+	auto append_element = [&](TemplateArgument elem) {
+		if (parameter.kind == TemplateParameterKind::Type &&
+		    elem.kind == TemplateArgumentKind::Value &&
+		    elem.type.get() != NULL &&
+		    (elem.dependent ||
+		     pa11::strip_cv(elem.type)->kind !=
+			     pa11::TypeKind::Fundamental))
+			elem = TemplateArgument::type_arg(elem.type);
+		if (!template_argument_kind_matches_parameter(elem, parameter))
+			throw runtime_error("template pack argument kind mismatch");
+		elem = convert_completed_non_type_template_argument(elem,
+		                                                    parameter_type);
+		if (elem.kind == TemplateArgumentKind::Value &&
+		    !template_argument_has_template_parameter(
+			    elem,
+			    record_template_arguments_))
+			elem.pack_expansion = false;
+		pack.push_back(elem);
+	};
+	auto append_expanded_argument = [&](const TemplateArgument& argument) {
+		vector<TemplateArgument> expanded =
+			expand_template_argument_pack(argument);
+		for (size_t e = 0; e < expanded.size(); ++e)
+		{
+			TemplateArgument substituted =
+				substitute_template_argument(expanded[e]);
+			if (substituted.kind == TemplateArgumentKind::Pack)
+			{
+				for (size_t p = 0; p < substituted.pack.size(); ++p)
+					append_element(substituted.pack[p]);
+			}
+			else
+				append_element(substituted);
+		}
+	};
+
+	size_t required_after = 0;
+	for (size_t j = parameter_index + 1;
+	     j < declaration->parameters.size();
+	     ++j)
+		if (!declaration->parameters[j].is_pack &&
+		    !declaration->parameters[j].has_default)
+			++required_after;
+	if (explicit_index + required_after > explicit_expanded.size())
+		throw runtime_error("missing template argument");
+
+	bool consumed_explicit_pack_argument = false;
+	if (explicit_index < explicit_expanded.size() &&
+	    explicit_expanded[explicit_index].kind == TemplateArgumentKind::Pack)
+	{
+		TemplateArgument arg = explicit_expanded[explicit_index++];
+		consumed_explicit_pack_argument = true;
+		for (size_t i = 0; i < arg.pack.size(); ++i)
+		{
+			if (arg.pack[i].kind == TemplateArgumentKind::Pack)
+			{
+				for (size_t p = 0; p < arg.pack[i].pack.size(); ++p)
+					append_expanded_argument(arg.pack[i].pack[p]);
+			}
+			else
+				append_expanded_argument(arg.pack[i]);
+		}
+	}
+
+	size_t take = consumed_explicit_pack_argument
+		? 0 : explicit_expanded.size() - explicit_index - required_after;
+	for (size_t i = 0; i < take; ++i)
+	{
+		TemplateArgument arg = explicit_expanded[explicit_index++];
+		if (arg.kind == TemplateArgumentKind::Pack)
+		{
+			for (size_t p = 0; p < arg.pack.size(); ++p)
+				append_expanded_argument(arg.pack[p]);
+		}
+		else
+			append_expanded_argument(arg);
+	}
+	TemplateArgument completed_pack = TemplateArgument::pack_arg(pack);
+	completed_pack.value_name = parameter.name;
+	out.push_back(completed_pack);
+}
 
 TemplateArgument Parser::parse_non_type_default_template_argument(
 	const TemplateParameterInfo& parameter,
@@ -1330,10 +1493,9 @@ TemplateArgument Parser::parse_default_template_argument(
 		save_tokens = tokens_;
 	size_t save_pos = pos_;
 	vector<Scope*> save_scopes = scopes_;
-	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
-	vector<map<string, TemplateArgument> > save_value_subst =
-		template_value_substitutions_;
-	vector<set<string> > save_pack_subst = template_type_parameter_packs_;
+	size_t save_type_subst_size = template_type_substitutions_.size();
+	size_t save_value_subst_size = template_value_substitutions_.size();
+	size_t save_pack_subst_size = template_type_parameter_packs_.size();
 	bool save_default_argument = parsing_default_template_argument_;
 
 	map<string, TypePtr> subst;
@@ -1405,9 +1567,9 @@ TemplateArgument Parser::parse_default_template_argument(
 		if (!tokens_are_declaration_tokens)
 			tokens_ = save_tokens;
 		scopes_ = save_scopes;
-		template_type_substitutions_ = save_subst;
-		template_value_substitutions_ = save_value_subst;
-		template_type_parameter_packs_ = save_pack_subst;
+		template_type_substitutions_.resize(save_type_subst_size);
+		template_value_substitutions_.resize(save_value_subst_size);
+		template_type_parameter_packs_.resize(save_pack_subst_size);
 		parsing_default_template_argument_ = save_default_argument;
 		pos_ = save_pos;
 		throw;
@@ -1416,9 +1578,9 @@ TemplateArgument Parser::parse_default_template_argument(
 	if (!tokens_are_declaration_tokens)
 		tokens_ = save_tokens;
 	scopes_ = save_scopes;
-	template_type_substitutions_ = save_subst;
-	template_value_substitutions_ = save_value_subst;
-	template_type_parameter_packs_ = save_pack_subst;
+	template_type_substitutions_.resize(save_type_subst_size);
+	template_value_substitutions_.resize(save_value_subst_size);
+	template_type_parameter_packs_.resize(save_pack_subst_size);
 	parsing_default_template_argument_ = save_default_argument;
 	pos_ = save_pos;
 	return arg;
@@ -1427,51 +1589,303 @@ TemplateArgument Parser::parse_default_template_argument(
 vector<TemplateArgument> Parser::complete_template_arguments(
 	TemplateDeclaration* declaration,
 	const vector<TemplateArgument>& explicit_arguments)
-{ vector<TemplateArgument> explicit_expanded; for (size_t i = 0; i < explicit_arguments.size(); ++i) { vector<TemplateArgument> expansion; bool keep_single_type_pattern = i < declaration->parameters.size() && !declaration->parameters[i].is_pack && explicit_arguments[i].kind == TemplateArgumentKind::Type; if (keep_single_type_pattern) { TypePtr bare_arg = explicit_arguments[i].type.get() != NULL ? pa11::strip_cv(explicit_arguments[i].type) : TypePtr(); keep_single_type_pattern = bare_arg.get() != NULL && (bare_arg->kind == pa11::TypeKind::Function || bare_arg->kind == pa11::TypeKind::MemberPointer); } if (keep_single_type_pattern) expansion.push_back(explicit_arguments[i]); else expansion = expand_template_argument_pack(explicit_arguments[i]);
+{ vector<TemplateArgument> explicit_expanded; for (size_t i = 0; i < explicit_arguments.size(); ++i) { vector<TemplateArgument> expansion; bool keep_explicit_pack = explicit_arguments.size() == declaration->parameters.size() && i < declaration->parameters.size() && declaration->parameters[i].is_pack && explicit_arguments[i].kind == TemplateArgumentKind::Pack; bool keep_single_type_pattern = i < declaration->parameters.size() && !declaration->parameters[i].is_pack && explicit_arguments[i].kind == TemplateArgumentKind::Type; if (keep_single_type_pattern) { TypePtr bare_arg = explicit_arguments[i].type.get() != NULL ? pa11::strip_cv(explicit_arguments[i].type) : TypePtr(); keep_single_type_pattern = bare_arg.get() != NULL && (bare_arg->kind == pa11::TypeKind::Function || bare_arg->kind == pa11::TypeKind::MemberPointer); } if (keep_explicit_pack || keep_single_type_pattern) expansion.push_back(explicit_arguments[i]); else expansion = expand_template_argument_pack(explicit_arguments[i]);
 explicit_expanded.insert(explicit_expanded.end(), expansion.begin(), expansion.end()); } vector<TemplateArgument> out; size_t explicit_index = 0; for (size_t param_index = 0; param_index < declaration->parameters.size();
 ++param_index) { const TemplateParameterInfo& parameter = declaration->parameters[param_index]; TypePtr parameter_type = parameter.type; if (parameter.kind == TemplateParameterKind::NonType &&
-parameter_type.get() != NULL) { map<string, TypePtr> subst; map<string, TemplateArgument> value_subst; for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i)
+	parameter_type.get() != NULL) { map<string, TypePtr> subst; map<string, TemplateArgument> value_subst; set<string> pack_subst; for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i)
 if (!declaration->parameters[i].name.empty()) { if (declaration->parameters[i].kind == TemplateParameterKind::Type) { if (declaration->parameters[i].is_pack) { subst[declaration->parameters[i].name] =
-pa11::make_template_parameter_type( declaration->parameters[i].name); value_subst[declaration->parameters[i].name] = out[i]; } else subst[declaration->parameters[i].name] = out[i].type; } else
-value_subst[declaration->parameters[i].name] = out[i]; } vector<map<string, TypePtr> > save_subst = template_type_substitutions_; vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_;
+	pa11::make_template_parameter_type( declaration->parameters[i].name); value_subst[declaration->parameters[i].name] = out[i]; pack_subst.insert(declaration->parameters[i].name); } else subst[declaration->parameters[i].name] = out[i].type; } else
+	value_subst[declaration->parameters[i].name] = out[i]; } size_t save_type_subst_size = template_type_substitutions_.size(); size_t save_value_subst_size = template_value_substitutions_.size(); size_t save_pack_subst_size = template_type_parameter_packs_.size();
 template_type_substitutions_.insert( template_type_substitutions_.end(), declaration->outer_type_substitutions.begin(), declaration->outer_type_substitutions.end()); template_value_substitutions_.insert(
-template_value_substitutions_.end(), declaration->outer_value_substitutions.begin(), declaration->outer_value_substitutions.end()); template_type_substitutions_.push_back(subst);
-template_value_substitutions_.push_back(value_subst); try { parameter_type = substitute_template_type(parameter_type); } catch (const runtime_error&) { template_type_substitutions_ = save_subst;
-template_value_substitutions_ = save_value_subst; throw; } template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; } if (parameter.is_pack) {
+	template_value_substitutions_.end(), declaration->outer_value_substitutions.begin(), declaration->outer_value_substitutions.end()); template_type_substitutions_.push_back(subst);
+	template_value_substitutions_.push_back(value_subst); template_type_parameter_packs_.push_back(pack_subst); try { parameter_type = substitute_template_type(parameter_type); } catch (const runtime_error& err) { bool disabled_enable_if = false; if (function_template_candidate_instantiation_depth_ != 0 && string(err.what()) == "dependent typename not resolved") { TypePtr bare_parameter_type = parameter_type.get() != NULL ? pa11::strip_cv(parameter_type) : TypePtr(); if (bare_parameter_type.get() != NULL && bare_parameter_type->is_dependent_typename && !bare_parameter_type->template_arguments.empty()) { vector<TemplateArgument> candidate_args; try { for (size_t ai = 0; ai < bare_parameter_type->template_arguments.size(); ++ai) { TemplateArgument candidate_arg = template_argument_from_instance_argument( bare_parameter_type->template_arguments[ai]); candidate_args.push_back(substitute_template_argument(candidate_arg)); } disabled_enable_if = dependent_typename_disabled_enable_if_argument( bare_parameter_type, candidate_args); } catch (const runtime_error&) { disabled_enable_if = false; } } } template_type_substitutions_.resize(save_type_subst_size);
+	template_value_substitutions_.resize(save_value_subst_size); template_type_parameter_packs_.resize(save_pack_subst_size); if (function_template_candidate_instantiation_depth_ == 0 || string(err.what()) != "dependent typename not resolved" || disabled_enable_if) throw; } template_type_substitutions_.resize(save_type_subst_size); template_value_substitutions_.resize(save_value_subst_size); template_type_parameter_packs_.resize(save_pack_subst_size); } if (parameter.is_pack) {
 append_completed_template_pack_argument(declaration, param_index, parameter_type, explicit_expanded, explicit_index, out); continue; } if (explicit_index < explicit_expanded.size()) {
 TemplateArgument arg = explicit_expanded[explicit_index++]; TemplateArgument original_arg = arg; if (parameter.kind == TemplateParameterKind::NonType && arg.kind == TemplateArgumentKind::Value && arg.dependent && parameter_type.get() != NULL) arg.type = parameter_type; if (parameter.kind == TemplateParameterKind::Type && arg.kind == TemplateArgumentKind::Value && arg.type.get() != NULL &&
 (arg.dependent || pa11::strip_cv(arg.type)->kind != pa11::TypeKind::Fundamental)) { bool pack_expansion = arg.pack_expansion; arg = TemplateArgument::type_arg(arg.type); arg.pack_expansion = pack_expansion; } {
-map<string, TypePtr> subst; map<string, TemplateArgument> value_subst; for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i) if (!declaration->parameters[i].name.empty()) {
+	map<string, TypePtr> subst; map<string, TemplateArgument> value_subst; set<string> pack_subst; for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i) if (!declaration->parameters[i].name.empty()) {
 if (declaration->parameters[i].kind == TemplateParameterKind::Type) { if (declaration->parameters[i].is_pack) { subst[declaration->parameters[i].name] = pa11::make_template_parameter_type(
-declaration->parameters[i].name); value_subst[declaration->parameters[i].name] = out[i]; } else subst[declaration->parameters[i].name] = out[i].type; } else value_subst[declaration->parameters[i].name] = out[i]; }
+	declaration->parameters[i].name); value_subst[declaration->parameters[i].name] = out[i]; pack_subst.insert(declaration->parameters[i].name); } else subst[declaration->parameters[i].name] = out[i].type; } else value_subst[declaration->parameters[i].name] = out[i]; }
 bool explicit_value_name_collides = false;
 if (arg.kind == TemplateArgumentKind::Value &&
     arg.dependent &&
     !arg.value_name.empty())
+{
 	for (size_t pi = 0; pi < declaration->parameters.size(); ++pi)
 		if (declaration->parameters[pi].name == arg.value_name)
 			explicit_value_name_collides = true;
-vector<map<string, TypePtr> > save_subst = template_type_substitutions_; vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_; template_type_substitutions_.insert(
+}
+	size_t save_type_subst_size = template_type_substitutions_.size(); size_t save_value_subst_size = template_value_substitutions_.size(); size_t save_pack_subst_size = template_type_parameter_packs_.size(); template_type_substitutions_.insert(
 template_type_substitutions_.end(), declaration->outer_type_substitutions.begin(), declaration->outer_type_substitutions.end()); template_value_substitutions_.insert( template_value_substitutions_.end(),
-declaration->outer_value_substitutions.begin(), declaration->outer_value_substitutions.end()); template_type_substitutions_.push_back(subst); template_value_substitutions_.push_back(value_subst); try {
+	declaration->outer_value_substitutions.begin(), declaration->outer_value_substitutions.end()); template_type_substitutions_.push_back(subst); template_value_substitutions_.push_back(value_subst); template_type_parameter_packs_.push_back(pack_subst); try {
 if (!explicit_value_name_collides)
-arg = substitute_template_argument(arg); } catch (...) { template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; throw; } template_type_substitutions_ = save_subst;
-template_value_substitutions_ = save_value_subst; } if (parameter.kind == TemplateParameterKind::TemplateTemplate && arg.kind == TemplateArgumentKind::Type) { TemplateDeclaration* recovered_template =
+	arg = substitute_template_argument(arg); } catch (...) { template_type_substitutions_.resize(save_type_subst_size); template_value_substitutions_.resize(save_value_subst_size); template_type_parameter_packs_.resize(save_pack_subst_size); throw; } template_type_substitutions_.resize(save_type_subst_size);
+	template_value_substitutions_.resize(save_value_subst_size); template_type_parameter_packs_.resize(save_pack_subst_size); } if (parameter.kind == TemplateParameterKind::TemplateTemplate && arg.kind == TemplateArgumentKind::Type) { TemplateDeclaration* recovered_template =
 class_template_declaration_for_match(arg.type); if (recovered_template != NULL) arg = TemplateArgument::template_arg(recovered_template); } if (!template_argument_kind_matches_parameter(arg, parameter)) { TypePtr dependent_type = arg.type; TypePtr dependent_bare = dependent_type.get() != NULL
 ? pa11::strip_cv(dependent_type) : TypePtr(); if ((dependent_bare.get() == NULL || !dependent_bare->is_dependent_typename || !dependent_bare->dependent_typename_qualified) &&
 original_arg.kind == TemplateArgumentKind::Type) { TypePtr original_bare = original_arg.type.get() != NULL ? pa11::strip_cv(original_arg.type) : TypePtr(); if (original_bare.get() != NULL &&
 original_bare->is_dependent_typename && original_bare->dependent_typename_qualified) { dependent_type = original_arg.type; dependent_bare = original_bare; } } if (parameter.kind == TemplateParameterKind::NonType &&
 arg.kind == TemplateArgumentKind::Type && dependent_bare.get() != NULL && dependent_bare->kind == pa11::TypeKind::Function && dependent_bare->parameters.size() == 1 && parameter_type.get() != NULL &&
-	pa11::same_type(dependent_bare->base, parameter_type)) dependent_type = dependent_bare->parameters[0]; if (parameter.kind != TemplateParameterKind::NonType || arg.kind != TemplateArgumentKind::Type ||
-	dependent_type.get() == NULL || !dependent_type->is_dependent_typename || !dependent_type->dependent_typename_qualified) { throw runtime_error("template argument kind mismatch"); } TemplateArgument value_arg =
+	pa11::same_type(dependent_bare->base, parameter_type)) { dependent_type = dependent_bare->parameters[0]; } if (parameter.kind != TemplateParameterKind::NonType || arg.kind != TemplateArgumentKind::Type ||
+		dependent_type.get() == NULL || !dependent_type->is_dependent_typename || !dependent_type->dependent_typename_qualified) { throw runtime_error("template argument kind mismatch"); } TemplateArgument value_arg =
 TemplateArgument::dependent_value_arg(parameter_type); value_arg.value_name = dependent_type->name; size_t member_pos = dependent_type->name.rfind("::"); string member_name = member_pos != string::npos
 ? dependent_type->name.substr(member_pos + 2) : string(); string owner_name = dependent_type->template_primary_name; if (owner_name.empty()) { string root = member_pos != string::npos
 ? dependent_type->name.substr(0, member_pos) : dependent_type->name; size_t template_pos = root.find('<'); owner_name = root.substr(0, template_pos); } if (!owner_name.empty() && !member_name.empty()) {
 value_arg.value_owner_template_name = owner_name; value_arg.value_member_name = member_name; for (size_t ai = 0; ai < dependent_type->template_arguments.size(); ++ai) { TemplateArgument owner_arg =
 template_argument_from_instance_argument( dependent_type->template_arguments[ai]); owner_arg = substitute_template_argument(owner_arg); value_arg.value_owner_template_arguments.push_back(
 completed_instance_argument(owner_arg)); } } arg = value_arg; arg = substitute_template_argument(arg); } arg = convert_completed_non_type_template_argument(arg, parameter_type); out.push_back(arg); continue; }
-if (!parameter.has_default) { throw runtime_error("missing template argument"); } TemplateArgument arg = parse_default_template_argument(declaration, param_index, out);
-if (parameter.kind == TemplateParameterKind::Type) arg = substitute_template_argument(arg); arg = convert_completed_non_type_template_argument(arg, parameter_type); out.push_back(arg); } if (explicit_index != explicit_expanded.size()) throw runtime_error("too many template arguments"); return out; }
+	if (!parameter.has_default) { throw runtime_error("missing template argument"); } TemplateArgument arg; try { arg = parse_default_template_argument(declaration, param_index, out);
+	if (parameter.kind == TemplateParameterKind::Type) arg = substitute_template_argument(arg); } catch (const runtime_error& err) { if (function_template_candidate_instantiation_depth_ == 0 || parameter.kind != TemplateParameterKind::Type || string(err.what()) != "dependent typename not resolved") throw; bool dependent_context = false; for (size_t ai = 0; ai < out.size(); ++ai) if (template_argument_has_template_parameter(out[ai], record_template_arguments_)) dependent_context = true; if (!dependent_context) throw; string default_name = parameter.name.empty() ? declaration->name + "__default" + to_string(param_index) : parameter.name; arg = TemplateArgument::type_arg(pa11::make_dependent_typename_type(default_name, false, false, false)); } arg = convert_completed_non_type_template_argument(arg, parameter_type); out.push_back(arg); } if (explicit_index != explicit_expanded.size()) throw runtime_error("too many template arguments");
+	{
+			map<string, TypePtr> subst;
+			map<string, TemplateArgument> value_subst;
+			set<string> pack_subst;
+			bool concrete_completion = true;
+		for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i)
+		{
+			if (declaration->parameters[i].name.empty())
+				continue;
+			if (declaration->parameters[i].kind == TemplateParameterKind::Type)
+			{
+				if (declaration->parameters[i].is_pack)
+				{
+						subst[declaration->parameters[i].name] =
+							pa11::make_template_parameter_type(
+								declaration->parameters[i].name);
+						value_subst[declaration->parameters[i].name] = out[i];
+						pack_subst.insert(declaration->parameters[i].name);
+					}
+				else
+					subst[declaration->parameters[i].name] = out[i].type;
+			}
+			else
+				value_subst[declaration->parameters[i].name] = out[i];
+		}
+		for (map<string, TypePtr>::const_iterator it = subst.begin();
+		     it != subst.end(); ++it)
+			if (type_is_template_dependent(it->second))
+				concrete_completion = false;
+		for (map<string, TemplateArgument>::const_iterator it =
+			     value_subst.begin(); it != value_subst.end(); ++it)
+			if (template_argument_has_template_parameter(
+				    it->second,
+				    record_template_arguments_))
+				concrete_completion = false;
+		size_t save_type_subst_size = template_type_substitutions_.size();
+			size_t save_value_subst_size =
+				template_value_substitutions_.size();
+			size_t save_pack_subst_size =
+				template_type_parameter_packs_.size();
+			template_type_substitutions_.insert(
+			template_type_substitutions_.end(),
+			declaration->outer_type_substitutions.begin(),
+			declaration->outer_type_substitutions.end());
+		template_value_substitutions_.insert(
+			template_value_substitutions_.end(),
+			declaration->outer_value_substitutions.begin(),
+			declaration->outer_value_substitutions.end());
+			template_type_substitutions_.push_back(subst);
+			template_value_substitutions_.push_back(value_subst);
+			template_type_parameter_packs_.push_back(pack_subst);
+			try
+		{
+			for (size_t i = 0; i < out.size() && i < declaration->parameters.size(); ++i)
+			{
+				if (declaration->parameters[i].kind != TemplateParameterKind::NonType ||
+				    declaration->parameters[i].type.get() == NULL)
+					continue;
+				TypePtr parameter_type = declaration->parameters[i].type;
+				try
+				{
+					parameter_type = substitute_template_type(parameter_type);
+				}
+				catch (const runtime_error& err)
+				{
+					if (function_template_candidate_instantiation_depth_ != 0 &&
+					    string(err.what()) == "dependent typename not resolved")
+					{
+						concrete_completion = false;
+						continue;
+					}
+					throw;
+				}
+				TypePtr parameter_bare =
+					parameter_type.get() != NULL
+					? pa11::strip_cv(parameter_type)
+					: TypePtr();
+				if (parameter_bare.get() != NULL &&
+				    parameter_bare->is_dependent_typename)
+				{
+					TypePtr resolved =
+						resolve_dependent_typename_type(parameter_bare);
+					if (resolved.get() != NULL && resolved != parameter_bare)
+						parameter_type = substitute_template_type(resolved);
+					else if (parameter_bare->dependent_typename_qualified &&
+					         !parameter_bare->template_primary_name.empty() &&
+					         !parameter_bare->template_arguments.empty())
+					{
+						string member_name = parameter_bare->name;
+						size_t member_pos = member_name.rfind("::");
+						if (member_pos != string::npos)
+							member_name = member_name.substr(member_pos + 2);
+						vector<TemplateArgument> owner_args;
+						bool owner_args_dependent = false;
+						for (size_t ai = 0;
+						     ai < parameter_bare->template_arguments.size();
+						     ++ai)
+						{
+							TemplateArgument owner_arg =
+								template_argument_from_instance_argument(
+									parameter_bare->template_arguments[ai]);
+							if (owner_arg.kind == TemplateArgumentKind::Value &&
+							    owner_arg.dependent &&
+							    !owner_arg.value_owner_template_name.empty())
+							{
+								TemplateArgument resolved_value;
+								try
+								{
+									if (resolve_dependent_value_member_argument(
+										    owner_arg,
+										    resolved_value))
+										owner_arg = resolved_value;
+								}
+								catch (const runtime_error&)
+								{
+									if (owner_arg.value_expr_end >
+										    owner_arg.value_expr_begin &&
+									    function_template_candidate_instantiation_depth_ != 0)
+										owner_args_dependent = true;
+									else
+										throw;
+								}
+							}
+							try
+							{
+								owner_arg = substitute_template_argument(owner_arg);
+							}
+							catch (const runtime_error&)
+							{
+								if (owner_arg.kind == TemplateArgumentKind::Value &&
+								    owner_arg.dependent &&
+								    owner_arg.value_expr_end >
+									    owner_arg.value_expr_begin &&
+								    function_template_candidate_instantiation_depth_ != 0)
+									owner_args_dependent = true;
+								else
+									throw;
+							}
+							if (template_argument_has_template_parameter(
+								    owner_arg,
+								    record_template_arguments_))
+								owner_args_dependent = true;
+							if (owner_arg.kind == TemplateArgumentKind::Value &&
+							    owner_arg.dependent &&
+							    owner_arg.value_expr_end > owner_arg.value_expr_begin &&
+							    function_template_candidate_instantiation_depth_ != 0)
+								owner_args_dependent = true;
+							owner_args.push_back(owner_arg);
+						}
+						if (!owner_args_dependent)
+						{
+							Scope* qualifier = NULL;
+							string lookup_name =
+								parameter_bare->template_primary_name;
+							resolve_template_name_spelling(
+								parameter_bare->template_primary_name,
+								qualifier,
+								lookup_name);
+							TemplateDeclaration* klass =
+								find_class_template(qualifier, lookup_name);
+							if (klass == NULL && qualifier != NULL)
+								klass = find_class_template(NULL,
+								                            lookup_name);
+							if (klass == NULL)
+								klass = find_class_template(
+									NULL,
+									parameter_bare->template_primary_name);
+							if (klass == NULL)
+							{
+								for (map<Scope*, map<string, TemplateDeclaration*> >::const_iterator
+									     sit = class_templates_.begin();
+								     sit != class_templates_.end() && klass == NULL;
+								     ++sit)
+								{
+									map<string, TemplateDeclaration*>::const_iterator
+										found = sit->second.find(lookup_name);
+									if (found == sit->second.end())
+										found = sit->second.find(
+											parameter_bare->template_primary_name);
+									if (found != sit->second.end())
+										klass = found->second;
+								}
+							}
+							if (klass != NULL)
+							{
+								TypePtr owner =
+									instantiate_class_template(klass,
+									                           owner_args);
+								TypePtr owner_bare = owner.get() != NULL
+									? pa11::strip_cv(owner)
+									: TypePtr();
+								if (owner_bare.get() != NULL &&
+								    owner_bare->kind == pa11::TypeKind::Record &&
+								    owner_bare->scope != NULL)
+								{
+									complete_template_record(owner_bare);
+									vector<Binding*> found =
+										lookup_qualified_set(
+											owner_bare->scope,
+											member_name,
+											pa11::LOOKUP_TYPE);
+									if (!found.empty() &&
+									    found[0]->type.get() != NULL)
+										parameter_type =
+											substitute_template_type_in_scope(
+												found[0]->type,
+												owner_bare->scope);
+								}
+							}
+						}
+						parameter_bare = parameter_type.get() != NULL
+							? pa11::strip_cv(parameter_type)
+							: TypePtr();
+							if (concrete_completion &&
+							    !owner_args_dependent &&
+							    parameter_bare.get() != NULL &&
+							    parameter_bare->is_dependent_typename)
+							{
+								if (function_template_candidate_instantiation_depth_ != 0)
+									concrete_completion = false;
+								else
+								throw runtime_error(
+									"dependent typename not resolved");
+							}
+						}
+						else if (concrete_completion)
+						{
+							if (function_template_candidate_instantiation_depth_ != 0)
+								concrete_completion = false;
+							else
+							throw runtime_error("dependent typename not resolved");
+						}
+					}
+				out[i] = convert_completed_non_type_template_argument(
+					out[i],
+					parameter_type);
+			}
+		}
+			catch (...)
+			{
+				template_type_substitutions_.resize(save_type_subst_size);
+				template_value_substitutions_.resize(save_value_subst_size);
+				template_type_parameter_packs_.resize(save_pack_subst_size);
+				throw;
+			}
+			template_type_substitutions_.resize(save_type_subst_size);
+			template_value_substitutions_.resize(save_value_subst_size);
+			template_type_parameter_packs_.resize(save_pack_subst_size);
+		}
+	return out; }
 
 }  // namespace internal
 }  // namespace pa12

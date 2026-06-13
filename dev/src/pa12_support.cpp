@@ -1,6 +1,7 @@
 #include "pa12_internal.h"
 
 #include <fstream>
+#include <map>
 #include <ostream>
 #include <stdexcept>
 
@@ -161,6 +162,7 @@ DeclSpecs::DeclSpecs()
 	  int128_decl(false),
 	  bitint_decl(false),
 	  no_unique_address_decl(false),
+	  vector_size(0),
 	  cv(pa11::CV_NONE)
 {
 }
@@ -193,7 +195,8 @@ Suffix::Suffix(SuffixKind k)
 		  override_decl(false),
 		  final_decl(false),
 		  trailing_return(),
-		  abi_tags()
+		  abi_tags(),
+		  vector_size(0)
 	{
 	}
 
@@ -381,6 +384,7 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  range_for_counter_(0),
 	  force_new_function_binding_(false),
 	  defer_function_template_bodies_(false),
+	  force_function_template_body_instantiation_(false),
 	  suppress_implicit_template_base_init_(false),
 	  parsing_base_specifier_(false),
 	  validating_template_definition_(false),
@@ -390,10 +394,13 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  single_linkage_specification_declaration_(false),
 		  defer_class_template_completion_depth_(0),
 	  function_template_candidate_instantiation_depth_(0),
+	  direct_template_call_depth_(0),
 	  template_argument_expression_depth_(0),
+	  constexpr_value_expression_depth_(0),
 	  unevaluated_expression_depth_(0),
 	  suppress_qualifier_template_member_instantiation_depth_(0),
-	  short_circuit_static_member_demand_depth_(0)
+	  short_circuit_static_member_demand_depth_(0),
+	  member_function_template_generation_(0)
 		{
 		pa10::Options pa10_options;
 		pa10_options.preprocess = options.preprocess;
@@ -500,10 +507,16 @@ bool Parser::consume(ETokenType type)
 void Parser::expect(ETokenType type)
 {
 	if (!consume(type))
+	{
+		map<ETokenType, string>::const_iterator expected =
+			TokenTypeToStringMap.find(type);
 		throw runtime_error("unexpected token: got '" +
 		                    (pos_ < tokens_.size() ? tokens_[pos_].source :
 		                     string("<eof>")) +
-		                    "', expected " + to_string(type));
+			                    "', expected " +
+			                    (expected != TokenTypeToStringMap.end()
+			                     ? expected->second : to_string(type)));
+	}
 }
 
 void Parser::expect_eof()
@@ -515,13 +528,7 @@ void Parser::expect_eof()
 string Parser::consume_identifier()
 {
 	if (!at_identifier())
-	{
-		string prev = pos_ > 0 ? tokens_[pos_ - 1].source : string("<start>");
-		string next = pos_ + 1 < tokens_.size()
-			? tokens_[pos_ + 1].source : string("<eof>");
-		throw runtime_error("expected identifier before '" + current().source +
-		                    "' after '" + prev + "' next '" + next + "'");
-	}
+		throw runtime_error("expected identifier");
 	return tokens_[pos_++].source;
 }
 
@@ -656,7 +663,8 @@ bool Parser::starts_attribute() const
 	if (at(OP_LSQUARE) && lookahead(OP_LSQUARE, 1))
 		return true;
 	if (at_identifier() &&
-	    (current().source == "__attribute__" ||
+	    (current().source == "__attribute" ||
+	     current().source == "__attribute__" ||
 	     current().source == "__declspec"))
 		return true;
 	return false;

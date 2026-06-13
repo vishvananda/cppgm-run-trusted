@@ -31,6 +31,8 @@ bool function_template_more_specialized(
 	const std::map<Binding*, TemplateDeclaration*>& origins,
 	Binding* lhs,
 	Binding* rhs);
+bool function_template_declaration_more_specialized(TemplateDeclaration* lhs,
+                                                    TemplateDeclaration* rhs);
 bool same_function_template_declaration_family(TemplateDeclaration* left,
                                                TemplateDeclaration* right);
 bool function_template_more_specialized_for_call(

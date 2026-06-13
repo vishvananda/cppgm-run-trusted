@@ -23,7 +23,8 @@ vector<Scope*> abi_dependent_typename_scope_prefix_for_binding(
 	const Binding* binding)
 {
 	if (binding == NULL || binding->owner == NULL ||
-	    binding->owner->kind != ScopeKind::Namespace)
+	    (binding->owner->kind != ScopeKind::Namespace &&
+	     binding->owner->kind != ScopeKind::Class))
 		return vector<Scope*>();
 	return abi_scope_path_outer_first(binding->owner);
 }
@@ -85,7 +86,7 @@ string abi_encode_function_template_name_with_substitutions(
 	string name = binding != NULL
 		? abi_binding_source_name(binding)
 		: abi_source_name(declaration->name);
-	if (scopes.empty() && declaration->name.compare(0, 8, "operator") == 0)
+	if (scopes.empty())
 		abi_add_substitution(ctx, name);
 	string leaf = name + "I";
 	bool saved_function_template_argument_list =
@@ -116,7 +117,8 @@ string abi_encode_function_template_name_with_substitutions(
 		encoded = "St" + leaf;
 	else
 		encoded = "N" + scope_prefix + leaf + "E";
-	abi_add_substitution(ctx, encoded);
+	if (!scopes.empty())
+		abi_add_substitution(ctx, encoded);
 	return encoded;
 }
 
@@ -361,7 +363,9 @@ string abi_function_template_specialization_symbol_with_substitutions(
 			template_parameters[declaration->parameters[i].name] = i;
 	const vector<string>* parameter_names =
 		declaration->function_parameter_names.empty()
-		? NULL
+		? binding != NULL && !binding->function_parameter_names.empty()
+		  ? &binding->function_parameter_names
+		  : NULL
 		: &declaration->function_parameter_names;
 	AbiSubstitutionContext ctx(template_parameters,
 	                           expression_tokens,
@@ -422,11 +426,12 @@ string abi_function_template_specialization_symbol_with_substitutions(
 	         binding->owner != NULL &&
 	         binding->owner->kind == ScopeKind::Class)
 	{
-		encoded_name += abi_binding_source_name(binding) + "I";
+		string member_name = abi_binding_source_name(binding);
+		abi_add_substitution(ctx, member_name);
+		encoded_name += member_name + "I";
 		abi_append_template_argument_list_with_substitutions(
 			encoded_name, declaration, full_args, ctx);
 		encoded_name += "EE";
-		abi_add_substitution(ctx, encoded_name);
 	}
 	else
 		encoded_name =

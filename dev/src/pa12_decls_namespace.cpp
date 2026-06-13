@@ -138,6 +138,12 @@ void Parser::parse_using_family(Node& out)
 			class_templates_[current_scope()][name] = class_template;
 			return;
 		}
+		TemplateDeclaration* alias_template = find_alias_template(qualifier, name);
+		if (alias_template != NULL)
+		{
+			alias_templates_[current_scope()][name] = alias_template;
+			return;
+		}
 		QualifiedName qname;
 		qname.qualifier = qualifier;
 		qname.name = name;
@@ -244,10 +250,7 @@ void Parser::parse_using_family(Node& out)
 							member_function_templates_[make_pair(
 								owner_template->second,
 								current_scope()->name)];
-						if (find(member_overloads.begin(),
-						         member_overloads.end(),
-						         declaration) == member_overloads.end())
-							member_overloads.push_back(declaration);
+						add_member_function_template(member_overloads, declaration);
 					}
 					continue;
 				}

@@ -16,6 +16,11 @@ string abi_dependent_expression_with_substitutions(
 	size_t end,
 	AbiSubstitutionContext& ctx);
 
+void abi_split_template_arguments(const vector<Token>& tokens,
+                                  size_t begin,
+                                  size_t end,
+                                  vector<pair<size_t, size_t> >& out);
+
 string abi_function_parameter_expression(const string& name,
                                          const AbiSubstitutionContext& ctx)
 {
@@ -153,6 +158,88 @@ string abi_encode_type_tokens_with_substitutions(const vector<Token>& tokens,
 		abi_add_substitution(ctx, encoded);
 		return encoded;
 	}
+	if (end > begin + 3 &&
+	    abi_token_is_simple(tokens, end - 1, OP_RPAREN))
+	{
+		int angle = 0;
+		int square = 0;
+		int brace = 0;
+		size_t function_open = end;
+		for (size_t i = begin; i < end; ++i)
+		{
+			if (tokens[i].kind != posttoken::TokenKind::Simple)
+				continue;
+			ETokenType type = tokens[i].type;
+			if (type == OP_LT)
+				++angle;
+			else if (type == OP_GT && angle > 0)
+				--angle;
+			else if (type == OP_LSQUARE)
+				++square;
+			else if (type == OP_RSQUARE && square > 0)
+				--square;
+			else if (type == OP_LBRACE)
+				++brace;
+			else if (type == OP_RBRACE && brace > 0)
+				--brace;
+			else if (type == OP_LPAREN && angle == 0 &&
+			         square == 0 && brace == 0)
+			{
+				function_open = i;
+				break;
+			}
+		}
+		if (function_open > begin && function_open < end - 1)
+		{
+			string result = abi_encode_type_tokens_with_substitutions(
+				tokens, begin, function_open, ctx);
+			if (result.empty())
+				return "";
+			string encoded = "F" + result;
+			vector<pair<size_t, size_t> > args;
+			abi_split_top_level_arguments(tokens,
+			                              function_open + 1,
+			                              end - 1,
+			                              args);
+			for (size_t i = 0; i < args.size(); ++i)
+			{
+				string arg = abi_encode_type_tokens_with_substitutions(
+					tokens, args[i].first, args[i].second, ctx);
+				if (arg.empty())
+					return "";
+				encoded += arg;
+			}
+			if (args.empty())
+				encoded += "v";
+			encoded += "E";
+			return abi_use_or_add_substitution(ctx, encoded);
+		}
+	}
+	if (begin + 3 <= end &&
+	    tokens[begin].kind == posttoken::TokenKind::Identifier &&
+	    abi_token_is_simple(tokens, begin + 1, OP_LT) &&
+	    abi_token_is_simple(tokens, end - 1, OP_GT))
+	{
+		string out = abi_source_name(tokens[begin].source) + "I";
+		vector<pair<size_t, size_t> > args;
+		abi_split_template_arguments(tokens, begin + 2, end - 1, args);
+		for (size_t i = 0; i < args.size(); ++i)
+		{
+			string type_arg = abi_encode_type_tokens_with_substitutions(
+				tokens, args[i].first, args[i].second, ctx);
+			if (!type_arg.empty())
+			{
+				out += type_arg;
+				continue;
+			}
+			string value_arg = abi_dependent_expression_with_substitutions(
+				tokens, args[i].first, args[i].second, ctx);
+			if (value_arg.empty())
+				return "";
+			out += "X" + value_arg + "E";
+		}
+		return out + "E";
+	}
 	if (end == begin + 1 &&
 	    tokens[begin].kind == posttoken::TokenKind::Identifier)
 	{
@@ -266,6 +353,175 @@ string abi_call_expression_with_substitutions(const vector<Token>& tokens,
 		out += arg;
 	}
 	return out + "E";
+}
+
+bool abi_find_top_level_colon2(const vector<Token>& tokens,
+                               size_t begin,
+                               size_t end,
+                               size_t& colon)
+{
+	int angle = 0;
+	int paren = 0;
+	int square = 0;
+	int brace = 0;
+	bool found = false;
+	for (size_t i = begin; i < end; ++i)
+	{
+		if (tokens[i].kind != posttoken::TokenKind::Simple)
+			continue;
+		ETokenType type = tokens[i].type;
+		if (type == OP_LT)
+			++angle;
+		else if (type == OP_GT && angle > 0)
+			--angle;
+		else if (type == OP_LPAREN)
+			++paren;
+		else if (type == OP_RPAREN && paren > 0)
+			--paren;
+		else if (type == OP_LSQUARE)
+			++square;
+		else if (type == OP_RSQUARE && square > 0)
+			--square;
+		else if (type == OP_LBRACE)
+			++brace;
+		else if (type == OP_RBRACE && brace > 0)
+			--brace;
+		else if (type == OP_COLON2 && angle == 0 && paren == 0 &&
+		         square == 0 && brace == 0)
+		{
+			colon = i;
+			found = true;
+		}
+	}
+	return found;
+}
+
+bool abi_type_token_span_is_template_id(const vector<Token>& tokens,
+                                        size_t begin,
+                                        size_t end)
+{
+	return begin + 3 <= end &&
+	       tokens[begin].kind == posttoken::TokenKind::Identifier &&
+	       abi_token_is_simple(tokens, begin + 1, OP_LT) &&
+	       abi_token_is_simple(tokens, end - 1, OP_GT);
+}
+
+bool abi_qualified_member_expression_with_substitutions(
+	const vector<Token>& tokens,
+	size_t begin,
+	size_t end,
+	AbiSubstitutionContext& ctx,
+	string& out)
+{
+	size_t colon = 0;
+	if (!abi_find_top_level_colon2(tokens, begin, end, colon) ||
+	    colon <= begin || colon + 1 >= end)
+		return false;
+	size_t member = colon + 1;
+	if (member < end &&
+	    tokens[member].kind == posttoken::TokenKind::Simple &&
+	    tokens[member].type == KW_TEMPLATE)
+		++member;
+	if (member + 1 != end ||
+	    tokens[member].kind != posttoken::TokenKind::Identifier)
+		return false;
+	string owner = abi_encode_type_tokens_with_substitutions(
+		tokens, begin, colon, ctx);
+	if (owner.empty())
+		return false;
+	out = "sr" + owner;
+	if (abi_type_token_span_is_template_id(tokens, begin, colon))
+		out += "E";
+	out += abi_source_name(tokens[member].source);
+	return true;
+}
+
+bool abi_find_matching_angle_close(const vector<Token>& tokens,
+                                   size_t open,
+                                   size_t end,
+                                   size_t& close)
+{
+	if (!abi_token_is_simple(tokens, open, OP_LT))
+		return false;
+	int angle = 0;
+	for (size_t i = open; i < end; ++i)
+	{
+		if (tokens[i].kind != posttoken::TokenKind::Simple)
+			continue;
+		if (tokens[i].type == OP_LT)
+			++angle;
+		else if (tokens[i].type == OP_GT)
+		{
+			--angle;
+			if (angle == 0)
+			{
+				close = i;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+string abi_cast_operator_code(ETokenType type)
+{
+	if (type == KW_STATIC_CAST)
+		return "sc";
+	if (type == KW_CONST_CAST)
+		return "cc";
+	if (type == KW_REINTERPET_CAST)
+		return "rc";
+	if (type == KW_DYNAMIC_CAST)
+		return "dc";
+	return "";
+}
+
+string abi_cast_target_type_with_substitutions(const vector<Token>& tokens,
+                                               size_t begin,
+                                               size_t end,
+                                               AbiSubstitutionContext& ctx)
+{
+	abi_trim_wrapping_parens(tokens, begin, end);
+	if (begin + 2 == end &&
+	    (abi_token_is_simple(tokens, end - 1, OP_AMP) ||
+	     abi_token_is_simple(tokens, end - 1, OP_LAND)) &&
+	    tokens[begin].kind == posttoken::TokenKind::Identifier)
+	{
+		map<string, size_t>::const_iterator found =
+			ctx.template_parameters.find(tokens[begin].source);
+		if (found != ctx.template_parameters.end())
+		{
+			string encoded = found->second == 0
+				? string("T_")
+				: string("T") + to_string(found->second - 1) + "_";
+			return abi_use_or_add_substitution(ctx, encoded);
+		}
+	}
+	return abi_encode_type_tokens_with_substitutions(tokens, begin, end, ctx);
+}
+
+string abi_cast_expression_with_substitutions(const vector<Token>& tokens,
+                                              size_t begin,
+                                              size_t end,
+                                              AbiSubstitutionContext& ctx)
+{
+	if (end <= begin + 5 ||
+	    tokens[begin].kind != posttoken::TokenKind::Simple)
+		return "";
+	string code = abi_cast_operator_code(tokens[begin].type);
+	if (code.empty() || !abi_token_is_simple(tokens, begin + 1, OP_LT))
+		return "";
+	size_t close = 0;
+	if (!abi_find_matching_angle_close(tokens, begin + 1, end, close) ||
+	    close + 3 > end ||
+	    !abi_token_is_simple(tokens, close + 1, OP_LPAREN) ||
+	    !abi_token_is_simple(tokens, end - 1, OP_RPAREN))
+		return "";
+	string type = abi_cast_target_type_with_substitutions(
+		tokens, begin + 2, close, ctx);
+	string expr = abi_dependent_expression_with_substitutions(
+		tokens, close + 2, end - 1, ctx);
+	return type.empty() || expr.empty() ? string("") : code + type + expr;
 }
 
 bool abi_binary_group_expression_with_substitutions(
@@ -391,12 +647,23 @@ string abi_dependent_expression_with_substitutions(
 		tokens, begin, end, ctx);
 	if (!out.empty())
 		return out;
+	if (abi_qualified_member_expression_with_substitutions(
+		    tokens, begin, end, ctx, out))
+		return out;
+	out = abi_cast_expression_with_substitutions(tokens, begin, end, ctx);
+	if (!out.empty())
+		return out;
 	size_t call_open = 0;
 	if (abi_find_call_open(tokens, begin, end, call_open) &&
 	    call_open > begin + 2 &&
 	    tokens[begin].kind == posttoken::TokenKind::Identifier &&
 	    abi_token_is_simple(tokens, begin + 1, OP_LT) &&
 	    abi_token_is_simple(tokens, call_open - 1, OP_GT))
+		return abi_call_expression_with_substitutions(
+			tokens, begin, call_open, end, ctx);
+	size_t qualified_colon = 0;
+	if (abi_find_call_open(tokens, begin, end, call_open) &&
+	    abi_find_top_level_colon2(tokens, begin, call_open, qualified_colon))
 		return abi_call_expression_with_substitutions(
 			tokens, begin, call_open, end, ctx);
 	if (abi_binary_expression_with_substitutions(tokens, begin, end, ctx, out))

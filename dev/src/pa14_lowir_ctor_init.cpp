@@ -68,7 +68,7 @@ lowered.push_back(convert_value(temp_addr, pa11::make_pointer(object), pa11::mak
 void FunctionLowerer::emit_constructor_call_with_cleanups( Binding* ctor, vector<string>& lowered, const vector<pair<Value, TypePtr> >& temp_cleanups,
 const vector<PendingConstructorConversion>& pending_conversions, bool base_entry) { if (!(base_entry && ctor->is_inline_definition))
 program_.demand_function_declaration(ctor); string callee = program_.constructor_symbol_for(ctor, base_entry); if (base_entry && generated_empty_constructor_record(ctor))
-program_.emit_generated_empty_constructor(ctor, callee); program_.demand_inline_function(ctor, !base_entry); function<string()> call_text = [callee, &lowered]() {
+program_.emit_generated_empty_constructor(ctor, callee); program_.demand_inline_function(ctor, !base_entry); if (base_entry) program_.demand_lifecycle_base_entry_declaration(ctor); function<string()> call_text = [callee, &lowered]() {
 ostringstream call; call << "call void @" << callee << "("; for (size_t i = 0; i < lowered.size(); ++i) {
 if (i != 0) call << ", "; call << lowered[i]; }
 call << ")"; return call.str(); }; if (temp_cleanups.empty())

@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_support.h"
 
 #include <algorithm>
@@ -20,6 +21,56 @@ bool has_token(const vector<Token>& tokens,
 		if (tokens[i].kind == posttoken::TokenKind::Simple &&
 		    tokens[i].type == type)
 			return true;
+	return false;
+}
+
+bool template_argument_has_top_level_brace(const vector<Token>& tokens,
+                                           size_t pos)
+{
+	int angle_depth = 0;
+	int paren_depth = 0;
+	int square_depth = 0;
+	int brace_depth = 0;
+	for (size_t i = pos; i < tokens.size(); ++i)
+	{
+		const Token& token = tokens[i];
+		if (token.kind != posttoken::TokenKind::Simple)
+			continue;
+		if (token.type == OP_LT)
+		{
+			++angle_depth;
+			continue;
+		}
+		if (token.type == OP_GT)
+		{
+			if (angle_depth == 0 && paren_depth == 0 &&
+			    square_depth == 0 && brace_depth == 0)
+				return false;
+			if (angle_depth > 0)
+				--angle_depth;
+			continue;
+		}
+		if (token.type == OP_COMMA && angle_depth == 0 &&
+		    paren_depth == 0 && square_depth == 0 && brace_depth == 0)
+			return false;
+		if (token.type == OP_LPAREN)
+			++paren_depth;
+		else if (token.type == OP_RPAREN && paren_depth > 0)
+			--paren_depth;
+		else if (token.type == OP_LSQUARE)
+			++square_depth;
+		else if (token.type == OP_RSQUARE && square_depth > 0)
+			--square_depth;
+		else if (token.type == OP_LBRACE)
+		{
+			if (angle_depth == 0 && paren_depth == 0 &&
+			    square_depth == 0 && brace_depth == 0)
+				return true;
+			++brace_depth;
+		}
+		else if (token.type == OP_RBRACE && brace_depth > 0)
+			--brace_depth;
+	}
 	return false;
 }
 
@@ -546,8 +597,10 @@ for (size_t i = 0; i < found.size(); ++i) { Binding* candidate = found[i]; if (c
 throw runtime_error("explicit member instantiation not found"); } } if (declared_type->kind != pa11::TypeKind::Function) throw runtime_error("invalid explicit function instantiation");
 if (qname.name.compare(0, 8, "operator") == 0) { bool overloaded_parameter = false; for (size_t i = 0; i < declared_type->parameters.size(); ++i) { TypePtr param =
 pa11::strip_cv(expression_object_type(declared_type->parameters[i])); if (param->kind == pa11::TypeKind::Record || param->kind == pa11::TypeKind::Enum) overloaded_parameter = true; } if (!overloaded_parameter)
-throw runtime_error("invalid overloaded operator instantiation"); } vector<TemplateDeclaration*> declarations = find_function_templates(qname); TemplateDeclaration* selected = NULL;
-vector<TemplateArgument> selected_args; auto substituted_function_type = [&](TemplateDeclaration* declaration, const vector<TemplateArgument>& full_args, TypePtr& out) -> bool { if (declaration == NULL ||
+throw runtime_error("invalid overloaded operator instantiation"); } if (qname.qualifier != NULL && qname.qualifier->kind == ScopeKind::Class) { TypePtr qualifier_record = pa11::record_type_for_scope(qname.qualifier); if (qualifier_record.get() != NULL) { TypePtr bare_qualifier_record = pa11::strip_cv(qualifier_record); if (bare_qualifier_record->kind == pa11::TypeKind::Record) { complete_template_record(bare_qualifier_record); instantiate_member_function_templates(bare_qualifier_record); } } } vector<TemplateDeclaration*> declarations = find_function_templates(qname); TemplateDeclaration* selected = NULL;
+vector<TemplateArgument> selected_args; TypePtr explicit_template_target_type = declared_type; TypePtr explicit_member_template_target_type; if (qname.qualifier != NULL && qname.qualifier->kind == ScopeKind::Class) explicit_member_template_target_type = make_member_function_type(qname.qualifier, declared_type);
+auto target_type_for_declaration = [&](TemplateDeclaration* declaration) -> TypePtr { if (explicit_member_template_target_type.get() != NULL && declaration != NULL && declaration->generic_function_type.get() != NULL && declaration->generic_function_type->kind == pa11::TypeKind::Function && declaration->generic_function_type->parameters.size() == explicit_member_template_target_type->parameters.size()) return explicit_member_template_target_type; return explicit_template_target_type; };
+auto substituted_function_type = [&](TemplateDeclaration* declaration, const vector<TemplateArgument>& full_args, TypePtr& out) -> bool { if (declaration == NULL ||
 declaration->generic_function_type.get() == NULL || declaration->generic_function_type->kind != pa11::TypeKind::Function) return false; vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
 vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_; vector<set<string> > save_pack_subst = template_type_parameter_packs_; map<string, TypePtr> subst;
 map<string, TemplateArgument> value_subst; set<string> pack_subst; for (size_t ai = 0; ai < full_args.size() && ai < declaration->parameters.size(); ++ai) { const TemplateParameterInfo& parameter =
@@ -558,12 +611,19 @@ template_value_substitutions_.insert( template_value_substitutions_.end(), decla
 template_value_substitutions_.push_back(value_subst); template_type_parameter_packs_.push_back(pack_subst); try { out = substitute_function_template_type( declaration, declaration->generic_function_type); }
 catch (const runtime_error&) { template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; return false; }
 template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; return out.get() != NULL && out->kind == pa11::TypeKind::Function; };
-for (size_t i = 0; i < declarations.size(); ++i) { vector<TemplateArgument> full_args; if (!deduce_function_template_target_type(declarations[i], declared_type, qname.template_arguments, full_args)) continue;
-TypePtr candidate_type; if (!substituted_function_type(declarations[i], full_args, candidate_type) || !pa11::same_type(candidate_type, declared_type)) continue; if (selected != NULL)
-throw runtime_error("ambiguous explicit function instantiation"); selected = declarations[i]; selected_args = full_args; } if (selected == NULL) throw runtime_error("function template not found");
+	TypePtr selected_target_type; for (size_t i = 0; i < declarations.size(); ++i) { TypePtr target_type = target_type_for_declaration(declarations[i]); vector<TemplateArgument> full_args; if (!deduce_function_template_target_type(declarations[i], target_type, qname.template_arguments, full_args)) continue;
+		TypePtr candidate_type; if (!substituted_function_type(declarations[i], full_args, candidate_type) || (!pa11::same_type(candidate_type, target_type) && !same_template_signature_type(candidate_type, target_type))) continue; if (selected != NULL)
+		{ if (same_function_template_declaration_family(selected, declarations[i])) { if (!selected->has_definition && declarations[i]->has_definition) { selected = declarations[i]; selected_args = full_args; selected_target_type = target_type; } continue; } bool candidate_more_specialized = function_template_declaration_more_specialized(declarations[i], selected); bool selected_more_specialized = function_template_declaration_more_specialized(selected, declarations[i]); if (candidate_more_specialized && !selected_more_specialized) { selected = declarations[i]; selected_args = full_args; selected_target_type = target_type; continue; } if (selected_more_specialized && !candidate_more_specialized) continue; throw runtime_error("ambiguous explicit function instantiation"); } selected = declarations[i]; selected_args = full_args; selected_target_type = target_type; } if (selected == NULL) throw runtime_error("function template not found");
 string key = template_argument_key(selected_args); map<string, Binding*>::iterator existing_specialization = selected->function_specializations.find(key);
-if (existing_specialization != selected->function_specializations.end() && function_template_placeholders_.find(existing_specialization->second) == function_template_placeholders_.end()) { if (!extern_declaration)
-existing_specialization->second->is_object_root = true; expect(OP_SEMICOLON); return; } if (extern_declaration) { Binding* binding = add_function_binding(selected->owner, selected->name, declared_type, false);
+if (existing_specialization == selected->function_specializations.end()) for (size_t i = 0; i < declarations.size(); ++i) {
+if (declarations[i] == selected || !same_function_template_declaration_family(selected, declarations[i])) continue;
+map<string, Binding*>::iterator found_existing = declarations[i]->function_specializations.find(key);
+if (found_existing == declarations[i]->function_specializations.end()) continue;
+selected->function_specializations[key] = found_existing->second;
+existing_specialization = selected->function_specializations.find(key);
+break; }
+if (existing_specialization != selected->function_specializations.end()) { Binding* existing = existing_specialization->second; bool existing_has_body = function_bodies_.find(existing) != function_bodies_.end() || pending_function_bodies_.find(existing) != pending_function_bodies_.end(); if (function_template_placeholders_.find(existing) == function_template_placeholders_.end() || existing_has_body) { if (!extern_declaration)
+existing->is_object_root = true; expect(OP_SEMICOLON); return; } } if (extern_declaration) { Binding* binding = add_function_binding(selected->owner, selected->name, selected_target_type.get() != NULL ? selected_target_type : declared_type, false);
 binding->language_linkage = current_language_linkage(); binding->is_object_root = true; binding->function_specialization_symbol = abi_function_template_specialization_symbol(selected, selected_args, binding, &declaration_tokens_);
 selected->function_specializations[key] = binding; function_template_placeholders_[binding] = selected;
 function_template_specialization_arguments_[binding] = selected_args; } else { selected->function_specializations.erase(key); Binding* binding = instantiate_function_template(selected, selected_args);
@@ -597,17 +657,36 @@ TemplateDeclaration* Parser::register_template_declaration(
 			ETokenType key = current().type;
 			++pos_;
 			QualifiedName name = parse_id_expression_name();
+			if (at(OP_LT) && !name.has_template_arguments)
+			{
+				name.has_template_arguments = true;
+				parse_template_argument_list(name.template_arguments);
+			}
 			Scope* target = name.qualifier != NULL
 				? name.qualifier : nearest_namespace_scope(class_scope);
-			vector<Binding*> found =
-				lookup_qualified_set(target, name.name, pa11::LOOKUP_TYPE);
 			TypePtr friend_type;
-			if (!found.empty() &&
-			    found[0]->type.get() != NULL &&
-			    pa11::strip_cv(found[0]->type)->kind ==
-			    pa11::TypeKind::Record)
-				friend_type = found[0]->type;
-			else
+			if (name.has_template_arguments)
+			{
+				TemplateDeclaration* class_template =
+					find_class_template(target, name.name);
+				if (class_template != NULL)
+					friend_type = instantiate_class_template(
+						class_template,
+						name.template_arguments);
+			}
+			if (friend_type.get() == NULL)
+			{
+				vector<Binding*> found =
+					lookup_qualified_set(target,
+					                     name.name,
+					                     pa11::LOOKUP_TYPE);
+				if (!found.empty() &&
+				    found[0]->type.get() != NULL &&
+				    pa11::strip_cv(found[0]->type)->kind ==
+				    pa11::TypeKind::Record)
+					friend_type = found[0]->type;
+			}
+			if (friend_type.get() == NULL)
 				friend_type = add_record(target,
 				                         name.name,
 				                         class_tag(key),
@@ -667,7 +746,7 @@ skip_balanced(OP_LPAREN, OP_RPAREN); Scope* owner = current_scope(); bool templa
 if (tokens_[p].kind == posttoken::TokenKind::Simple && tokens_[p].type == OP_LT) ++depth; else if (tokens_[p].kind == posttoken::TokenKind::Simple && tokens_[p].type == OP_GT) { --depth; if (depth == 0) {
 template_id_qualifier = p + 1 < tokens_.size() && tokens_[p + 1].kind == posttoken::TokenKind::Simple && tokens_[p + 1].type == OP_COLON2; break; } } ++p; } } if (at(OP_COLON2) || (at_identifier() &&
 (lookahead(OP_COLON2, 1) || template_id_qualifier))) owner = parse_nested_name_specifier(NULL); if (!at_identifier()) throw runtime_error("expected class template name"); declaration->owner = owner;
-	declaration->name = consume_identifier(); if (owner != NULL && owner->kind == ScopeKind::Class) declaration->lexical_scope = owner; if (at(OP_LT)) { vector<TemplateArgument> pattern;
+		declaration->name = consume_identifier(); if (owner != NULL && owner->kind == ScopeKind::Class) declaration->lexical_scope = owner; if (at(OP_LT)) { vector<TemplateArgument> pattern;
 parse_template_argument_list(pattern); declaration->class_specialization = true; declaration->class_specialization_pattern = pattern; declaration->has_definition = has_token(tokens_, pos_,
 declaration->decl_end, OP_LBRACE); TemplateDeclaration* primary = find_class_template(owner, declaration->name); if (primary == NULL) { if (owner == NULL) owner = current_scope(); unique_ptr<TemplateDeclaration> holder( new TemplateDeclaration()); primary = holder.get(); primary->kind = TemplateDeclarationKind::Class; primary->owner = owner;
 primary->lexical_scope = owner; primary->name = declaration->name; primary->tag = declaration->tag; primary->parameters = declaration->parameters; class_templates_[owner][declaration->name] = primary;
@@ -851,6 +930,8 @@ bool Parser::register_conversion_function_template(TemplateDeclaration* declarat
 			!class_protected_access_.empty() &&
 			class_protected_access_.back();
 		function_parameter_names_[placeholder] = vector<string>(1, "this");
+		placeholder->function_parameter_names =
+			function_parameter_names_[placeholder];
 		declaration->function_parameter_names =
 			function_parameter_names_[placeholder];
 		declaration->kind = TemplateDeclarationKind::Function;
@@ -875,8 +956,11 @@ bool Parser::register_conversion_function_template(TemplateDeclaration* declarat
 			map<const void*, TemplateDeclaration*>::iterator outer =
 				record_template_declarations_.find(pa11::strip_cv(owner_record).get());
 			if (outer != record_template_declarations_.end())
-				member_function_templates_[make_pair(outer->second, name)]
-					.push_back(declaration);
+			{
+				vector<TemplateDeclaration*>& members =
+					member_function_templates_[make_pair(outer->second, name)];
+				add_member_function_template(members, declaration);
+			}
 		}
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
@@ -895,7 +979,7 @@ bool Parser::register_conversion_function_template(TemplateDeclaration* declarat
 }
 
 void Parser::register_function_template(TemplateDeclaration* declaration)
-{ bool could_conversion_template = at(KW_OPERATOR) || at(KW_EXPLICIT) || at(KW_CONSTEXPR); bool could_constructor_template = at_identifier() || at(OP_COLON2) || at(KW_EXPLICIT) || at(KW_CONSTEXPR); if (could_conversion_template && register_conversion_function_template(declaration)) return; if (could_constructor_template && register_constructor_template(declaration)) return; declaration->kind = TemplateDeclarationKind::Function; map<string, TypePtr> parameter_types;
+{ bool could_conversion_template = at(KW_OPERATOR) || at(KW_EXPLICIT) || at(KW_CONSTEXPR) || starts_attribute(); bool could_constructor_template = at_identifier() || at(OP_COLON2) || at(KW_EXPLICIT) || at(KW_CONSTEXPR) || starts_attribute(); if (could_conversion_template && register_conversion_function_template(declaration)) return; if (could_constructor_template && register_constructor_template(declaration)) return; declaration->kind = TemplateDeclarationKind::Function; map<string, TypePtr> parameter_types;
 map<string, TemplateArgument> parameter_values; collect_template_parameter_placeholders(declaration->parameters, parameter_types, parameter_values); size_t save_pos = pos_;
 vector<map<string, TypePtr> > save_subst = template_type_substitutions_; vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_;
 vector<set<string> > save_pack_subst = template_type_parameter_packs_; template_type_substitutions_.push_back(parameter_types); template_value_substitutions_.push_back(parameter_values);
@@ -912,7 +996,7 @@ pa11::record_type_for_scope(qname.qualifier); owner_record = owner_record.get() 
 : find_class_template(qname.qualifier->parent, qname.qualifier->name); if (owner_template != NULL) { declaration->kind = TemplateDeclarationKind::Function; declaration->owner = qname.qualifier;
 declaration->name = qname.name; declaration->class_template_member = template_parameter_lists_match( declaration->parameters, owner_template->parameters) || !declaration->outer_type_substitutions.empty(); declaration->generic_function_type = pa11::make_function(
 pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false); declaration->has_definition = true; vector<TemplateDeclaration*>& members = member_function_templates_[make_pair( owner_template, qname.name)];
-if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
+add_member_function_template(members, declaration); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos; return; } } Scope* target = qname.qualifier != NULL ? qname.qualifier : declaration->owner; declaration->owner = target; declaration->name = qname.name;
 if (qname.has_template_arguments) { declaration->class_specialization = true; declaration->class_specialization_pattern = qname.template_arguments; } template_type_substitutions_ = save_subst;
 template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos; if (declaration->parameters.empty() && target->kind == ScopeKind::Class && qname.qualifier != NULL) {
@@ -947,13 +1031,13 @@ if (placeholder == NULL) { placeholder = add_value(target, BindingKind::Function
 placeholder->is_hidden_friend = false; placeholder->is_static_member = target->kind == ScopeKind::Class && (specs.static_decl || static_member_definition); declaration->placeholder = placeholder;
 const Suffix* primary_suffix = declarator_function_suffix(declarator); placeholder->is_constexpr = placeholder->is_constexpr || specs.constexpr_decl; placeholder->is_declared_inline = placeholder->is_declared_inline || specs.inline_decl || specs.constexpr_decl; placeholder->is_private = target->kind == ScopeKind::Class && !class_private_access_.empty() && class_private_access_.back(); placeholder->is_protected_member = target->kind == ScopeKind::Class && !class_protected_access_.empty() && class_protected_access_.back(); if (primary_suffix != NULL) { placeholder->unwind_no = primary_suffix->noexcept_decl; placeholder->ref_qualifier = primary_suffix->ref_qualifier; } if (primary_suffix != NULL) { vector<string> names; vector<Expr> defaults; if (target->kind == ScopeKind::Class && !placeholder->is_static_member)
 defaults.push_back(Expr()); for (size_t i = 0; i < primary_suffix->parameters.size(); ++i) { if (primary_suffix->parameters[i].type.get() != NULL || !primary_suffix->parameters[i].name.empty())
-names.push_back(primary_suffix->parameters[i].name); defaults.push_back( primary_suffix->parameters[i].default_value); } map<Binding*, vector<string> >::const_iterator old_names =
-function_parameter_names_.find(placeholder); if (old_names != function_parameter_names_.end()) { vector<string> merged = old_names->second; size_t offset = placeholder->owner != NULL &&
+	names.push_back(primary_suffix->parameters[i].name); defaults.push_back( primary_suffix->parameters[i].default_value); } map<Binding*, vector<string> >::const_iterator old_names =
+	function_parameter_names_.find(placeholder); if (old_names != function_parameter_names_.end()) { vector<string> merged = old_names->second; size_t offset = placeholder->owner != NULL &&
 placeholder->owner->kind == ScopeKind::Class && !placeholder->is_static_member && merged.size() == names.size() + 1 ? 1 : 0; if (merged.size() < names.size() + offset) merged.resize(names.size() + offset);
 for (size_t i = 0; i < names.size(); ++i) if (!names[i].empty() || merged[i + offset].empty()) merged[i + offset] = names[i]; names = merged; } else if (target->kind == ScopeKind::Class && qname.qualifier != NULL) {
 vector<Binding*> existing_functions = lookup_qualified_set(target, qname.name, pa11::LOOKUP_FUNCTION); for (size_t fi = 0; fi < existing_functions.size(); ++fi) { map<Binding*, vector<string> >::const_iterator
 existing_names = function_parameter_names_.find( existing_functions[fi]); if (existing_names == function_parameter_names_.end() || existing_names->second.size() != names.size()) continue;
-for (size_t ni = 0; ni < names.size(); ++ni) if (names[ni].empty()) names[ni] = existing_names->second[ni]; break; } } function_parameter_names_[placeholder] = names; declaration->function_parameter_names = names;
+for (size_t ni = 0; ni < names.size(); ++ni) if (names[ni].empty()) names[ni] = existing_names->second[ni]; break; } } function_parameter_names_[placeholder] = names; placeholder->function_parameter_names = names; declaration->function_parameter_names = names;
 map<Binding*, vector<Expr> >::const_iterator old_defaults = default_arguments_.find(placeholder); if (old_defaults != default_arguments_.end()) { vector<Expr> merged = defaults;
 if (merged.size() < old_defaults->second.size()) merged.resize(old_defaults->second.size()); for (size_t i = 0; i < old_defaults->second.size(); ++i) if (!merged[i].valid && old_defaults->second[i].valid)
 merged[i] = old_defaults->second[i]; defaults = merged; } default_arguments_[placeholder] = defaults; } if (previous_declaration != NULL) merge_template_defaults(declaration->parameters,
@@ -963,7 +1047,7 @@ TypePtr owner_record = pa11::record_type_for_scope(target); if (owner_record.get
 record_template_declarations_.find(pa11::strip_cv(owner_record).get()); TemplateDeclaration* owner_template = outer != record_template_declarations_.end() ? outer->second
 : find_class_template(target->parent, target->name); if (qname.qualifier != NULL && owner_template != NULL && (template_parameter_lists_match(declaration->parameters, owner_template->parameters) || !declaration->outer_type_substitutions.empty()))
 declaration->class_template_member = true; if (owner_template != NULL) { vector<TemplateDeclaration*>& members = member_function_templates_[make_pair(owner_template, qname.name)];
-if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); } } } catch (const exception& err) { string message = err.what(); bool hard_registration_error =
+add_member_function_template(members, declaration); } } } catch (const exception& err) { string message = err.what(); bool hard_registration_error =
 hard_template_registration_error(message); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos;
 if (could_constructor_template && register_constructor_template(declaration)) return; if (register_dependent_nested_constructor_template(declaration)) return; if (register_dependent_qualified_conversion_function_template( declaration)) return;
 if (register_dependent_qualified_member_function_template( declaration)) return; if (register_static_member_variable_template(declaration)) return; if (hard_registration_error) throw;
@@ -1003,7 +1087,7 @@ arg_type->name != parameter.name) owner_name_subst[arg_type->name] = pa11::make_
 owner_name_subst); } declaration->kind = TemplateDeclarationKind::Function; declaration->owner = owner_template->owner; declaration->name = member_name; declaration->class_template_member =
 template_parameter_lists_match(declaration->parameters, owner_template->parameters) || owner_template_args_pos != declaration->decl_end || !declaration->outer_type_substitutions.empty(); declaration->generic_function_type = pa11::make_function(pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false);
 declaration->constructor_template = member_name == owner_template->name; declaration->has_definition = true; vector<TemplateDeclaration*>& members = member_function_templates_[make_pair(owner_template, declaration->name)];
-if (find(members.begin(), members.end(), declaration) == members.end()) members.push_back(declaration); return true; }
+add_member_function_template(members, declaration); return true; }
 
 bool Parser::register_dependent_qualified_conversion_function_template(
 	TemplateDeclaration* declaration)
@@ -1070,8 +1154,7 @@ bool Parser::register_dependent_qualified_conversion_function_template(
 	vector<TemplateDeclaration*>& members =
 		member_function_templates_[make_pair(owner_template,
 		                                     declaration->name)];
-	if (find(members.begin(), members.end(), declaration) == members.end())
-		members.push_back(declaration);
+	add_member_function_template(members, declaration);
 	return true;
 }
 
@@ -1093,7 +1176,7 @@ nested_components.push_back(component); continue; } final_name = component; brea
 throw runtime_error("not a dependent nested constructor"); declaration->kind = TemplateDeclarationKind::Function; declaration->constructor_template = true; declaration->class_template_member = true;
 declaration->owner = outer_template->owner; declaration->name = final_name; declaration->generic_function_type = pa11::make_function(pa11::make_fundamental(FT_VOID), vector<TypePtr>(), false);
 declaration->has_definition = has_token(tokens_, pos_, declaration->decl_end, OP_LBRACE); vector<TemplateDeclaration*>& constructors = member_function_templates_[make_pair(outer_template, final_name)];
-if (find(constructors.begin(), constructors.end(), declaration) == constructors.end()) constructors.push_back(declaration); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
+add_member_function_template(constructors, declaration); template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos; return true; } catch (const exception&) { template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; pos_ = save_pos; return false; } }
 
@@ -1102,7 +1185,7 @@ bool Parser::register_constructor_template(TemplateDeclaration* declaration)
 vector<Scope*> save_scopes = scopes_; vector<map<string, TypePtr> > save_subst = template_type_substitutions_; vector<map<string, TemplateArgument> > save_value_subst = template_value_substitutions_;
 vector<set<string> > save_pack_subst = template_type_parameter_packs_; template_type_substitutions_.push_back(parameter_types); template_value_substitutions_.push_back(parameter_values);
 template_type_parameter_packs_.push_back( collect_template_type_parameter_packs(declaration->parameters)); pos_ = declaration->decl_begin; bool matched_constructor = false; try {
-bool explicit_ctor = consume_explicit_specifier(); bool constexpr_ctor = consume(KW_CONSTEXPR); if (!explicit_ctor) explicit_ctor = consume_explicit_specifier(); QualifiedName qname = parse_id_expression_name();
+skip_attributes(); bool explicit_ctor = consume_explicit_specifier(); bool constexpr_ctor = consume(KW_CONSTEXPR); if (!explicit_ctor) explicit_ctor = consume_explicit_specifier(); QualifiedName qname = parse_id_expression_name();
 Scope* class_scope = qname.qualifier; if (class_scope == NULL && current_scope() != NULL && current_scope()->kind == ScopeKind::Class && qname.name == current_scope()->name) class_scope = current_scope();
 if (class_scope == NULL || class_scope->kind != ScopeKind::Class || !at(OP_LPAREN)) throw runtime_error("not a constructor template definition"); TypePtr class_type = pa11::record_type_for_scope(class_scope);
 if (class_type.get() == NULL) throw runtime_error("constructor without class type"); if (!constructor_name_matches_scope(class_scope, qname.name)) throw runtime_error("not a constructor template definition");
@@ -1113,12 +1196,14 @@ parse_parameter_clause(parameters, variadic); scopes_.pop_back(); expect(OP_RPAR
 fn_params.push_back(pa11::make_pointer(class_type)); for (size_t i = 0; i < parameters.size(); ++i) fn_params.push_back(parameters[i].type);
 TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID), fn_params, variadic); Binding* existing = find_matching_function_template_placeholder( function_template_placeholders_, class_scope, qname.name,
 fn_type, declaration->parameters); if (existing == NULL) existing = find_matching_function(class_scope, qname.name, fn_type); bool merged_noexcept = (existing != NULL && existing->unwind_no) || suffix.noexcept_decl;
-if (existing != NULL && existing->unwind_no != suffix.noexcept_decl) throw runtime_error("function exception specification mismatch");
-Binding* placeholder = existing != NULL ? existing : add_value(class_scope, BindingKind::Function, qname.name, fn_type);
-TemplateDeclaration* previous_declaration = NULL; if (existing != NULL) { map<Binding*, TemplateDeclaration*>::iterator previous = function_template_placeholders_.find(existing);
+	if (existing != NULL && existing->unwind_no != suffix.noexcept_decl &&
+	    !hosted_compatibility_) throw runtime_error("function exception specification mismatch");
+	Binding* placeholder = existing != NULL ? existing : add_value(class_scope, BindingKind::Function, qname.name, fn_type);
+	discard_implicit_default_constructor(class_type, placeholder);
+	TemplateDeclaration* previous_declaration = NULL; if (existing != NULL) { map<Binding*, TemplateDeclaration*>::iterator previous = function_template_placeholders_.find(existing);
 if (previous != function_template_placeholders_.end()) previous_declaration = previous->second; } placeholder->unwind_no = merged_noexcept; placeholder->is_explicit = explicit_ctor;
 placeholder->is_constexpr = placeholder->is_constexpr || constexpr_ctor; vector<string> names(1, "this"); vector<Expr> defaults(1); for (size_t i = 0; i < parameters.size(); ++i) { names.push_back(parameters[i].name);
-defaults.push_back(parameters[i].default_value); } function_parameter_names_[placeholder] = names; declaration->function_parameter_names = names; default_arguments_[placeholder] = defaults; declaration->kind = TemplateDeclarationKind::Function;
+defaults.push_back(parameters[i].default_value); } function_parameter_names_[placeholder] = names; placeholder->function_parameter_names = names; declaration->function_parameter_names = names; default_arguments_[placeholder] = defaults; declaration->kind = TemplateDeclarationKind::Function;
 declaration->constructor_template = true; declaration->owner = class_scope; declaration->name = qname.name; declaration->generic_function_type = fn_type; declaration->placeholder = placeholder;
 if (previous_declaration != NULL) merge_template_defaults(declaration->parameters, previous_declaration->parameters); function_template_placeholders_[placeholder] = declaration;
 declaration->has_definition = has_token(tokens_, pos_, declaration->decl_end, OP_LBRACE); TemplateDeclaration* outer_template = NULL; for (Scope* owner_scope = class_scope; owner_scope != NULL && outer_template == NULL;
@@ -1128,7 +1213,7 @@ string outer_name = qname.spelling; size_t nested = outer_name.find("::"); if (n
 outer_name = outer_name.substr(0, args); map<Scope*, map<string, TemplateDeclaration*> >::iterator sit = class_templates_.find(declaration->owner); if (sit != class_templates_.end()) {
 map<string, TemplateDeclaration*>::iterator found = sit->second.find(outer_name); if (found != sit->second.end()) outer_template = found->second; } } if (outer_template == NULL && qname.qualified) {
 map<Scope*, map<string, TemplateDeclaration*> >::iterator sit = class_templates_.find(declaration->owner); if (sit != class_templates_.end() && sit->second.size() == 1) outer_template = sit->second.begin()->second; }
-if (outer_template != NULL) { declaration->class_template_member = declaration->outer_type_substitutions.empty() && template_parameter_lists_match(declaration->parameters, outer_template->parameters); member_function_templates_[make_pair(outer_template, qname.name)].push_back(declaration); } template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
+if (outer_template != NULL) { declaration->class_template_member = declaration->outer_type_substitutions.empty() && template_parameter_lists_match(declaration->parameters, outer_template->parameters); vector<TemplateDeclaration*>& members = member_function_templates_[make_pair(outer_template, qname.name)]; add_member_function_template(members, declaration); } template_type_substitutions_ = save_subst; template_value_substitutions_ = save_value_subst;
 template_type_parameter_packs_ = save_pack_subst; scopes_ = save_scopes; pos_ = save_pos; return true; } catch (const exception&) { template_type_substitutions_ = save_subst;
 template_value_substitutions_ = save_value_subst; template_type_parameter_packs_ = save_pack_subst; scopes_ = save_scopes; pos_ = save_pos; if (matched_constructor) throw; return false; } }
 
@@ -1220,7 +1305,9 @@ bool Parser::find_function_parameter_pack_substitution(
 bool Parser::try_parse_template_template_argument(TemplateArgument& out)
 {
 	size_t save = pos_;
-	Scope* qualifier = NULL;
+		Scope* qualifier = NULL;
+		string qualifier_spelling;
+		bool qualifier_template_keyword = false;
 	bool template_id_qualifier = false;
 	if (at_identifier() && lookahead(OP_LT, 1))
 	{
@@ -1253,16 +1340,16 @@ bool Parser::try_parse_template_template_argument(TemplateArgument& out)
 	     (lookahead(OP_COLON2, 1) || template_id_qualifier)))
 	{
 			try
-			{
-				qualifier = parse_nested_name_specifier(NULL);
-			}
-			catch (const exception&)
-			{
-				pos_ = save;
-				return false;
-			}
-		consume(KW_TEMPLATE);
-	}
+				{
+					qualifier = parse_nested_name_specifier(&qualifier_spelling);
+				}
+				catch (const exception&)
+				{
+					pos_ = save;
+					return false;
+				}
+			qualifier_template_keyword = consume(KW_TEMPLATE);
+		}
 	if (!at_identifier())
 	{
 		pos_ = save;
@@ -1289,6 +1376,17 @@ bool Parser::try_parse_template_template_argument(TemplateArgument& out)
 		declaration = find_alias_template(qualifier, name);
 	if (declaration == NULL)
 	{
+		TypePtr qualifier_record =
+			qualifier != NULL ? pa11::record_type_for_scope(qualifier)
+			                  : TypePtr();
+			if (qualifier_record.get() != NULL &&
+			    type_is_template_dependent(qualifier_record) &&
+			    qualifier_template_keyword)
+			{
+				out = TemplateArgument::template_arg(NULL);
+				out.value_name = qualifier_spelling + name;
+			return true;
+		}
 		pos_ = save;
 		return false;
 	}
@@ -1336,8 +1434,8 @@ if (expr.binding->is_static_member && (!active_class_instantiations_.empty() || 
 TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.value_name = expr.dependent_value_name.empty() ? expr.binding->name : expr.dependent_value_name; arg.value_owner_template_name =
 expr.dependent_value_owner_template_name; arg.value_member_name = expr.dependent_value_member_name; arg.value_negated = expr.dependent_value_negated; arg.value_owner_template_arguments =
 expr.dependent_value_owner_template_arguments; arg.value_expr_begin = save; arg.value_expr_end = expr_end; return arg; } TemplateArgument arg = TemplateArgument::value_arg(expression_object_type(expr.type),
-reinterpret_cast<uint64_t>( expr.binding)); arg.value_binding = expr.binding; return arg; } if (!expr.has_constant_value) { if (!active_class_instantiations_.empty() || !template_type_substitutions_.empty() ||
-!template_value_substitutions_.empty()) { TemplateArgument qualified_dependent; size_t replay_save = pos_; pos_ = save; bool saw_amp = consume(OP_AMP); bool parsed_qualified = saw_amp && try_parse_dependent_qualified_non_type_template_argument(qualified_dependent); if (parsed_qualified) { qualified_dependent.type = expression_object_type(expr.type); qualified_dependent.value_expr_begin = save; qualified_dependent.value_expr_end = expr_end; pos_ = replay_save; return qualified_dependent; } pos_ = replay_save; TemplateArgument arg = TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.value_name = expr.dependent_value_name; arg.value_owner_template_name =
+	reinterpret_cast<uint64_t>( expr.binding)); arg.value_binding = expr.binding; return arg; } if (!expr.has_constant_value) { if (!expr.dependent_value_name.empty() || !active_class_instantiations_.empty() || !template_type_substitutions_.empty() ||
+	!template_value_substitutions_.empty()) { TemplateArgument qualified_dependent; size_t replay_save = pos_; pos_ = save; bool saw_amp = consume(OP_AMP); bool parsed_qualified = saw_amp && try_parse_dependent_qualified_non_type_template_argument(qualified_dependent); if (parsed_qualified) { qualified_dependent.type = expression_object_type(expr.type); qualified_dependent.value_expr_begin = save; qualified_dependent.value_expr_end = expr_end; pos_ = replay_save; return qualified_dependent; } pos_ = replay_save; TemplateArgument arg = TemplateArgument::dependent_value_arg( expression_object_type(expr.type)); arg.value_name = expr.dependent_value_name; arg.value_owner_template_name =
 expr.dependent_value_owner_template_name; arg.value_member_name = expr.dependent_value_member_name; arg.value_negated = expr.dependent_value_negated; arg.value_owner_template_arguments =
 expr.dependent_value_owner_template_arguments; arg.value_expr_begin = save; arg.value_expr_end = expr_end; return arg; } throw runtime_error("invalid non-type template argument"); }
 return TemplateArgument::value_arg(expression_object_type(expr.type), expr.constant_value); }
@@ -1353,13 +1451,13 @@ if (offset < template_type_substitutions_.size()) { size_t index = template_type
 if (subst.kind == TemplateArgumentKind::Pack && !at(OP_DOTS)) { TypePtr type_subst; if (find_template_type_substitution(value_name, type_subst) && active_type_parameter_pack(value_name))
 arg = TemplateArgument::type_arg(type_subst); else if (!subst.pack.empty() && subst.pack[0].dependent && subst.pack[0].value_name == value_name) arg = subst.pack[0]; else { TypePtr value_type =
 !subst.pack.empty() ? subst.pack[0].type : TypePtr(); arg = TemplateArgument::dependent_value_arg( value_type.get() != NULL ? value_type : pa11::make_fundamental(FT_INT)); arg.value_name = value_name; } } else
-arg = subst; arg.pack_expansion = consume(OP_DOTS); arguments.push_back(arg); if (!consume(OP_COMMA)) break; continue; } } try { size_t braced_value_save = pos_; TypePtr braced_type; bool parsed_braced_type = false;
+arg = subst; arg.pack_expansion = consume(OP_DOTS); arguments.push_back(arg); if (!consume(OP_COMMA)) break; continue; } } try { size_t braced_value_save = pos_; if (template_argument_has_top_level_brace(tokens_, pos_)) { TypePtr braced_type; bool parsed_braced_type = false;
 ++defer_class_template_completion_depth_; try { parsed_braced_type = try_parse_type_name(braced_type); } catch (...) { --defer_class_template_completion_depth_; throw; } --defer_class_template_completion_depth_;
 if (parsed_braced_type && at(OP_LBRACE)) { Expr init = parse_braced_init_list(); if (init.node.children.empty()) { TemplateArgument braced_arg; TypePtr bare = pa11::strip_cv(braced_type);
 if (type_is_template_dependent(braced_type)) { braced_arg = TemplateArgument::dependent_value_arg(braced_type); braced_arg.value_name = pa11::describe_type(braced_type) + "{}"; arguments.push_back(braced_arg);
 if (!consume(OP_COMMA)) break; continue; } if (bare->kind == pa11::TypeKind::Record && bare->scope != NULL) { complete_template_record(bare); vector<Binding*> values = lookup_qualified_set(bare->scope, "value",
 pa11::LOOKUP_VARIABLE); bool have_braced_value = false; for (size_t vi = 0; vi < values.size(); ++vi) if (values[vi]->has_constant) { braced_arg = TemplateArgument::value_arg( expression_object_type(values[vi]->type),
-values[vi]->constant_value); have_braced_value = true; break; } if (have_braced_value) { arguments.push_back(braced_arg); if (!consume(OP_COMMA)) break; continue; } } } } pos_ = braced_value_save; TypePtr type;
+values[vi]->constant_value); have_braced_value = true; break; } if (have_braced_value) { arguments.push_back(braced_arg); if (!consume(OP_COMMA)) break; continue; } } } } } pos_ = braced_value_save; TypePtr type;
 ++defer_class_template_completion_depth_; try { type = parse_type_id(); } catch (...) { --defer_class_template_completion_depth_; throw; } --defer_class_template_completion_depth_; if (save < tokens_.size() &&
 tokens_[save].type == KW_TYPENAME && at(OP_COLON2)) { TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() != NULL && !bare->template_primary_name.empty()) { string dependent_name =
 bare->template_primary_name + "<>"; vector<vector<pa11::TemplateInstanceArgument> > argument_lists; if (!bare->template_arguments.empty()) argument_lists.push_back( bare->template_arguments); while (consume(OP_COLON2)) {

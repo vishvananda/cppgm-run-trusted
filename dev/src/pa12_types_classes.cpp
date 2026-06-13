@@ -448,6 +448,37 @@ TypePtr Parser::parse_class_specifier()
 	parse_class_body(class_scope, key == KW_CLASS);
 	scopes_.pop_back();
 	expect(OP_RBRACE);
+	if (active_template_class && class_scope != NULL)
+	{
+		const string type_prefix = "__anonymous_union_type__";
+		const string storage_prefix = "__anonymous_union_storage__";
+		size_t original_count = class_scope->binding_order.size();
+		for (size_t i = 0; i < original_count; ++i)
+		{
+			Binding* member = class_scope->binding_order[i];
+			if (member == NULL ||
+			    member->kind != BindingKind::Type ||
+			    member->name.find(type_prefix) != 0 ||
+			    member->type.get() == NULL)
+				continue;
+			TypePtr anonymous = pa11::strip_cv(member->type);
+			if (anonymous->kind != pa11::TypeKind::Record ||
+			    anonymous->tag != "union" ||
+			    anonymous->scope == NULL)
+				continue;
+			string storage_name = member->name;
+			storage_name.replace(0, type_prefix.size(), storage_prefix);
+			if (pa11::find_owned_binding(class_scope,
+			                             storage_name,
+			                             BindingKind::Variable) != NULL)
+				continue;
+			Binding* storage = add_value(class_scope,
+			                             BindingKind::Variable,
+			                             storage_name,
+			                             anonymous);
+			inject_anonymous_union_members(anonymous->scope, storage);
+		}
+	}
 	for (size_t i = 0; class_scope != NULL &&
 	     i < class_scope->binding_order.size(); ++i)
 	{
@@ -633,9 +664,11 @@ TypePtr Parser::parse_enum_specifier()
 {
 	expect(KW_ENUM);
 	bool scoped = consume(KW_CLASS) || consume(KW_STRUCT);
+	skip_attributes();
 	string name;
 	if (at_identifier())
 		name = consume_identifier();
+	skip_attributes();
 	EFundamentalType underlying = FT_INT;
 	if (consume(OP_COLON))
 		underlying = parse_enum_underlying_type();
@@ -657,13 +690,24 @@ TypePtr Parser::parse_enum_specifier()
 	while (!at(OP_RBRACE))
 	{
 		string enumerator = consume_identifier();
+		skip_attributes();
 		uint64_t value = next_value;
 		if (consume(OP_ASS))
 		{
 			Expr explicit_value = parse_assignment_expression();
 			if (!explicit_value.has_constant_value)
-				throw runtime_error("invalid enumerator initializer");
-			value = explicit_value.constant_value;
+			{
+				bool dependent_initializer =
+					validating_template_definition_ ||
+					active_class_instantiation_dependent() ||
+					type_is_template_dependent(explicit_value.type) ||
+					!explicit_value.dependent_value_name.empty();
+				if (!dependent_initializer)
+					throw runtime_error("invalid enumerator initializer");
+			}
+			else
+				value = explicit_value.constant_value;
+			skip_attributes();
 		}
 		Binding* binding =
 			pa11::add_binding(enum_scope, BindingKind::Enumerator, enumerator, type);

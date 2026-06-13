@@ -14,6 +14,58 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+namespace {
+
+bool hosted_streambuf_iterator_template(const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL ||
+	    (declaration->name != "istreambuf_iterator" &&
+	     declaration->name != "ostreambuf_iterator"))
+		return false;
+	for (Scope* scope = declaration->owner;
+	     scope != NULL;
+	     scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+			return true;
+	return false;
+}
+
+bool hosted_shared_ptr_template(const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL ||
+	    (declaration->name != "shared_ptr" &&
+	     declaration->name != "__shared_ptr"))
+		return false;
+	for (Scope* scope = declaration->owner;
+	     scope != NULL;
+	     scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+			return true;
+	return false;
+}
+
+void complete_hosted_shared_ptr_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
+		return;
+	bare->complete = true;
+	bare->fields.clear();
+	bare->direct_bases.clear();
+	bare->direct_base_offsets.clear();
+	bare->direct_base_virtuals.clear();
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
+	bare->direct_base_offset = 0;
+	bare->record_size = 16;
+	bare->record_align = 8;
+	bare->nonvirtual_size = 16;
+	bare->nonvirtual_align = 8;
+	bare->layout_valid = true;
+}
+
+}  // namespace
+
 TypePtr Parser::instantiate_class_template(
 	TemplateDeclaration* declaration,
 	const vector<TemplateArgument>& arguments)
@@ -155,18 +207,51 @@ TypePtr Parser::instantiate_class_template(
 					         best_partial,
 					         candidate,
 					         record_template_arguments_))
+				{
+					string best_pattern_key =
+						template_argument_key(
+							best_partial->class_specialization_pattern);
+					string candidate_pattern_key =
+						template_argument_key(
+							candidate->class_specialization_pattern);
+					string best_pattern_spelling =
+						template_argument_spelling(
+							best_partial->class_specialization_pattern);
+					string candidate_pattern_spelling =
+						template_argument_spelling(
+							candidate->class_specialization_pattern);
+					if (best_pattern_key == candidate_pattern_key ||
+					    best_pattern_spelling == candidate_pattern_spelling)
+					{
+						if (!best_partial->has_definition &&
+						    candidate->has_definition)
+						{
+							best_partial = candidate;
+							selected_declaration = candidate;
+							selected_args = candidate_args;
+						}
+						continue;
+					}
 					throw runtime_error(
-						"ambiguous class template partial specialization");
+						"ambiguous class template partial specialization: " +
+						declaration->name + "<" + key + "> between " +
+						template_argument_spelling(
+							best_partial->class_specialization_pattern) +
+						" and " +
+						template_argument_spelling(
+							candidate->class_specialization_pattern));
+				}
 			}
 			catch (const runtime_error& err)
 			{
 				string message = err.what();
-				if (message == "incomplete object type" ||
-				    message == "incomplete class type" ||
-				    message == "dependent typename not resolved" ||
-				    message == "function template not found")
-				{
-					continue;
+					if (message == "incomplete object type" ||
+					    message == "incomplete class type" ||
+					    message == "dependent typename not resolved" ||
+					    message == "expected declaration specifiers" ||
+					    message == "function template not found")
+					{
+						continue;
 				}
 				throw;
 			}
@@ -208,6 +293,7 @@ TypePtr Parser::instantiate_class_template(
 		TypePtr existing_record = pa11::strip_cv(existing->second);
 		existing_record->template_primary_name = declaration->name;
 		existing_record->template_arguments = template_instance_arguments(full_args);
+		record_template_arguments_[existing_record.get()] = selected_args;
 		map<const void*, TemplateDeclaration*>::iterator existing_decl =
 			record_template_declarations_.find(existing_record.get());
 		bool only_injected_type_members = true;
@@ -245,9 +331,13 @@ TypePtr Parser::instantiate_class_template(
 		if (function_template_candidate_instantiation_depth_ == 0)
 			candidate_only_class_template_specializations_.erase(
 				existing->second.get());
-		if (!dependent &&
-		    defer_class_template_completion_depth_ == 0 &&
-		    function_template_candidate_instantiation_depth_ == 0)
+		bool complete_now =
+			!dependent &&
+			defer_class_template_completion_depth_ == 0 &&
+			(function_template_candidate_instantiation_depth_ == 0 ||
+			 (hosted_compatibility_ &&
+			  hosted_streambuf_iterator_template(selected_declaration)));
+		if (complete_now)
 			complete_template_record(existing->second);
 		return existing->second;
 	}
@@ -286,9 +376,13 @@ TypePtr Parser::instantiate_class_template(
 	record_template_arguments_[type.get()] = selected_args;
 	if (function_template_candidate_instantiation_depth_ != 0)
 		candidate_only_class_template_specializations_.insert(type.get());
-	if (!dependent &&
-	    defer_class_template_completion_depth_ == 0 &&
-	    function_template_candidate_instantiation_depth_ == 0)
+	bool complete_now =
+		!dependent &&
+		defer_class_template_completion_depth_ == 0 &&
+		(function_template_candidate_instantiation_depth_ == 0 ||
+		 (hosted_compatibility_ &&
+		  hosted_streambuf_iterator_template(selected_declaration)));
+	if (complete_now)
 		complete_template_record(type);
 	return type;
 }
@@ -433,7 +527,14 @@ void Parser::complete_template_record(TypePtr type)
 	declaration->completing_specializations.insert(key);
 
 	size_t save_pos = pos_;
-	vector<Token> complete_save_tokens = tokens_;
+	bool tokens_are_declaration_tokens =
+		tokens_.size() == declaration_tokens_.size() &&
+		(tokens_.empty() ||
+		 (tokens_.front().source == declaration_tokens_.front().source &&
+		  tokens_.back().source == declaration_tokens_.back().source));
+	vector<Token> complete_save_tokens;
+	if (!tokens_are_declaration_tokens)
+		complete_save_tokens = tokens_;
 	vector<Scope*> save_scopes = scopes_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
 	vector<map<string, TemplateArgument> > save_value_subst =
@@ -499,7 +600,8 @@ void Parser::complete_template_record(TypePtr type)
 	scopes_.push_back(declaration->lexical_scope != NULL
 	                  ? declaration->lexical_scope
 	                  : declaration->owner);
-	tokens_ = declaration_tokens_;
+	if (!tokens_are_declaration_tokens)
+		tokens_ = declaration_tokens_;
 	pos_ = declaration->decl_begin;
 	try
 	{
@@ -512,11 +614,24 @@ void Parser::complete_template_record(TypePtr type)
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
-		tokens_ = complete_save_tokens;
+		if (!tokens_are_declaration_tokens)
+			tokens_ = complete_save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		declaration->completing_specializations.erase(key);
 		bare->complete = false;
+		if (hosted_compatibility_ &&
+		    hosted_shared_ptr_template(declaration) &&
+		    (string(err.what()) == "incomplete object type" ||
+		     string(err.what()) == "incomplete class type" ||
+		     string(err.what()) == "incomplete array type" ||
+		     string(err.what()) == "no matching constructor" ||
+		     string(err.what()) == "invalid initializer conversion" ||
+		     string(err.what()) == "expected declaration specifiers"))
+		{
+			complete_hosted_shared_ptr_layout(bare);
+			return;
+		}
 		if (dependent &&
 		    (string(err.what()) == "incomplete object type" ||
 		     string(err.what()) == "incomplete class type" ||
@@ -533,7 +648,8 @@ void Parser::complete_template_record(TypePtr type)
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
-		tokens_ = complete_save_tokens;
+		if (!tokens_are_declaration_tokens)
+			tokens_ = complete_save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
 		declaration->completing_specializations.erase(key);
@@ -544,7 +660,8 @@ void Parser::complete_template_record(TypePtr type)
 	template_type_substitutions_ = save_subst;
 	template_value_substitutions_ = save_value_subst;
 	template_type_parameter_packs_ = save_pack_subst;
-	tokens_ = complete_save_tokens;
+	if (!tokens_are_declaration_tokens)
+		tokens_ = complete_save_tokens;
 	scopes_ = save_scopes;
 	pos_ = save_pos;
 	declaration->completing_specializations.erase(key);

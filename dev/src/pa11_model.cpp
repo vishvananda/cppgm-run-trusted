@@ -10,9 +10,57 @@ using namespace std;
 namespace pa11 {
 namespace {
 
+const char kGnuVectorTypeTag[] = "__gnu_vector";
+
 TypePtr new_type(TypeKind kind)
 {
 	return TypePtr(new Type(kind));
+}
+
+bool scope_has_namespace_named(Scope* scope, const string& name)
+{
+	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+		if (cur->kind == ScopeKind::Namespace && cur->name == name)
+			return true;
+	return false;
+}
+
+string unqualified_template_primary_name(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t pos = primary.rfind("::");
+	return pos == string::npos ? primary : primary.substr(pos + 2);
+}
+
+bool complete_hosted_shared_ptr_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary != "shared_ptr" && primary != "__shared_ptr")
+		return false;
+	bare->complete = true;
+	bare->fields.clear();
+	bare->direct_bases.clear();
+	bare->direct_base_offsets.clear();
+	bare->direct_base_virtuals.clear();
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
+	bare->direct_base_offset = 0;
+	bare->record_size = 16;
+	bare->record_align = 8;
+	bare->nonvirtual_size = 16;
+	bare->nonvirtual_align = 8;
+	bare->layout_valid = true;
+	return true;
 }
 
 uint64_t fundamental_size(EFundamentalType type)
@@ -226,7 +274,8 @@ Scope::Scope(ScopeKind k, const string& n, Scope* p)
 	  name(n),
 	  parent(p),
 	  unnamed_namespace(NULL),
-	  is_inline_namespace(false)
+	  is_inline_namespace(false),
+	  record_type()
 {
 }
 
@@ -314,9 +363,14 @@ TypePtr make_cv(TypePtr base, unsigned cv)
 	if (is_reference_type(base) || base->kind == TypeKind::Function)
 		return base;
 	if (base->kind == TypeKind::Array)
-		return make_array(make_cv(base->base, cv),
-		                  base->unknown_bound,
-		                  base->bound);
+	{
+		TypePtr out = make_array(make_cv(base->base, cv),
+		                         base->unknown_bound,
+		                         base->bound);
+		out->name = base->name;
+		out->tag = base->tag;
+		return out;
+	}
 	if (base->kind == TypeKind::Cv)
 	{
 		TypePtr type = new_type(TypeKind::Cv);
@@ -370,6 +424,16 @@ TypePtr make_array(TypePtr element, bool unknown, uint64_t bound)
 	return type;
 }
 
+TypePtr make_gnu_vector(TypePtr element, uint64_t bytes)
+{
+	uint64_t element_size = type_size(element);
+	if (element_size == 0 || bytes == 0 || bytes % element_size != 0)
+		throw runtime_error("invalid vector size");
+	TypePtr type = make_array(element, false, bytes / element_size);
+	type->tag = kGnuVectorTypeTag;
+	return type;
+}
+
 TypePtr make_function(TypePtr result,
                       const vector<TypePtr>& parameters,
                       bool variadic)
@@ -407,6 +471,10 @@ TypePtr make_record_type(const string& name,
 	type->tag = tag;
 	type->complete = complete;
 	type->scope = scope;
+	if (scope != NULL &&
+	    scope->kind == ScopeKind::Class &&
+	    scope->record_type.get() == NULL)
+		scope->record_type = type;
 	return type;
 }
 
@@ -501,6 +569,14 @@ bool is_reference_type(const TypePtr& type)
 	       type->kind == TypeKind::RValueReference;
 }
 
+bool is_gnu_vector_type(const TypePtr& type)
+{
+	TypePtr bare = strip_cv(type);
+	return bare.get() != NULL &&
+	       bare->kind == TypeKind::Array &&
+	       bare->tag == kGnuVectorTypeTag;
+}
+
 bool is_integral_or_bool_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
@@ -547,6 +623,7 @@ bool same_type(const TypePtr& left, const TypePtr& right)
 	if (left->kind == TypeKind::Array)
 		return left->unknown_bound == right->unknown_bound &&
 		       left->bound == right->bound &&
+		       left->tag == right->tag &&
 		       same_type(left->base, right->base);
 	if (left->kind == TypeKind::Function)
 		return left->cv == right->cv && same_function_type(left, right);
@@ -647,11 +724,14 @@ uint64_t type_size(const TypePtr& type)
 	if (bare->kind == TypeKind::Record)
 	{
 		if (!bare->complete)
-			throw runtime_error("incomplete class type");
+		{
+			if (!complete_hosted_shared_ptr_layout(bare))
+				throw runtime_error("incomplete class type");
+		}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_size;
-	}
+		}
 	throw runtime_error("incomplete object type");
 }
 
@@ -663,11 +743,14 @@ uint64_t type_align(const TypePtr& type)
 	if (bare->kind == TypeKind::Record)
 	{
 		if (!bare->complete)
-			throw runtime_error("incomplete class type");
+		{
+			if (!complete_hosted_shared_ptr_layout(bare))
+				throw runtime_error("incomplete class type");
+		}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_align;
-	}
+		}
 	if (bare->kind == TypeKind::MemberPointer)
 		return 8;
 	return type_size(bare);
@@ -1134,7 +1217,10 @@ void layout_record_type(TypePtr type)
 	if (bare->kind != TypeKind::Record)
 		throw runtime_error("layout target is not a record");
 	if (!bare->complete)
-		throw runtime_error("incomplete class type");
+	{
+		if (!complete_hosted_shared_ptr_layout(bare))
+			throw runtime_error("incomplete class type");
+	}
 	if (bare->layout_valid)
 		return;
 	bare->fields.clear();
@@ -1259,6 +1345,8 @@ TypePtr record_type_for_scope(Scope* scope)
 {
 	if (scope == NULL || scope->kind != ScopeKind::Class || scope->parent == NULL)
 		return TypePtr();
+	if (scope->record_type.get() != NULL)
+		return scope->record_type;
 	for (size_t i = 0; i < scope->parent->binding_order.size(); ++i)
 	{
 		Binding* binding = scope->parent->binding_order[i];
@@ -1269,7 +1357,10 @@ TypePtr record_type_for_scope(Scope* scope)
 			continue;
 		TypePtr bare = strip_cv(binding->type);
 		if (bare->kind == TypeKind::Record && bare->scope == scope)
+		{
+			scope->record_type = bare;
 			return bare;
+		}
 	}
 	return TypePtr();
 }
@@ -1304,11 +1395,15 @@ Scope* get_or_create_namespace(Scope* parent,
 	return scope;
 }
 
+size_t& binding_generation_storage();
+
 Binding* add_binding(Scope* scope,
                      BindingKind kind,
                      const string& name,
                      TypePtr type)
 {
+	static size_t& generation = binding_generation_storage();
+	++generation;
 	unique_ptr<Binding> binding(new Binding(kind, name, scope));
 	binding->type = type;
 	Binding* raw = binding.get();
@@ -1317,6 +1412,17 @@ Binding* add_binding(Scope* scope,
 	if (kind != BindingKind::Namespace && kind != BindingKind::NamespaceAlias)
 		scope->binding_order.push_back(raw);
 	return raw;
+}
+
+size_t& binding_generation_storage()
+{
+	static size_t generation = 0;
+	return generation;
+}
+
+size_t binding_generation()
+{
+	return binding_generation_storage();
 }
 
 Binding* add_namespace_alias(Scope* scope,
@@ -1336,7 +1442,10 @@ void add_using_directive(Scope* scope, Scope* target)
 	if (find(scope->using_directives.begin(),
 	         scope->using_directives.end(),
 	         target) == scope->using_directives.end())
+	{
 		scope->using_directives.push_back(target);
+		++binding_generation_storage();
+	}
 }
 
 Binding* add_using_declaration(Scope* scope,

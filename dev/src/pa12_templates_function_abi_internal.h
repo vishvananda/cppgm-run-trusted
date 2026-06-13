@@ -30,6 +30,7 @@ struct AbiSubstitutionContext
 	std::map<std::string, size_t> substitution_aliases;
 	std::map<std::string, size_t> semantic_type_substitutions;
 	std::vector<Scope*> dependent_typename_scope_prefix;
+	std::vector<const void*> active_type_encodings;
 	size_t function_template_argument_substitution_floor;
 	bool use_actual_template_parameter_types;
 	bool suppress_dependent_typename_marker;
@@ -147,6 +148,8 @@ std::string abi_dependent_decltype_type_with_substitutions(
 	AbiSubstitutionContext& ctx);
 void abi_add_substitution(AbiSubstitutionContext& ctx,
                           const std::string& encoded);
+std::string abi_use_or_add_substitution(AbiSubstitutionContext& ctx,
+                                        const std::string& encoded);
 std::string abi_template_argument_for_parameter_with_substitutions(
 	const TemplateParameterInfo& parameter,
 	const TemplateArgument& arg,

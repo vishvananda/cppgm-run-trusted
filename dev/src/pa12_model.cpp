@@ -531,6 +531,11 @@ TypePtr Parser::apply_suffixes(TypePtr type, const vector<Suffix>& suffixes)
 			type = pa11::make_array(type, suffix.unknown_bound, suffix.bound);
 			type->name = suffix.array_bound_name;
 		}
+		else if (suffix.kind == SuffixKind::Attribute)
+		{
+			if (suffix.vector_size != 0)
+				type = pa11::make_gnu_vector(type, suffix.vector_size);
+		}
 		else
 		{
 			vector<TypePtr> params;
@@ -770,6 +775,15 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
                                                 const string& name,
                                                 int mask)
 {
+	pair<pair<Scope*, string>, int> cache_key =
+		make_pair(make_pair(start, name), mask);
+	size_t cache_generation = pa11::binding_generation();
+	map<pair<pair<Scope*, string>, int>,
+	    pair<size_t, vector<Binding*> > >::const_iterator cached =
+		unqualified_lookup_cache_.find(cache_key);
+	if (cached != unqualified_lookup_cache_.end() &&
+	    cached->second.first == cache_generation)
+		return cached->second.second;
 	vector<Scope*> deferred_using_directives;
 	for (Scope* scope = start; scope != NULL; scope = scope->parent)
 	{
@@ -790,7 +804,11 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 			                 direct);
 		}
 		if (!direct.empty())
+		{
+			unqualified_lookup_cache_[cache_key] =
+				make_pair(pa11::binding_generation(), direct);
 			return direct;
+		}
 		TypePtr record = pa11::record_type_for_scope(scope);
 		vector<TypePtr> bases = record.get() != NULL
 			? pa11::record_direct_bases(record) : vector<TypePtr>();
@@ -812,9 +830,16 @@ vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
 			}
 		}
 		if (!base_found.empty())
+		{
+			unqualified_lookup_cache_[cache_key] =
+				make_pair(pa11::binding_generation(), base_found);
 			return base_found;
+		}
 	}
-	return vector<Binding*>();
+	vector<Binding*> empty;
+	unqualified_lookup_cache_[cache_key] =
+		make_pair(pa11::binding_generation(), empty);
+	return empty;
 }
 
 bool Parser::record_skips_dependent_base_unqualified_lookup(
@@ -891,7 +916,18 @@ TypePtr Parser::lvalue_to_rvalue_type(TypePtr type) const
 {
 	TypePtr object = expression_object_type(type);
 	if (object->kind == pa11::TypeKind::Array)
+	{
+		if (pa11::is_gnu_vector_type(object))
+		{
+			TypePtr out = pa11::make_array(pa11::strip_cv(object->base),
+			                               object->unknown_bound,
+			                               object->bound);
+			out->name = object->name;
+			out->tag = object->tag;
+			return out;
+		}
 		return pa11::make_pointer(object->base);
+	}
 	if (object->kind == pa11::TypeKind::Function)
 		return pa11::make_pointer(object);
 	return pa11::strip_top_level_cv(object);
@@ -971,13 +1007,33 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 {
 	if (class_scope == NULL)
 		return false;
+	TypePtr class_type = pa11::record_type_for_scope(class_scope);
+	class_type = class_type.get() != NULL ? pa11::strip_cv(class_type)
+	                                      : TypePtr();
 	for (size_t i = scopes_.size(); i > 0; --i)
 	{
 		for (Scope* scope = scopes_[i - 1];
 		     scope != NULL;
 		     scope = scope->parent)
+		{
 			if (scope == class_scope)
 				return true;
+			if (scope->kind == ScopeKind::Class &&
+			    class_type.get() != NULL)
+			{
+				TypePtr active_type = pa11::record_type_for_scope(scope);
+				active_type = active_type.get() != NULL
+					? pa11::strip_cv(active_type) : TypePtr();
+				if (active_type.get() != NULL &&
+				    (same_template_record_family(active_type,
+				                                 class_type) ||
+				     record_base_distance(active_type,
+				                          class_type) < 1000000 ||
+				     record_has_base_family(active_type,
+				                            class_type)))
+					return true;
+			}
+		}
 	}
 	for (size_t i = active_friend_class_scopes_.size(); i > 0; --i)
 		if (active_friend_class_scopes_[i - 1] == class_scope)
@@ -995,7 +1051,6 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 		if (parent == class_scope)
 			return true;
 	}
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
 	if (active_class != NULL && class_type.get() != NULL)
 	{
 		TypePtr active_type = pa11::record_type_for_scope(active_class);
@@ -1129,9 +1184,12 @@ int Parser::scalar_conversion_rank(TypePtr source, TypePtr target) const
 		{
 			TypePtr src_pointee = pa11::strip_cv(src)->base;
 			TypePtr dst_pointee = pa11::strip_cv(dst)->base;
-			int cv_rank =
-				(cv_flags(dst_pointee) & ~cv_flags(src_pointee)) != 0 ? 1 : 0;
-			int distance = record_base_distance(src_pointee, dst_pointee);
+				int cv_rank =
+					(cv_flags(dst_pointee) & ~cv_flags(src_pointee)) != 0 ? 1 : 0;
+				if (pa11::same_type(pa11::strip_cv(src_pointee),
+				                    pa11::strip_cv(dst_pointee)))
+					return cv_rank;
+				int distance = record_base_distance(src_pointee, dst_pointee);
 			if (distance < 1000000)
 				return distance + cv_rank;
 			return 4 + cv_rank;

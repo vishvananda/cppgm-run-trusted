@@ -158,6 +158,7 @@ void emit_base_destructor_call(ProgramLowerer& program,
 	program.demand_function_declaration(base_dtor);
 	string base_callee = program.destructor_symbol_for(base_dtor, true);
 	program.demand_inline_function(base_dtor, false);
+	program.demand_lifecycle_base_entry_declaration(base_dtor);
 	string reload = "%t" + to_string(temp++);
 	block.instrs.push_back("    " + reload + " = load ptr $this");
 	string base_addr = "%t" + to_string(temp++);

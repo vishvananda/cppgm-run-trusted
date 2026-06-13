@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <exception>
 
 namespace std {
@@ -7,6 +8,7 @@ public:
   virtual ~type_info();
   bool operator==(const type_info &) const;
   bool operator!=(const type_info &) const;
+  size_t hash_code() const;
   const char *name() const;
 };
 

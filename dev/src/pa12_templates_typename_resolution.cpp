@@ -1,4 +1,5 @@
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -19,6 +20,296 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 	if (type.get() == NULL ||
 	    !type->is_dependent_typename)
 		return TypePtr();
+	auto hash_node_value_type = [&](TypePtr node_type) -> TypePtr {
+		if (node_type.get() == NULL)
+			return TypePtr();
+		try
+		{
+			node_type = substitute_template_type(node_type);
+		}
+		catch (const runtime_error&)
+		{
+		}
+		TypePtr bare = pa11::strip_cv(node_type);
+		if (bare.get() == NULL ||
+		    bare->kind != pa11::TypeKind::Record)
+			return TypePtr();
+		string primary = bare->template_primary_name.empty()
+			? bare->name : bare->template_primary_name;
+		size_t sep = primary.rfind("::");
+		if (sep != string::npos)
+			primary = primary.substr(sep + 2);
+		size_t args_pos = primary.find('<');
+		if (args_pos != string::npos)
+			primary = primary.substr(0, args_pos);
+		if (primary != "_Hash_node")
+			return TypePtr();
+		vector<TemplateArgument> args;
+		map<const void*, vector<TemplateArgument> >::const_iterator stored =
+			record_template_arguments_.find(bare.get());
+		if (stored != record_template_arguments_.end())
+			args = stored->second;
+		else
+			for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+				args.push_back(template_argument_from_instance_argument(
+					bare->template_arguments[i]));
+		if (args.empty())
+			return TypePtr();
+		TemplateArgument value_arg = substitute_template_argument(args[0]);
+		return value_arg.kind == TemplateArgumentKind::Type
+			? value_arg.type : TypePtr();
+	};
+	auto lookup_type_member = [&](Scope* scope,
+	                              const string& name) -> TypePtr {
+		if (scope == NULL)
+			return TypePtr();
+		try
+		{
+			vector<Binding*> found =
+				const_cast<Parser*>(this)->lookup_qualified_set(
+					scope,
+					name,
+					pa11::LOOKUP_TYPE);
+			if (found.empty() || found[0]->type.get() == NULL)
+				return TypePtr();
+			return substitute_template_type_in_scope(found[0]->type, scope);
+		}
+		catch (const runtime_error&)
+		{
+			return TypePtr();
+		}
+	};
+	auto allocator_value_type = [&](TypePtr allocator_type) -> TypePtr {
+		try
+		{
+			allocator_type = substitute_template_type(allocator_type);
+		}
+		catch (const runtime_error&)
+		{
+		}
+		TypePtr bare = allocator_type.get() != NULL
+			? pa11::strip_cv(allocator_type) : TypePtr();
+		if (bare.get() == NULL ||
+		    bare->kind != pa11::TypeKind::Record ||
+		    bare->scope == NULL)
+			return TypePtr();
+		try
+		{
+			const_cast<Parser*>(this)->complete_template_record(bare);
+		}
+		catch (const runtime_error&)
+		{
+		}
+		return lookup_type_member(bare->scope, "value_type");
+	};
+	auto hosted_get_value_type_from_context = [&]() -> TypePtr {
+		if (!hosted_compatibility_)
+			return TypePtr();
+		for (size_t i = active_class_instantiations_.size(); i > 0; --i)
+		{
+			const ActiveClassInstantiation& active =
+				active_class_instantiations_[i - 1];
+			TypePtr active_record = active.type.get() != NULL
+				? pa11::strip_cv(active.type) : TypePtr();
+			if (active_record.get() == NULL ||
+			    active_record->kind != pa11::TypeKind::Record)
+				continue;
+			TypePtr node_type = lookup_type_member(active_record->scope,
+			                                       "__node_type");
+			TypePtr value_type = hash_node_value_type(node_type);
+			if (value_type.get() != NULL)
+				return value_type;
+			map<const void*, vector<TemplateArgument> >::const_iterator args =
+				record_template_arguments_.find(active_record.get());
+			if (active.declaration == NULL ||
+			    args == record_template_arguments_.end())
+				continue;
+			for (size_t pi = 0;
+			     pi < active.declaration->parameters.size() &&
+			     pi < args->second.size();
+			     ++pi)
+			{
+				if (active.declaration->parameters[pi].name != "_NodeAlloc" ||
+				    args->second[pi].kind != TemplateArgumentKind::Type)
+					continue;
+				node_type = allocator_value_type(args->second[pi].type);
+				value_type = hash_node_value_type(node_type);
+				if (value_type.get() != NULL)
+					return value_type;
+			}
+		}
+		for (Scope* scope = current_scope(); scope != NULL; scope = scope->parent)
+		{
+			TypePtr node_type = lookup_type_member(scope, "__node_type");
+			TypePtr value_type = hash_node_value_type(node_type);
+			if (value_type.get() != NULL)
+				return value_type;
+		}
+		for (size_t si = template_type_substitutions_.size(); si > 0; --si)
+		{
+			map<string, TypePtr>::const_iterator node_alloc =
+				template_type_substitutions_[si - 1].find("_NodeAlloc");
+			if (node_alloc == template_type_substitutions_[si - 1].end())
+				continue;
+			TypePtr node_type = allocator_value_type(node_alloc->second);
+			TypePtr value_type = hash_node_value_type(node_type);
+			if (value_type.get() != NULL)
+				return value_type;
+		}
+		return TypePtr();
+	};
+	auto hosted_allocator_rebind_value_type = [&]() -> TypePtr {
+		if (!hosted_compatibility_)
+			return TypePtr();
+		const char* names[] = {"_Tp", "_Up", "_Val", "T"};
+		for (size_t ni = 0; ni < sizeof(names) / sizeof(names[0]); ++ni)
+		{
+			for (size_t si = template_type_substitutions_.size(); si > 0; --si)
+			{
+				map<string, TypePtr>::const_iterator it =
+					template_type_substitutions_[si - 1].find(names[ni]);
+				if (it == template_type_substitutions_[si - 1].end())
+					continue;
+				try
+				{
+					return substitute_template_type(it->second);
+				}
+				catch (const runtime_error&)
+				{
+					return it->second;
+				}
+			}
+		}
+		return TypePtr();
+	};
+	auto hosted_bool_constant_type = [&](bool value) -> TypePtr {
+		TemplateDeclaration* integral =
+			const_cast<Parser*>(this)->find_class_template(
+				NULL,
+				"integral_constant");
+		if (integral == NULL)
+			return TypePtr();
+		vector<TemplateArgument> args;
+		args.push_back(
+			TemplateArgument::type_arg(pa11::make_fundamental(FT_BOOL)));
+		args.push_back(
+			TemplateArgument::value_arg(pa11::make_fundamental(FT_BOOL),
+			                            value ? 1 : 0));
+		return const_cast<Parser*>(this)->instantiate_class_template(
+			integral,
+			args);
+	};
+	auto hosted_invoke_result_call_types =
+		[&](TypePtr invoke_result, vector<TypePtr>& call_types) -> bool {
+			auto resolve_call_type = [&](TypePtr call_type) -> TypePtr {
+				try
+				{
+					call_type = substitute_template_type(call_type);
+				}
+				catch (const runtime_error&)
+				{
+				}
+				if (call_type.get() == NULL)
+					return call_type;
+				if (call_type->kind == pa11::TypeKind::LValueReference ||
+				    call_type->kind == pa11::TypeKind::RValueReference)
+				{
+					TypePtr base = call_type->base;
+					try
+					{
+						base = substitute_template_type(base);
+					}
+					catch (const runtime_error&)
+					{
+					}
+					if (base.get() != NULL &&
+					    base->is_dependent_typename)
+					{
+						TypePtr resolved =
+							resolve_dependent_typename_type(base);
+						if (resolved.get() != NULL)
+						{
+							try
+							{
+								base = substitute_template_type(resolved);
+							}
+							catch (const runtime_error&)
+							{
+								base = resolved;
+							}
+						}
+					}
+					if (base != call_type->base)
+						return call_type->kind ==
+							       pa11::TypeKind::LValueReference
+							? pa11::make_lvalue_reference(base)
+							: pa11::make_rvalue_reference(base);
+					return call_type;
+				}
+				if (call_type->is_dependent_typename)
+				{
+					TypePtr resolved =
+						resolve_dependent_typename_type(call_type);
+					if (resolved.get() != NULL)
+					{
+						try
+						{
+							return substitute_template_type(resolved);
+						}
+						catch (const runtime_error&)
+						{
+							return resolved;
+						}
+					}
+				}
+				return call_type;
+			};
+			TypePtr bare = invoke_result.get() != NULL
+				? pa11::strip_cv(invoke_result) : TypePtr();
+			if (bare.get() == NULL ||
+			    bare->kind != pa11::TypeKind::Record)
+				return false;
+			string primary = bare->template_primary_name.empty()
+				? bare->name : bare->template_primary_name;
+			size_t sep = primary.rfind("::");
+			if (sep != string::npos)
+				primary = primary.substr(sep + 2);
+			size_t arg_pos = primary.find('<');
+			if (arg_pos != string::npos)
+				primary = primary.substr(0, arg_pos);
+			if (primary != "__invoke_result")
+				return false;
+			vector<TemplateArgument> args;
+			map<const void*, vector<TemplateArgument> >::const_iterator stored =
+				record_template_arguments_.find(bare.get());
+			if (stored != record_template_arguments_.end())
+				args = stored->second;
+			else
+				for (size_t ai = 0; ai < bare->template_arguments.size(); ++ai)
+					args.push_back(template_argument_from_instance_argument(
+						bare->template_arguments[ai]));
+			args = flatten_template_argument_packs(args);
+			for (size_t ai = 0; ai < args.size(); ++ai)
+			{
+				TemplateArgument arg = substitute_template_argument(args[ai]);
+				if (arg.kind == TemplateArgumentKind::Pack)
+				{
+					for (size_t pi = 0; pi < arg.pack.size(); ++pi)
+					{
+						TemplateArgument elem =
+							substitute_template_argument(arg.pack[pi]);
+						if (elem.kind != TemplateArgumentKind::Type)
+							return false;
+						call_types.push_back(resolve_call_type(elem.type));
+					}
+					continue;
+				}
+				if (arg.kind != TemplateArgumentKind::Type)
+					return false;
+				call_types.push_back(resolve_call_type(arg.type));
+			}
+			return !call_types.empty();
+		};
 	if (!type->dependent_typename_qualified)
 	{
 		if (!type->dependent_typename_template_id)
@@ -31,12 +322,26 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 			root_name = root_name.substr(0, root_template);
 		size_t template_argument_list_index = 0;
 		vector<TemplateArgument> stored_arguments;
-		if (!dependent_typename_template_argument_list(
-			    type,
-			    template_argument_list_index,
-			    stored_arguments))
-			return TypePtr();
-		vector<TemplateArgument> arguments;
+				if (!dependent_typename_template_argument_list(
+					    type,
+					    template_argument_list_index,
+					    stored_arguments))
+					return TypePtr();
+				if (stored_arguments.empty() &&
+				    hosted_compatibility_ &&
+				    root_name == "__get_value_type")
+				{
+					vector<Binding*> node_type =
+						const_cast<Parser*>(this)->lookup_unqualified_set(
+							current_scope(),
+							"__node_type",
+							pa11::LOOKUP_TYPE);
+					if (!node_type.empty() &&
+					    node_type[0]->type.get() != NULL)
+						stored_arguments.push_back(
+							TemplateArgument::type_arg(node_type[0]->type));
+				}
+				vector<TemplateArgument> arguments;
 		for (size_t i = 0; i < stored_arguments.size(); ++i)
 		{
 			TemplateArgument arg = stored_arguments[i];
@@ -461,6 +766,47 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 		if (root_template != string::npos)
 			root_name = root_name.substr(0, root_template);
 		size_t template_argument_list_index = 0;
+		if (hosted_compatibility_ &&
+		    root_name == "_Policy" &&
+		    parts.size() == first_type_part + 2 &&
+		    parts[first_type_part + 1] == "__has_load_factor" &&
+		    !type->template_arguments.empty())
+		{
+			TemplateArgument policy =
+				template_argument_from_instance_argument(
+					type->template_arguments[0]);
+			policy = substitute_template_argument(policy);
+			if (policy.kind == TemplateArgumentKind::Type)
+			{
+				TypePtr policy_type = substitute_template_type(policy.type);
+				TypePtr policy_record = policy_type.get() != NULL
+					? pa11::strip_cv(policy_type) : TypePtr();
+				if (policy_record.get() != NULL &&
+				    policy_record->kind == pa11::TypeKind::Record &&
+				    policy_record->scope != NULL)
+				{
+					try
+					{
+						const_cast<Parser*>(this)->
+							complete_template_record(policy_record);
+					}
+					catch (const runtime_error&)
+					{
+					}
+					TypePtr member = lookup_type_member(
+						policy_record->scope,
+						"__has_load_factor");
+					if (member.get() != NULL)
+					{
+						TypePtr bool_constant =
+							hosted_bool_constant_type(true);
+						if (bool_constant.get() != NULL)
+							return bool_constant;
+						return member;
+					}
+				}
+			}
+		}
 		if (root_template != string::npos)
 		{
 			vector<TemplateArgument> stored_arguments;
@@ -468,7 +814,43 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				    type,
 				    template_argument_list_index,
 				    stored_arguments))
+			{
+				if (hosted_compatibility_ &&
+				    root_name == "__get_value_type" &&
+				    parts.size() > first_type_part + 1 &&
+				    parts[first_type_part + 1] == "type")
+					return hosted_get_value_type_from_context();
 				return TypePtr();
+			}
+			if (stored_arguments.empty() &&
+			    hosted_compatibility_ &&
+			    root_name == "__get_value_type" &&
+			    parts.size() > first_type_part + 1 &&
+			    parts[first_type_part + 1] == "type")
+			{
+				TypePtr value_type = hosted_get_value_type_from_context();
+				if (value_type.get() != NULL)
+					return value_type;
+			}
+			if (!stored_arguments.empty() &&
+			    hosted_compatibility_ &&
+			    root_name == "__get_value_type" &&
+			    parts.size() > first_type_part + 1 &&
+			    parts[first_type_part + 1] == "type")
+			{
+				TemplateArgument node_arg =
+					substitute_template_argument(stored_arguments[0]);
+				if (node_arg.kind == TemplateArgumentKind::Type)
+				{
+					TypePtr value_type =
+						hash_node_value_type(node_arg.type);
+					if (value_type.get() != NULL)
+						return value_type;
+				}
+				TypePtr value_type = hosted_get_value_type_from_context();
+				if (value_type.get() != NULL)
+					return value_type;
+			}
 			vector<TemplateArgument> arguments;
 			for (size_t i = 0; i < stored_arguments.size(); ++i)
 			{
@@ -542,6 +924,214 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				arguments.push_back(arg);
 			}
 			arguments = flatten_template_argument_packs(arguments);
+			auto resolve_type_suffix =
+				[&](TypePtr owner_type, size_t suffix_begin) -> TypePtr {
+					TypePtr current = owner_type;
+					for (size_t pi = suffix_begin; pi < parts.size(); ++pi)
+					{
+						TypePtr owner = current.get() != NULL
+							? pa11::strip_cv(current) : TypePtr();
+						if (owner.get() == NULL ||
+						    owner->kind != pa11::TypeKind::Record ||
+						    owner->scope == NULL)
+							return TypePtr();
+						try
+						{
+							const_cast<Parser*>(this)->
+								complete_template_record(owner);
+						}
+						catch (const runtime_error&)
+						{
+						}
+						string member_name = parts[pi];
+						size_t member_template = member_name.find('<');
+						if (member_template != string::npos)
+							member_name = member_name.substr(0,
+							                                  member_template);
+						current = lookup_type_member(owner->scope,
+						                             member_name);
+						if (current.get() == NULL)
+							return TypePtr();
+					}
+					return current;
+				};
+			if (hosted_compatibility_ &&
+			    internal_type_transform_name(root_name) &&
+			    parts.size() == first_type_part + 1 &&
+			    arguments.size() == 1 &&
+			    arguments[0].kind == TemplateArgumentKind::Type &&
+			    !template_argument_has_template_parameter(
+				    arguments[0],
+				    record_template_arguments_))
+				return apply_internal_type_transform(root_name,
+				                                     arguments[0].type);
+			if (hosted_compatibility_ &&
+			    root_name == "__iter_category_t" &&
+			    parts.size() == first_type_part + 1 &&
+			    arguments.size() == 1 &&
+			    arguments[0].kind == TemplateArgumentKind::Type &&
+			    !template_argument_has_template_parameter(
+				    arguments[0],
+				    record_template_arguments_))
+			{
+				TemplateDeclaration* traits =
+					const_cast<Parser*>(this)->find_class_template(
+						NULL,
+						"iterator_traits");
+				if (traits != NULL)
+				{
+					vector<TemplateArgument> trait_args;
+					trait_args.push_back(arguments[0]);
+					TypePtr traits_type =
+						const_cast<Parser*>(this)->
+							instantiate_class_template(
+								traits,
+								trait_args);
+					TypePtr traits_record =
+						traits_type.get() != NULL
+						? pa11::strip_cv(traits_type) : TypePtr();
+					if (traits_record.get() != NULL &&
+					    traits_record->kind == pa11::TypeKind::Record &&
+					    traits_record->scope != NULL)
+					{
+						try
+						{
+							const_cast<Parser*>(this)->
+								complete_template_record(traits_record);
+						}
+						catch (const runtime_error&)
+						{
+						}
+						TypePtr category = lookup_type_member(
+							traits_record->scope,
+							"iterator_category");
+						if (category.get() != NULL)
+							return category;
+					}
+				}
+			}
+				if (hosted_compatibility_ &&
+				    root_name == "__enable_if_t" &&
+				    !arguments.empty() &&
+				    arguments[0].kind == TemplateArgumentKind::Value &&
+				    !arguments[0].dependent)
+				{
+					if (arguments[0].value == 0)
+						return TypePtr();
+					TypePtr enabled_type = arguments.size() >= 2 &&
+					                       arguments[1].kind ==
+						                       TemplateArgumentKind::Type
+						? arguments[1].type
+						: pa11::make_fundamental(FT_VOID);
+					if (parts.size() == first_type_part + 1)
+						return enabled_type;
+					TypePtr resolved = resolve_type_suffix(enabled_type,
+					                                       first_type_part + 1);
+					if (resolved.get() != NULL)
+						return resolved;
+				}
+					if (hosted_compatibility_ &&
+				    root_name == "enable_if" &&
+					    parts.size() > first_type_part + 1 &&
+					    parts[first_type_part + 1] == "type" &&
+				    !arguments.empty() &&
+				    arguments[0].kind == TemplateArgumentKind::Value &&
+				    !arguments[0].dependent)
+				{
+					if (arguments[0].value == 0)
+						return TypePtr();
+					TypePtr enabled_type = arguments.size() >= 2 &&
+					                       arguments[1].kind ==
+						                       TemplateArgumentKind::Type
+						? arguments[1].type
+						: pa11::make_fundamental(FT_VOID);
+					if (parts.size() == first_type_part + 2)
+						return enabled_type;
+					TypePtr resolved = resolve_type_suffix(enabled_type,
+					                                       first_type_part + 2);
+						if (resolved.get() != NULL)
+							return resolved;
+					}
+				if (root_name == "conditional" &&
+				    parts.size() > first_type_part + 1 &&
+				    parts[first_type_part + 1] == "type" &&
+				    arguments.size() >= 3 &&
+				    arguments[0].kind == TemplateArgumentKind::Value &&
+				    !arguments[0].dependent &&
+				    arguments[1].kind == TemplateArgumentKind::Type &&
+				    arguments[2].kind == TemplateArgumentKind::Type)
+				{
+					TypePtr selected_type = arguments[0].value != 0
+						? arguments[1].type : arguments[2].type;
+					if (parts.size() == first_type_part + 2)
+						return selected_type;
+					TypePtr resolved = resolve_type_suffix(selected_type,
+					                                       first_type_part + 2);
+					if (resolved.get() != NULL)
+						return resolved;
+				}
+				if (hosted_compatibility_ &&
+				    root_name == "__invoke_result" &&
+				    parts.size() > first_type_part + 1 &&
+			    parts[first_type_part + 1] == "type")
+			{
+				vector<TypePtr> call_types;
+				bool type_args = true;
+				for (size_t ai = 0; ai < arguments.size(); ++ai)
+				{
+					if (arguments[ai].kind != TemplateArgumentKind::Type)
+					{
+						type_args = false;
+						break;
+					}
+					call_types.push_back(arguments[ai].type);
+				}
+				if (type_args)
+				{
+					Expr call;
+					if (const_cast<Parser*>(this)->
+						    try_make_invocable_type_trait_call(
+							    call_types,
+							    call))
+						return call.type;
+					return TypePtr();
+				}
+			}
+			if (hosted_compatibility_ &&
+			    root_name == "__is_invocable_impl" &&
+			    parts.size() > first_type_part + 1 &&
+			    parts[first_type_part + 1] == "type" &&
+			    arguments.size() >= 2 &&
+			    arguments[0].kind == TemplateArgumentKind::Type &&
+			    arguments[1].kind == TemplateArgumentKind::Type)
+			{
+				vector<TypePtr> trait_types;
+				trait_types.push_back(arguments[1].type);
+				vector<TypePtr> call_types;
+				if (hosted_invoke_result_call_types(arguments[0].type,
+				                                    call_types))
+				{
+					bool dependent_trait =
+						type_structurally_dependent(arguments[1].type);
+					for (size_t ci = 0; ci < call_types.size(); ++ci)
+						if (type_structurally_dependent(call_types[ci]))
+							dependent_trait = true;
+					if (!dependent_trait)
+					{
+						trait_types.insert(trait_types.end(),
+						                   call_types.begin(),
+						                   call_types.end());
+						TypePtr bool_constant =
+							hosted_bool_constant_type(
+								const_cast<Parser*>(this)->
+									is_invocable_r_type_trait(
+										trait_types,
+										false));
+						if (bool_constant.get() != NULL)
+							return bool_constant;
+					}
+				}
+			}
 			TemplateArgument template_subst;
 			if (namespace_scope == NULL &&
 			    find_template_value_substitution(root_name, template_subst) &&
@@ -681,7 +1271,27 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				    type,
 				    template_argument_list_index,
 				    stored_arguments))
+			{
+				if (hosted_compatibility_ &&
+				    member_name == "rebind" &&
+				    i + 2 < parts.size() &&
+				    parts[i + 1] == "other" &&
+				    parts[i + 2] == "value_type")
+					return hosted_allocator_rebind_value_type();
 				return TypePtr();
+			}
+			if (hosted_compatibility_ &&
+			    member_name == "rebind" &&
+			    i + 2 < parts.size() &&
+			    parts[i + 1] == "other" &&
+			    parts[i + 2] == "value_type" &&
+			    !stored_arguments.empty())
+			{
+				TemplateArgument rebound =
+					substitute_template_argument(stored_arguments[0]);
+				if (rebound.kind == TemplateArgumentKind::Type)
+					return rebound.type;
+			}
 			vector<TemplateArgument> arguments;
 			for (size_t j = 0; j < stored_arguments.size(); ++j)
 			{
