@@ -12,9 +12,10 @@ in `dev/` and `dev/src/`; `pa35/` remains the handout and harness area.
 - PA35 stress is now concentrated in hosted template/SFINAE paths exercised by
   iostream, string, tuple, memory, and type-trait headers.
 - The PA35 compiler behavior is currently test-clean through the full staged
-  report; the remaining blocker is the source-file audit over `dev/src`.
-  Cleanup must preserve the same parser, semantic, lowering, and object paths
-  while removing oversized files/functions and compressed implementation lines.
+  report, and the source-file audit over `dev/src` is a pass with warnings.
+  Cleanup must continue to preserve the same parser, semantic, lowering, and
+  object paths while avoiding new oversized files/functions, compressed
+  implementation lines, or unchecked source islands.
 - Rvalue stream forwarding overloads require alias templates with dependent
   default SFINAE arguments to preserve their alias identity until concrete call
   substitution can reject `enable_if<false>` candidates.
@@ -150,6 +151,56 @@ in `dev/` and `dev/src/`; `pa35/` remains the handout and harness area.
     `dev/frontend_source_sets.mk`; oversized methods should be split into typed
     helpers that operate on the existing compiler state rather than on formatted
     dumps or fixture-specific probes.
+
+## Architecture Review
+
+PA35 is implemented as an extension of the existing hosted compile pipeline, not
+as a replacement path. The driver still preprocesses through `preproc_support`,
+parses and type-checks through the PA12 model, lowers through the PA14 LowIR
+builder, and emits host objects through the PA31+ object path. The PA35-specific
+pressure valves are concentrated in typed compiler structures:
+
+- Hosted function-template definition validation is skipped only for templates
+  owned by `std`/`__gnu_cxx` or forwarding templates whose bodies mention `std`.
+  Declarations, template parameters, overload sets, and specialization
+  signatures are still recorded.
+- Deferred hosted function bodies remain pending until demanded by expression
+  semantics or LowIR object roots. `is_object_root`, explicit body-demand
+  helpers, and address-taken function scanning keep object-relevant functions on
+  the real replay/lowering path.
+- Hosted STL modeling is narrow and typed: `std::function::operator=`,
+  `std::vector::insert`, `std::__write`, `std::basic_string` operators,
+  `__gnu_cxx::__normal_iterator` qualification conversion, and
+  `std::shared_ptr` qualification/layout recovery operate on `TypePtr`,
+  `TemplateArgument`, `Binding`, and namespace ownership, not on PA35 test names
+  or dumped text.
+- The audit refactor split large template/constexpr/member-body logic into
+  responsibility-named modules and added them to `dev/frontend_source_sets.mk`.
+  The split preserved ownership in `dev/src` and did not move implementation
+  into handout directories or unchecked paths.
+
+The performance story is based on deferring unreachable hosted implementation
+bodies, reusing specialization/candidate signatures, and protecting recursive
+template/type traversal. This is aligned with the PA35 contract: heavy headers
+must compile within a workable budget, but PA36 owns hosted link/runtime
+behavior.
+
+## Final Architecture Review
+
+The audit found no blocker requiring source changes. The implementation still
+compiles real hosted headers through the normal compiler phases and writes a
+real relocatable object; there is no reference-binary shell-out, templated
+object payload, VM/interpreter substitute, or dummy object path in the PA35
+compiler code. Searches for PA35 fixture names and reference-tool invocations in
+`dev/` did not find source-shape gates.
+
+File-audit warnings remain warnings, not failures: they identify older
+catch-all/helper/header ownership and duplicate-helper debt plus a compressed
+LowIR line that the audit script reports as a large literal risk. These are
+visible in the required `cppgm_file_audit` output and are not bypasses; the PA35
+files added by the audit refactor are built through the `cppgm++` source set.
+No unresolved architecture, performance, regression, or cheating blocker was
+found in this pass.
 
 ## Validation
 
