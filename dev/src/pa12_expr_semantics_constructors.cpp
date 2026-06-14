@@ -386,6 +386,149 @@ bool Parser::constructor_candidate_ambiguous(
 	return true;
 }
 
+void Parser::select_constructor_candidate(
+	TypePtr record,
+	const vector<Expr>& args,
+	bool copy_initialization,
+	const vector<Binding*>& constructors,
+	bool has_user_declared_constructor,
+	const vector<Expr>& template_order_args,
+	Binding*& best,
+	vector<int>& best_ranks,
+	vector<Expr>& best_args,
+	bool& ambiguous)
+{
+	vector<Binding*> considered;
+	for (size_t i = 0; i < constructors.size(); ++i)
+	{
+		Binding* ctor = constructors[i];
+		if (has_user_declared_constructor &&
+		    ctor->is_generated_default_constructor)
+			continue;
+		ctor = instantiate_constructor_template_candidate(record, ctor, args);
+		if (ctor == NULL || active_function_matches(ctor))
+			continue;
+		if (ctor->kind != BindingKind::Function ||
+		    ctor->type->kind != pa11::TypeKind::Function ||
+		    ctor->type->parameters.empty())
+			continue;
+		Binding* duplicate =
+			find_duplicate_constructor_candidate(ctor, considered);
+		if (duplicate != NULL)
+		{
+			if (!should_replace_duplicate_constructor(ctor, duplicate))
+				continue;
+			considered.erase(find(considered.begin(),
+			                      considered.end(),
+			                      duplicate));
+		}
+		considered.push_back(ctor);
+		if (copy_initialization && ctor->is_explicit)
+			continue;
+		if (!constructor_accepts_argument_count(ctor, args.size()))
+			continue;
+		vector<int> ranks;
+		vector<Expr> conv_args;
+		if (!convert_constructor_candidate_arguments(ctor,
+		                                             args,
+		                                             conv_args,
+		                                             ranks))
+			continue;
+		if (constructor_candidate_better(ctor,
+		                                 best,
+		                                 ranks,
+		                                 best_ranks,
+		                                 template_order_args))
+		{
+			best = ctor;
+			best_ranks = ranks;
+			best_args = conv_args;
+			ambiguous = false;
+		}
+		else if (best != NULL && pa11::same_type(best->type, ctor->type))
+		{
+			if (ctor->is_inline_definition && !best->is_inline_definition)
+			{
+				best = ctor;
+				best_args = conv_args;
+				ambiguous = false;
+			}
+		}
+		else if (constructor_candidate_ambiguous(ctor,
+		                                        best,
+		                                        ranks,
+		                                        best_ranks,
+		                                        template_order_args))
+			ambiguous = true;
+	}
+}
+
+bool Parser::use_hosted_allocator_constructor_fallback(
+	TypePtr record,
+	const vector<Expr>& args,
+	Binding*& best,
+	vector<Expr>& best_args,
+	bool& ambiguous)
+{
+	if (best != NULL || ambiguous || !hosted_compatibility_ ||
+	    args.size() != 1)
+		return false;
+	auto unqualified_primary = [](TypePtr t) {
+		string primary = t.get() != NULL
+			? (t->template_primary_name.empty()
+			   ? t->name : t->template_primary_name)
+			: string();
+		size_t sep = primary.rfind("::");
+		if (sep != string::npos)
+			primary = primary.substr(sep + 2);
+		size_t arg_pos = primary.find('<');
+		if (arg_pos != string::npos)
+			primary = primary.substr(0, arg_pos);
+		return primary;
+	};
+	TypePtr source = expression_object_type(args[0].type);
+	TypePtr source_record = source.get() != NULL
+		? pa11::strip_cv(source) : TypePtr();
+	if (!record->is_template_specialization ||
+	    source_record.get() == NULL ||
+	    source_record->kind != pa11::TypeKind::Record ||
+	    !source_record->is_template_specialization ||
+	    unqualified_primary(record) != "allocator" ||
+	    unqualified_primary(source_record) != "allocator")
+		return false;
+	TypePtr param_type = pa11::make_lvalue_reference(
+		pa11::make_cv(source_record, pa11::CV_CONST));
+	vector<TypePtr> params;
+	params.push_back(pa11::make_pointer(record));
+	params.push_back(param_type);
+	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
+	                                      params,
+	                                      false);
+	Binding* ctor = NULL;
+	map<string, vector<Binding*> >::iterator existing =
+		record->scope->members.find(record->scope->name);
+	if (existing != record->scope->members.end())
+		for (size_t ci = 0; ci < existing->second.size(); ++ci)
+			if (existing->second[ci]->kind == BindingKind::Function &&
+			    pa11::same_type(existing->second[ci]->type, fn_type))
+				ctor = existing->second[ci];
+	if (ctor == NULL)
+	{
+		ctor = add_value(record->scope,
+		                 BindingKind::Function,
+		                 record->scope->name,
+		                 fn_type);
+		ctor->is_inline_definition = true;
+		ctor->is_defaulted = true;
+		function_parameter_names_[ctor] = vector<string>(2, "this");
+		function_parameter_names_[ctor][1] = "other";
+	}
+	best = ctor;
+	best_args = args;
+	ambiguous = false;
+	return true;
+}
+
 Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 {
 	if (best == NULL ||
@@ -677,136 +820,22 @@ Binding* Parser::resolve_constructor_candidate(TypePtr type,
 	vector<int> best_ranks;
 	vector<Expr> best_args;
 	bool ambiguous = false;
-	vector<Binding*> considered;
-	for (size_t i = 0; i < found->second.size(); ++i)
-		{
-			Binding* ctor = found->second[i];
-			if (has_user_declared_constructor &&
-			    ctor->is_generated_default_constructor)
-				continue;
-			ctor = instantiate_constructor_template_candidate(record, ctor, args);
-			if (ctor == NULL || active_function_matches(ctor))
-				continue;
-		if (ctor->kind != BindingKind::Function ||
-		    ctor->type->kind != pa11::TypeKind::Function ||
-		    ctor->type->parameters.empty())
-			continue;
-		Binding* duplicate = find_duplicate_constructor_candidate(ctor, considered);
-		if (duplicate != NULL)
-		{
-			if (!should_replace_duplicate_constructor(ctor, duplicate))
-				continue;
-			considered.erase(find(considered.begin(),
-			                      considered.end(),
-			                      duplicate));
-		}
-		considered.push_back(ctor);
-		if (copy_initialization && ctor->is_explicit)
-			continue;
-		if (!constructor_accepts_argument_count(ctor, args.size()))
-			continue;
-		vector<int> ranks;
-		vector<Expr> conv_args;
-		if (!convert_constructor_candidate_arguments(ctor,
-		                                             args,
-		                                             conv_args,
-		                                             ranks))
-			continue;
-		if (constructor_candidate_better(ctor,
-		                                 best,
-		                                 ranks,
-		                                 best_ranks,
-		                                 template_order_args))
-		{
-			best = ctor;
-			best_ranks = ranks;
-			best_args = conv_args;
-			ambiguous = false;
-		}
-		else if (best != NULL && pa11::same_type(best->type, ctor->type))
-		{
-			if (ctor->is_inline_definition && !best->is_inline_definition)
-			{
-				best = ctor;
-				best_args = conv_args;
-				ambiguous = false;
-			}
-		}
-		else if (constructor_candidate_ambiguous(ctor,
-		                                        best,
-		                                        ranks,
-		                                        best_ranks,
-		                                        template_order_args))
-			ambiguous = true;
-	}
+	select_constructor_candidate(record,
+	                             args,
+	                             copy_initialization,
+	                             found->second,
+	                             has_user_declared_constructor,
+	                             template_order_args,
+	                             best,
+	                             best_ranks,
+	                             best_args,
+	                             ambiguous);
 	if (best == NULL || ambiguous)
-	{
-		if (best == NULL &&
-		    !ambiguous &&
-		    hosted_compatibility_ &&
-		    args.size() == 1)
-		{
-			auto unqualified_primary = [](TypePtr t) {
-				string primary = t.get() != NULL
-					? (t->template_primary_name.empty()
-					   ? t->name : t->template_primary_name)
-					: string();
-				size_t sep = primary.rfind("::");
-				if (sep != string::npos)
-					primary = primary.substr(sep + 2);
-				size_t arg_pos = primary.find('<');
-				if (arg_pos != string::npos)
-					primary = primary.substr(0, arg_pos);
-				return primary;
-			};
-			TypePtr source = expression_object_type(args[0].type);
-			TypePtr source_record = source.get() != NULL
-				? pa11::strip_cv(source) : TypePtr();
-			if (record->is_template_specialization &&
-			    source_record.get() != NULL &&
-			    source_record->kind == pa11::TypeKind::Record &&
-			    source_record->is_template_specialization &&
-			    unqualified_primary(record) == "allocator" &&
-			    unqualified_primary(source_record) == "allocator")
-			{
-				TypePtr param_type =
-					pa11::make_lvalue_reference(
-						pa11::make_cv(source_record, pa11::CV_CONST));
-				vector<TypePtr> params;
-				params.push_back(pa11::make_pointer(record));
-				params.push_back(param_type);
-				TypePtr fn_type = pa11::make_function(
-					pa11::make_fundamental(FT_VOID),
-					params,
-					false);
-				Binding* ctor = NULL;
-				map<string, vector<Binding*> >::iterator existing =
-					record->scope->members.find(record->scope->name);
-				if (existing != record->scope->members.end())
-					for (size_t ci = 0; ci < existing->second.size(); ++ci)
-						if (existing->second[ci]->kind ==
-							    BindingKind::Function &&
-						    pa11::same_type(existing->second[ci]->type,
-						                    fn_type))
-							ctor = existing->second[ci];
-				if (ctor == NULL)
-				{
-					ctor = add_value(record->scope,
-					                 BindingKind::Function,
-					                 record->scope->name,
-					                 fn_type);
-					ctor->is_inline_definition = true;
-					ctor->is_defaulted = true;
-					function_parameter_names_[ctor] =
-						vector<string>(2, "this");
-					function_parameter_names_[ctor][1] = "other";
-				}
-				best = ctor;
-				best_args = args;
-				ambiguous = false;
-			}
-		}
-	}
+		use_hosted_allocator_constructor_fallback(record,
+		                                          args,
+		                                          best,
+		                                          best_args,
+		                                          ambiguous);
 	if (best == NULL || ambiguous)
 		throw runtime_error("no matching constructor");
 	if (unevaluated_expression_depth_ == 0)

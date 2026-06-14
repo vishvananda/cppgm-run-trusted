@@ -11,6 +11,10 @@ in `dev/` and `dev/src/`; `pa35/` remains the handout and harness area.
 
 - PA35 stress is now concentrated in hosted template/SFINAE paths exercised by
   iostream, string, tuple, memory, and type-trait headers.
+- The PA35 compiler behavior is currently test-clean through the full staged
+  report; the remaining blocker is the source-file audit over `dev/src`.
+  Cleanup must preserve the same parser, semantic, lowering, and object paths
+  while removing oversized files/functions and compressed implementation lines.
 - Rvalue stream forwarding overloads require alias templates with dependent
   default SFINAE arguments to preserve their alias identity until concrete call
   substitution can reject `enable_if<false>` candidates.
@@ -19,10 +23,10 @@ in `dev/` and `dev/src/`; `pa35/` remains the handout and harness area.
   defaults. Those defaults should be preserved as dependent semantic state; true
   overload candidate substitution still rejects concrete disabled `enable_if`
   arguments.
-- The through gate currently exposes older-stage regressions before PA35:
-  inherited member operator-template lookup in PA26, host exception inspection
-  facts in PA31, and several hosted ABI/substitution object cases in PA32-PA34.
-  These remain PA35 blockers because PA35 builds on the same compiler pipeline.
+- Through-gate regressions are PA35 blockers because PA35 builds on the same
+  compiler pipeline. Recent audit refactors exposed older PA23/PA34 template
+  substitution regressions; fixes must preserve those earlier stages before the
+  PA35 gate can be considered stable.
 - Recent ABI work for dependent `decltype` expressions must preserve typed
   expression semantics and Itanium substitution-slot ordering for qualified
   static calls, function types, casts, and template-id arguments. Follow-up
@@ -140,6 +144,12 @@ in `dev/` and `dev/src/`; `pa35/` remains the handout and harness area.
     completed actual stores a parameter-pack slot as a `Pack`, match it directly
     against a deducible type-parameter-pack pattern instead of falling back to
     stale stored dependent base arguments.
+27. Treat the file-audit cleanup as an ownership refactor, not a behavior
+    change. Oversized files should donate whole methods or cohesive helper
+    groups to responsibility-named `dev/src` modules that are added to
+    `dev/frontend_source_sets.mk`; oversized methods should be split into typed
+    helpers that operate on the existing compiler state rather than on formatted
+    dumps or fixture-specific probes.
 
 ## Validation
 

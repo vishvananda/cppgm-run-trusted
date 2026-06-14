@@ -1,22 +1,16 @@
 #include "pa11_internal.h"
-
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
-
 using namespace std;
-
 namespace pa11 {
 namespace {
-
 const char kGnuVectorTypeTag[] = "__gnu_vector";
-
 TypePtr new_type(TypeKind kind)
 {
 	return TypePtr(new Type(kind));
 }
-
 bool scope_has_namespace_named(Scope* scope, const string& name)
 {
 	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
@@ -24,7 +18,6 @@ bool scope_has_namespace_named(Scope* scope, const string& name)
 			return true;
 	return false;
 }
-
 string unqualified_template_primary_name(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
@@ -35,7 +28,6 @@ string unqualified_template_primary_name(TypePtr type)
 	size_t pos = primary.rfind("::");
 	return pos == string::npos ? primary : primary.substr(pos + 2);
 }
-
 bool complete_hosted_shared_ptr_layout(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
@@ -62,7 +54,6 @@ bool complete_hosted_shared_ptr_layout(TypePtr type)
 	bare->layout_valid = true;
 	return true;
 }
-
 uint64_t fundamental_size(EFundamentalType type)
 {
 	switch (type)
@@ -98,7 +89,6 @@ uint64_t fundamental_size(EFundamentalType type)
 	}
 	throw runtime_error("incomplete object type");
 }
-
 bool same_function_type(const TypePtr& left, const TypePtr& right)
 {
 	if (left->ref_qualifier != right->ref_qualifier ||
@@ -113,7 +103,6 @@ bool same_function_type(const TypePtr& left, const TypePtr& right)
 	}
 	return true;
 }
-
 string join_parameter_types(const vector<TypePtr>& parameters, bool variadic)
 {
 	ostringstream out;
@@ -131,12 +120,10 @@ string join_parameter_types(const vector<TypePtr>& parameters, bool variadic)
 	}
 	return out.str();
 }
-
 bool lookup_seen_insert(set<Scope*>& seen, Scope* scope)
 {
 	return scope != NULL && seen.insert(scope).second;
 }
-
 Binding* lookup_in_scope(Scope* scope,
                          const string& name,
                          int mask,
@@ -178,9 +165,7 @@ Binding* lookup_in_scope(Scope* scope,
 	}
 	return NULL;
 }
-
 }  // namespace
-
 Type::Type(TypeKind k)
 	: kind(k),
 	  fundamental(FT_INT),
@@ -212,7 +197,6 @@ Type::Type(TypeKind k)
 	  is_final_record(false)
 {
 }
-
 Binding::Binding(BindingKind k, const string& n, Scope* o)
 	: kind(k),
 	  name(n),
@@ -268,7 +252,6 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  bit_offset(0)
 {
 }
-
 Scope::Scope(ScopeKind k, const string& n, Scope* p)
 	: kind(k),
 	  name(n),
@@ -278,21 +261,17 @@ Scope::Scope(ScopeKind k, const string& n, Scope* p)
 	  record_type()
 {
 }
-
 TranslationUnit::TranslationUnit() : anonymous_counter(0)
 {
 }
-
 VirtualTableEntry::VirtualTableEntry()
 	: function(NULL), deleting_entry(false)
 {
 }
-
 VirtualTableEntry::VirtualTableEntry(Binding* f, bool d)
 	: function(f), deleting_entry(d)
 {
 }
-
 TemplateInstanceArgument::TemplateInstanceArgument()
 	: kind(TemplateInstanceArgumentKind::Type),
 	  value_expr_begin(0),
@@ -302,7 +281,6 @@ TemplateInstanceArgument::TemplateInstanceArgument()
 	  value_negated(false)
 {
 }
-
 TemplateInstanceArgument TemplateInstanceArgument::type_arg(TypePtr type)
 {
 	TemplateInstanceArgument arg;
@@ -310,7 +288,6 @@ TemplateInstanceArgument TemplateInstanceArgument::type_arg(TypePtr type)
 	arg.type = type;
 	return arg;
 }
-
 TemplateInstanceArgument TemplateInstanceArgument::value_arg(TypePtr type,
                                                              uint64_t value)
 {
@@ -320,7 +297,6 @@ TemplateInstanceArgument TemplateInstanceArgument::value_arg(TypePtr type,
 	arg.value = value;
 	return arg;
 }
-
 TemplateInstanceArgument TemplateInstanceArgument::dependent_value_arg(
 	TypePtr type)
 {
@@ -330,7 +306,6 @@ TemplateInstanceArgument TemplateInstanceArgument::dependent_value_arg(
 	arg.dependent = true;
 	return arg;
 }
-
 TemplateInstanceArgument TemplateInstanceArgument::template_arg(
 	const string& name)
 {
@@ -339,7 +314,6 @@ TemplateInstanceArgument TemplateInstanceArgument::template_arg(
 	arg.template_name = name;
 	return arg;
 }
-
 TemplateInstanceArgument TemplateInstanceArgument::pack_arg(
 	const vector<TemplateInstanceArgument>& values)
 {
@@ -348,14 +322,12 @@ TemplateInstanceArgument TemplateInstanceArgument::pack_arg(
 	arg.pack = values;
 	return arg;
 }
-
 TypePtr make_fundamental(EFundamentalType fundamental)
 {
 	TypePtr type = new_type(TypeKind::Fundamental);
 	type->fundamental = fundamental;
 	return type;
 }
-
 TypePtr make_cv(TypePtr base, unsigned cv)
 {
 	if (cv == CV_NONE)
@@ -383,7 +355,6 @@ TypePtr make_cv(TypePtr base, unsigned cv)
 	type->base = base;
 	return type;
 }
-
 TypePtr make_pointer(TypePtr base)
 {
 	if (is_reference_type(base))
@@ -392,7 +363,6 @@ TypePtr make_pointer(TypePtr base)
 	type->base = base;
 	return type;
 }
-
 TypePtr make_lvalue_reference(TypePtr base)
 {
 	if (is_reference_type(base) || is_void_type(base))
@@ -401,7 +371,6 @@ TypePtr make_lvalue_reference(TypePtr base)
 	type->base = base;
 	return type;
 }
-
 TypePtr make_rvalue_reference(TypePtr base)
 {
 	if (is_reference_type(base) || is_void_type(base))
@@ -410,7 +379,6 @@ TypePtr make_rvalue_reference(TypePtr base)
 	type->base = base;
 	return type;
 }
-
 TypePtr make_array(TypePtr element, bool unknown, uint64_t bound)
 {
 	if (is_void_type(element) ||
@@ -423,7 +391,6 @@ TypePtr make_array(TypePtr element, bool unknown, uint64_t bound)
 	type->bound = bound;
 	return type;
 }
-
 TypePtr make_gnu_vector(TypePtr element, uint64_t bytes)
 {
 	uint64_t element_size = type_size(element);
@@ -433,7 +400,6 @@ TypePtr make_gnu_vector(TypePtr element, uint64_t bytes)
 	type->tag = kGnuVectorTypeTag;
 	return type;
 }
-
 TypePtr make_function(TypePtr result,
                       const vector<TypePtr>& parameters,
                       bool variadic)
@@ -447,7 +413,6 @@ TypePtr make_function(TypePtr result,
 	type->variadic = variadic;
 	return type;
 }
-
 TypePtr make_member_pointer(TypePtr class_type, TypePtr member_type)
 {
 	TypePtr bare = strip_cv(class_type);
@@ -460,7 +425,6 @@ TypePtr make_member_pointer(TypePtr class_type, TypePtr member_type)
 	type->base = member_type;
 	return type;
 }
-
 TypePtr make_record_type(const string& name,
                          const string& tag,
                          bool complete,
@@ -477,7 +441,6 @@ TypePtr make_record_type(const string& name,
 		scope->record_type = type;
 	return type;
 }
-
 TypePtr make_enum_type(const string& name,
                        bool scoped,
                        EFundamentalType underlying,
@@ -492,14 +455,12 @@ TypePtr make_enum_type(const string& name,
 	type->scope = scope;
 	return type;
 }
-
 TypePtr make_template_parameter_type(const string& name)
 {
 	TypePtr type = new_type(TypeKind::TemplateParameter);
 	type->name = name;
 	return type;
 }
-
 TypePtr make_dependent_typename_type(const string& name,
                                      bool qualified,
                                      bool template_id,
@@ -512,42 +473,36 @@ TypePtr make_dependent_typename_type(const string& name,
 	type->dependent_typename_decltype = decltype_id;
 	return type;
 }
-
 TypePtr make_template_template_parameter_type(const string& name)
 {
 	TypePtr type = new_type(TypeKind::TemplateTemplateParameter);
 	type->name = name;
 	return type;
 }
-
 bool is_deducible_template_parameter_type(const TypePtr& type)
 {
 	return type.get() != NULL &&
 	       type->kind == TypeKind::TemplateParameter &&
 	       !type->is_dependent_typename;
 }
-
 bool is_dependent_typename_type(const TypePtr& type)
 {
 	return type.get() != NULL &&
 	       type->kind == TypeKind::TemplateParameter &&
 	       type->is_dependent_typename;
 }
-
 TypePtr strip_top_level_cv(TypePtr type)
 {
 	if (type->kind == TypeKind::Cv)
 		return type->base;
 	return type;
 }
-
 TypePtr strip_cv(TypePtr type)
 {
 	while (type->kind == TypeKind::Cv)
 		type = type->base;
 	return type;
 }
-
 bool type_has_const(const TypePtr& type)
 {
 	if (type->kind == TypeKind::Cv)
@@ -556,19 +511,16 @@ bool type_has_const(const TypePtr& type)
 		return type_has_const(type->base);
 	return false;
 }
-
 bool is_void_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
 	return bare->kind == TypeKind::Fundamental && bare->fundamental == FT_VOID;
 }
-
 bool is_reference_type(const TypePtr& type)
 {
 	return type->kind == TypeKind::LValueReference ||
 	       type->kind == TypeKind::RValueReference;
 }
-
 bool is_gnu_vector_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
@@ -576,7 +528,6 @@ bool is_gnu_vector_type(const TypePtr& type)
 	       bare->kind == TypeKind::Array &&
 	       bare->tag == kGnuVectorTypeTag;
 }
-
 bool is_integral_or_bool_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
@@ -608,10 +559,8 @@ bool is_integral_or_bool_type(const TypePtr& type)
 		return false;
 	}
 }
-
 static bool type_template_identity_matches(const TypePtr& left,
                                            const TypePtr& right);
-
 bool same_type(const TypePtr& left, const TypePtr& right)
 {
 	if (left->kind != right->kind)
@@ -653,7 +602,6 @@ bool same_type(const TypePtr& left, const TypePtr& right)
 	}
 	return same_type(left->base, right->base);
 }
-
 string describe_type(const TypePtr& type)
 {
 	switch (type->kind)
@@ -703,7 +651,6 @@ string describe_type(const TypePtr& type)
 	}
 	throw logic_error("unknown type kind");
 }
-
 uint64_t type_size(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
@@ -734,7 +681,6 @@ uint64_t type_size(const TypePtr& type)
 		}
 	throw runtime_error("incomplete object type");
 }
-
 uint64_t type_align(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
@@ -755,11 +701,8 @@ uint64_t type_align(const TypePtr& type)
 		return 8;
 	return type_size(bare);
 }
-
 namespace {
-
 bool type_uses_object_storage(TypePtr type);
-
 bool record_uses_object_storage(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -785,7 +728,6 @@ bool record_uses_object_storage(TypePtr type)
 			return true;
 	return false;
 }
-
 bool type_uses_object_storage(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -804,23 +746,19 @@ bool type_uses_object_storage(TypePtr type)
 	}
 	return true;
 }
-
 bool no_unique_member_uses_no_storage(Binding* member)
 {
 	return member != NULL &&
 	       member->is_no_unique_address &&
 	       !type_uses_object_storage(member->type);
 }
-
 }  // namespace
-
 static bool direct_base_is_virtual(TypePtr record, size_t index)
 {
 	TypePtr bare = strip_cv(record);
 	return index < bare->direct_base_virtuals.size() &&
 	       bare->direct_base_virtuals[index];
 }
-
 static uint64_t align_up(uint64_t offset, uint64_t align)
 {
 	if (align == 0)
@@ -828,13 +766,10 @@ static uint64_t align_up(uint64_t offset, uint64_t align)
 	uint64_t padding = offset % align;
 	return padding == 0 ? offset : offset + align - padding;
 }
-
 bool same_type(const TypePtr& left, const TypePtr& right);
-
 static bool same_template_instance_argument(
 	const TemplateInstanceArgument& left,
 	const TemplateInstanceArgument& right);
-
 static bool same_template_instance_arguments(
 	const vector<TemplateInstanceArgument>& left,
 	const vector<TemplateInstanceArgument>& right)
@@ -846,7 +781,6 @@ static bool same_template_instance_arguments(
 			return false;
 	return true;
 }
-
 static bool template_instance_value_has_semantic_identity(
 	const TemplateInstanceArgument& argument)
 {
@@ -854,7 +788,6 @@ static bool template_instance_value_has_semantic_identity(
 	       !argument.value_member_name.empty() ||
 	       argument.value_name.find("::") != string::npos;
 }
-
 static bool same_template_instance_argument(
 	const TemplateInstanceArgument& left,
 	const TemplateInstanceArgument& right)
@@ -901,7 +834,6 @@ static bool same_template_instance_argument(
 	}
 	return false;
 }
-
 static bool same_template_argument_lists(
 	const vector<vector<TemplateInstanceArgument> >& left,
 	const vector<vector<TemplateInstanceArgument> >& right)
@@ -913,7 +845,6 @@ static bool same_template_argument_lists(
 			return false;
 	return true;
 }
-
 static bool type_template_identity_matches(const TypePtr& left,
                                            const TypePtr& right)
 {
@@ -925,7 +856,6 @@ static bool type_template_identity_matches(const TypePtr& left,
 		       left->dependent_typename_template_argument_lists,
 		       right->dependent_typename_template_argument_lists);
 }
-
 static bool type_vector_contains(const vector<TypePtr>& types, TypePtr type)
 {
 	TypePtr wanted = strip_cv(type);
@@ -935,7 +865,6 @@ static bool type_vector_contains(const vector<TypePtr>& types, TypePtr type)
 			return true;
 	return false;
 }
-
 static void collect_record_virtual_bases(TypePtr record,
                                          vector<TypePtr>& out)
 {
@@ -955,7 +884,6 @@ static void collect_record_virtual_bases(TypePtr record,
 		collect_record_virtual_bases(direct, out);
 	}
 }
-
 static uint64_t record_nonvirtual_subobject_size(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -966,21 +894,18 @@ static uint64_t record_nonvirtual_subobject_size(TypePtr type)
 		size = 1;
 	return align_up(size, bare->record_align);
 }
-
 static uint64_t record_virtual_subobject_size(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
 	layout_record_type(bare);
 	return bare->nonvirtual_size != 0 ? bare->nonvirtual_size : 1;
 }
-
 static uint64_t record_virtual_subobject_align(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
 	layout_record_type(bare);
 	return bare->nonvirtual_align != 0 ? bare->nonvirtual_align : 1;
 }
-
 static size_t primary_polymorphic_base_index(TypePtr record,
                                              const vector<TypePtr>& bases)
 {
@@ -996,13 +921,11 @@ static size_t primary_polymorphic_base_index(TypePtr record,
 	}
 	return static_cast<size_t>(-1);
 }
-
 struct RecordLayoutCursor
 {
 	uint64_t offset;
 	uint64_t align;
 	uint64_t nonvirtual_align;
-
 	explicit RecordLayoutCursor(uint64_t forced_align)
 		: offset(0),
 		  align(max<uint64_t>(1, forced_align)),
@@ -1010,7 +933,6 @@ struct RecordLayoutCursor
 	{
 	}
 };
-
 static vector<size_t> direct_base_layout_order(size_t primary_base,
                                                size_t base_count)
 {
@@ -1022,7 +944,6 @@ static vector<size_t> direct_base_layout_order(size_t primary_base,
 			layout_order.push_back(b);
 	return layout_order;
 }
-
 static void layout_record_direct_bases(TypePtr bare,
                                        const vector<TypePtr>& direct_bases,
                                        size_t primary_base,
@@ -1071,7 +992,6 @@ static void layout_record_direct_bases(TypePtr bare,
 			bare->direct_base_offset = base_offset;
 	}
 }
-
 static void layout_record_member(TypePtr bare,
                                  Binding* member,
                                  RecordLayoutCursor& cursor,
@@ -1154,7 +1074,6 @@ static void layout_record_member(TypePtr bare,
 	cursor.align = max(cursor.align, member_align);
 	cursor.nonvirtual_align = max(cursor.nonvirtual_align, member_align);
 }
-
 static void layout_record_members(TypePtr bare, RecordLayoutCursor& cursor)
 {
 	if (bare->scope == NULL)
@@ -1175,7 +1094,6 @@ static void layout_record_members(TypePtr bare, RecordLayoutCursor& cursor)
 	if (bit_used != 0)
 		cursor.offset = bit_unit_offset + bit_unit_size;
 }
-
 static void layout_record_virtual_bases(TypePtr bare,
                                         RecordLayoutCursor& cursor)
 {
@@ -1190,7 +1108,6 @@ static void layout_record_virtual_bases(TypePtr bare,
 		cursor.align = max<uint64_t>(cursor.align, type_align(vbase));
 	}
 }
-
 static void assign_direct_virtual_base_offsets(
 	TypePtr bare,
 	const vector<TypePtr>& direct_bases)
@@ -1210,7 +1127,6 @@ static void assign_direct_virtual_base_offsets(
 					}
 		}
 }
-
 void layout_record_type(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -1266,7 +1182,6 @@ void layout_record_type(TypePtr type)
 	bare->record_align = cursor.align;
 	bare->layout_valid = true;
 }
-
 vector<TypePtr> record_direct_bases(TypePtr type)
 {
 	vector<TypePtr> out;
@@ -1280,7 +1195,6 @@ vector<TypePtr> record_direct_bases(TypePtr type)
 		out.push_back(bare->base);
 	return out;
 }
-
 uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base)
 {
 	if (record.get() == NULL || direct_base.get() == NULL)
@@ -1301,7 +1215,6 @@ uint64_t record_direct_base_offset(TypePtr record, TypePtr direct_base)
 	}
 	return 0;
 }
-
 bool record_direct_base_is_virtual(TypePtr record, size_t index)
 {
 	if (record.get() == NULL)
@@ -1311,7 +1224,6 @@ bool record_direct_base_is_virtual(TypePtr record, size_t index)
 		return false;
 	return direct_base_is_virtual(bare, index);
 }
-
 vector<TypePtr> record_virtual_bases(TypePtr type)
 {
 	vector<TypePtr> out;
@@ -1323,7 +1235,6 @@ vector<TypePtr> record_virtual_bases(TypePtr type)
 	layout_record_type(bare);
 	return bare->virtual_bases;
 }
-
 uint64_t record_virtual_base_offset(TypePtr record, TypePtr virtual_base)
 {
 	if (record.get() == NULL || virtual_base.get() == NULL)
@@ -1340,7 +1251,6 @@ uint64_t record_virtual_base_offset(TypePtr record, TypePtr virtual_base)
 				? bare->virtual_base_offsets[i] : 0;
 	return 0;
 }
-
 TypePtr record_type_for_scope(Scope* scope)
 {
 	if (scope == NULL || scope->kind != ScopeKind::Class || scope->parent == NULL)
@@ -1364,7 +1274,6 @@ TypePtr record_type_for_scope(Scope* scope)
 	}
 	return TypePtr();
 }
-
 Scope* create_child_scope(Scope* parent, ScopeKind kind, const string& name)
 {
 	unique_ptr<Scope> scope(new Scope(kind, name, parent));
@@ -1373,7 +1282,6 @@ Scope* create_child_scope(Scope* parent, ScopeKind kind, const string& name)
 	parent->child_order.push_back(raw);
 	return raw;
 }
-
 Scope* get_or_create_namespace(Scope* parent,
                                const string& name,
                                bool is_inline)
@@ -1394,9 +1302,7 @@ Scope* get_or_create_namespace(Scope* parent,
 		add_using_directive(parent, scope);
 	return scope;
 }
-
 size_t& binding_generation_storage();
-
 Binding* add_binding(Scope* scope,
                      BindingKind kind,
                      const string& name,
@@ -1413,18 +1319,15 @@ Binding* add_binding(Scope* scope,
 		scope->binding_order.push_back(raw);
 	return raw;
 }
-
 size_t& binding_generation_storage()
 {
 	static size_t generation = 0;
 	return generation;
 }
-
 size_t binding_generation()
 {
 	return binding_generation_storage();
 }
-
 Binding* add_namespace_alias(Scope* scope,
                              const string& name,
                              Scope* target)
@@ -1434,7 +1337,6 @@ Binding* add_namespace_alias(Scope* scope,
 	binding->target_scope = target;
 	return binding;
 }
-
 void add_using_directive(Scope* scope, Scope* target)
 {
 	if (target == NULL)
@@ -1447,7 +1349,6 @@ void add_using_directive(Scope* scope, Scope* target)
 		++binding_generation_storage();
 	}
 }
-
 Binding* add_using_declaration(Scope* scope,
                                const string& name,
                                const Binding* target)
@@ -1495,7 +1396,6 @@ Binding* add_using_declaration(Scope* scope,
 		target->is_cleanup_only_destructor;
 	return binding;
 }
-
 Binding* find_owned_binding(Scope* scope,
                             const string& name,
                             BindingKind kind)
@@ -1511,7 +1411,6 @@ Binding* find_owned_binding(Scope* scope,
 	}
 	return NULL;
 }
-
 bool binding_matches(const Binding* binding, int mask)
 {
 	if (binding == NULL)
@@ -1534,7 +1433,6 @@ bool binding_matches(const Binding* binding, int mask)
 		return true;
 	return false;
 }
-
 Binding* lookup_unqualified(Scope* start, const string& name, int mask)
 {
 	for (Scope* scope = start; scope != NULL; scope = scope->parent)
@@ -1546,13 +1444,11 @@ Binding* lookup_unqualified(Scope* start, const string& name, int mask)
 	}
 	return NULL;
 }
-
 Binding* lookup_qualified(Scope* scope, const string& name, int mask)
 {
 	set<Scope*> seen;
 	return lookup_in_scope(scope, name, mask, seen);
 }
-
 Scope* binding_qualifier_scope(const Binding* binding)
 {
 	if (binding == NULL)
@@ -1570,5 +1466,4 @@ Scope* binding_qualifier_scope(const Binding* binding)
 	}
 	return NULL;
 }
-
 }  // namespace pa11

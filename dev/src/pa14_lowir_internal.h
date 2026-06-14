@@ -337,11 +337,20 @@ struct ProgramLowerer
 			const Binding* binding, PendingInlineIterator& pos);
 		void place_constructor_destructor_pair(
 			const Binding* binding, PendingInlineIterator& pos);
-		void place_constructor_after_record_return_dependency(
-			const Binding* binding, PendingInlineIterator& pos);
-		void emit_pending_synthetic_assignment_functions();
-	void demand_inline_function(const Binding* binding,
-	                            bool complete_entry = true);
+			void place_constructor_after_record_return_dependency(
+				const Binding* binding, PendingInlineIterator& pos);
+			void emit_pending_synthetic_assignment_functions();
+			void append_lowered_inline_definition_outputs(
+				const Binding* binding,
+				const string& name,
+				bool class_ctor,
+				bool class_dtor,
+				bool need_base,
+				bool need_complete,
+				const FunctionOut& lowered,
+				const FunctionOut& destructor_base_lowered);
+		void demand_inline_function(const Binding* binding,
+		                            bool complete_entry = true);
 	void emit_pending_inline_definitions();
 	void emit_global_lifecycle_functions();
 	void collect_translation_unit(const Node& root);
@@ -594,11 +603,17 @@ private:
 	void lower_zero_init(const function<Value()>& addr_for, TypePtr type);
 	void lower_default_init(const function<Value()>& addr_for, TypePtr type);
 	void lower_storage_zero(Value addr, uint64_t size);
-	void lower_constructor_call(const function<Value()>& addr_for,
-	                            Binding* ctor,
-	                            const vector<const Node*>& args,
-	                            bool base_entry = false);
-	void lower_record_reference_constructor_argument(
+		void lower_constructor_call(const function<Value()>& addr_for,
+		                            Binding* ctor,
+		                            const vector<const Node*>& args,
+		                            bool base_entry = false);
+		void append_constructor_hidden_parameter_args(
+			Binding* ctor,
+			const vector<const Node*>& args,
+			vector<string>& lowered);
+		void append_constructor_base_entry_hidden_args(Binding* ctor,
+		                                              vector<string>& lowered);
+		void lower_record_reference_constructor_argument(
 		const Node& arg,
 		TypePtr param,
 		vector<string>& lowered,

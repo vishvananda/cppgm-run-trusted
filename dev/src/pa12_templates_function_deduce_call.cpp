@@ -688,6 +688,131 @@ bool Parser::deduce_function_template_call_parameters(
 	return true;
 }
 
+bool Parser::append_deduced_function_template_argument(
+	TemplateDeclaration* declaration,
+	const TemplateParameterInfo& parameter,
+	size_t parameter_index,
+	map<string, TypePtr>& deduced,
+	map<string, vector<TemplateArgument> >& deduced_packs,
+	map<string, TemplateArgument>& fixed_arguments,
+	bool& saw_template_parameter_pack,
+	vector<TemplateArgument>& explicit_args)
+{
+	const string& pname = parameter.name;
+	if (parameter.is_pack)
+	{
+		map<string, TemplateArgument>::iterator fixed_pack =
+			fixed_arguments.find(pname);
+		if (fixed_pack != fixed_arguments.end())
+			explicit_args.push_back(fixed_pack->second);
+		else
+		{
+			map<string, vector<TemplateArgument> >::iterator found =
+				deduced_packs.find(pname);
+			map<string, TypePtr>::iterator scalar =
+				parameter.kind == TemplateParameterKind::Type
+				? deduced.find(pname) : deduced.end();
+			if (found == deduced_packs.end() && scalar != deduced.end())
+			{
+				vector<TemplateArgument> pack;
+				pack.push_back(TemplateArgument::type_arg(scalar->second));
+				explicit_args.push_back(TemplateArgument::pack_arg(pack));
+			}
+			else if (found == deduced_packs.end())
+				explicit_args.push_back(TemplateArgument::pack_arg(
+					vector<TemplateArgument>()));
+			else
+				explicit_args.push_back(
+					TemplateArgument::pack_arg(found->second));
+		}
+		saw_template_parameter_pack = true;
+		return true;
+	}
+	if (parameter.kind == TemplateParameterKind::Type)
+	{
+		map<string, TypePtr>::iterator found = deduced.find(pname);
+		if (found != deduced.end())
+			explicit_args.push_back(
+				TemplateArgument::type_arg(found->second));
+		else if (parameter.has_default)
+		{
+			if (saw_template_parameter_pack)
+				return false;
+			if (hosted_compatibility_ &&
+			    validating_template_definition_ &&
+			    hosted_library_template_declaration(declaration))
+			{
+				explicit_args.push_back(
+					dependent_default_template_argument(
+						declaration,
+						parameter,
+						parameter_index));
+				return true;
+			}
+			try
+			{
+				explicit_args.push_back(
+					parse_default_template_argument(declaration,
+					                                parameter_index,
+					                                explicit_args));
+			}
+			catch (const runtime_error& err)
+			{
+				if (function_template_candidate_instantiation_depth_ == 0 ||
+				    string(err.what()) != "dependent typename not resolved")
+					throw;
+				bool dependent_context = false;
+				for (size_t ai = 0; ai < explicit_args.size(); ++ai)
+					if (template_argument_has_template_parameter(
+						    explicit_args[ai],
+						    record_template_arguments_))
+						dependent_context = true;
+				if (!dependent_context)
+					return false;
+				string default_name = parameter.name.empty()
+					? declaration->name + "__default" +
+					  to_string(parameter_index)
+					: parameter.name;
+				explicit_args.push_back(TemplateArgument::type_arg(
+					pa11::make_dependent_typename_type(default_name,
+					                                   false,
+					                                   false,
+					                                   false)));
+			}
+		}
+		else
+			return false;
+		return true;
+	}
+	map<string, TemplateArgument>::iterator found =
+		fixed_arguments.find(pname);
+	if (found != fixed_arguments.end())
+		explicit_args.push_back(found->second);
+	else if (parameter.has_default)
+	{
+		if (saw_template_parameter_pack)
+			return false;
+		if (hosted_compatibility_ &&
+		    validating_template_definition_ &&
+		    hosted_library_template_declaration(declaration))
+		{
+			explicit_args.push_back(
+				dependent_default_template_argument(
+					declaration,
+					parameter,
+					parameter_index));
+			return true;
+		}
+		explicit_args.push_back(
+			parse_default_template_argument(declaration,
+			                                parameter_index,
+			                                explicit_args));
+	}
+	else
+		return false;
+	return true;
+}
+
 bool Parser::finish_deduced_function_template_arguments(
 	TemplateDeclaration* declaration,
 	map<string, TypePtr>& deduced,
@@ -700,119 +825,16 @@ bool Parser::finish_deduced_function_template_arguments(
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
 		const TemplateParameterInfo& parameter = declaration->parameters[i];
-		const string& pname = parameter.name;
-		if (parameter.is_pack)
-		{
-			map<string, TemplateArgument>::iterator fixed_pack =
-				fixed_arguments.find(pname);
-			if (fixed_pack != fixed_arguments.end())
-				explicit_args.push_back(fixed_pack->second);
-			else
-			{
-				map<string, vector<TemplateArgument> >::iterator found =
-					deduced_packs.find(pname);
-				map<string, TypePtr>::iterator scalar =
-					parameter.kind == TemplateParameterKind::Type
-					? deduced.find(pname) : deduced.end();
-				if (found == deduced_packs.end() && scalar != deduced.end())
-				{
-					vector<TemplateArgument> pack;
-					pack.push_back(TemplateArgument::type_arg(scalar->second));
-					explicit_args.push_back(TemplateArgument::pack_arg(pack));
-				}
-				else if (found == deduced_packs.end())
-					explicit_args.push_back(TemplateArgument::pack_arg(
-						vector<TemplateArgument>()));
-				else
-					explicit_args.push_back(
-						TemplateArgument::pack_arg(found->second));
-			}
-			saw_template_parameter_pack = true;
-			continue;
-		}
-		if (parameter.kind == TemplateParameterKind::Type)
-		{
-			map<string, TypePtr>::iterator found = deduced.find(pname);
-			if (found != deduced.end())
-				explicit_args.push_back(
-					TemplateArgument::type_arg(found->second));
-			else if (parameter.has_default)
-			{
-				if (saw_template_parameter_pack)
-					break;
-				if (hosted_compatibility_ &&
-				    validating_template_definition_ &&
-				    hosted_library_template_declaration(declaration))
-				{
-					explicit_args.push_back(
-						dependent_default_template_argument(
-							declaration,
-							parameter,
-							i));
-					continue;
-				}
-				try
-				{
-					explicit_args.push_back(
-						parse_default_template_argument(declaration,
-						                                i,
-						                                explicit_args));
-				}
-				catch (const runtime_error& err)
-				{
-					if (function_template_candidate_instantiation_depth_ == 0 ||
-					    string(err.what()) != "dependent typename not resolved")
-						throw;
-					bool dependent_context = false;
-					for (size_t ai = 0; ai < explicit_args.size(); ++ai)
-						if (template_argument_has_template_parameter(
-							    explicit_args[ai],
-							    record_template_arguments_))
-							dependent_context = true;
-					if (!dependent_context)
-						return false;
-					string default_name = parameter.name.empty()
-						? declaration->name + "__default" + to_string(i)
-						: parameter.name;
-					explicit_args.push_back(TemplateArgument::type_arg(
-						pa11::make_dependent_typename_type(default_name,
-						                                   false,
-						                                   false,
-						                                   false)));
-				}
-			}
-			else
-				break;
-		}
-		else
-		{
-			map<string, TemplateArgument>::iterator found =
-				fixed_arguments.find(pname);
-			if (found != fixed_arguments.end())
-				explicit_args.push_back(found->second);
-			else if (parameter.has_default)
-			{
-				if (saw_template_parameter_pack)
-					break;
-				if (hosted_compatibility_ &&
-				    validating_template_definition_ &&
-				    hosted_library_template_declaration(declaration))
-				{
-					explicit_args.push_back(
-						dependent_default_template_argument(
-							declaration,
-							parameter,
-							i));
-					continue;
-				}
-				explicit_args.push_back(
-					parse_default_template_argument(declaration,
-					                                i,
-					                                explicit_args));
-			}
-			else
-				break;
-		}
+		if (!append_deduced_function_template_argument(
+			    declaration,
+			    parameter,
+			    i,
+			    deduced,
+			    deduced_packs,
+			    fixed_arguments,
+			    saw_template_parameter_pack,
+			    explicit_args))
+			break;
 	}
 	try
 	{

@@ -72,17 +72,85 @@ return parameter_type_needs_destructor(bare->base); if (bare->kind != TypeKind::
 if (dtor != NULL && (!dtor->is_noop_destructor || !dtor->is_generated_default_destructor)) return true; pa11::layout_record_type(bare);
 if (bare->base.get() != NULL && parameter_type_needs_destructor(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
 if (parameter_type_needs_destructor(bare->fields[i]->type)) return true; return false; }
-bool record_has_base_subobject(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL) return false; TypePtr bare = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
-if (bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return false; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
-{ TypePtr stripped = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (stripped.get() == NULL) continue; if (pa11::same_type(stripped, wanted)) return true;
-if (record_has_base_subobject(stripped, wanted)) return true; } return false;
-} uint64_t base_subobject_offset(TypePtr source, TypePtr target) { if (source.get() == NULL || target.get() == NULL)
-return 0; TypePtr root = pa11::strip_cv(source); TypePtr wanted = pa11::strip_cv(target);
-if (root->kind != TypeKind::Record || wanted->kind != TypeKind::Record) return 0; vector<pair<TypePtr, uint64_t> > pending; pending.push_back(make_pair(root, 0)); vector<pair<TypePtr, uint64_t> > seen;
-while (!pending.empty()) { TypePtr record = pa11::strip_cv(pending.back().first); uint64_t base_offset = pending.back().second; pending.pop_back(); if (record.get() == NULL || record->kind != TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i].first, record) && seen[i].second == base_offset) already = true; if (already) continue; seen.push_back(make_pair(record, base_offset)); pa11::layout_record_type(record); vector<TypePtr> bases = pa11::record_direct_bases(record); for (size_t i = 0; i < bases.size(); ++i) { TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record) continue; uint64_t offset = pa11::record_direct_base_is_virtual(record, i) ? pa11::record_virtual_base_offset(root, direct) : base_offset + pa11::record_direct_base_offset(record, direct); if (pa11::same_type(direct, wanted)) return offset; pending.push_back(make_pair(direct, offset)); } }
-return 0; }
+bool record_has_base_subobject(TypePtr source, TypePtr target)
+{
+	if (source.get() == NULL || target.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(source);
+	TypePtr wanted = pa11::strip_cv(target);
+	if (bare->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return false;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr stripped = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (stripped.get() == NULL)
+			continue;
+		if (pa11::same_type(stripped, wanted))
+			return true;
+		if (record_has_base_subobject(stripped, wanted))
+			return true;
+	}
+	return false;
+}
+uint64_t base_subobject_offset(TypePtr source, TypePtr target)
+{
+	if (source.get() == NULL || target.get() == NULL)
+		return 0;
+	TypePtr root = pa11::strip_cv(source);
+	TypePtr wanted = pa11::strip_cv(target);
+	if (root->kind != TypeKind::Record || wanted->kind != TypeKind::Record)
+		return 0;
+	vector<pair<TypePtr, uint64_t> > pending;
+	pending.push_back(make_pair(root, 0));
+	vector<pair<TypePtr, uint64_t> > seen;
+	while (!pending.empty())
+	{
+		TypePtr record = pa11::strip_cv(pending.back().first);
+		uint64_t base_offset = pending.back().second;
+		pending.pop_back();
+		if (record.get() == NULL || record->kind != TypeKind::Record)
+			continue;
+		bool already = false;
+		for (size_t i = 0; i < seen.size(); ++i)
+			if (pa11::same_type(seen[i].first, record) &&
+			    seen[i].second == base_offset)
+				already = true;
+		if (already)
+			continue;
+		seen.push_back(make_pair(record, base_offset));
+		pa11::layout_record_type(record);
+		vector<TypePtr> bases = pa11::record_direct_bases(record);
+		for (size_t i = 0; i < bases.size(); ++i)
+		{
+			TypePtr direct = bases[i].get() != NULL
+				? pa11::strip_cv(bases[i]) : TypePtr();
+			if (direct.get() == NULL || direct->kind != TypeKind::Record)
+				continue;
+			uint64_t offset = pa11::record_direct_base_is_virtual(record, i)
+				? pa11::record_virtual_base_offset(root, direct)
+				: base_offset + pa11::record_direct_base_offset(record, direct);
+			if (pa11::same_type(direct, wanted))
+				return offset;
+			pending.push_back(make_pair(direct, offset));
+		}
+	}
+	return 0;
+}
 bool target_is_virtual_base_subobject(TypePtr source, TypePtr target)
-{ TypePtr bare = source.get() != NULL ? pa11::strip_cv(source) : TypePtr(); TypePtr wanted = target.get() != NULL ? pa11::strip_cv(target) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return false; vector<TypePtr> vbases = pa11::record_virtual_bases(bare); for (size_t i = 0; i < vbases.size(); ++i) if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted)) return true; return false; }
+{
+	TypePtr bare = source.get() != NULL ? pa11::strip_cv(source) : TypePtr();
+	TypePtr wanted = target.get() != NULL ? pa11::strip_cv(target) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record ||
+	    wanted.get() == NULL || wanted->kind != TypeKind::Record)
+		return false;
+	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
+	for (size_t i = 0; i < vbases.size(); ++i)
+		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
+			return true;
+	return false;
+}
 vector<size_t> hidden_virtual_base_slot_store_order(
 	const vector<TypePtr>& bases)
 {
@@ -366,16 +434,102 @@ out_.returns_pointer_result = !indirect_result && scalar_lowir_type(fn_type->bas
 	}
 	map<string, int> parameter_name_counts;
 	map<string, int> raw_parameter_seen;
-	header << "function @" << name << "("; if (indirect_result) { header << "%ret : ptr [pass=indirect_result]"; parameter_name_counts["ret"] = 1; } for (size_t i = 0; i < fn_type->parameters.size(); ++i)
-	{ if (i != 0 || indirect_result) header << ", "; string pname = raw_parameter_names[i]; if (!pname.empty()) ++raw_parameter_seen[pname];
-	if (pname.empty() || raw_parameter_seen[pname] < raw_parameter_counts[pname]) pname = "__param" + to_string(i); int& count = parameter_name_counts[pname]; ++count; if (count > 1) pname += "__shadow" + to_string(count); out_.parameter_names.push_back(pname); TypePtr ptype = fn_type->parameters[i]; header << "%" << pname << " : " << lowir_parameter(ptype);
-} size_t hidden_pvb_index = 0; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && !fn_type->parameters.empty(); for (size_t i = member_this_param ? 1 : 0; i < fn_type->parameters.size(); ++i) { vector<TypePtr> vbases = program_.hidden_virtual_bases_for_function_parameter(fn_.binding, i, fn_type->parameters[i]); for (size_t v = 0; v < vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result) header << ", "; header << "%__pvbptr" << hidden_pvb_index++ << " : ptr"; } } vector<TypePtr> this_vbases = member_this_param && !is_class_constructor_binding(fn_.binding) && !is_class_destructor_binding(fn_.binding) ? (fn_.binding->is_virtual ? program_.hidden_virtual_bases_for_function_parameter(fn_.binding, 0, fn_type->parameters[0]) : hidden_virtual_bases_for_record(class_record_for_member(fn_.binding))) : vector<TypePtr>(); for (size_t v = 0; v < this_vbases.size(); ++v) { if (hidden_pvb_index != 0 || !fn_type->parameters.empty() || indirect_result || v != 0) header << ", "; header << "%__vbptr" << v << " : ptr"; } header << ") -> " << (indirect_result ? "void" : scalar_lowir_type(fn_type->base)); vector<string> metadata;
-if (fn_type->variadic) metadata.push_back("arity=variadic"); if (binding->language_linkage == "c") metadata.push_back("linkage=c");
-if (binding->unwind_no) metadata.push_back("unwind=no"); if (binding->name == "__cppgm_init") metadata.push_back("role=init");
-else if (binding->name == "__cppgm_fini") metadata.push_back("role=fini"); else if (binding->name == "main") {
-metadata.push_back("role=entry"); metadata.push_back("binding=strong"); out_.strong_binding = true; metadata.push_back("keep_alias=yes"); }
-else if (binding->name.compare(0, 8, "__lambda") == 0 || binding_has_internal_linkage(binding)) metadata.push_back("binding=internal"); else if (binding->is_inline_definition) metadata.push_back("binding=weak");
-else { metadata.push_back("binding=strong"); out_.strong_binding = true; } if (!binding->function_specialization_symbol.empty()) metadata.push_back("object=" + binding->function_specialization_symbol);
+	header << "function @" << name << "(";
+	if (indirect_result)
+	{
+		header << "%ret : ptr [pass=indirect_result]";
+		parameter_name_counts["ret"] = 1;
+	}
+	for (size_t i = 0; i < fn_type->parameters.size(); ++i)
+	{
+		if (i != 0 || indirect_result)
+			header << ", ";
+		string pname = raw_parameter_names[i];
+		if (!pname.empty())
+			++raw_parameter_seen[pname];
+		if (pname.empty() ||
+		    raw_parameter_seen[pname] < raw_parameter_counts[pname])
+			pname = "__param" + to_string(i);
+		int& count = parameter_name_counts[pname];
+		++count;
+		if (count > 1)
+			pname += "__shadow" + to_string(count);
+		out_.parameter_names.push_back(pname);
+		TypePtr ptype = fn_type->parameters[i];
+		header << "%" << pname << " : " << lowir_parameter(ptype);
+	}
+	size_t hidden_pvb_index = 0;
+	bool member_this_param =
+		fn_.binding->owner != NULL &&
+		fn_.binding->owner->kind == ScopeKind::Class &&
+		!fn_.binding->is_static_member &&
+		!fn_type->parameters.empty();
+	for (size_t i = member_this_param ? 1 : 0;
+	     i < fn_type->parameters.size();
+	     ++i)
+	{
+		vector<TypePtr> vbases =
+			program_.hidden_virtual_bases_for_function_parameter(
+				fn_.binding, i, fn_type->parameters[i]);
+		for (size_t v = 0; v < vbases.size(); ++v)
+		{
+			if (hidden_pvb_index != 0 ||
+			    !fn_type->parameters.empty() ||
+			    indirect_result)
+				header << ", ";
+			header << "%__pvbptr" << hidden_pvb_index++ << " : ptr";
+		}
+	}
+	vector<TypePtr> this_vbases =
+		member_this_param &&
+		!is_class_constructor_binding(fn_.binding) &&
+		!is_class_destructor_binding(fn_.binding)
+		? (fn_.binding->is_virtual
+		   ? program_.hidden_virtual_bases_for_function_parameter(
+			   fn_.binding, 0, fn_type->parameters[0])
+		   : hidden_virtual_bases_for_record(class_record_for_member(fn_.binding)))
+		: vector<TypePtr>();
+	for (size_t v = 0; v < this_vbases.size(); ++v)
+	{
+		if (hidden_pvb_index != 0 ||
+		    !fn_type->parameters.empty() ||
+		    indirect_result ||
+		    v != 0)
+			header << ", ";
+		header << "%__vbptr" << v << " : ptr";
+	}
+	header << ") -> "
+	       << (indirect_result ? "void" : scalar_lowir_type(fn_type->base));
+	vector<string> metadata;
+	if (fn_type->variadic)
+		metadata.push_back("arity=variadic");
+	if (binding->language_linkage == "c")
+		metadata.push_back("linkage=c");
+	if (binding->unwind_no)
+		metadata.push_back("unwind=no");
+	if (binding->name == "__cppgm_init")
+		metadata.push_back("role=init");
+	else if (binding->name == "__cppgm_fini")
+		metadata.push_back("role=fini");
+	else if (binding->name == "main")
+	{
+		metadata.push_back("role=entry");
+		metadata.push_back("binding=strong");
+		out_.strong_binding = true;
+		metadata.push_back("keep_alias=yes");
+	}
+	else if (binding->name.compare(0, 8, "__lambda") == 0 ||
+	         binding_has_internal_linkage(binding))
+		metadata.push_back("binding=internal");
+	else if (binding->is_inline_definition)
+		metadata.push_back("binding=weak");
+	else
+	{
+		metadata.push_back("binding=strong");
+		out_.strong_binding = true;
+	}
+	if (!binding->function_specialization_symbol.empty())
+		metadata.push_back("object=" + binding->function_specialization_symbol);
 else if (binding->name != "main" &&
          binding->name != "__cppgm_init" &&
          binding->name != "__cppgm_fini") {

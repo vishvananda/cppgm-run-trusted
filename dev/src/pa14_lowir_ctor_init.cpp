@@ -81,12 +81,201 @@ return; string end = fresh_block("call_unwind_end"); terminate("jump ^" + end); 
 start_block(dispatch); emit_unwind_cleanups(); terminate("resume"); start_block(end);
 return; } instr(call_text()); return;
 } string dispatch = fresh_block("call_unwind_dispatch"); string end = fresh_block("call_unwind_end"); instr("eh_try ^" + dispatch);
-++eh_try_depth_; for (size_t i = 0; i < pending_conversions.size(); ++i) lowered[pending_conversions[i].index] = convert_value(pending_conversions[i].value,
-pending_conversions[i].from, pending_conversions[i].to).text; instr(call_text()); emit_temporary_cleanups(temp_cleanups);
---eh_try_depth_; instr("eh_end"); terminate("jump ^" + end); start_block(dispatch);
-emit_temporary_cleanups(temp_cleanups); terminate("resume"); start_block(end); }
-void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for, Binding* ctor, const vector<const Node*>& args, bool base_entry)
-{ if (ctor == NULL) throw runtime_error("missing constructor"); if (args.size() == 1 && ctor->type.get() != NULL &&
+	++eh_try_depth_; for (size_t i = 0; i < pending_conversions.size(); ++i) lowered[pending_conversions[i].index] = convert_value(pending_conversions[i].value,
+	pending_conversions[i].from, pending_conversions[i].to).text; instr(call_text()); emit_temporary_cleanups(temp_cleanups);
+	--eh_try_depth_; instr("eh_end"); terminate("jump ^" + end); start_block(dispatch);
+	emit_temporary_cleanups(temp_cleanups); terminate("resume"); start_block(end); }
+	void FunctionLowerer::append_constructor_hidden_parameter_args(
+		Binding* ctor,
+		const vector<const Node*>& args,
+		vector<string>& lowered)
+	{
+		for (size_t i = 0; i < args.size(); ++i)
+		{
+			TypePtr param = ctor->type->parameters[i + 1];
+			TypePtr context = hidden_virtual_base_context_record(param);
+			vector<TypePtr> vbases = hidden_virtual_bases_for_parameter(param);
+			if (vbases.empty())
+				continue;
+			const Node& arg = *args[i];
+			string explicit_arg = i + 1 < lowered.size()
+				? lowered[i + 1] : string();
+			for (size_t v = 0; v < vbases.size(); ++v)
+			{
+				string hidden;
+				if (starts_with(arg.line, "id-expression") &&
+				    arg.binding != NULL &&
+				    arg.binding->kind == BindingKind::Parameter)
+				{
+					vector<TypePtr> arg_vbases =
+						hidden_virtual_bases_for_parameter(arg.binding->type);
+					for (size_t av = 0; av < arg_vbases.size(); ++av)
+						if (pa11::same_type(pa11::strip_cv(arg_vbases[av]),
+						                    pa11::strip_cv(vbases[v])))
+						{
+							TypePtr arg_type = pa11::strip_cv(arg.binding->type);
+							if ((arg_type->kind == TypeKind::LValueReference ||
+							     arg_type->kind == TypeKind::RValueReference) &&
+							    pa11::strip_cv(arg_type->base)->kind ==
+								    TypeKind::Record)
+							{
+								hidden = fresh_temp();
+								instr(hidden + " = load ptr $" +
+								      slot_for(arg.binding) + "__pvb" +
+								      to_string(av));
+							}
+							else
+								hidden = "%__pvbptr" + to_string(av);
+							break;
+						}
+				}
+				if (hidden.empty() && !explicit_arg.empty())
+				{
+					TypePtr source_context =
+						hidden_virtual_base_context_record(arg.type);
+					if (source_context.get() != NULL &&
+					    context.get() != NULL &&
+					    pa11::same_type(pa11::strip_cv(source_context),
+					                    pa11::strip_cv(context)) &&
+					    record_has_base_subobject(context, vbases[v]))
+					{
+						uint64_t offset = base_subobject_offset(context,
+						                                        vbases[v]);
+						if (offset == 0)
+							hidden = explicit_arg;
+						else
+						{
+							hidden = fresh_temp();
+							instr(hidden + " = index i8 " + explicit_arg +
+							      ", " + to_string(offset));
+						}
+					}
+				}
+				if (hidden.empty())
+				{
+					TypePtr source;
+					Value base;
+					if (arg.category == ValueCategory::LValue ||
+					    arg.category == ValueCategory::XValue)
+					{
+						base = ensure_pointer(emit_lvalue_addr(arg));
+						source = pa11::strip_cv(object_type(arg.type));
+					}
+					else
+					{
+						base = emit_rvalue(arg);
+						source = pa11::strip_cv(strip_for_value(arg.type));
+						if (source.get() != NULL &&
+						    source->kind == TypeKind::Pointer)
+							source = pa11::strip_cv(source->base);
+					}
+					if (source.get() != NULL &&
+					    source->kind == TypeKind::Record &&
+					    record_has_base_subobject(source, vbases[v]))
+					{
+						uint64_t offset =
+							base_subobject_offset(source, vbases[v]);
+						if (offset == 0)
+							hidden = base.text;
+						else
+						{
+							hidden = fresh_temp();
+							instr(hidden + " = index i8 " + base.text +
+							      ", " + to_string(offset));
+						}
+					}
+					else if (!explicit_arg.empty())
+					{
+						uint64_t offset =
+							base_subobject_offset(context, vbases[v]);
+						if (offset == 0)
+							hidden = explicit_arg;
+						else
+						{
+							hidden = fresh_temp();
+							instr(hidden + " = index i8 " + explicit_arg +
+							      ", " + to_string(offset));
+						}
+					}
+				}
+				if (hidden.empty())
+					hidden = "0";
+				lowered.push_back(hidden);
+			}
+		}
+	}
+	void FunctionLowerer::append_constructor_base_entry_hidden_args(
+		Binding* ctor,
+		vector<string>& lowered)
+	{
+		TypePtr constructed = class_record_for_member(ctor);
+		TypePtr constructed_bare = constructed.get() != NULL
+			? pa11::strip_cv(constructed) : TypePtr();
+		TypePtr current_record = class_record_for_member(fn_.binding);
+		TypePtr current_bare = current_record.get() != NULL
+			? pa11::strip_cv(current_record) : TypePtr();
+		if (constructed_bare.get() != NULL &&
+		    constructed_bare->kind == TypeKind::Record &&
+		    constructed_bare->is_polymorphic &&
+		    record_uses_virtual_base_vtt(constructed_bare) &&
+		    current_bare.get() != NULL &&
+		    current_bare->kind == TypeKind::Record)
+		{
+			size_t vtt_slot =
+				construction_vtt_slot_for_direct_base(current_bare,
+				                                      constructed_bare);
+			if (vtt_slot != static_cast<size_t>(-1))
+			{
+				string vtt_base = fresh_temp();
+				instr(vtt_base + " = addr @" + vtt_symbol_for_record(current_bare));
+				string vtt_arg = vtt_base;
+				if (vtt_slot != 0)
+				{
+					vtt_arg = fresh_temp();
+					instr(vtt_arg + " = index i8 " + vtt_base +
+					      ", " + to_string(vtt_slot * 8));
+				}
+				lowered.push_back(vtt_arg);
+			}
+		}
+		vector<TypePtr> vbases = hidden_virtual_bases_for_record(constructed_bare);
+		vector<TypePtr> current_vbases =
+			hidden_virtual_bases_for_record(current_bare);
+		for (size_t v = 0; v < vbases.size(); ++v)
+		{
+			string hidden;
+			if (current_bare.get() != NULL &&
+			    current_bare->kind == TypeKind::Record &&
+			    record_has_base_subobject(current_bare, vbases[v]))
+			{
+				string this_ptr = fresh_temp();
+				instr(this_ptr + " = load ptr $this");
+				uint64_t offset = base_subobject_offset(current_bare,
+				                                        vbases[v]);
+				if (offset == 0)
+					hidden = this_ptr;
+				else
+				{
+					hidden = fresh_temp();
+					instr(hidden + " = index i8 " + this_ptr +
+					      ", " + to_string(offset));
+				}
+			}
+			else
+				hidden = "%__vbptr" + to_string(v);
+			for (size_t cv = 0; cv < current_vbases.size(); ++cv)
+				if (pa11::same_type(pa11::strip_cv(current_vbases[cv]),
+				                    pa11::strip_cv(vbases[v])))
+				{
+					out_.constructor_base_entry_arg_rewrites.push_back(
+						make_pair(hidden, "%__vbptr" + to_string(cv)));
+					break;
+				}
+			lowered.push_back(hidden);
+		}
+	}
+	void FunctionLowerer::lower_constructor_call(const function<Value()>& addr_for, Binding* ctor, const vector<const Node*>& args, bool base_entry)
+	{ if (ctor == NULL) throw runtime_error("missing constructor"); if (args.size() == 1 && ctor->type.get() != NULL &&
 ctor->type->kind == TypeKind::Function && ctor->type->parameters.size() == 2 && is_reference(ctor->type->parameters[1]) && pa11::strip_cv(ctor->type->parameters[1]->base)->kind == TypeKind::Record &&
 !defaulted_copy_move_constructor_needs_helper(ctor, ctor->type->parameters[1]->base) && !record_has_storage_copy(ctor->type->parameters[1]->base)) {
 const Node& arg = *args[0]; TypePtr src_record = pa11::strip_cv(object_type(arg.type)); TypePtr dst_record = pa11::strip_cv(ctor->type->parameters[1]->base); TypePtr constructed_record = class_record_for_member(ctor);
@@ -133,8 +322,13 @@ value.text + ", $" + slot); string addr = fresh_temp(); instr(addr + " = addr $"
 if (pa11::strip_cv(param)->kind == TypeKind::Record) { bool by_address = record_pass_by_address(param); string slot = fresh_aux_slot(by_address ? "arg" : "argobj",
 slot_lowir_type(param)); string addr_name = fresh_temp(); instr(addr_name + " = addr $" + slot); Value target_addr("ptr", addr_name);
 function<Value()> arg_addr = [target_addr]() { return target_addr; }; lower_object_init(arg_addr, param, arg);
-lowered.push_back(by_address ? target_addr.text : "$" + slot); } else lowered.push_back(
-convert_binary_value(emit_rvalue(arg), arg.type, param).text); } } if (!base_entry) { for (size_t i = 0; i < args.size(); ++i) { TypePtr param = ctor->type->parameters[i + 1]; TypePtr context = hidden_virtual_base_context_record(param); vector<TypePtr> vbases = hidden_virtual_bases_for_parameter(param); if (vbases.empty()) continue; const Node& arg = *args[i]; string explicit_arg = i + 1 < lowered.size() ? lowered[i + 1] : string(); for (size_t v = 0; v < vbases.size(); ++v) { string hidden; if (starts_with(arg.line, "id-expression") && arg.binding != NULL && arg.binding->kind == BindingKind::Parameter) { TypePtr arg_context = hidden_virtual_base_context_record(arg.binding->type); vector<TypePtr> arg_vbases = hidden_virtual_bases_for_parameter(arg.binding->type); for (size_t av = 0; av < arg_vbases.size(); ++av) if (pa11::same_type(pa11::strip_cv(arg_vbases[av]), pa11::strip_cv(vbases[v]))) { TypePtr arg_type = pa11::strip_cv(arg.binding->type); if ((arg_type->kind == TypeKind::LValueReference || arg_type->kind == TypeKind::RValueReference) && pa11::strip_cv(arg_type->base)->kind == TypeKind::Record) { hidden = fresh_temp(); instr(hidden + " = load ptr $" + slot_for(arg.binding) + "__pvb" + to_string(av)); } else hidden = "%__pvbptr" + to_string(av); break; } } if (hidden.empty() && !explicit_arg.empty()) { TypePtr source_context = hidden_virtual_base_context_record(arg.type); if (source_context.get() != NULL && context.get() != NULL && pa11::same_type(pa11::strip_cv(source_context), pa11::strip_cv(context)) && record_has_base_subobject(context, vbases[v])) { uint64_t offset = base_subobject_offset(context, vbases[v]); if (offset == 0) hidden = explicit_arg; else { hidden = fresh_temp(); instr(hidden + " = index i8 " + explicit_arg + ", " + to_string(offset)); } } } if (hidden.empty()) { TypePtr source; Value base; if (arg.category == ValueCategory::LValue || arg.category == ValueCategory::XValue) { base = ensure_pointer(emit_lvalue_addr(arg)); source = pa11::strip_cv(object_type(arg.type)); } else { base = emit_rvalue(arg); source = pa11::strip_cv(strip_for_value(arg.type)); if (source.get() != NULL && source->kind == TypeKind::Pointer) source = pa11::strip_cv(source->base); } if (source.get() != NULL && source->kind == TypeKind::Record && record_has_base_subobject(source, vbases[v])) { uint64_t offset = base_subobject_offset(source, vbases[v]); if (offset == 0) hidden = base.text; else { hidden = fresh_temp(); instr(hidden + " = index i8 " + base.text + ", " + to_string(offset)); } } else if (!explicit_arg.empty()) { uint64_t offset = base_subobject_offset(context, vbases[v]); if (offset == 0) hidden = explicit_arg; else { hidden = fresh_temp(); instr(hidden + " = index i8 " + explicit_arg + ", " + to_string(offset)); } } } if (hidden.empty()) hidden = "0"; lowered.push_back(hidden); } } } if (base_entry) { TypePtr constructed = class_record_for_member(ctor); TypePtr constructed_bare = constructed.get() != NULL ? pa11::strip_cv(constructed) : TypePtr(); TypePtr current_record = class_record_for_member(fn_.binding); TypePtr current_bare = current_record.get() != NULL ? pa11::strip_cv(current_record) : TypePtr(); if (constructed_bare.get() != NULL && constructed_bare->kind == TypeKind::Record && constructed_bare->is_polymorphic && record_uses_virtual_base_vtt(constructed_bare) && current_bare.get() != NULL && current_bare->kind == TypeKind::Record) { size_t vtt_slot = construction_vtt_slot_for_direct_base(current_bare, constructed_bare); if (vtt_slot != static_cast<size_t>(-1)) { string vtt_base = fresh_temp(); instr(vtt_base + " = addr @" + vtt_symbol_for_record(current_bare)); string vtt_arg = vtt_base; if (vtt_slot != 0) { vtt_arg = fresh_temp(); instr(vtt_arg + " = index i8 " + vtt_base + ", " + to_string(vtt_slot * 8)); } lowered.push_back(vtt_arg); } } vector<TypePtr> vbases = hidden_virtual_bases_for_record(constructed_bare); vector<TypePtr> current_vbases = hidden_virtual_bases_for_record(current_bare); for (size_t v = 0; v < vbases.size(); ++v) { string hidden; if (current_bare.get() != NULL && current_bare->kind == TypeKind::Record && record_has_base_subobject(current_bare, vbases[v])) { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this"); uint64_t offset = base_subobject_offset(current_bare, vbases[v]); if (offset == 0) hidden = this_ptr; else { hidden = fresh_temp(); instr(hidden + " = index i8 " + this_ptr + ", " + to_string(offset)); } } else hidden = "%__vbptr" + to_string(v); for (size_t cv = 0; cv < current_vbases.size(); ++cv) if (pa11::same_type(pa11::strip_cv(current_vbases[cv]), pa11::strip_cv(vbases[v]))) { out_.constructor_base_entry_arg_rewrites.push_back(make_pair(hidden, "%__vbptr" + to_string(cv))); break; } lowered.push_back(hidden); } } emit_constructor_call_with_cleanups(
+	lowered.push_back(by_address ? target_addr.text : "$" + slot); } else lowered.push_back(
+	convert_binary_value(emit_rvalue(arg), arg.type, param).text); } }
+	if (!base_entry)
+		append_constructor_hidden_parameter_args(ctor, args, lowered);
+	else
+		append_constructor_base_entry_hidden_args(ctor, lowered);
+	emit_constructor_call_with_cleanups(
 ctor, lowered, temp_cleanups, pending_conversions, base_entry); if (protect_reference_argument_setup) { --eh_try_depth_;
 instr("eh_end"); if (protected_define_dispatch) { protected_end = fresh_block("call_unwind_end");
 terminate("jump ^" + protected_end); active_unwind_dispatch_ = protected_dispatch; start_block(protected_dispatch); emit_unwind_cleanups();

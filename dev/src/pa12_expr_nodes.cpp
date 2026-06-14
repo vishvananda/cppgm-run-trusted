@@ -529,13 +529,206 @@ if (op == OP_EQ || op == OP_NE) {
 		return out;
 	}
 }
-vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs); Expr builtin_converted; bool have_builtin_converted = make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted); TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type)); TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
-bool enum_operand = left_object->kind == pa11::TypeKind::Enum || right_object->kind == pa11::TypeKind::Enum; bool enum_integral_mix = (left_object->kind == pa11::TypeKind::Enum && right_object->kind != pa11::TypeKind::Enum && pa11::is_integral_or_bool_type(right_object)) || (right_object->kind == pa11::TypeKind::Enum && left_object->kind != pa11::TypeKind::Enum && pa11::is_integral_or_bool_type(left_object)); if (have_builtin_converted && left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record) return builtin_converted; if (left_object->kind != pa11::TypeKind::Record && right_object->kind != pa11::TypeKind::Record && (!enum_operand || enum_integral_mix)) candidates.clear(); bool candidate_accepts_operands = false;
-for (size_t i = 0; i < candidates.size(); ++i) if (function_template_placeholders_.find(candidates[i]) != function_template_placeholders_.end() || binary_candidate_accepts_operands(candidates[i], lhs, rhs)) candidate_accepts_operands = true; if (have_builtin_converted && !candidate_accepts_operands) return builtin_converted; if (!candidates.empty()) { Expr callee; callee.valid = true; callee.binding = candidates[0]; callee.type = candidates[0]->type; callee.category = ValueCategory::LValue; callee.overloads = candidates; callee.node = Node("id-expression lvalue " + pa11::describe_type(callee.type) + " " + candidates[0]->name); annotate_expr_node(callee); vector<Expr> args; args.push_back(lhs); args.push_back(rhs); try { return make_call_expr(callee, args); } catch (const runtime_error& err) { if (string(err.what()).compare(0, 28, "cannot resolve call overload") != 0) throw; } }
-TypePtr left_record = pa11::strip_cv(expression_object_type(lhs.type)); if (left_record->kind == pa11::TypeKind::Record && left_record->scope != NULL) { string opname = operator_function_name(op, text); vector<Binding*> members = lookup_qualified_set(left_record->scope, opname, pa11::LOOKUP_FUNCTION); if (!members.empty()) { Expr callee = make_member_expr(lhs, opname, "."); vector<Expr> args; args.push_back(rhs); return make_call_expr(callee, args); } } if (have_builtin_converted) return builtin_converted; if (!delayed_member_pointer_error.empty()) throw runtime_error(delayed_member_pointer_error); if (op == OP_LAND || op == OP_LOR) { ++explicit_conversion_context_; Conversion left_bool; Conversion right_bool; try { left_bool = convert_to(lhs, pa11::make_fundamental(FT_BOOL)); right_bool = convert_to(rhs, pa11::make_fundamental(FT_BOOL)); } catch (...) { --explicit_conversion_context_; throw; } --explicit_conversion_context_; if (!left_bool.viable || !right_bool.viable) throw runtime_error("invalid logical conversion"); lhs = left_bool.expr; rhs = right_bool.expr; } else { static const EFundamentalType targets[] = { FT_INT, FT_UNSIGNED_INT, FT_LONG_INT, FT_UNSIGNED_LONG_INT, FT_LONG_LONG_INT, FT_UNSIGNED_LONG_LONG_INT, FT_INT128, FT_UNSIGNED_INT128, FT_SHORT_INT, FT_UNSIGNED_SHORT_INT, FT_CHAR, FT_SIGNED_CHAR, FT_UNSIGNED_CHAR, FT_BOOL, FT_FLOAT, FT_DOUBLE, FT_LONG_DOUBLE }; if (pa11::strip_cv(expression_object_type(lhs.type))->kind == pa11::TypeKind::Record) { for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) { Conversion conv; try { conv = convert_to(lhs, pa11::make_fundamental(targets[i])); } catch (const runtime_error&) { continue; } if (conv.viable) { lhs = conv.expr; break; } } } if (pa11::strip_cv(expression_object_type(rhs.type))->kind == pa11::TypeKind::Record) { for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) { Conversion conv; try { conv = convert_to(rhs, pa11::make_fundamental(targets[i])); } catch (const runtime_error&) { continue; } if (conv.viable) { rhs = conv.expr; break; } } } } TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type); TypePtr type = arithmetic_type;
-if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT || op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR) type = pa11::make_fundamental(FT_BOOL); else if ((op == OP_PLUS || op == OP_MINUS) && is_pointer_arithmetic(lhs, rhs)) type = pointer_arithmetic_type(op, lhs, rhs); else if (op == OP_MINUS && is_pointer_difference(lhs, rhs)) type = pa11::make_fundamental(FT_LONG_INT); else if (op == OP_LSHIFT || op == OP_RSHIFT) type = usual_arithmetic_type(lhs.type, lhs.type); else if (op == OP_COMMA) type = rhs.type; Expr out; out.type = type; out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue; out.valid = true; out.constant_expression = lhs.constant_expression && rhs.constant_expression; if (lhs.has_constant_value && rhs.has_constant_value)
-{ uint64_t value = 0; if (constant_binary_value(op, arithmetic_type, lhs.constant_value, arithmetic_type, rhs.constant_value, type, value)) { out.has_constant_value = true; out.constant_value = value; out.null_pointer_constant = out.constant_value == 0 && pa11::is_integral_or_bool_type(out.type); } } const Expr* dependent_operand = NULL; if (!lhs.dependent_value_name.empty() && parameter_pack_expansion_name(lhs.dependent_value_name)) dependent_operand = &lhs; else if (!rhs.dependent_value_name.empty() && parameter_pack_expansion_name(rhs.dependent_value_name)) dependent_operand = &rhs; else if (!lhs.dependent_value_name.empty()) dependent_operand = &lhs; else if (!rhs.dependent_value_name.empty()) dependent_operand = &rhs; if (dependent_operand != NULL) {
-out.dependent_value_name = dependent_operand->dependent_value_name; out.dependent_value_owner_template_name = dependent_operand->dependent_value_owner_template_name; out.dependent_value_member_name = dependent_operand->dependent_value_member_name; out.dependent_value_owner_template_arguments = dependent_operand->dependent_value_owner_template_arguments; out.dependent_value_negated = dependent_operand->dependent_value_negated; } out.node = Node("binary-expression prvalue " + pa11::describe_type(type) + " " + op_leaf(op, text)); add_child(out.node, lhs.node); add_child(out.node, rhs.node); out.node.has_op = true; out.node.op = op; out.node.token_text = text; annotate_expr_node(out); return out; }
+	vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs);
+	Expr builtin_converted;
+	bool have_builtin_converted =
+		make_builtin_converted_binary_expr(op, text, lhs, rhs, builtin_converted);
+	TypePtr left_object = pa11::strip_cv(expression_object_type(lhs.type));
+	TypePtr right_object = pa11::strip_cv(expression_object_type(rhs.type));
+	bool enum_operand = left_object->kind == pa11::TypeKind::Enum ||
+	                    right_object->kind == pa11::TypeKind::Enum;
+	bool enum_integral_mix =
+		(left_object->kind == pa11::TypeKind::Enum &&
+		 right_object->kind != pa11::TypeKind::Enum &&
+		 pa11::is_integral_or_bool_type(right_object)) ||
+		(right_object->kind == pa11::TypeKind::Enum &&
+		 left_object->kind != pa11::TypeKind::Enum &&
+		 pa11::is_integral_or_bool_type(left_object));
+	if (have_builtin_converted &&
+	    left_object->kind != pa11::TypeKind::Record &&
+	    right_object->kind != pa11::TypeKind::Record)
+		return builtin_converted;
+	if (left_object->kind != pa11::TypeKind::Record &&
+	    right_object->kind != pa11::TypeKind::Record &&
+	    (!enum_operand || enum_integral_mix))
+		candidates.clear();
+	bool candidate_accepts_operands = false;
+	for (size_t i = 0; i < candidates.size(); ++i)
+		if (function_template_placeholders_.find(candidates[i]) !=
+			    function_template_placeholders_.end() ||
+		    binary_candidate_accepts_operands(candidates[i], lhs, rhs))
+			candidate_accepts_operands = true;
+	if (have_builtin_converted && !candidate_accepts_operands)
+		return builtin_converted;
+	if (!candidates.empty())
+	{
+		Expr callee;
+		callee.valid = true;
+		callee.binding = candidates[0];
+		callee.type = candidates[0]->type;
+		callee.category = ValueCategory::LValue;
+		callee.overloads = candidates;
+		callee.node = Node("id-expression lvalue " +
+		                   pa11::describe_type(callee.type) + " " +
+		                   candidates[0]->name);
+		annotate_expr_node(callee);
+		vector<Expr> args;
+		args.push_back(lhs);
+		args.push_back(rhs);
+		try {
+			return make_call_expr(callee, args);
+		} catch (const runtime_error& err) {
+			if (string(err.what()).compare(0, 28,
+			                               "cannot resolve call overload") != 0)
+				throw;
+		}
+	}
+	TypePtr left_record = pa11::strip_cv(expression_object_type(lhs.type));
+	if (left_record->kind == pa11::TypeKind::Record &&
+	    left_record->scope != NULL)
+	{
+		string opname = operator_function_name(op, text);
+		vector<Binding*> members =
+			lookup_qualified_set(left_record->scope,
+			                     opname,
+			                     pa11::LOOKUP_FUNCTION);
+		if (!members.empty())
+		{
+			Expr callee = make_member_expr(lhs, opname, ".");
+			vector<Expr> args;
+			args.push_back(rhs);
+			return make_call_expr(callee, args);
+		}
+	}
+	if (have_builtin_converted)
+		return builtin_converted;
+	if (!delayed_member_pointer_error.empty())
+		throw runtime_error(delayed_member_pointer_error);
+	if (op == OP_LAND || op == OP_LOR)
+	{
+		++explicit_conversion_context_;
+		Conversion left_bool;
+		Conversion right_bool;
+		try {
+			left_bool = convert_to(lhs, pa11::make_fundamental(FT_BOOL));
+			right_bool = convert_to(rhs, pa11::make_fundamental(FT_BOOL));
+		} catch (...) {
+			--explicit_conversion_context_;
+			throw;
+		}
+		--explicit_conversion_context_;
+		if (!left_bool.viable || !right_bool.viable)
+			throw runtime_error("invalid logical conversion");
+		lhs = left_bool.expr;
+		rhs = right_bool.expr;
+	}
+	else
+	{
+		static const EFundamentalType targets[] = {
+			FT_INT, FT_UNSIGNED_INT, FT_LONG_INT, FT_UNSIGNED_LONG_INT,
+			FT_LONG_LONG_INT, FT_UNSIGNED_LONG_LONG_INT, FT_INT128,
+			FT_UNSIGNED_INT128, FT_SHORT_INT, FT_UNSIGNED_SHORT_INT,
+			FT_CHAR, FT_SIGNED_CHAR, FT_UNSIGNED_CHAR, FT_BOOL,
+			FT_FLOAT, FT_DOUBLE, FT_LONG_DOUBLE
+		};
+		if (pa11::strip_cv(expression_object_type(lhs.type))->kind ==
+		    pa11::TypeKind::Record)
+			for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i)
+			{
+				Conversion conv;
+				try {
+					conv = convert_to(lhs, pa11::make_fundamental(targets[i]));
+				} catch (const runtime_error&) {
+					continue;
+				}
+				if (conv.viable) {
+					lhs = conv.expr;
+					break;
+				}
+			}
+		if (pa11::strip_cv(expression_object_type(rhs.type))->kind ==
+		    pa11::TypeKind::Record)
+			for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i)
+			{
+				Conversion conv;
+				try {
+					conv = convert_to(rhs, pa11::make_fundamental(targets[i]));
+				} catch (const runtime_error&) {
+					continue;
+				}
+				if (conv.viable) {
+					rhs = conv.expr;
+					break;
+				}
+			}
+	}
+	TypePtr arithmetic_type = usual_arithmetic_type(lhs.type, rhs.type);
+	TypePtr type = arithmetic_type;
+	if (op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_GT ||
+	    op == OP_LE || op == OP_GE || op == OP_LAND || op == OP_LOR)
+		type = pa11::make_fundamental(FT_BOOL);
+	else if ((op == OP_PLUS || op == OP_MINUS) &&
+	         is_pointer_arithmetic(lhs, rhs))
+		type = pointer_arithmetic_type(op, lhs, rhs);
+	else if (op == OP_MINUS && is_pointer_difference(lhs, rhs))
+		type = pa11::make_fundamental(FT_LONG_INT);
+	else if (op == OP_LSHIFT || op == OP_RSHIFT)
+		type = usual_arithmetic_type(lhs.type, lhs.type);
+	else if (op == OP_COMMA)
+		type = rhs.type;
+	Expr out;
+	out.type = type;
+	out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue;
+	out.valid = true;
+	out.constant_expression =
+		lhs.constant_expression && rhs.constant_expression;
+	if (lhs.has_constant_value && rhs.has_constant_value)
+	{
+		uint64_t value = 0;
+		if (constant_binary_value(op, arithmetic_type, lhs.constant_value,
+		                          arithmetic_type, rhs.constant_value,
+		                          type, value))
+		{
+			out.has_constant_value = true;
+			out.constant_value = value;
+			out.null_pointer_constant =
+				out.constant_value == 0 &&
+				pa11::is_integral_or_bool_type(out.type);
+		}
+	}
+	const Expr* dependent_operand = NULL;
+	if (!lhs.dependent_value_name.empty() &&
+	    parameter_pack_expansion_name(lhs.dependent_value_name))
+		dependent_operand = &lhs;
+	else if (!rhs.dependent_value_name.empty() &&
+	         parameter_pack_expansion_name(rhs.dependent_value_name))
+		dependent_operand = &rhs;
+	else if (!lhs.dependent_value_name.empty())
+		dependent_operand = &lhs;
+	else if (!rhs.dependent_value_name.empty())
+		dependent_operand = &rhs;
+	if (dependent_operand != NULL)
+	{
+		out.dependent_value_name = dependent_operand->dependent_value_name;
+		out.dependent_value_owner_template_name =
+			dependent_operand->dependent_value_owner_template_name;
+		out.dependent_value_member_name =
+			dependent_operand->dependent_value_member_name;
+		out.dependent_value_owner_template_arguments =
+			dependent_operand->dependent_value_owner_template_arguments;
+		out.dependent_value_negated =
+			dependent_operand->dependent_value_negated;
+	}
+	out.node = Node("binary-expression prvalue " + pa11::describe_type(type) +
+	                " " + op_leaf(op, text));
+	add_child(out.node, lhs.node);
+	add_child(out.node, rhs.node);
+	out.node.has_op = true;
+	out.node.op = op;
+	out.node.token_text = text;
+	annotate_expr_node(out);
+	return out;
+}
 bool Parser::binary_candidate_accepts_operands(Binding* fn, const Expr& lhs, const Expr& rhs) const {
 if (fn == NULL || fn->type->kind != pa11::TypeKind::Function || fn->type->parameters.size() != 2) return false;
 const Expr* args[2] = {&lhs, &rhs}; for (size_t i = 0; i < 2; ++i) { TypePtr param = expression_object_type(fn->type->parameters[i]);

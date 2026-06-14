@@ -364,19 +364,126 @@ bool record_is_virtual_base_of_for_vtt(TypePtr record, TypePtr base)
 }
 }
 bool record_uses_virtual_base_vtt(TypePtr record)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); return bare.get() != NULL && bare->kind == TypeKind::Record && !pa11::record_virtual_bases(bare).empty(); }
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->kind == TypeKind::Record &&
+	       !pa11::record_virtual_bases(bare).empty();
+}
 vector<pair<TypePtr, uint64_t> > vtt_ordered_vtable_views(TypePtr record)
-{ vector<pair<TypePtr, uint64_t> > views = polymorphic_vtable_views(record); vector<pair<TypePtr, uint64_t> > ordered; for (size_t i = 0; i < views.size(); ++i) if (!record_is_virtual_base_of_for_vtt(record, views[i].first)) ordered.push_back(views[i]); for (size_t i = 0; i < views.size(); ++i) if (record_is_virtual_base_of_for_vtt(record, views[i].first)) ordered.push_back(views[i]); return ordered; }
+{
+	vector<pair<TypePtr, uint64_t> > views = polymorphic_vtable_views(record);
+	vector<pair<TypePtr, uint64_t> > ordered;
+	for (size_t i = 0; i < views.size(); ++i)
+		if (!record_is_virtual_base_of_for_vtt(record, views[i].first))
+			ordered.push_back(views[i]);
+	for (size_t i = 0; i < views.size(); ++i)
+		if (record_is_virtual_base_of_for_vtt(record, views[i].first))
+			ordered.push_back(views[i]);
+	return ordered;
+}
 size_t construction_vtt_group_size(TypePtr record)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || !bare->is_polymorphic || !record_uses_virtual_base_vtt(bare)) return 0; size_t size = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() != NULL && direct->kind == TypeKind::Record && direct->is_polymorphic && record_uses_virtual_base_vtt(direct)) size += construction_vtt_group_size(direct); } size += vtt_ordered_vtable_views(bare).size(); return size; }
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_polymorphic ||
+	    !record_uses_virtual_base_vtt(bare))
+		return 0;
+	size_t size = 1;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		if (pa11::record_direct_base_is_virtual(bare, i))
+			continue;
+		TypePtr direct = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (direct.get() != NULL &&
+		    direct->kind == TypeKind::Record &&
+		    direct->is_polymorphic &&
+		    record_uses_virtual_base_vtt(direct))
+			size += construction_vtt_group_size(direct);
+	}
+	size += vtt_ordered_vtable_views(bare).size();
+	return size;
+}
 size_t construction_vtt_slot_for_direct_base(TypePtr record, TypePtr direct_base)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr wanted = direct_base.get() != NULL ? pa11::strip_cv(direct_base) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return static_cast<size_t>(-1); size_t slot = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() == NULL || direct->kind != TypeKind::Record || !direct->is_polymorphic || !record_uses_virtual_base_vtt(direct)) continue; if (pa11::same_type(direct, wanted)) return slot; slot += construction_vtt_group_size(direct); } return static_cast<size_t>(-1); }
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr wanted = direct_base.get() != NULL
+		? pa11::strip_cv(direct_base) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record ||
+	    wanted.get() == NULL || wanted->kind != TypeKind::Record)
+		return static_cast<size_t>(-1);
+	size_t slot = 1;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		if (pa11::record_direct_base_is_virtual(bare, i))
+			continue;
+		TypePtr direct = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (direct.get() == NULL ||
+		    direct->kind != TypeKind::Record ||
+		    !direct->is_polymorphic ||
+		    !record_uses_virtual_base_vtt(direct))
+			continue;
+		if (pa11::same_type(direct, wanted))
+			return slot;
+		slot += construction_vtt_group_size(direct);
+	}
+	return static_cast<size_t>(-1);
+}
 size_t construction_vtt_slot_for_view(TypePtr record, TypePtr view_base, uint64_t offset)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); TypePtr wanted = view_base.get() != NULL ? pa11::strip_cv(view_base) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || wanted.get() == NULL || wanted->kind != TypeKind::Record) return static_cast<size_t>(-1); size_t slot = 1; vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i) { if (pa11::record_direct_base_is_virtual(bare, i)) continue; TypePtr direct = bases[i].get() != NULL ? pa11::strip_cv(bases[i]) : TypePtr(); if (direct.get() != NULL && direct->kind == TypeKind::Record && direct->is_polymorphic && record_uses_virtual_base_vtt(direct)) slot += construction_vtt_group_size(direct); } vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare); for (size_t i = 0; i < views.size(); ++i) if (views[i].second == offset && pa11::same_type(pa11::strip_cv(views[i].first), wanted)) return slot + i; return static_cast<size_t>(-1); }
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr wanted = view_base.get() != NULL
+		? pa11::strip_cv(view_base) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record ||
+	    wanted.get() == NULL || wanted->kind != TypeKind::Record)
+		return static_cast<size_t>(-1);
+	size_t slot = 1;
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		if (pa11::record_direct_base_is_virtual(bare, i))
+			continue;
+		TypePtr direct = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (direct.get() != NULL &&
+		    direct->kind == TypeKind::Record &&
+		    direct->is_polymorphic &&
+		    record_uses_virtual_base_vtt(direct))
+			slot += construction_vtt_group_size(direct);
+	}
+	vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare);
+	for (size_t i = 0; i < views.size(); ++i)
+		if (views[i].second == offset &&
+		    pa11::same_type(pa11::strip_cv(views[i].first), wanted))
+			return slot + i;
+	return static_cast<size_t>(-1);
+}
 TypePtr hidden_virtual_base_context_record(TypePtr type)
-{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL) return TypePtr(); if (bare->kind == TypeKind::LValueReference || bare->kind == TypeKind::RValueReference) bare = pa11::strip_cv(bare->base); if (bare.get() != NULL && bare->kind == TypeKind::Pointer) bare = pa11::strip_cv(bare->base); if (bare.get() != NULL && bare->kind == TypeKind::Record) return bare; return TypePtr(); }
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return TypePtr();
+	if (bare->kind == TypeKind::LValueReference ||
+	    bare->kind == TypeKind::RValueReference)
+		bare = pa11::strip_cv(bare->base);
+	if (bare.get() != NULL && bare->kind == TypeKind::Pointer)
+		bare = pa11::strip_cv(bare->base);
+	if (bare.get() != NULL && bare->kind == TypeKind::Record)
+		return bare;
+	return TypePtr();
+}
 vector<TypePtr> hidden_virtual_bases_for_record(TypePtr record)
-{ TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record || !bare->complete) return vector<TypePtr>(); return pa11::record_virtual_bases(bare); }
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record || !bare->complete)
+		return vector<TypePtr>();
+	return pa11::record_virtual_bases(bare);
+}
 vector<TypePtr> hidden_virtual_bases_for_parameter(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
