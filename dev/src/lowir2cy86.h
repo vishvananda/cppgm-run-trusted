@@ -151,6 +151,7 @@ struct Instruction
 {
 	InstrKind kind;
 	string dest;
+	string debug;
 	Type type;
 	Type src_type;
 	Type result_type;
@@ -218,6 +219,7 @@ struct Function
 {
 	bool declaration;
 	string name;
+	string debug;
 	vector<Parameter> params;
 	Type ret;
 	Metadata metadata;

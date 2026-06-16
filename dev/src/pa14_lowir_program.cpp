@@ -9,6 +9,11 @@
 
 namespace pa14 {
 namespace internal {
+
+void append_assignment_dependency_members(TypePtr record, vector<Binding*>& members);
+uint64_t assignment_storage_copy_limit(TypePtr record);
+uint64_t assignment_member_storage_end(Binding* member);
+
 namespace {
 
 Binding* find_assignment_binding(TypePtr type, bool move)
@@ -776,6 +781,172 @@ Binding* ProgramLowerer::demand_implicit_copy_assignment(TypePtr type, bool move
 	return binding;
 }
 
+bool synthetic_assignment_has_bitfield(TypePtr record)
+{
+	for (size_t i = 0; i < record->fields.size(); ++i)
+		if (record->fields[i]->is_bit_field)
+			return true;
+	return false;
+}
+
+void append_synthetic_bitfield_assignment(Block& block, TypePtr record)
+{
+	set<uint64_t> copied_units;
+	int temp = 1;
+	for (size_t i = 0; i < record->fields.size(); ++i)
+	{
+		Binding* field = record->fields[i];
+		if (!field->is_bit_field ||
+		    copied_units.find(field->member_offset) != copied_units.end())
+			continue;
+		copied_units.insert(field->member_offset);
+		string other = "%t" + to_string(temp++);
+		string other_field = "%t" + to_string(temp++);
+		string value = "%t" + to_string(temp++);
+		string self = "%t" + to_string(temp++);
+		string self_field = "%t" + to_string(temp++);
+		string low_type = scalar_lowir_type(field->type);
+		block.instrs.push_back("    " + other + " = load ptr $other");
+		block.instrs.push_back("    " + other_field + " = index i8 " +
+		                       other + ", " + to_string(field->member_offset));
+		block.instrs.push_back("    " + value + " = load " + low_type +
+		                       " " + other_field);
+		block.instrs.push_back("    " + self + " = load ptr $this");
+		block.instrs.push_back("    " + self_field + " = index i8 " +
+		                       self + ", " + to_string(field->member_offset));
+		block.instrs.push_back("    store " + low_type + " " + value +
+		                       ", " + self_field);
+	}
+	block.instrs.push_back("    %t" + to_string(temp) + " = load ptr $this");
+	block.instrs.push_back("    return ptr %t" + to_string(temp));
+}
+
+Binding* synthetic_assignment_member_op(ProgramLowerer& program,
+                                        Binding* member,
+                                        bool move)
+{
+	TypePtr field_type = pa11::strip_cv(member->type);
+	Binding* op = field_type->kind == TypeKind::Record
+		? program.demand_implicit_copy_assignment(field_type, move)
+		: find_assignment_binding(member->type, move);
+	if (op == NULL && move)
+		op = field_type->kind == TypeKind::Record
+			? program.demand_implicit_copy_assignment(field_type, false)
+			: find_assignment_binding(member->type, false);
+	return op;
+}
+
+vector<pair<Binding*, Binding*> > synthetic_assignment_field_ops(
+	ProgramLowerer& program,
+	TypePtr record,
+	bool move,
+	uint64_t& prefix_size)
+{
+	vector<pair<Binding*, Binding*> > out;
+	vector<Binding*> members;
+	append_assignment_dependency_members(record, members);
+	prefix_size = record->fields.empty() ? 0 : pa11::type_size(record);
+	for (size_t i = 0; i < members.size(); ++i)
+	{
+		Binding* op = synthetic_assignment_member_op(program, members[i], move);
+		if (op == NULL)
+			continue;
+		if (out.empty())
+			prefix_size = members[i]->member_offset;
+		out.push_back(make_pair(members[i], op));
+	}
+	return out;
+}
+
+void append_synthetic_copyobj(Block& block,
+                              int& temp,
+                              const string& self,
+                              const string& other,
+                              uint64_t offset,
+                              uint64_t bytes,
+                              uint64_t align)
+{
+	if (bytes == 0)
+		return;
+	if (offset == 0)
+	{
+		block.instrs.push_back("    copyobj " + to_string(bytes) + "x" +
+		                       to_string(align) + " " + other + ", " + self);
+		return;
+	}
+	string self_chunk = "%t" + to_string(temp++);
+	string other_chunk = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + self_chunk + " = index i8 " + self +
+	                       ", " + to_string(offset));
+	block.instrs.push_back("    " + other_chunk + " = index i8 " + other +
+	                       ", " + to_string(offset));
+	block.instrs.push_back("    copyobj " + to_string(bytes) + "x1 " +
+	                       other_chunk + ", " + self_chunk);
+}
+
+void append_synthetic_assignment_call(ProgramLowerer& program,
+                                      Block& block,
+                                      int& temp,
+                                      Binding* field,
+                                      Binding* op)
+{
+	program.demand_function_declaration(op);
+	if (op->is_inline_definition)
+		program.demand_inline_function(op);
+	string self_base = "%t" + to_string(temp++);
+	string self_field = "%t" + to_string(temp++);
+	string other_base = "%t" + to_string(temp++);
+	string other_field = "%t" + to_string(temp++);
+	string ignored = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + self_base + " = load ptr $this");
+	block.instrs.push_back("    " + self_field + " = index i8 " +
+	                       self_base + ", " + to_string(field->member_offset));
+	block.instrs.push_back("    " + other_base + " = load ptr $other");
+	block.instrs.push_back("    " + other_field + " = index i8 " +
+	                       other_base + ", " + to_string(field->member_offset));
+	block.instrs.push_back("    " + ignored + " = call ptr @" +
+	                       program.symbol_for(op) + "(" + self_field +
+	                       ", " + other_field + ")");
+}
+
+void append_synthetic_storage_assignment(ProgramLowerer& program,
+                                         Block& block,
+                                         TypePtr record,
+                                         bool move)
+{
+	uint64_t prefix_size = 0;
+	vector<pair<Binding*, Binding*> > field_ops =
+		synthetic_assignment_field_ops(program, record, move, prefix_size);
+	int temp = 1;
+	string self = "%t" + to_string(temp++);
+	string other = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + self + " = load ptr $this");
+	block.instrs.push_back("    " + other + " = load ptr $other");
+	append_synthetic_copyobj(block, temp, self, other, 0, prefix_size,
+	                         pa11::type_align(record));
+	uint64_t cursor = prefix_size;
+	for (size_t i = 0; i < field_ops.size(); ++i)
+	{
+		Binding* field = field_ops[i].first;
+		uint64_t offset = field->member_offset;
+		append_synthetic_copyobj(block, temp, self, other, cursor,
+		                         offset > cursor ? offset - cursor : 0, 1);
+		append_synthetic_assignment_call(program, block, temp, field,
+		                                 field_ops[i].second);
+		uint64_t end = assignment_member_storage_end(field);
+		if (end > cursor)
+			cursor = end;
+	}
+	uint64_t total = field_ops.empty()
+		? pa11::type_size(record)
+		: assignment_storage_copy_limit(record);
+	append_synthetic_copyobj(block, temp, self, other, cursor,
+	                         total > cursor ? total - cursor : 0, 1);
+	string ret = "%t" + to_string(temp++);
+	block.instrs.push_back("    " + ret + " = load ptr $this");
+	block.instrs.push_back("    return ptr " + ret);
+}
+
 void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
                                                          TypePtr record,
                                                          bool move,
@@ -798,99 +969,10 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
 	block.instrs.push_back("    store ptr %this, $this");
 	block.instrs.push_back("    store ptr %other, $other");
 	pa11::layout_record_type(record);
-	bool has_bitfield = false;
-	for (size_t i = 0; i < record->fields.size(); ++i)
-		if (record->fields[i]->is_bit_field)
-			has_bitfield = true;
-	if (has_bitfield)
-	{
-		set<uint64_t> copied_units;
-		int temp = 1;
-		for (size_t i = 0; i < record->fields.size(); ++i)
-		{
-			Binding* field = record->fields[i];
-			if (!field->is_bit_field ||
-			    copied_units.find(field->member_offset) != copied_units.end())
-				continue;
-			copied_units.insert(field->member_offset);
-			string other = "%t" + to_string(temp++);
-			string other_field = "%t" + to_string(temp++);
-			string value = "%t" + to_string(temp++);
-			string self = "%t" + to_string(temp++);
-			string self_field = "%t" + to_string(temp++);
-			string low_type = scalar_lowir_type(field->type);
-			block.instrs.push_back("    " + other + " = load ptr $other");
-			block.instrs.push_back("    " + other_field +
-			                       " = index i8 " + other + ", " +
-			                       to_string(field->member_offset));
-			block.instrs.push_back("    " + value + " = load " +
-			                       low_type + " " + other_field);
-			block.instrs.push_back("    " + self + " = load ptr $this");
-			block.instrs.push_back("    " + self_field +
-			                       " = index i8 " + self + ", " +
-			                       to_string(field->member_offset));
-			block.instrs.push_back("    store " + low_type + " " +
-			                       value + ", " + self_field);
-		}
-		block.instrs.push_back("    %t" + to_string(temp) +
-		                       " = load ptr $this");
-		block.instrs.push_back("    return ptr %t" + to_string(temp));
-	}
+	if (synthetic_assignment_has_bitfield(record))
+		append_synthetic_bitfield_assignment(block, record);
 	else
-	{
-		vector<pair<Binding*, Binding*> > field_ops;
-		uint64_t prefix_size = pa11::type_size(record);
-		for (size_t i = 0; i < record->fields.size(); ++i)
-		{
-			Binding* op = find_assignment_binding(record->fields[i]->type, move);
-			if (op == NULL && move)
-				op = find_assignment_binding(record->fields[i]->type, false);
-			if (op == NULL ||
-			    (op->is_generated_copy_move_assignment &&
-			     !op->is_inline_definition))
-				continue;
-			if (field_ops.empty())
-				prefix_size = record->fields[i]->member_offset;
-			field_ops.push_back(make_pair(record->fields[i], op));
-		}
-		int temp = 1;
-		string self = "%t" + to_string(temp++);
-		string other = "%t" + to_string(temp++);
-		block.instrs.push_back("    " + self + " = load ptr $this");
-		block.instrs.push_back("    " + other + " = load ptr $other");
-		if (prefix_size != 0)
-			block.instrs.push_back(
-				"    copyobj " + to_string(prefix_size) +
-				"x" + to_string(pa11::type_align(record)) + " " +
-				other + ", " + self);
-		for (size_t i = 0; i < field_ops.size(); ++i)
-		{
-			Binding* field = field_ops[i].first;
-			Binding* op = field_ops[i].second;
-			demand_function_declaration(op);
-			if (op->is_inline_definition)
-				demand_inline_function(op);
-			string self_base = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + self_base + " = load ptr $this");
-			string self_field = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + self_field +
-			                       " = index i8 " + self_base + ", " +
-			                       to_string(field->member_offset));
-			string other_base = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + other_base + " = load ptr $other");
-			string other_field = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + other_field +
-			                       " = index i8 " + other_base + ", " +
-			                       to_string(field->member_offset));
-			string ignored = "%t" + to_string(temp++);
-			block.instrs.push_back("    " + ignored + " = call ptr @" +
-			                       symbol_for(op) + "(" + self_field +
-			                       ", " + other_field + ")");
-		}
-		string ret = "%t" + to_string(temp++);
-		block.instrs.push_back("    " + ret + " = load ptr $this");
-		block.instrs.push_back("    return ptr " + ret);
-	}
+		append_synthetic_storage_assignment(*this, block, record, move);
 	block.terminated = true;
 	out.blocks.push_back(block);
 	pending_synthetic_assignment_functions.push_back(out);

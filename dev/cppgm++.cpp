@@ -1,6 +1,7 @@
 // Student-facing scaffold for the PA10+ `cppgm++` binary.
 
 #include "exceptions.h"
+#include "lowiropt.h"
 #include "pa10_ast.h"
 #include "pa11_types.h"
 #include "pa12_semantics.h"
@@ -118,6 +119,17 @@ int optimization_level_for_flag(const string & arg)
     return 3;
   }
   return 1;
+}
+
+int optimization_level_arg(const vector<string> & args)
+{
+  int level = 0;
+  for(size_t i = 0; i < args.size(); ++i) {
+    if(is_optimization_flag(args[i])) {
+      level = optimization_level_for_flag(args[i]);
+    }
+  }
+  return level > 2 ? 2 : level;
 }
 
 bool is_benign_driver_flag(const string & arg)
@@ -263,6 +275,13 @@ void parse_source_output_invocation(const vector<string> & args,
       continue;
     }
     if(allow_lowir_options && is_optimization_flag(args[i])) {
+      continue;
+    }
+    if(allow_lowir_options &&
+       (args[i] == "-g0" ||
+        args[i] == "-gline-tables-only" ||
+        args[i] == "-g" ||
+        starts_with(args[i], "-g"))) {
       continue;
     }
     if(allow_lowir_options &&
@@ -704,7 +723,19 @@ int run_emit_lowir_mode(const vector<string> & args)
   parse_source_output_invocation(args, true, &outfile, &srcfiles);
   pa14::Options options;
   options.preprocess = make_preproc_options();
-  pa14::emit_lowir(srcfiles, outfile, options);
+  const int optimization_level = optimization_level_arg(args);
+  if(optimization_level == 0) {
+    pa14::emit_lowir(srcfiles, outfile, options);
+  }
+  else {
+    const string tmp = outfile + ".lowiropt.tmp";
+    pa14::emit_lowir(srcfiles, tmp, options);
+    lowiropt::Options opt_options;
+    opt_options.optimization_level = optimization_level;
+    opt_options.outfile = outfile;
+    lowiropt::optimize_files_to_file(vector<string>(1, tmp), opt_options);
+    remove(tmp.c_str());
+  }
   return EXIT_SUCCESS;
 }
 

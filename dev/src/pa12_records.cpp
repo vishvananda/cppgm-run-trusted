@@ -440,6 +440,13 @@ if (bare->fields[i]->is_bit_field) continue; if (type_needs_copy_move_assignment
 } return false; } bool type_needs_copy_move_assignment_helper(TypePtr type, bool move)
 { TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array) return type_needs_copy_move_assignment_helper(bare->base, move);
 if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return false; return record_needs_copy_move_assignment_helper(bare, move); }
+bool type_has_empty_record_assignment_subobject(TypePtr type)
+{ TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array) return type_has_empty_record_assignment_subobject(bare->base);
+if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return false; pa11::layout_record_type(bare); return bare->fields.empty() && pa11::record_direct_bases(bare).empty(); }
+bool generated_field_needs_assignment_statement(TypePtr type, bool move, bool field_needs_helper, Binding* field_assignment)
+{ bool needs = field_needs_helper || (field_assignment != NULL && !field_assignment->is_generated_copy_move_assignment) || type_has_empty_record_assignment_subobject(type);
+TypePtr bare = pa11::strip_cv(type); if (bare->kind == pa11::TypeKind::Array && !type_needs_copy_move_assignment_helper(bare->base, move) && !type_has_empty_record_assignment_subobject(bare->base))
+needs = false; return needs; }
 Node make_parameter_lvalue(Binding* binding, TypePtr expr_type) { Node node("id-expression lvalue " + pa11::describe_type(expr_type) + " " + binding->name);
 node.binding = binding; node.type = expr_type; node.category = ValueCategory::LValue; return node;
 } Node make_this_pointer_node(Binding* binding, TypePtr type) { Node node("id-expression prvalue " + pa11::describe_type(type) +
@@ -573,7 +580,7 @@ if (bare_assign->unknown_bound) throw runtime_error("incomplete array type"); fo
 Expr index = make_index_expr(n); Expr target_elem = make_subscript_expr(target, index); Expr source_elem = make_subscript_expr(source, index);
 append_assignment_statement(target_elem, source_elem, bare_assign->base); } return; }
 if (move) source = expr_from_node(make_move_cast(assign_type, source.node)); TypePtr target_bare = pa11::strip_cv(expression_object_type(target.type)); Expr action;
-if (target_bare->kind == pa11::TypeKind::Record && target_bare->scope != NULL) { Expr callee = make_member_expr(target, "operator=", "."); vector<Expr> args;
+if (target_bare->kind == pa11::TypeKind::Record && target_bare->scope != NULL) { Binding* ensured_assignment = ensure_copy_move_assignment(target_bare, move); if (ensured_assignment == NULL && move) ensured_assignment = ensure_copy_move_assignment(target_bare, false); Expr callee = make_member_expr(target, "operator=", "."); vector<Expr> args;
 args.push_back(source); action = make_call_expr(callee, args); } else action = make_assignment_expr(OP_ASS, "=", target, source);
 Node stmt("expression-statement"); add_child(stmt, action.node); add_child(body, stmt); };
 vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
@@ -582,27 +589,25 @@ if (base_needs_helper) any_base_needs_helper = true; if (direct_base.get() != NU
 deleted = true; if (base_needs_helper) { Expr target = target_base_expr(direct_base, this_object);
 Expr callee = make_member_expr(target, "operator=", "."); vector<Expr> args; args.push_back(expr_from_node(source_base_expr(direct_base, other,
 move))); Expr call = make_call_expr(callee, args); Node stmt("expression-statement"); add_child(stmt, call.node);
-add_child(body, stmt); } } } uint64_t copied_prefix = pa11::type_size(bare);
+add_child(body, stmt); } } } uint64_t copied_prefix = type_has_empty_record_assignment_subobject(bare) ? 0 : pa11::type_size(bare);
 if (any_base_needs_helper) copied_prefix = 0; else {
 for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i]; Binding* field_assignment =
 find_copy_move_assignment_binding(field->type, move); if (field_assignment == NULL && move) field_assignment = find_copy_move_assignment_binding(field->type, false);
-bool field_needs_assignment = type_needs_copy_move_assignment_helper(field->type, move) || (field_assignment != NULL && !field_assignment->is_generated_copy_move_assignment);
-TypePtr field_bare_for_assignment = pa11::strip_cv(field->type); if (field_bare_for_assignment->kind == pa11::TypeKind::Array && !type_needs_copy_move_assignment_helper(field_bare_for_assignment->base, move))
-field_needs_assignment = false;
+bool field_needs_helper = type_needs_copy_move_assignment_helper(field->type, move); bool field_needs_assignment = generated_field_needs_assignment_statement(field->type, move, field_needs_helper, field_assignment);
 if (field_needs_assignment) { copied_prefix = field->member_offset; break;
 } } } if (copied_prefix != 0)
 { Node action("storage-copy-action"); action.type = bare; action.has_constant_value = true;
 action.constant_value = copied_prefix; add_child(action, other); add_child(body, action); }
 for (size_t i = 0; i < bare->fields.size(); ++i) { Binding* field = bare->fields[i]; bool field_needs_helper =
 type_needs_copy_move_assignment_helper(field->type, move); Binding* field_assignment = find_copy_move_assignment_binding(field->type, move); if (field_assignment == NULL && move)
-field_assignment = find_copy_move_assignment_binding(field->type, false); bool field_needs_assignment = field_needs_helper ||
-(field_assignment != NULL && !field_assignment->is_generated_copy_move_assignment); if (pa11::type_has_const(field->type) || pa11::is_reference_type(field->type) ||
+field_assignment = find_copy_move_assignment_binding(field->type, false); bool field_needs_assignment = generated_field_needs_assignment_statement(field->type, move, field_needs_helper, field_assignment); if (pa11::type_has_const(field->type) || pa11::is_reference_type(field->type) ||
 ((field_needs_helper || field_assignment != NULL) && !copy_move_assignment_available(field->type, move))) deleted = true; if (copied_prefix != 0 &&
-pa11::strip_cv(field->type)->kind == pa11::TypeKind::Array && !type_needs_copy_move_assignment_helper(pa11::strip_cv(field->type)->base, move))
+pa11::strip_cv(field->type)->kind == pa11::TypeKind::Array && !type_needs_copy_move_assignment_helper(pa11::strip_cv(field->type)->base, move) && !type_has_empty_record_assignment_subobject(pa11::strip_cv(field->type)->base))
 field_needs_assignment = false; if (copied_prefix != 0 &&
 field->member_offset < copied_prefix && !field_needs_assignment) continue; if (!field_needs_assignment)
 continue; Expr target = target_field_expr(field, this_object); TypePtr field_bare = pa11::strip_cv(field->type); if (field_bare->kind == pa11::TypeKind::Array) {
 append_assignment_statement(target, expr_from_node(source_field_expr(field, other, false)), field->type); continue; }
+Binding* ensured_assignment = ensure_copy_move_assignment(field_bare, move); if (ensured_assignment == NULL && move) ensured_assignment = ensure_copy_move_assignment(field_bare, false);
 Expr callee = make_member_expr(target, "operator=", "."); vector<Expr> args;
 args.push_back(expr_from_node(source_field_expr(field, other, move))); Expr call = make_call_expr(callee, args); Node stmt("expression-statement"); add_child(stmt, call.node);
 add_child(body, stmt); } if (deleted) deleted_functions_.insert(op);

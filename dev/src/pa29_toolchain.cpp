@@ -2,6 +2,7 @@
 
 #include "lowir2cy86.h"
 #include "lowir2native.h"
+#include "lowiropt.h"
 #include "pa14_lowir.h"
 #include "pa31_host_object.h"
 
@@ -378,7 +379,19 @@ void compile_source_to_lowir(const string& srcfile,
 	lowir_options.native_lowering = true;
 	lowir_options.host_object_lowering = host_object;
 	lowir_options.hosted_compatibility = options.hosted_compatibility;
-	pa14::emit_lowir(vector<string>(1, srcfile), objfile, lowir_options);
+	if (options.optimization_level <= 0)
+	{
+		pa14::emit_lowir(vector<string>(1, srcfile), objfile, lowir_options);
+		return;
+	}
+	const string tmp = objfile + ".lowiropt.tmp";
+	pa14::emit_lowir(vector<string>(1, srcfile), tmp, lowir_options);
+	lowiropt::Options opt_options;
+	opt_options.optimization_level =
+	    options.optimization_level > 2 ? 2 : options.optimization_level;
+	opt_options.outfile = objfile;
+	lowiropt::optimize_files_to_file(vector<string>(1, tmp), opt_options);
+	remove(tmp.c_str());
 }
 
 bool file_exists(const string& path)
@@ -476,7 +489,11 @@ void link_inputs_to_executable(const vector<string>& inputs,
 	native_options.target = normalize_target(options.target);
 	native_options.outfile = outfile;
 	native_options.external_objects = external_objects;
-	lowir2native::compile_program(merge_objects(lowir_objects), native_options);
+	lowir2cy86::Program program = merge_objects(lowir_objects);
+	if (options.optimization_level > 0)
+		program = lowiropt::optimize_program(
+		    program, options.optimization_level > 2 ? 2 : options.optimization_level);
+	lowir2native::compile_program(program, native_options);
 }
 
 }  // namespace pa29

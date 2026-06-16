@@ -1,6 +1,7 @@
 // Student-facing scaffold for the PA37 `lowiropt` binary.
 
 #include "exceptions.h"
+#include "lowiropt.h"
 #include "tool_help_text.h"
 
 #include <iostream>
@@ -19,6 +20,8 @@ struct LowIROptInvocation
   string outfile;
   vector<string> inputs;
 };
+
+LowIROptInvocation parse_lowiropt_invocation(const vector<string> & args);
 
 vector<string> collect_args(int argc, char ** argv)
 {
@@ -49,12 +52,48 @@ bool has_batch_stdin_arg(const vector<string> & args)
   return false;
 }
 
-int run_not_implemented_batch_mode()
+int run_batch_mode(const vector<string> & base_args)
 {
+  vector<string> inherited_args;
+  for(size_t i = 0; i < base_args.size(); ++i) {
+    if(base_args[i] != "--batch-stdin") {
+      inherited_args.push_back(base_args[i]);
+    }
+  }
+
   string line;
   while(getline(cin, line)) {
-    (void)line;
-    cout << "EXIT_NOT_IMPLEMENTED" << endl;
+    try {
+      vector<string> fields;
+      string field;
+      for(size_t i = 0; i <= line.size(); ++i) {
+        if(i == line.size() || line[i] == '\t') {
+          fields.push_back(field);
+          field.clear();
+        }
+        else {
+          field.push_back(line[i]);
+        }
+      }
+      if(fields.size() < 5) {
+        cout << "EXIT_FAILURE" << endl;
+        continue;
+      }
+      vector<string> args = inherited_args;
+      args.insert(args.end(), fields.begin() + 4, fields.end());
+      const LowIROptInvocation invocation = parse_lowiropt_invocation(args);
+      lowiropt::Options options;
+      options.optimization_level = invocation.optimization_level;
+      options.outfile = fields[0];
+      lowiropt::optimize_files_to_file(invocation.inputs, options);
+      cout << "EXIT_SUCCESS" << endl;
+    }
+    catch(const NotImplementedException &) {
+      cout << "EXIT_NOT_IMPLEMENTED" << endl;
+    }
+    catch(const exception &) {
+      cout << "EXIT_FAILURE" << endl;
+    }
   }
   return EXIT_SUCCESS;
 }
@@ -123,7 +162,7 @@ LowIROptInvocation parse_lowiropt_invocation(const vector<string> & args)
 int run_lowiropt_mode(const vector<string> & args)
 {
   if(has_batch_stdin_arg(args)) {
-    return run_not_implemented_batch_mode();
+    return run_batch_mode(args);
   }
 
   if(has_help_arg(args)) {
@@ -132,8 +171,11 @@ int run_lowiropt_mode(const vector<string> & args)
   }
 
   const LowIROptInvocation invocation = parse_lowiropt_invocation(args);
-  (void)invocation;
-  throw NotImplementedException();
+  lowiropt::Options options;
+  options.optimization_level = invocation.optimization_level;
+  options.outfile = invocation.outfile;
+  lowiropt::optimize_files_to_file(invocation.inputs, options);
+  return EXIT_SUCCESS;
 }
 
 }  // namespace

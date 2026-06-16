@@ -1,0 +1,18 @@
+#pragma once
+
+extern "C" {
+struct __cppgm_FILE;
+typedef __cppgm_FILE FILE;
+extern FILE* stdout;
+int printf(const char*, ...);
+int puts(const char*);
+int fputs(const char*, FILE*);
+}
+
+namespace std {
+using ::FILE;
+using ::fputs;
+using ::printf;
+using ::puts;
+using ::stdout;
+}

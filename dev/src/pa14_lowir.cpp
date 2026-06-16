@@ -1008,6 +1008,59 @@ record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_i
 	}
 }
 
+void append_assignment_dependency_members(TypePtr record, vector<Binding*>& members)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return;
+	pa11::layout_record_type(bare);
+	members = bare->fields;
+	if (bare->scope == NULL)
+		return;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member == NULL ||
+		    member->kind != BindingKind::Variable ||
+		    member->is_static_member ||
+		    member->aliased_binding != NULL)
+			continue;
+		bool duplicate = false;
+		for (size_t j = 0; j < members.size(); ++j)
+			if (members[j] == member)
+				duplicate = true;
+		if (!duplicate)
+			members.push_back(member);
+	}
+}
+
+uint64_t assignment_storage_copy_limit(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return 0;
+	pa11::layout_record_type(bare);
+	uint64_t limit = 0;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+		if (record_has_storage_copy(bare->fields[i]->type))
+		{
+			uint64_t end = bare->fields[i]->member_offset +
+			               pa11::type_size(bare->fields[i]->type);
+			if (end > limit)
+				limit = end;
+		}
+	return limit;
+}
+
+uint64_t assignment_member_storage_end(Binding* member)
+{
+	if (member == NULL)
+		return 0;
+	if (!record_has_storage_copy(member->type))
+		return member->member_offset;
+	return member->member_offset + pa11::type_size(member->type);
+}
+
 bool FunctionLowerer::lower_defaulted_assignment_fields(TypePtr record,
                                                         bool move,
                                                         const string& other_name)
@@ -1016,22 +1069,48 @@ bool FunctionLowerer::lower_defaulted_assignment_fields(TypePtr record,
 	if (bare->kind != TypeKind::Record)
 		return false;
 	pa11::layout_record_type(bare);
+	vector<Binding*> members;
+	append_assignment_dependency_members(bare, members);
 	vector<pair<Binding*, Binding*> > field_ops;
-	for (size_t i = 0; i < bare->fields.size(); ++i)
+	for (size_t i = 0; i < members.size(); ++i)
 	{
-		Binding* op = find_record_copy_move_assignment(
-			bare->fields[i]->type, move);
+		TypePtr field_type = pa11::strip_cv(members[i]->type);
+		Binding* op = field_type->kind == TypeKind::Record
+			? program_.demand_implicit_copy_assignment(field_type, move)
+			: find_record_copy_move_assignment(members[i]->type, move);
 		if (op == NULL && move)
-			op = find_record_copy_move_assignment(bare->fields[i]->type,
-			                                      false);
-		if (op == NULL ||
-		    (op->is_generated_copy_move_assignment &&
-		     !op->is_inline_definition))
+			op = field_type->kind == TypeKind::Record
+				? program_.demand_implicit_copy_assignment(field_type, false)
+				: find_record_copy_move_assignment(members[i]->type,
+				                                   false);
+		if (op == NULL)
 			continue;
-		field_ops.push_back(make_pair(bare->fields[i], op));
+		field_ops.push_back(make_pair(members[i], op));
 	}
 	if (field_ops.empty())
+	{
+		for (size_t i = 0; i < members.size(); ++i)
+		{
+			bool storage_field = false;
+			for (size_t j = 0; j < bare->fields.size(); ++j)
+				if (bare->fields[j] == members[i])
+					storage_field = true;
+			TypePtr field_type = pa11::strip_cv(members[i]->type);
+			if (storage_field || field_type->kind != TypeKind::Record)
+				continue;
+			program_.demand_implicit_copy_assignment(field_type, move);
+			string self = fresh_temp();
+			string other = fresh_temp();
+			instr(self + " = load ptr $this");
+			instr(other + " = load ptr $" + other_name);
+			if (members[i]->member_offset != 0)
+				instr("copyobj " + to_string(members[i]->member_offset) +
+				      "x" + to_string(pa11::type_align(bare)) + " " +
+				      other + ", " + self);
+			return true;
+		}
 		return false;
+	}
 	string self = fresh_temp();
 	string other = fresh_temp();
 	instr(self + " = load ptr $this");
@@ -1065,11 +1144,11 @@ bool FunctionLowerer::lower_defaulted_assignment_fields(TypePtr record,
 		string ignored = fresh_temp();
 		instr(ignored + " = call ptr @" + program_.symbol_for(op) +
 		      "(" + self_field + ", " + other_field + ")");
-		uint64_t end = offset + pa11::type_size(field->type);
+		uint64_t end = assignment_member_storage_end(field);
 		if (end > cursor)
 			cursor = end;
 	}
-	uint64_t total = pa11::type_size(bare);
+	uint64_t total = assignment_storage_copy_limit(bare);
 	if (total > cursor)
 	{
 		string self_chunk = fresh_temp();

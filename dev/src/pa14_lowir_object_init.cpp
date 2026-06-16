@@ -38,6 +38,25 @@ bool is_no_op_generated_default_prvalue(const Node& node, TypePtr type)
 	       pa11::same_type(target, source) &&
 	       no_op_generated_default_constructor(node.direct_call, type);
 }
+bool should_zero_before_value_constructor(Binding* ctor,
+                                          TypePtr type,
+                                          bool lowering_record_return_object)
+{
+	if (ctor == NULL)
+		return false;
+	const bool noop_generated =
+		ctor->is_generated_default_constructor &&
+		no_op_generated_default_constructor(ctor, type);
+	if ((ctor->is_generated_default_constructor && !noop_generated) ||
+	    ctor->is_defaulted)
+		return true;
+	if (!noop_generated || lowering_record_return_object)
+		return false;
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->kind == TypeKind::Record &&
+	       !record_is_template_specialization(bare);
+}
 bool type_contains_enum(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -753,11 +772,14 @@ void FunctionLowerer::lower_aggregate_elements(const function<Value()>& addr_for
 		const bool noop_generated =
 			init.direct_call->is_generated_default_constructor &&
 			no_op_generated_default_constructor(init.direct_call, type);
-		if (((init.direct_call->is_generated_default_constructor &&
-		      !noop_generated) ||
-		     init.direct_call->is_defaulted) &&
+		if (should_zero_before_value_constructor(
+			    init.direct_call,
+			    type,
+			    lowering_record_return_object_) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));
+		if (noop_generated)
+			demand_suppressed_default_init_subobjects(program_, type);
 		function<Value()> same_addr = [addr]() {
 			return addr;
 		};
@@ -811,11 +833,14 @@ bool FunctionLowerer::lower_braced_record_constructor_init(
 		const bool noop_generated =
 			ctor->is_generated_default_constructor &&
 			no_op_generated_default_constructor(ctor, type);
-		if (((ctor->is_generated_default_constructor &&
-		      !noop_generated) ||
-		     ctor->is_defaulted) &&
+		if (should_zero_before_value_constructor(
+			    ctor,
+			    type,
+			    lowering_record_return_object_) &&
 		    zero_init_has_store(type))
 			lower_storage_zero(addr, pa11::type_size(type));
+		if (noop_generated)
+			demand_suppressed_default_init_subobjects(program_, type);
 		function<Value()> same_addr = [addr]() {
 			return addr;
 		};
@@ -1215,6 +1240,20 @@ void FunctionLowerer::lower_storage_zero(Value addr, uint64_t size)
 	if (!type.empty())
 	{
 		instr("store " + type + " 0, " + addr.text);
+		return;
+	}
+	if (size != 0 && size % 8 == 0)
+	{
+		for (uint64_t i = 0; i < size; i += 8)
+		{
+			string target = addr.text;
+			if (i != 0)
+			{
+				target = fresh_temp();
+				instr(target + " = index i8 " + addr.text + ", " + to_string(i));
+			}
+			instr("store i64 0, " + target);
+		}
 		return;
 	}
 	for (uint64_t i = 0; i < size; ++i)

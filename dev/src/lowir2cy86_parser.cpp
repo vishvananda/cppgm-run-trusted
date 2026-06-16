@@ -309,7 +309,7 @@ private:
 		expect("->");
 		function.ret = parse_type();
 		append_metadata(function.metadata);
-		skip_debug();
+		function.debug = take_debug();
 		return function;
 	}
 
@@ -476,7 +476,7 @@ private:
 		}
 		else
 			parse_void_or_terminator(ins);
-		skip_debug();
+		ins.debug = take_debug();
 		return ins;
 	}
 
@@ -995,10 +995,11 @@ private:
 		return text;
 	}
 
-	void skip_debug()
+	string take_debug()
 	{
 		if (!check("<eof>") && peek().text.compare(0, 5, "!dbg(") == 0)
-			++pos_;
+			return take();
+		return "";
 	}
 
 	static bool is_temp_token(const string& text)
