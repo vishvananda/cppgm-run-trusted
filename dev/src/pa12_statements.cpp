@@ -62,14 +62,6 @@ static bool defaulted_default_constructor_binding(Binding* function)
 }
 static string template_primary(TypePtr type)
 { TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL) return ""; string primary = bare->template_primary_name.empty() ? bare->name : bare->template_primary_name; size_t args = primary.find('<'); if (args != string::npos) primary = primary.substr(0, args); size_t scope = primary.rfind("::"); if (scope != string::npos) primary = primary.substr(scope + 2); return primary; }
-static bool hosted_character_type(TypePtr type)
-{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL || bare->kind != pa11::TypeKind::Fundamental) return false; return bare->fundamental == FT_CHAR || bare->fundamental == FT_SIGNED_CHAR || bare->fundamental == FT_UNSIGNED_CHAR || bare->fundamental == FT_WCHAR_T; }
-static string hosted_char_abi_code(TypePtr type, bool& pointer)
-{ pointer = false; TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL) return ""; if (bare->kind == pa11::TypeKind::Pointer) { pointer = true; bare = pa11::strip_cv(bare->base); } if (bare.get() == NULL || bare->kind != pa11::TypeKind::Fundamental) return ""; if (bare->fundamental == FT_CHAR) return "c"; if (bare->fundamental == FT_SIGNED_CHAR) return "a"; if (bare->fundamental == FT_UNSIGNED_CHAR) return "h"; return ""; }
-static bool hosted_char_ostream(TypePtr type)
-{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record) return false; string primary = template_primary(bare); if (primary == "ostream") return true; if (primary != "basic_ostream" || bare->template_arguments.empty() || bare->template_arguments[0].kind != pa11::TemplateInstanceArgumentKind::Type) return false; return hosted_character_type(bare->template_arguments[0].type); }
-static bool hosted_stream_insertion_extern_template(Binding* function)
-{ if (function == NULL || function->name != "operator<<" || function->owner == NULL || function->owner->kind != ScopeKind::Namespace || function->owner->name != "std" || function->type.get() == NULL || function->type->kind != pa11::TypeKind::Function || function->type->parameters.size() != 2) return false; TypePtr stream = pa11::strip_cv(function->type->parameters[0]); if (stream->kind != pa11::TypeKind::LValueReference || !hosted_char_ostream(stream->base)) return false; TypePtr stream_record = pa11::strip_cv(stream->base); if (stream_record->kind != pa11::TypeKind::Record || !stream_record->is_extern_template_instantiation) return false; bool pointer = false; string code = hosted_char_abi_code(function->type->parameters[1], pointer); if (code.empty()) return false; function->function_specialization_symbol = "_ZStlsISt11char_traitsIcEERSt13basic_ostreamIcT_ES5_" + string(pointer ? "PK" : "") + code; return true; }
 static bool hosted_locale_cache_helper(Binding* function)
 {
 	if (function == NULL ||
@@ -715,7 +707,8 @@ PendingFunctionBody body = found->second; pending_function_bodies_.erase(found);
 		ensure_function_body_extra_node(function->aliased_binding, true);
 			bool out = extra_lowir_nodes_.size() != before;
 		return out;
-	} bool Parser::defer_hosted_function_body(Binding* function) const
+	}
+	bool Parser::defer_hosted_function_body(Binding* function) const
 			{
 				if (!hosted_compatibility_ || function == NULL)
 					return false;
@@ -733,7 +726,7 @@ PendingFunctionBody body = found->second; pending_function_bodies_.erase(found);
 				return true;
 			if (function->is_object_root)
 				return false;
-			if (hosted_stream_insertion_extern_template(function))
+			if (mark_hosted_stream_insertion_extern_template(function))
 				return true;
 				if (function->owner != NULL &&
 				    function->owner->kind == ScopeKind::Namespace &&

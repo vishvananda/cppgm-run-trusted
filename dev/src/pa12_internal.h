@@ -591,6 +591,7 @@ public:
 			bool parse_pending_function_body(Binding* function);
 			bool parse_pending_member_body(Binding* function);
 			bool defer_hosted_function_body(Binding* function) const;
+			bool mark_hosted_stream_insertion_extern_template(Binding* function) const;
 			void ensure_function_body_extra_node(Binding* function,
 			                                     bool force_hosted_body = false);
 		void parse_pending_member_bodies(Scope* class_scope);

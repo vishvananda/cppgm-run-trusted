@@ -119,6 +119,46 @@ PA14 LowIR lowering, and PA31 host object writer.
 - New regression tests, if needed, go under `cppgm.tests/course/pa36/`; PA36
   handout references are not edited.
 
+## Architecture Review
+
+- PA36 implementation remains in `dev/` and `dev/src/`; the PA36 handout
+  tests and references are unchanged. New source ownership added during audit
+  is registered in `dev/frontend_source_sets.mk`.
+- Hosted body ownership is demand-driven. PA12 records template placeholders,
+  specialization arguments, pending member bodies, and external ownership facts;
+  PA14 demands concrete inline/header bodies from typed `Binding` and `TypePtr`
+  state; PA31 emits host ELF symbols, relocations, weak/COMDAT sections, and EH
+  metadata.
+- The audit found one PA12 ownership violation: hosted stream insertion
+  deferral wrote a raw Itanium specialization symbol in `pa12_statements.cpp`.
+  That bypassed the central PA12 ABI mangler. The code now lives in
+  `pa12_statements_hosted.cpp` and uses the existing
+  `abi_function_template_specialization_symbol` path with the recorded
+  `TemplateDeclaration` and concrete `TemplateArgument` vector.
+- The CY86 `append_external_rtti_vtable_stubs_cy86` path was reviewed as an
+  older standalone-runtime compatibility path, not the PA36 host-object path.
+  PA36 object output keeps hosted/runtime references as ELF declarations and
+  relocations through PA31.
+- File audit warnings remain non-fatal and are tracked as broad historical
+  ownership/formatting warnings. The PA36-blocking warning from the raw hosted
+  stream symbol was removed, and the new hosted statement helper split keeps
+  `pa12_statements.cpp` under the stage file-size limit.
+
+## Final Architecture Review
+
+- No dummy object generation, reference-binary shell-outs, copied executable
+  payloads, fixture gates, timeout workarounds, or test-name gates were found
+  in the PA36 implementation footprint.
+- The externally owned hosted stream insertion path now preserves the same
+  demand policy while deriving ABI spelling from semantic template facts instead
+  of reconstructing it from a hand-coded string.
+- The demand closure, hosted layout, LowIR lowering, and host-object writer
+  still use typed compiler state for required definitions and symbol ownership.
+  Remaining broad scans are over per-translation-unit emitted bodies or object
+  records and did not present a PA36 performance blocker in audit.
+- Final validation for this audit is the root through-report plus the PA36 file
+  audit. Both are recorded in `pa36/audit.md`.
+
 ## Validation
 
 - Use `make -C pa36 check TEST=tests/link/<case>.t` and
