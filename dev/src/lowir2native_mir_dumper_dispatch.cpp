@@ -49,7 +49,7 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 		break;
 		case lowir2cy86::InstrKind::Addr: {
 			const lowir2cy86::Instruction* store =
-			    optimized_literal_store_for_addr(fn, ins.dest);
+			    optimized_literal_store_for_addr(ins.dest);
 			if (store != nullptr) {
 				if (!past_call_in_block_) {
 					out_ << "    mov rax, " << store->a.text
@@ -59,7 +59,7 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 				}
 				break;
 			}
-			if (optimized_addr_temp_feeds_load(fn, ins.dest))
+			if (optimized_addr_temp_feeds_load(ins.dest))
 				break;
 			if (is_dead_dest(ins.dest) ||
 			    global_store_addrs_.find(ins.dest) != global_store_addrs_.end() ||

@@ -60,6 +60,9 @@ vector<size_t> MirDumper::optimized_block_order(
 			order.push_back(i);
 		return order;
 	}
+	map<string, size_t> block_indexes;
+	for (size_t i = 0; i < fn.blocks.size(); ++i)
+		block_indexes[fn.blocks[i].name] = i;
 	for (size_t start = 0; start < fn.blocks.size(); ++start) {
 		size_t current = start;
 		while (current < fn.blocks.size() && !seen[current]) {
@@ -71,21 +74,14 @@ vector<size_t> MirDumper::optimized_block_order(
 			const lowir2cy86::Instruction& last = block.instructions.back();
 			if (last.kind != lowir2cy86::InstrKind::Jump)
 				break;
-			const size_t next = block_index_by_name(fn, last.target);
-			if (next >= fn.blocks.size() || seen[next])
+			map<string, size_t>::const_iterator next_it =
+			    block_indexes.find(last.target);
+			if (next_it == block_indexes.end() || seen[next_it->second])
 				break;
-			current = next;
+			current = next_it->second;
 		}
 	}
 	return order;
-}
-
-size_t MirDumper::block_index_by_name(const lowir2cy86::Function& fn,
-                                      const string& name) const {
-	for (size_t i = 0; i < fn.blocks.size(); ++i)
-		if (fn.blocks[i].name == name)
-			return i;
-	return fn.blocks.size();
 }
 
 string MirDumper::fallthrough_for_order(const lowir2cy86::Function& fn,
@@ -170,6 +166,8 @@ void MirDumper::reset_analysis_state(const lowir2cy86::Function& fn) {
 	copy_alias_call_args_.clear();
 	branch_cmp_call_results_.clear();
 	rematerialized_binary_immediates_.clear();
+	optimized_addr_load_temps_.clear();
+	optimized_literal_stores_by_addr_.clear();
 	store_source_loads_.clear();
 	store_source_addrs_.clear();
 	global_store_addrs_.clear();
@@ -284,6 +282,7 @@ void MirDumper::analyze_instruction_feature(const lowir2cy86::Function& fn,
 		analyze_call_instruction_feature(fn, ins);
 	if (ins.kind == lowir2cy86::InstrKind::Binary)
 		analyze_binary_instruction_feature(ins);
+	analyze_optimized_addr_use(ins);
 	if (ins.kind == lowir2cy86::InstrKind::Convert && ins.op == "trunc" &&
 	    lowir2cy86::is_signed_integer_type(ins.type) && ins.type.bits == 32 &&
 	    lowir2cy86::is_integer_type(ins.src_type) && ins.src_type.bits == 64 &&
@@ -348,6 +347,27 @@ void MirDumper::analyze_binary_instruction_feature(
 	string literal;
 	if (temp_is_const_integer_literal(ins.b.text, literal))
 		rematerialized_binary_immediates_.insert(ins.b.text);
+}
+
+void MirDumper::analyze_optimized_addr_use(
+    const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ < 1)
+		return;
+	if (ins.kind == lowir2cy86::InstrKind::Load &&
+	    ins.a.kind == lowir2cy86::ValueKind::Temp &&
+	    use_counts_[ins.a.text] == 1 &&
+	    optimized_addr_definition(ins.a) != nullptr)
+		optimized_addr_load_temps_.insert(ins.a.text);
+	if (ins.kind != lowir2cy86::InstrKind::Store ||
+	    ins.b.kind != lowir2cy86::ValueKind::Temp ||
+	    optimized_addr_definition(ins.b) == nullptr)
+		return;
+	if (use_counts_[ins.b.text] != 1 || ins.a.kind != lowir2cy86::ValueKind::Literal ||
+	    !lowir2cy86::is_integer_type(ins.type) ||
+	    optimized_literal_stores_by_addr_.find(ins.b.text) !=
+	        optimized_literal_stores_by_addr_.end())
+		return;
+	optimized_literal_stores_by_addr_[ins.b.text] = &ins;
 }
 
 void MirDumper::analyze_store_instruction_feature(

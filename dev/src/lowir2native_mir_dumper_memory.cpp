@@ -178,35 +178,10 @@ bool MirDumper::addr_prefers_rcx(const lowir2cy86::Instruction& ins) const {
 	return ins.a.kind == lowir2cy86::ValueKind::Slot &&
 	       single_use_temp(ins.dest); }
 
-bool MirDumper::optimized_addr_temp_feeds_load(const lowir2cy86::Function& fn,
-                                               const string& name) const {
-	if (optimization_level_ < 1 || use_counts_.find(name) == use_counts_.end() ||
-	    use_counts_.find(name)->second != 1)
-		return false;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
-			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == lowir2cy86::InstrKind::Load &&
-			    ins.a.kind == lowir2cy86::ValueKind::Temp &&
-			    ins.a.text == name)
-				return true;
-		}
-	return false;
-}
-
-bool MirDumper::optimized_addr_temp_feeds_load_or_store(
-    const lowir2cy86::Function& fn, const string& name) const {
-	if (optimized_addr_temp_feeds_load(fn, name))
-		return true;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
-			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == lowir2cy86::InstrKind::Store &&
-			    ins.b.kind == lowir2cy86::ValueKind::Temp &&
-			    ins.b.text == name)
-				return true;
-		}
-	return false;
+bool MirDumper::optimized_addr_temp_feeds_load(const string& name) const {
+	return optimization_level_ >= 1 &&
+	       optimized_addr_load_temps_.find(name) !=
+	           optimized_addr_load_temps_.end();
 }
 
 const lowir2cy86::Instruction* MirDumper::optimized_addr_definition(
@@ -224,25 +199,12 @@ const lowir2cy86::Instruction* MirDumper::optimized_addr_definition(
 }
 
 const lowir2cy86::Instruction* MirDumper::optimized_literal_store_for_addr(
-    const lowir2cy86::Function& fn, const string& name) const {
+    const string& name) const {
 	if (optimization_level_ < 1)
 		return nullptr;
-	lowir2cy86::Value value;
-	value.kind = lowir2cy86::ValueKind::Temp;
-	value.text = name;
-	if (optimized_addr_definition(value) == nullptr)
-		return nullptr;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
-			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == lowir2cy86::InstrKind::Store &&
-			    ins.a.kind == lowir2cy86::ValueKind::Literal &&
-			    lowir2cy86::is_integer_type(ins.type) &&
-			    ins.b.kind == lowir2cy86::ValueKind::Temp &&
-			    ins.b.text == name)
-				return &ins;
-		}
-	return nullptr;
+	map<string, const lowir2cy86::Instruction*>::const_iterator it =
+	    optimized_literal_stores_by_addr_.find(name);
+	return it == optimized_literal_stores_by_addr_.end() ? nullptr : it->second;
 }
 
 bool MirDumper::has_large_slot_frame(const lowir2cy86::Function& fn) const {

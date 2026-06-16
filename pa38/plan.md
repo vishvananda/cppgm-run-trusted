@@ -41,6 +41,56 @@ block-order pass guarded by `optimization_level >= 2`.
   the surviving emitted machine operations; avoid adding fixed callee-save
   requirements for O2-only cleaned paths.
 
+## Architecture Review
+
+- `dev/lowir2native.cpp` owns only command-line parsing, batch handling, help,
+  and the `Options::optimization_level` handoff. It accepts `-O0`, `-O1`, and
+  `-O2`; unknown options and missing output/input paths still fail before
+  compilation.
+- `dev/src/lowir2native_support.cpp` remains the single compiler entry point:
+  parse all LowIR inputs, validate/layout the typed `lowir2cy86::Program`, then
+  produce any requested outputs from that validated program. It does not read
+  sidecars, invoke reference tools, or branch on tests.
+- PA38 backend cleanup is owned by `MirDumper` in
+  `dev/src/lowir2native_mir_dumper*.{h,cpp}`. The dumper performs per-function
+  definition/use/liveness/frame analyses before emission, then gates local O1
+  cleanup and O2 block-order cleanup on `optimization_level_`.
+- The native executable path remains the PA28 in-process executable writer:
+  `dev/src/lowir2native_native.cpp` copies the validated LowIR program for the
+  scalar global-call rewrite, emits native-safe CY86, and calls
+  `cy86::compile_to_file` in process. The PA38 harness validates behavior of
+  that executable and validates optimized backend shape through
+  `--dump-machine-ir`; no host compiler, reference binary, interpreter, VM,
+  trampoline, template executable, or embedded payload path is present.
+- Debug metadata is carried as instruction-local suffix text through each PA38
+  MIR rewrite rather than by postprocessing a completed dump.
+- File ownership stays within `dev/` and `dev/src`; PA38 tests, scripts, and
+  sidecars remain oracle material only.
+
+## Final Architecture Review
+
+- The audit found no skipped PA38 compiler phase, fallback success path,
+  reference-tool call, host-toolchain call, fixture-name gate, source-shape gate,
+  timeout workaround, dummy output path, hidden implementation fragment, or
+  file-audit bypass in the PA38 implementation.
+- The main audit finding was in performance and ownership of MIR facts: folded
+  address-use decisions and O2 jump-trace layout were being recovered through
+  emitter-time function scans. Those decisions now live in the existing
+  analysis state: direct-address load temps and literal stores are cached during
+  `analyze_instruction_features`, and O2 block layout builds one block-name map
+  per function.
+- The address-folding cleanup also tightened correctness. Literal-store
+  preemission is now limited to single-use direct slot/global address temps, so
+  a reused address temp cannot accidentally reuse the first literal value for
+  later stores.
+- O1/O2 cleanup still uses typed LowIR values, instruction kinds, use counts,
+  ABI metadata, and frame analysis as the source of truth. The optimized MIR
+  dump is not produced by text rewriting an earlier dump, and no downstream
+  recovery of semantic facts was added.
+- The file audit passes for PA38-owned paths. Remaining audit output is warning
+  level and points at longstanding broad repository shape issues rather than a
+  fatal PA38 bypass.
+
 ## Validation
 
 - First run `make test-report ACTIVE_TEST_REPORT_PAS='pa38'` while iterating on

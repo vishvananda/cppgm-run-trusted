@@ -67,6 +67,8 @@ private:
 		map<string, string> copy_alias_call_args_;
 		set<string> branch_cmp_call_results_;
 	set<string> rematerialized_binary_immediates_;
+	set<string> optimized_addr_load_temps_;
+	map<string, const lowir2cy86::Instruction*> optimized_literal_stores_by_addr_;
 	set<string> store_source_loads_;
 	set<string> store_source_addrs_;
 	set<string> global_store_addrs_;
@@ -126,8 +128,6 @@ private:
 	void dump_functions();
 	void dump_function(const lowir2cy86::Function& fn);
 	vector<size_t> optimized_block_order(const lowir2cy86::Function& fn) const;
-	size_t block_index_by_name(const lowir2cy86::Function& fn,
-	                           const string& name) const;
 	string fallthrough_for_order(const lowir2cy86::Function& fn,
 	                             const vector<size_t>& order,
 	                             size_t order_index) const;
@@ -146,6 +146,7 @@ private:
 	                                      const lowir2cy86::Instruction& ins);
 	void analyze_binary_instruction_feature(
 	    const lowir2cy86::Instruction& ins);
+	void analyze_optimized_addr_use(const lowir2cy86::Instruction& ins);
 	void analyze_store_instruction_feature(const lowir2cy86::Instruction& ins);
 	void analyze_branch_instruction_feature(const lowir2cy86::Function& fn,
 	                                        size_t block_index,
@@ -380,14 +381,11 @@ private:
 	bool copy_can_narrow_in_place(const lowir2cy86::Function& fn,
 	                              const lowir2cy86::Instruction& ins) const;
 	bool addr_prefers_rcx(const lowir2cy86::Instruction& ins) const;
-	bool optimized_addr_temp_feeds_load(const lowir2cy86::Function& fn,
-	                                    const string& name) const;
-	bool optimized_addr_temp_feeds_load_or_store(
-	    const lowir2cy86::Function& fn, const string& name) const;
+	bool optimized_addr_temp_feeds_load(const string& name) const;
 	const lowir2cy86::Instruction* optimized_addr_definition(
 	    const lowir2cy86::Value& value) const;
 	const lowir2cy86::Instruction* optimized_literal_store_for_addr(
-	    const lowir2cy86::Function& fn, const string& name) const;
+	    const string& name) const;
 	bool has_large_slot_frame(const lowir2cy86::Function& fn) const;
 	void dump_copyobj(const lowir2cy86::Function& fn,
 	                  const lowir2cy86::Instruction& ins);
