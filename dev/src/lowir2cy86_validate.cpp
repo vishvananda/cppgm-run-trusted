@@ -10,6 +10,7 @@ namespace lowir2cy86 {
 namespace {
 
 bool allow_f80_surface = false;
+bool allow_identity_conversion_surface = false;
 
 size_t align_up(size_t value, size_t align)
 {
@@ -193,7 +194,8 @@ Type value_type(const Function& fn, const Program& program, const Value& value)
 			return pit->second;
 		map<string, Type>::const_iterator it = fn.temp_types.find(value.text);
 		if (it == fn.temp_types.end())
-			throw runtime_error("undefined temporary");
+			throw runtime_error("undefined temporary " + value.text +
+			                    " in " + fn.name);
 		return it->second;
 	}
 	if (value.kind == ValueKind::Slot)
@@ -253,6 +255,8 @@ void validate_projection(const string& projection)
 
 void validate_conversion(const Instruction& ins)
 {
+	if (allow_identity_conversion_surface && ins.type.text == ins.src_type.text)
+		return;
 	const bool dst_int = is_integer_type(ins.type);
 	const bool src_int = is_integer_type(ins.src_type);
 	const bool dst_float = is_float_type(ins.type);
@@ -501,6 +505,18 @@ void validate_instruction_operands(Function& fn,
 
 void collect_function_locals(Function& fn)
 {
+	fn.temp_order.clear();
+	fn.temp_types.clear();
+	fn.temp_offsets.clear();
+	fn.slot_offsets.clear();
+	fn.slot_types.clear();
+	fn.param_types.clear();
+	fn.param_offsets.clear();
+	fn.hidden_result_offset = 0;
+	fn.stack_size = 0;
+	fn.convert_scratch_offset = 0;
+	fn.needs_convert_scratch = false;
+
 	set<string> seen;
 	for (size_t i = 0; i < fn.params.size(); ++i)
 	{
@@ -599,6 +615,13 @@ size_t allocate_stack_slot(size_t& offset, const Type& type)
 
 void collect_top_level(Program& program)
 {
+	program.global_by_name.clear();
+	program.function_by_name.clear();
+	program.needs_eh_runtime = false;
+	program.entry_function.clear();
+	program.init_function.clear();
+	program.fini_function.clear();
+
 	set<string> symbols;
 	for (size_t i = 0; i < program.globals.size(); ++i)
 	{
@@ -623,7 +646,7 @@ void collect_top_level(Program& program)
 	}
 }
 
-void resolve_roles(Program& program)
+void resolve_roles(Program& program, bool require_entry)
 {
 	map<string, string> role_owners;
 	for (size_t i = 0; i < program.globals.size(); ++i)
@@ -659,7 +682,7 @@ void resolve_roles(Program& program)
 	if (program.fini_function.empty() &&
 	    program.function_by_name.find("@__cppgm_fini") != program.function_by_name.end())
 		program.fini_function = "@__cppgm_fini";
-	if (program.entry_function.empty())
+	if (require_entry && program.entry_function.empty())
 		throw runtime_error("missing entry function");
 }
 
@@ -727,10 +750,10 @@ bool function_uses_eh(const Function& fn)
 	return false;
 }
 
-void validate_and_layout_impl(Program& program)
+void validate_and_layout_impl(Program& program, bool require_entry)
 {
 	collect_top_level(program);
-	resolve_roles(program);
+	resolve_roles(program, require_entry);
 	validate_tls_wrappers(program);
 	for (size_t i = 0; i < program.functions.size(); ++i)
 	{
@@ -742,38 +765,95 @@ void validate_and_layout_impl(Program& program)
 	}
 }
 
+void validate_fragment_impl(Program& program)
+{
+	collect_top_level(program);
+	resolve_roles(program, false);
+	validate_tls_wrappers(program);
+	for (size_t i = 0; i < program.functions.size(); ++i)
+		validate_function(program.functions[i], program);
+}
+
 }  // namespace
 
 void validate_and_layout(Program& program)
 {
 	const bool prev = allow_f80_surface;
+	const bool prev_identity = allow_identity_conversion_surface;
 	allow_f80_surface = false;
+	allow_identity_conversion_surface = false;
 	try
 	{
-		validate_and_layout_impl(program);
+		validate_and_layout_impl(program, true);
 	}
 	catch (...)
 	{
 		allow_f80_surface = prev;
+		allow_identity_conversion_surface = prev_identity;
 		throw;
 	}
 	allow_f80_surface = prev;
+	allow_identity_conversion_surface = prev_identity;
 }
 
 void validate_and_layout_allow_f80(Program& program)
 {
 	const bool prev = allow_f80_surface;
+	const bool prev_identity = allow_identity_conversion_surface;
 	allow_f80_surface = true;
+	allow_identity_conversion_surface = false;
 	try
 	{
-		validate_and_layout_impl(program);
+		validate_and_layout_impl(program, true);
 	}
 	catch (...)
 	{
 		allow_f80_surface = prev;
+		allow_identity_conversion_surface = prev_identity;
 		throw;
 	}
 	allow_f80_surface = prev;
+	allow_identity_conversion_surface = prev_identity;
+}
+
+void validate_and_layout_fragment_allow_f80(Program& program)
+{
+	const bool prev = allow_f80_surface;
+	const bool prev_identity = allow_identity_conversion_surface;
+	allow_f80_surface = true;
+	allow_identity_conversion_surface = false;
+	try
+	{
+		validate_and_layout_impl(program, false);
+	}
+	catch (...)
+	{
+		allow_f80_surface = prev;
+		allow_identity_conversion_surface = prev_identity;
+		throw;
+	}
+	allow_f80_surface = prev;
+	allow_identity_conversion_surface = prev_identity;
+}
+
+void validate_fragment(Program& program)
+{
+	const bool prev = allow_f80_surface;
+	const bool prev_identity = allow_identity_conversion_surface;
+	allow_f80_surface = true;
+	allow_identity_conversion_surface = true;
+	try
+	{
+		validate_fragment_impl(program);
+	}
+	catch (...)
+	{
+		allow_f80_surface = prev;
+		allow_identity_conversion_surface = prev_identity;
+		throw;
+	}
+	allow_f80_surface = prev;
+	allow_identity_conversion_surface = prev_identity;
 }
 
 }  // namespace lowir2cy86

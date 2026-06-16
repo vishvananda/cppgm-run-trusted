@@ -122,35 +122,44 @@ bool dominates(const vector<set<size_t> >& doms, size_t def_block, size_t use_bl
 	return use_block < doms.size() && doms[use_block].count(def_block) != 0;
 }
 
-void replace_value(Value& value,
+bool replace_value(Value& value,
                    const map<string, Fact>& facts,
                    const vector<set<size_t> >& doms,
                    size_t block)
 {
 	set<string> seen;
+	bool changed = false;
 	while (value.kind == ValueKind::Temp)
 	{
 		map<string, Fact>::const_iterator it = facts.find(value.text);
 		if (it == facts.end() || !dominates(doms, it->second.block, block))
-			return;
+			return changed;
 		if (!seen.insert(value.text).second)
-			return;
+			return changed;
+		if (it->second.value.kind == value.kind &&
+		    it->second.value.text == value.text)
+			return changed;
 		value = it->second.value;
+		changed = true;
 	}
+	return changed;
 }
 
-void replace_instruction_values(Instruction& ins,
+bool replace_instruction_values(Instruction& ins,
                                 const map<string, Fact>& facts,
                                 const vector<set<size_t> >& doms,
                                 size_t block)
 {
-	replace_value(ins.a, facts, doms, block);
-	replace_value(ins.b, facts, doms, block);
-	replace_value(ins.c, facts, doms, block);
+	bool changed = false;
+	changed = replace_value(ins.a, facts, doms, block) || changed;
+	changed = replace_value(ins.b, facts, doms, block) || changed;
+	changed = replace_value(ins.c, facts, doms, block) || changed;
 	for (size_t i = 0; i < ins.args.size(); ++i)
-		replace_value(ins.args[i], facts, doms, block);
+		changed = replace_value(ins.args[i], facts, doms, block) || changed;
 	for (size_t i = 0; i < ins.switch_cases.size(); ++i)
-		replace_value(ins.switch_cases[i].value, facts, doms, block);
+		changed = replace_value(ins.switch_cases[i].value, facts, doms, block) ||
+		          changed;
+	return changed;
 }
 
 bool commutative_binary(const string& op)
@@ -221,15 +230,6 @@ bool pure_expr_kind(InstrKind kind)
 	return kind == InstrKind::Addr || kind == InstrKind::Index ||
 	       kind == InstrKind::Unary || kind == InstrKind::Binary ||
 	       kind == InstrKind::Cmp || kind == InstrKind::Convert;
-}
-
-bool type_is_bool_temp(const Function& fn, const string& name)
-{
-	map<string, Type>::const_iterator it = fn.temp_types.find(name);
-	if (it == fn.temp_types.end())
-		return false;
-	return it->second.text == "i64" || it->second.text == "i1" ||
-	       it->second.text == "i32";
 }
 
 bool temp_defined_by_cmp(const map<string, const Instruction*>& defs,
@@ -492,7 +492,7 @@ bool simplify_instruction(Function& fn,
 {
 	(void)program;
 	bool changed = false;
-	replace_instruction_values(ins, facts, doms, block);
+	changed = replace_instruction_values(ins, facts, doms, block) || changed;
 	Value replacement;
 	bool has_replacement = false;
 	if (ins.kind == InstrKind::Const || ins.kind == InstrKind::Copy)
@@ -523,7 +523,6 @@ bool simplify_instruction(Function& fn,
 		fact.value = replacement;
 		fact.block = block;
 		facts[ins.dest] = fact;
-		changed = true;
 	}
 	else if (ins.has_dest && pure_expr_kind(ins.kind))
 	{
@@ -541,7 +540,6 @@ bool simplify_instruction(Function& fn,
 				fact.value = temp_value(expr.temp);
 				fact.block = block;
 				facts[ins.dest] = fact;
-				changed = true;
 				reused = true;
 				break;
 			}
@@ -1300,22 +1298,31 @@ bool simplify_function(Function& fn, Program& program)
 			exprs.clear();
 		}
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-			changed = simplify_instruction(fn, program, fn.blocks[b].instructions[i],
-			                               b, doms, storage_temps, facts, exprs, defs) ||
-			          changed;
+		{
+			bool c = simplify_instruction(fn, program,
+			                              fn.blocks[b].instructions[i],
+			                              b, doms, storage_temps, facts,
+			                              exprs, defs);
+			changed = c || changed;
+		}
 	}
 	rebuild_program(program);
 	const bool broad_slot_cleanup =
 	    function_has_inline_artifact(fn) || metadata_is(fn.metadata, "role", "entry");
-	changed = promote_single_store_slots(fn, doms, !broad_slot_cleanup) || changed;
+	bool c = promote_single_store_slots(fn, doms, !broad_slot_cleanup);
+	changed = c || changed;
 	rebuild_program(program);
-	changed = remove_unused_temps(fn, program) || changed;
+	c = remove_unused_temps(fn, program);
+	changed = c || changed;
 	rebuild_program(program);
-	changed = remove_dead_slot_traffic(fn) || changed;
+	c = remove_dead_slot_traffic(fn);
+	changed = c || changed;
 	rebuild_program(program);
-	changed = strip_no_unwind_eh(fn, program) || changed;
+	c = strip_no_unwind_eh(fn, program);
+	changed = c || changed;
 	rebuild_program(program);
-	changed = cleanup_cfg(fn) || changed;
+	c = cleanup_cfg(fn);
+	changed = c || changed;
 	return changed;
 }
 
@@ -1348,12 +1355,14 @@ bool simplify_o1_once(Program& program)
 	bool changed = false;
 	for (size_t i = 0; i < program.functions.size(); ++i)
 	{
-		changed = add_prefer_local_binding(program.functions[i]) || changed;
+		bool c = add_prefer_local_binding(program.functions[i]);
+		changed = c || changed;
 		if (!program.functions[i].declaration)
 			changed = simplify_function(program.functions[i], program) || changed;
 	}
 	rebuild_program(program);
-	changed = inline_o1_once(program) || changed;
+	bool inlined = inline_o1_once(program);
+	changed = inlined || changed;
 	rebuild_program(program);
 	return changed;
 }
@@ -1361,10 +1370,8 @@ bool simplify_o1_once(Program& program)
 bool run_o1_fixedpoint(Program& program)
 {
 	bool changed = false;
-	for (int pass = 0; pass < 20; ++pass)
+	while (simplify_o1_once(program))
 	{
-		if (!simplify_o1_once(program))
-			break;
 		changed = true;
 	}
 	return changed;
@@ -1377,13 +1384,21 @@ Program optimize_program(Program program, int level)
 	if (level < 0 || level > 2)
 		throw runtime_error("unsupported optimization level");
 	rebuild_program(program);
+	lowir2cy86::validate_fragment(program);
+	rebuild_program(program);
 	const Program original = program;
 	if (level == 0)
+	{
+		lowir2cy86::validate_fragment(program);
 		return program;
+	}
 	run_o1_fixedpoint(program);
 	if (level == 1)
+	{
+		lowir2cy86::validate_fragment(program);
 		return program;
-	for (int pass = 0; pass < 20; ++pass)
+	}
+	for (;;)
 	{
 		bool changed = promote_o2_slots_once(program);
 		changed = run_o1_fixedpoint(program) || changed;
@@ -1391,6 +1406,7 @@ Program optimize_program(Program program, int level)
 			break;
 	}
 	canonicalize_optimized_program(program, original);
+	lowir2cy86::validate_fragment(program);
 	return program;
 }
 

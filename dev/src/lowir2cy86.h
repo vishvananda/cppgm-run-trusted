@@ -290,6 +290,8 @@ string global_label(const string& name);
 Program parse_files(const vector<string>& srcfiles);
 void validate_and_layout(Program& program);
 void validate_and_layout_allow_f80(Program& program);
+void validate_and_layout_fragment_allow_f80(Program& program);
+void validate_fragment(Program& program);
 string emit_cy86(const Program& program);
 string emit_cy86_for_native(const Program& program);
 void compile_to_file(const vector<string>& srcfiles, const string& outfile);

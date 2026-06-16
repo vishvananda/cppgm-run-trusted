@@ -512,6 +512,8 @@ bool inline_multi_block(Function& caller,
 
 	Block original = caller.blocks[block_index];
 	vector<Block> replacement;
+	bool replace_whole_function = false;
+	Value whole_function_replacement;
 	Block entry = original;
 	entry.instructions.assign(original.instructions.begin(),
 	                          original.instructions.begin() + ins_index);
@@ -537,6 +539,8 @@ bool inline_multi_block(Function& caller,
 					{
 						replacement = ins.a;
 						suffix_replacement = &replacement;
+						whole_function_replacement = replacement;
+						replace_whole_function = true;
 					}
 					append_original_suffix(nb, original, ins_index, call,
 					                       suffix_replacement);
@@ -586,6 +590,8 @@ bool inline_multi_block(Function& caller,
 	caller.blocks.insert(caller.blocks.begin() + block_index,
 	                     replacement.begin(),
 	                     replacement.end());
+	if (replace_whole_function)
+		replace_temp_uses(caller, call.dest, whole_function_replacement);
 	return true;
 }
 
@@ -657,6 +663,8 @@ bool inline_o1_once(Program& program)
 {
 	rebuild_program(program);
 	for (int priority = 0; priority < 7; ++priority)
+	{
+		bool changed = false;
 		for (size_t i = 0; i < program.functions.size(); ++i)
 		{
 			if (program.functions[i].declaration ||
@@ -664,10 +672,13 @@ bool inline_o1_once(Program& program)
 				continue;
 			if (inline_function_once(program.functions[i], program))
 			{
+				changed = true;
 				rebuild_program(program);
-				return true;
 			}
 		}
+		if (changed)
+			return true;
+	}
 	return false;
 }
 

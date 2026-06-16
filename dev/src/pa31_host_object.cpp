@@ -1457,17 +1457,7 @@ void write_host_object(lowir2cy86::Program& program,
                        const string& outfile,
                        const Options& options)
 {
-	if (program.function_by_name.empty())
-	{
-		bool has_entry = false;
-		for (size_t i = 0; i < program.functions.size(); ++i)
-			if (metadata(program.functions[i].metadata, "role") == "entry" ||
-			    program.functions[i].name == "@main")
-				has_entry = true;
-		if (!has_entry)
-			program.entry_function = "@__pa31_object_without_entry";
-	}
-	lowir2cy86::validate_and_layout_allow_f80(program);
+	lowir2cy86::validate_and_layout_fragment_allow_f80(program);
 	ObjectFile obj;
 	Unit unit(program, obj, options);
 	unit.prepare_symbols();
