@@ -163,6 +163,7 @@ lowir2native::Options invocation_options(const LowIR2NativeInvocation & invocati
   options.target = invocation.output_target;
   options.outfile = invocation.outfile;
   options.machine_ir_file = invocation.machine_ir_file;
+  options.optimization_level = invocation.optimization_level;
   return options;
 }
 

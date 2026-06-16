@@ -47,7 +47,20 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 	case lowir2cy86::InstrKind::Copy:
 		dump_copy(fn, ins);
 		break;
-		case lowir2cy86::InstrKind::Addr:
+		case lowir2cy86::InstrKind::Addr: {
+			const lowir2cy86::Instruction* store =
+			    optimized_literal_store_for_addr(fn, ins.dest);
+			if (store != nullptr) {
+				if (!past_call_in_block_) {
+					out_ << "    mov rax, " << store->a.text
+					     << debug_suffix(store->debug) << "\n";
+					dump_addr(fn, ins, store->debug);
+					preemitted_store_literal_addrs_.insert(ins.dest);
+				}
+				break;
+			}
+			if (optimized_addr_temp_feeds_load(fn, ins.dest))
+				break;
 			if (is_dead_dest(ins.dest) ||
 			    global_store_addrs_.find(ins.dest) != global_store_addrs_.end() ||
 			    store_source_addrs_.find(ins.dest) != store_source_addrs_.end() ||
@@ -62,8 +75,8 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 		if (inline_atomic_expected_addrs_.find(ins.dest) !=
 		    inline_atomic_expected_addrs_.end())
 			break;
-		dump_addr(fn, ins);
-		break;
+		dump_addr(fn, ins, ins.debug);
+		break; }
 	case lowir2cy86::InstrKind::Load:
 		if (direct_param_copy_loads_.find(ins.dest) !=
 		    direct_param_copy_loads_.end())
@@ -127,6 +140,8 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 	case lowir2cy86::InstrKind::AtomicSignalFence:
 		break;
 	case lowir2cy86::InstrKind::Jump:
+		if (optimization_level_ >= 1 && ins.target == current_fallthrough_block_)
+			break;
 		out_ << "    jmp " << ins.target << "\n";
 		break;
 	case lowir2cy86::InstrKind::Branch:

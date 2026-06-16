@@ -45,9 +45,9 @@ void MirDumper::dump_call(const lowir2cy86::Function& fn,
 		if (mir_call_arg_register(program_, fn, ins, i).empty())
 			dump_stack_call_arg(fn, ins, i);
 	if (ins.a.kind == lowir2cy86::ValueKind::Function)
-		out_ << "    call " << ins.a.text << "\n";
+		out_ << "    call " << ins.a.text << debug_suffix(ins) << "\n";
 	else
-		out_ << "    call *r10\n";
+		out_ << "    call *r10" << debug_suffix(ins) << "\n";
 	if (stack_bytes != 0)
 		out_ << "    add rsp, " << stack_bytes << "\n";
 	if (ins.has_dest && full_gpr_indirect_call(fn, ins)) {
@@ -506,12 +506,12 @@ void MirDumper::dump_call_arg(const lowir2cy86::Function& fn,
 		const string op =
 		    addr.a.kind == lowir2cy86::ValueKind::Global ? "mov" : "lea";
 		out_ << "    " << op << " " << reg << ", "
-		     << value_reg(fn, addr.a) << "\n";
+		     << value_reg(fn, addr.a) << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (mir_call_arg_needs_address(program_, ins, index) && arg.kind == lowir2cy86::ValueKind::Slot) {
 		out_ << "    lea " << reg << ", "
-		     << value_reg(fn, arg) << "\n";
+		     << value_reg(fn, arg) << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (mir_call_arg_needs_address(program_, ins, index) && arg.kind == lowir2cy86::ValueKind::Temp &&
@@ -520,12 +520,22 @@ void MirDumper::dump_call_arg(const lowir2cy86::Function& fn,
 		out_ << "    lea " << reg << ", " << mem << "\n";
 		return;
 	}
+	string literal;
+	if (optimization_level_ >= 1 &&
+		    !mir_call_arg_needs_address(program_, ins, index) &&
+		    lowir2cy86::is_integer_type(type) &&
+		    value_is_const_integer_literal(arg, literal)) {
+		out_ << "    mov " << reg << ", " << literal
+		     << debug_suffix(ins) << "\n";
+		return;
+	}
 	const bool saved_force_entry_param_reg = force_entry_param_reg_;
 	force_entry_param_reg_ = true;
 	const string src = value_reg(fn, arg);
 	force_entry_param_reg_ = saved_force_entry_param_reg;
 	if (src != reg)
-		out_ << "    mov " << reg << ", " << src << "\n"; }
+		out_ << "    mov " << reg << ", " << src
+		     << debug_suffix(ins) << "\n"; }
 
 bool MirDumper::single_use_temp(const string& name) const {
 	map<string, int>::const_iterator it = use_counts_.find(name); return it == use_counts_.end() || it->second <= 1; }

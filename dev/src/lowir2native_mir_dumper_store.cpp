@@ -70,13 +70,26 @@ void MirDumper::dump_store(const lowir2cy86::Function& fn,
 		    param_index(fn, dst_value.text) >= 0 &&
 		    lowir2cy86::is_ptr_type(mir_lookup_type(fn, dst_value))) {
 			const string dst = store_dest(fn, ins.b);
-			out_ << "    mov rax, " << ins.a.text << "\n";
-			out_ << "    store." << ins.type.text << " " << dst << ", rax\n";
+			out_ << "    mov rax, " << ins.a.text
+			     << debug_suffix(ins) << "\n";
+			out_ << "    store." << ins.type.text << " " << dst
+			     << ", rax" << debug_suffix(ins) << "\n";
 			return;
 		}
-		out_ << "    mov rax, " << ins.a.text << "\n";
+		const bool preemitted =
+		    ins.b.kind == lowir2cy86::ValueKind::Temp &&
+		    preemitted_store_literal_addrs_.find(ins.b.text) !=
+		        preemitted_store_literal_addrs_.end();
+		const lowir2cy86::Instruction* folded_addr =
+		    optimized_addr_definition(ins.b);
+		if (!preemitted)
+			out_ << "    mov rax, " << ins.a.text
+			     << debug_suffix(ins) << "\n";
 		const string dst = store_dest(fn, ins.b);
-		out_ << "    store." << ins.type.text << " " << dst << ", rax\n";
+		out_ << "    store." << ins.type.text << " " << dst
+		     << ", rax" << debug_suffix(ins) << "\n";
+		if (!preemitted && folded_addr != nullptr && past_call_in_block_)
+			dump_addr(fn, *folded_addr, ins.debug);
 		return;
 	}
 	if (ins.a.kind == lowir2cy86::ValueKind::Literal &&

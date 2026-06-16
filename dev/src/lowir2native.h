@@ -15,6 +15,9 @@ struct Options
 	string outfile;
 	string machine_ir_file;
 	vector<string> external_objects;
+	int optimization_level;
+
+	Options() : optimization_level(0) {}
 };
 
 void compile(const vector<string>& srcfiles, const Options& options);

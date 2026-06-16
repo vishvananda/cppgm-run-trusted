@@ -45,16 +45,22 @@ void MirDumper::dump_binary(const lowir2cy86::Function& fn,
 		const string rhs = shift_rhs(fn, ins.b);
 		out_ << "    shl " << dst << ", " << rhs << "\n"; } else {
 		string rhs;
-		const bool rhs_tls_frame =
-		    ins.b.kind == lowir2cy86::ValueKind::Temp &&
-		    tls_pressure_frame_temps_.find(ins.b.text) !=
-		        tls_pressure_frame_temps_.end();
-		if (rhs_tls_frame) {
-			out_ << "    load." << ins.type.text << " rdx"
-			     << ", " << frame_temp_mem(fn, ins.b.text) << "\n";
-			rhs = "rdx";
-		} else
-			rhs = value_reg(fn, ins.b);
+			const bool rhs_tls_frame =
+			    ins.b.kind == lowir2cy86::ValueKind::Temp &&
+			    tls_pressure_frame_temps_.find(ins.b.text) !=
+			        tls_pressure_frame_temps_.end();
+			string literal_rhs;
+			if (optimization_level_ >= 1 &&
+			    rematerialized_binary_immediates_.find(ins.b.text) !=
+			        rematerialized_binary_immediates_.end() &&
+			    value_is_const_integer_literal(ins.b, literal_rhs))
+				rhs = literal_rhs;
+			else if (rhs_tls_frame) {
+				out_ << "    load." << ins.type.text << " rdx"
+				     << ", " << frame_temp_mem(fn, ins.b.text) << "\n";
+				rhs = "rdx";
+			} else
+				rhs = value_reg(fn, ins.b);
 		if (is_param_slot_value(fn, ins.b)) {
 			out_ << "    load." << ins.type.text << " rdx"
 			     << ", " << param_slot_mem(fn, ins.b) << "\n";
@@ -71,8 +77,8 @@ void MirDumper::dump_binary(const lowir2cy86::Function& fn,
 		    ins.b.kind == lowir2cy86::ValueKind::Temp &&
 		    ins.a.text == ins.b.text && dst != left)
 			rhs = dst;
-		out_ << "    " << binary_opcode(ins.op) << " " << dst << ", "
-		     << rhs << "\n";
+			out_ << "    " << binary_opcode(ins.op) << " " << dst << ", "
+			     << rhs << debug_suffix(ins) << "\n";
 	}
 	dump_narrow_extend(ins.type, dst);
 	if (tls_pressure_frame_temps_.find(ins.dest) !=
@@ -88,7 +94,7 @@ void MirDumper::dump_float_binary(const lowir2cy86::Function& fn,
 	const string dst = float_binary_dest(ins);
 	out_ << "    f" << float_binary_opcode(ins.op) << "." << ins.type.text << " "
 	     << dst << ", " << float_value(fn, ins.a) << ", "
-	     << float_value(fn, ins.b) << "\n";
+	     << float_value(fn, ins.b) << debug_suffix(ins) << "\n";
 	remember_xmm_reg(ins.dest, dst); }
 
 string MirDumper::float_binary_dest(const lowir2cy86::Instruction& ins) {
@@ -269,16 +275,16 @@ void MirDumper::dump_branch(const lowir2cy86::Function& fn,
 				out_ << "    mov rax, " << src << "\n";
 			out_ << "    mov rdx, " << cmp.b.text << "\n";
 			out_ << "    cmp." << cmp.type.text << " rax, rdx\n";
-			out_ << "    j" << branch_suffix(cmp.op) << " " << ins.target << "\n";
-			out_ << "    jmp " << ins.target_false << "\n";
+			dump_conditional_branch(branch_suffix(cmp.op),
+			                        ins.target, ins.target_false, ins.debug);
 			return;
 		}
 		const string lhs = direct_cmp_lhs(fn, cmp);
 		const string rhs = direct_cmp_rhs(fn, cmp);
 		out_ << "    cmp." << cmp.type.text << " " << lhs << ", "
 		     << rhs << "\n";
-		out_ << "    j" << branch_suffix(cmp.op) << " " << ins.target << "\n";
-		out_ << "    jmp " << ins.target_false << "\n";
+		dump_conditional_branch(branch_suffix(cmp.op),
+		                        ins.target, ins.target_false, ins.debug);
 		return;
 	}
 	if (ins.a.kind == lowir2cy86::ValueKind::Temp &&
@@ -287,6 +293,13 @@ void MirDumper::dump_branch(const lowir2cy86::Function& fn,
 		string cond = value_reg(fn, un.a);
 		if (branch_uses_fresh_call_result(un.a))
 			cond = "rax";
+		if (optimization_level_ >= 1) {
+			out_ << "    test." << un.type.text << " " << cond
+			     << ", " << cond << debug_suffix(ins) << "\n";
+			dump_conditional_branch("e", ins.target,
+			                        ins.target_false, ins.debug);
+			return;
+		}
 		if (cond != "rax")
 			out_ << "    mov rax, " << cond << "\n";
 		out_ << "    cmp.i64 rax, 0\n";
@@ -297,11 +310,51 @@ void MirDumper::dump_branch(const lowir2cy86::Function& fn,
 	string cond = value_reg(fn, ins.a);
 	if (branch_uses_fresh_call_result(ins.a))
 		cond = "rax";
+	if (optimization_level_ >= 1) {
+		const lowir2cy86::Type cond_type = mir_lookup_type(fn, ins.a);
+		out_ << "    test." << cond_type.text << " " << cond
+		     << ", " << cond << debug_suffix(ins) << "\n";
+		dump_conditional_branch("ne", ins.target,
+		                        ins.target_false, ins.debug);
+		return;
+	}
 	if (cond != "rax")
 		out_ << "    mov rax, " << cond << "\n";
 	out_ << "    cmp.i64 rax, 0\n";
 	out_ << "    jne " << ins.target << "\n";
 	out_ << "    jmp " << ins.target_false << "\n"; }
+
+string MirDumper::inverse_branch_suffix(const string& suffix) const {
+	if (suffix == "e") return "ne";
+	if (suffix == "ne") return "e";
+	if (suffix == "l") return "ge";
+	if (suffix == "le") return "g";
+	if (suffix == "g") return "le";
+	if (suffix == "ge") return "l";
+	if (suffix == "b") return "ae";
+	if (suffix == "be") return "a";
+	if (suffix == "a") return "be";
+	if (suffix == "ae") return "b";
+	return "";
+}
+
+void MirDumper::dump_conditional_branch(const string& suffix,
+                                        const string& true_target,
+                                        const string& false_target,
+                                        const string& debug) {
+	if (optimization_level_ >= 1 && true_target == current_fallthrough_block_) {
+		const string inverse = inverse_branch_suffix(suffix);
+		if (!inverse.empty()) {
+			out_ << "    j" << inverse << " " << false_target
+			     << debug_suffix(debug) << "\n";
+			return;
+		}
+	}
+	out_ << "    j" << suffix << " " << true_target
+	     << debug_suffix(debug) << "\n";
+	if (optimization_level_ < 1 || false_target != current_fallthrough_block_)
+		out_ << "    jmp " << false_target << debug_suffix(debug) << "\n";
+}
 
 bool MirDumper::branch_uses_fresh_call_result(const lowir2cy86::Value& value) const {
 	if (value.kind != lowir2cy86::ValueKind::Temp) return false;
@@ -321,7 +374,8 @@ void MirDumper::dump_float_branch(const lowir2cy86::Function& fn,
 	else
 		out_ << "    jp " << target_false << "\n";
 	out_ << "    j" << float_branch_suffix(cmp.op) << " " << target << "\n";
-	out_ << "    jmp " << target_false << "\n"; }
+	if (optimization_level_ < 1 || target_false != current_fallthrough_block_)
+		out_ << "    jmp " << target_false << "\n"; }
 
 string MirDumper::direct_cmp_lhs(const lowir2cy86::Function& fn,
                       const lowir2cy86::Instruction& cmp) {

@@ -4,25 +4,35 @@ namespace lowir2native {
 
 void MirDumper::dump_const(const lowir2cy86::Function& fn,
                 const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ >= 1 &&
+	    rematerialized_binary_immediates_.find(ins.dest) !=
+	        rematerialized_binary_immediates_.end())
+		return;
 	if (lowir2cy86::is_f80_type(ins.type)) {
 		lowir2cy86::Value dst;
 		dst.kind = lowir2cy86::ValueKind::Temp;
 		dst.text = ins.dest;
 		out_ << "    fmov.f80 " << mir_f80_value(fn, dst, omitted_slots_)
-		     << ", " << ins.a.text << "\n";
+		     << ", " << ins.a.text << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (lowir2cy86::is_float_type(ins.type) && !lowir2cy86::is_f80_type(ins.type)) {
 		out_ << "    fmov." << ins.type.text << " " << xmm_reg(ins.dest)
-		     << ", " << ins.a.text << "\n";
+		     << ", " << ins.a.text << debug_suffix(ins) << "\n";
 		return;
 	}
 	const string dst = const_dest_reg(ins);
-	out_ << "    mov " << dst << ", " << ins.a.text << "\n";
-	dump_narrow_extend(ins.type, dst);
+	out_ << "    mov " << dst << ", " << ins.a.text
+	     << debug_suffix(ins) << "\n";
+	dump_narrow_extend(ins.type, dst, ins.debug);
 	remember_const_dest(ins.dest, dst); }
 
 string MirDumper::const_dest_reg(const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ >= 1 &&
+	    direct_branch_value_operands_.find(ins.dest) !=
+	        direct_branch_value_operands_.end() &&
+	    lowir2cy86::is_integer_type(ins.type))
+		return "rax";
 	if (!preferred_literal_reg_.empty() && lowir2cy86::is_integer_type(ins.type)) {
 		const string reg = preferred_literal_reg_;
 		preferred_literal_reg_.clear();
@@ -48,7 +58,8 @@ void MirDumper::remember_const_dest(const string& name, const string& reg) {
 	remember_temp_reg(name, reg); }
 
 	void MirDumper::dump_addr(const lowir2cy86::Function& fn,
-	               const lowir2cy86::Instruction& ins) {
+	               const lowir2cy86::Instruction& ins,
+	               const string& debug) {
 		const string op =
 		    ins.a.kind == lowir2cy86::ValueKind::Global ? "mov" : "lea";
 		map<string, string>::const_iterator bit =
@@ -65,7 +76,7 @@ void MirDumper::remember_const_dest(const string& name, const string& reg) {
 		        global_store_addrs_.find(ins.dest) != global_store_addrs_.end()
 		            ? "rbx" : temp_reg(ins.dest);
 	out_ << "    " << op << " " << dst << ", "
-	     << value_reg(fn, ins.a) << "\n";
+	     << value_reg(fn, ins.a) << debug_suffix(debug) << "\n";
 	if (bit != direct_branch_addr_regs_.end())
 		remember_fixed_temp_reg(ins.dest, bit->second);
 	else if (cit != call_arg_addr_regs_.end())
@@ -93,6 +104,10 @@ void MirDumper::remember_const_dest(const string& name, const string& reg) {
 void MirDumper::dump_copy(const lowir2cy86::Function& fn,
                const lowir2cy86::Instruction& ins) {
 		if (lowir2cy86::is_float_type(ins.type) && !lowir2cy86::is_f80_type(ins.type)) {
+			if (optimization_level_ >= 1 && copy_can_forward(fn, ins)) {
+				remember_xmm_reg(ins.dest, float_value(fn, ins.a));
+				return;
+			}
 			out_ << "    fmov." << ins.type.text << " " << xmm_reg(ins.dest)
 			     << ", " << float_value(fn, ins.a) << "\n";
 			return;
@@ -162,6 +177,73 @@ bool MirDumper::addr_prefers_rcx(const lowir2cy86::Instruction& ins) const {
 		return false;
 	return ins.a.kind == lowir2cy86::ValueKind::Slot &&
 	       single_use_temp(ins.dest); }
+
+bool MirDumper::optimized_addr_temp_feeds_load(const lowir2cy86::Function& fn,
+                                               const string& name) const {
+	if (optimization_level_ < 1 || use_counts_.find(name) == use_counts_.end() ||
+	    use_counts_.find(name)->second != 1)
+		return false;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
+			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
+			if (ins.kind == lowir2cy86::InstrKind::Load &&
+			    ins.a.kind == lowir2cy86::ValueKind::Temp &&
+			    ins.a.text == name)
+				return true;
+		}
+	return false;
+}
+
+bool MirDumper::optimized_addr_temp_feeds_load_or_store(
+    const lowir2cy86::Function& fn, const string& name) const {
+	if (optimized_addr_temp_feeds_load(fn, name))
+		return true;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
+			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
+			if (ins.kind == lowir2cy86::InstrKind::Store &&
+			    ins.b.kind == lowir2cy86::ValueKind::Temp &&
+			    ins.b.text == name)
+				return true;
+		}
+	return false;
+}
+
+const lowir2cy86::Instruction* MirDumper::optimized_addr_definition(
+    const lowir2cy86::Value& value) const {
+	if (optimization_level_ < 1 || value.kind != lowir2cy86::ValueKind::Temp)
+		return nullptr;
+	map<string, const lowir2cy86::Instruction*>::const_iterator it =
+	    definitions_.find(value.text);
+	if (it == definitions_.end() ||
+	    it->second->kind != lowir2cy86::InstrKind::Addr ||
+	    (it->second->a.kind != lowir2cy86::ValueKind::Slot &&
+	     it->second->a.kind != lowir2cy86::ValueKind::Global))
+		return nullptr;
+	return it->second;
+}
+
+const lowir2cy86::Instruction* MirDumper::optimized_literal_store_for_addr(
+    const lowir2cy86::Function& fn, const string& name) const {
+	if (optimization_level_ < 1)
+		return nullptr;
+	lowir2cy86::Value value;
+	value.kind = lowir2cy86::ValueKind::Temp;
+	value.text = name;
+	if (optimized_addr_definition(value) == nullptr)
+		return nullptr;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i) {
+			const lowir2cy86::Instruction& ins = fn.blocks[b].instructions[i];
+			if (ins.kind == lowir2cy86::InstrKind::Store &&
+			    ins.a.kind == lowir2cy86::ValueKind::Literal &&
+			    lowir2cy86::is_integer_type(ins.type) &&
+			    ins.b.kind == lowir2cy86::ValueKind::Temp &&
+			    ins.b.text == name)
+				return &ins;
+		}
+	return nullptr;
+}
 
 bool MirDumper::has_large_slot_frame(const lowir2cy86::Function& fn) const {
 	size_t bytes = 0;
@@ -735,6 +817,9 @@ long MirDumper::index_literal_offset(const lowir2cy86::Instruction& ins) const {
 
 string MirDumper::load_source(const lowir2cy86::Function& fn,
                    const lowir2cy86::Value& value) {
+	const lowir2cy86::Instruction* addr = optimized_addr_definition(value);
+	if (addr != nullptr)
+		return value_reg(fn, addr->a);
 	if (value.kind == lowir2cy86::ValueKind::Temp) return "[" + value_reg(fn, value) + "]"; return value_reg(fn, value); }
 
 bool MirDumper::is_thread_local_global(const string& name) const {
@@ -837,20 +922,24 @@ void MirDumper::dump_load(const lowir2cy86::Function& fn,
 	    lowir2cy86::is_ptr_type(mir_lookup_type(fn, src_value))) {
 		const bool promoted = ins.a.kind == lowir2cy86::ValueKind::Temp &&
 		    promoted_loads_.find(ins.a.text) != promoted_loads_.end();
-		const string base = pointer_load_base_reg(fn, src_value, promoted);
 		const string src = value_reg(fn, src_value);
+		string base = pointer_load_base_reg(fn, src_value, promoted);
+		if (optimization_level_ >= 1 &&
+		    direct_return_values_.find(ins.dest) !=
+		        direct_return_values_.end())
+			base = src;
 		if (src != base)
 			out_ << "    mov " << base << ", " << src << "\n";
 		const string dst = load_dest_reg(fn, ins);
 		out_ << "    load." << ins.type.text << " " << dst
-		     << ", [" << base << "]\n";
-		dump_narrow_extend(ins.type, dst);
+		     << ", [" << base << "]" << debug_suffix(ins) << "\n";
+		dump_narrow_extend(ins.type, dst, ins.debug);
 		remember_load_dest(ins.dest, dst);
 		return;
 	}
 	const string dst = load_dest_reg(fn, ins);
 	out_ << "    load." << ins.type.text << " " << dst << ", "
-	     << load_source(fn, ins.a) << "\n";
+	     << load_source(fn, ins.a) << debug_suffix(ins) << "\n";
 	if (post_call_direct_branch_loads_.find(ins.dest) !=
 	    post_call_direct_branch_loads_.end()) {
 		out_ << "    store." << ins.type.text << " "
@@ -859,7 +948,7 @@ void MirDumper::dump_load(const lowir2cy86::Function& fn,
 		return;
 	}
 	if (stack_call_arg_temps_.find(ins.dest) == stack_call_arg_temps_.end())
-		dump_narrow_extend(ins.type, dst);
+		dump_narrow_extend(ins.type, dst, ins.debug);
 	remember_load_dest(ins.dest, dst); }
 
 string MirDumper::pointer_load_base_reg(const lowir2cy86::Function& fn,
@@ -968,6 +1057,15 @@ string MirDumper::indirect_result_load_dest_reg(
 
 string MirDumper::fixed_analysis_load_dest_reg(
     const lowir2cy86::Function& fn, const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ >= 1 &&
+	    direct_return_values_.find(ins.dest) != direct_return_values_.end() &&
+	    lowir2cy86::is_integer_type(ins.type) && ins.type.bits < 64 &&
+	    ins.a.kind == lowir2cy86::ValueKind::Temp &&
+	    param_index(fn, ins.a.text) >= 0 &&
+	    lowir2cy86::is_ptr_type(mir_lookup_type(fn, ins.a))) {
+		fixed_load_dest_ = true;
+		return "r9";
+	}
 	if (direct_return_values_.find(ins.dest) != direct_return_values_.end() &&
 	    (!lowir2cy86::is_integer_type(ins.type) || ins.type.bits == 64)) {
 		fixed_load_dest_ = true;
@@ -1038,6 +1136,8 @@ string MirDumper::fixed_analysis_load_dest_reg(
 
 string MirDumper::fallback_load_dest_reg(const lowir2cy86::Function& fn,
                                          const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ >= 1 && optimized_addr_definition(ins.a) != nullptr)
+		return "r8";
 	const string source = value_reg(fn, ins.a);
 	if (live_across_calls_.find(ins.dest) != live_across_calls_.end())
 		return temp_reg(ins.dest);
@@ -1168,11 +1268,15 @@ void MirDumper::remember_reload(const string& ptr, const string& reg, bool prefe
 	preferred_load_sets_literal_ = prefer_literal;
 	note_temp_reg(reg); }
 
-void MirDumper::dump_narrow_extend(const lowir2cy86::Type& type, const string& reg) {
+void MirDumper::dump_narrow_extend(const lowir2cy86::Type& type,
+                                   const string& reg,
+                                   const string& debug) {
 	if (lowir2cy86::is_signed_integer_type(type) && type.bits < 64)
-		out_ << "    sext.i" << type.bits << " " << reg << "\n";
+		out_ << "    sext.i" << type.bits << " " << reg
+		     << debug_suffix(debug) << "\n";
 	else if (type.kind == lowir2cy86::TypeKind::UnsignedInt && type.bits < 64)
-		out_ << "    zext.i" << type.bits << " " << reg << "\n"; }
+		out_ << "    zext.i" << type.bits << " " << reg
+		     << debug_suffix(debug) << "\n"; }
 
 string MirDumper::store_dest(const lowir2cy86::Function& fn,
                   const lowir2cy86::Value& value) {
@@ -1209,6 +1313,9 @@ string MirDumper::store_dest(const lowir2cy86::Function& fn,
 		out_ << "    mov " << reg << ", " << value_reg(fn, value) << "\n";
 		return "[" + reg + "]";
 	}
+	const lowir2cy86::Instruction* addr = optimized_addr_definition(value);
+	if (addr != nullptr)
+		return value_reg(fn, addr->a);
 	if (value.kind == lowir2cy86::ValueKind::Temp) return "[" + value_reg(fn, value) + "]"; return value_reg(fn, value); }
 
 }  // namespace lowir2native

@@ -82,23 +82,25 @@ void MirDumper::dump_switch(const lowir2cy86::Function& fn,
 void MirDumper::dump_return(const lowir2cy86::Function& fn,
                  const lowir2cy86::Instruction& ins) {
 	if (lowir2cy86::is_void_type(ins.type)) {
-		out_ << "    ret\n";
+		out_ << "    ret" << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (lowir2cy86::is_f80_type(ins.type)) {
-		out_ << "    fret.f80 " << mir_f80_value(fn, ins.a, omitted_slots_) << "\n";
+		out_ << "    fret.f80 " << mir_f80_value(fn, ins.a, omitted_slots_)
+		     << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (mir_is_xmm_type(ins.type)) {
 		if (lowir2cy86::is_f80_type(mir_lookup_type(fn, ins.a))) {
 			out_ << "    fptrunc.f80." << ins.type.text << " xmm0, "
 			     << mir_f80_value(fn, ins.a, omitted_slots_) << "\n";
-			out_ << "    ret\n";
+			out_ << "    ret" << debug_suffix(ins) << "\n";
 			return;
 		}
 		const string src = float_value(fn, ins.a);
-		out_ << "    fmov." << ins.type.text << " xmm0, " << src << "\n";
-		out_ << "    ret\n";
+		out_ << "    fmov." << ins.type.text << " xmm0, " << src
+		     << debug_suffix(ins) << "\n";
+		out_ << "    ret" << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (lowir2cy86::is_obj_type(ins.type)) {
@@ -113,20 +115,27 @@ void MirDumper::dump_return(const lowir2cy86::Function& fn,
 			if (src != "rax")
 				out_ << "    mov rax, " << src << "\n";
 		}
-		out_ << "    ret\n";
+		out_ << "    ret" << debug_suffix(ins) << "\n";
 		return;
 	}
 	if (is_param_slot_value(fn, ins.a)) {
 		out_ << "    load." << ins.type.text << " rax, "
 		     << param_slot_mem(fn, ins.a) << "\n";
 		dump_narrow_extend(ins.type, "rax");
-		out_ << "    ret rax\n";
+		out_ << "    ret rax" << debug_suffix(ins) << "\n";
 		return;
 	}
 	const string src = value_reg(fn, ins.a);
 	if (src != "rax")
-		out_ << "    mov rax, " << src << "\n";
-	out_ << "    ret rax\n";
+	{
+		if (optimization_level_ >= 1 && !is_memory_operand(src) &&
+		    ins.a.kind != lowir2cy86::ValueKind::Literal) {
+			out_ << "    ret " << src << debug_suffix(ins) << "\n";
+			return;
+		}
+		out_ << "    mov rax, " << src << debug_suffix(ins) << "\n";
+	}
+	out_ << "    ret rax" << debug_suffix(ins) << "\n";
 }
 
 }  // namespace lowir2native

@@ -424,4 +424,36 @@ bool MirDumper::direct_branch_slot_load_temp(const string& name,
 	       promoted_loads_.find(name) == promoted_loads_.end() &&
 	       it->second->type.text == type.text; }
 
+bool MirDumper::temp_is_const_integer_literal(const string& name,
+                                              string& literal) const {
+	map<string, const lowir2cy86::Instruction*>::const_iterator it =
+	    definitions_.find(name);
+	if (it == definitions_.end() ||
+	    it->second->kind != lowir2cy86::InstrKind::Const ||
+	    !lowir2cy86::is_integer_type(it->second->type))
+		return false;
+	literal = it->second->a.text;
+	return !literal_needs_reg(literal);
+}
+
+bool MirDumper::value_is_const_integer_literal(
+    const lowir2cy86::Value& value, string& literal) const {
+	if (value.kind == lowir2cy86::ValueKind::Literal) {
+		literal = value.text;
+		return !literal_needs_reg(literal);
+	}
+	if (value.kind != lowir2cy86::ValueKind::Temp)
+		return false;
+	return temp_is_const_integer_literal(value.text, literal);
+}
+
+bool MirDumper::binary_supports_immediate_rhs(
+    const lowir2cy86::Instruction& ins) const {
+	if (ins.kind != lowir2cy86::InstrKind::Binary ||
+	    !lowir2cy86::is_integer_type(ins.type))
+		return false;
+	return ins.op == "add" || ins.op == "sub" || ins.op == "mul" ||
+	       ins.op == "and" || ins.op == "or" || ins.op == "xor";
+}
+
 }  // namespace lowir2native

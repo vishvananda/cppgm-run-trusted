@@ -2,8 +2,10 @@
 
 namespace lowir2native {
 
-MirDumper::MirDumper(const lowir2cy86::Program& program, const string& target)
-	: program_(program), target_(target) { }
+MirDumper::MirDumper(const lowir2cy86::Program& program, const string& target,
+                     int optimization_level)
+	: program_(program), target_(target),
+	  optimization_level_(optimization_level) { }
 
 string MirDumper::dump() {
 	out_ << "machine_ir x86_64 " << target_ << "\n\n";
@@ -26,25 +28,81 @@ void MirDumper::dump_functions() {
 void MirDumper::dump_function(const lowir2cy86::Function& fn) {
 	analyze_function(fn);
 	const vector<string> preserves = frame_preserves(fn);
+	const vector<size_t> order = optimized_block_order(fn);
 	reset_function_state();
 	out_ << "function " << fn.name << "\n";
 	dump_mir_abi(out_, fn);
 	dump_mir_frame(out_, program_, fn, preserves, omitted_slots_);
 	dump_mir_frame_temps(out_, fn, frame_temps_, omitted_slots_);
 	out_ << "\n";
-	for (size_t i = 0; i < fn.blocks.size(); ++i) {
-		current_block_index_ = i;
+	for (size_t i = 0; i < order.size(); ++i) {
+		current_block_index_ = order[i];
+		current_fallthrough_block_ = fallthrough_for_order(fn, order, i);
 		past_call_in_block_ = false;
 		past_stack_call_in_block_ = false;
 		release_dead_temps();
-		out_ << "  block " << fn.blocks[i].name << "\n";
-		if (i == 0)
+		const lowir2cy86::Block& block = fn.blocks[order[i]];
+		out_ << "  block " << block.name << "\n";
+		if (order[i] == 0)
 			dump_param_saves(fn);
-		for (size_t j = 0; j < fn.blocks[i].instructions.size(); ++j)
-			dump_instruction(fn, fn.blocks[i].instructions[j]);
-		if (i + 1 != fn.blocks.size())
+		for (size_t j = 0; j < block.instructions.size(); ++j)
+			dump_instruction(fn, block.instructions[j]);
+		if (i + 1 != order.size())
 			out_ << "\n";
 	} }
+
+vector<size_t> MirDumper::optimized_block_order(
+    const lowir2cy86::Function& fn) const {
+	vector<size_t> order;
+	vector<bool> seen(fn.blocks.size(), false);
+	if (optimization_level_ < 2) {
+		for (size_t i = 0; i < fn.blocks.size(); ++i)
+			order.push_back(i);
+		return order;
+	}
+	for (size_t start = 0; start < fn.blocks.size(); ++start) {
+		size_t current = start;
+		while (current < fn.blocks.size() && !seen[current]) {
+			seen[current] = true;
+			order.push_back(current);
+			const lowir2cy86::Block& block = fn.blocks[current];
+			if (block.instructions.empty())
+				break;
+			const lowir2cy86::Instruction& last = block.instructions.back();
+			if (last.kind != lowir2cy86::InstrKind::Jump)
+				break;
+			const size_t next = block_index_by_name(fn, last.target);
+			if (next >= fn.blocks.size() || seen[next])
+				break;
+			current = next;
+		}
+	}
+	return order;
+}
+
+size_t MirDumper::block_index_by_name(const lowir2cy86::Function& fn,
+                                      const string& name) const {
+	for (size_t i = 0; i < fn.blocks.size(); ++i)
+		if (fn.blocks[i].name == name)
+			return i;
+	return fn.blocks.size();
+}
+
+string MirDumper::fallthrough_for_order(const lowir2cy86::Function& fn,
+                                        const vector<size_t>& order,
+                                        size_t order_index) const {
+	if (order_index + 1 >= order.size())
+		return "";
+	return fn.blocks[order[order_index + 1]].name;
+}
+
+string MirDumper::debug_suffix(const lowir2cy86::Instruction& ins) const {
+	return debug_suffix(ins.debug);
+}
+
+string MirDumper::debug_suffix(const string& debug) const {
+	return debug.empty() ? "" : " " + debug;
+}
 
 void MirDumper::reset_function_state() {
 	temp_names_.clear();
@@ -54,6 +112,7 @@ void MirDumper::reset_function_state() {
 	xmm_regs_.clear();
 	remaining_uses_ = use_counts_;
 	used_preserves_.clear();
+	preemitted_store_literal_addrs_.clear();
 	live_reg_alloc_ = 0;
 	current_block_index_ = 0;
 	stack_call_index_arg_spills_.clear();
@@ -69,7 +128,9 @@ void MirDumper::reset_function_state() {
 	prefer_r8_literal_ = false;
 	past_call_in_block_ = false;
 	past_stack_call_in_block_ = false;
-	force_entry_param_reg_ = false; }
+	force_entry_param_reg_ = false;
+	current_fallthrough_block_.clear();
+}
 
 void MirDumper::analyze_function(const lowir2cy86::Function& fn) {
 	reset_analysis_state(fn);
@@ -108,6 +169,7 @@ void MirDumper::reset_analysis_state(const lowir2cy86::Function& fn) {
 	convert_call_results_.clear();
 	copy_alias_call_args_.clear();
 	branch_cmp_call_results_.clear();
+	rematerialized_binary_immediates_.clear();
 	store_source_loads_.clear();
 	store_source_addrs_.clear();
 	global_store_addrs_.clear();
@@ -220,6 +282,8 @@ void MirDumper::analyze_instruction_feature(const lowir2cy86::Function& fn,
 		direct_return_values_.insert(ins.a.text);
 	if (ins.kind == lowir2cy86::InstrKind::Call)
 		analyze_call_instruction_feature(fn, ins);
+	if (ins.kind == lowir2cy86::InstrKind::Binary)
+		analyze_binary_instruction_feature(ins);
 	if (ins.kind == lowir2cy86::InstrKind::Convert && ins.op == "trunc" &&
 	    lowir2cy86::is_signed_integer_type(ins.type) && ins.type.bits == 32 &&
 	    lowir2cy86::is_integer_type(ins.src_type) && ins.src_type.bits == 64 &&
@@ -246,7 +310,7 @@ void MirDumper::analyze_instruction_feature(const lowir2cy86::Function& fn,
 
 void MirDumper::analyze_call_instruction_feature(
     const lowir2cy86::Function& fn, const lowir2cy86::Instruction& ins) {
-	for (size_t a = 0; a < ins.args.size(); ++a)
+	for (size_t a = 0; a < ins.args.size(); ++a) {
 		if (ins.args[a].kind == lowir2cy86::ValueKind::Temp &&
 		    use_counts_[ins.args[a].text] == 1) {
 			map<string, const lowir2cy86::Instruction*>::const_iterator cit =
@@ -255,13 +319,14 @@ void MirDumper::analyze_call_instruction_feature(
 				if (cit->second->kind == lowir2cy86::InstrKind::Call) {
 					branch_call_results_.insert(ins.args[a].text);
 					call_arg_results_.insert(ins.args[a].text);
-					if (call_uses_full_gpr_args(fn, ins))
-						call_arg_result_frame_preserve_ = true;
-				} else if (cit->second->kind == lowir2cy86::InstrKind::Addr &&
-				           cit->second->a.kind == lowir2cy86::ValueKind::Slot)
-					inline_call_arg_addrs_.insert(ins.args[a].text);
+				if (call_uses_full_gpr_args(fn, ins))
+					call_arg_result_frame_preserve_ = true;
+			} else if (cit->second->kind == lowir2cy86::InstrKind::Addr &&
+			           cit->second->a.kind == lowir2cy86::ValueKind::Slot)
+				inline_call_arg_addrs_.insert(ins.args[a].text);
 			}
 		}
+	}
 	if (ins.a.kind == lowir2cy86::ValueKind::Temp) {
 		map<string, const lowir2cy86::Instruction*>::const_iterator lit =
 		    definitions_.find(ins.a.text);
@@ -274,9 +339,23 @@ void MirDumper::analyze_call_instruction_feature(
 	}
 }
 
+void MirDumper::analyze_binary_instruction_feature(
+    const lowir2cy86::Instruction& ins) {
+	if (optimization_level_ < 1 || !binary_supports_immediate_rhs(ins) ||
+	    ins.b.kind != lowir2cy86::ValueKind::Temp ||
+	    use_counts_[ins.b.text] != 1)
+		return;
+	string literal;
+	if (temp_is_const_integer_literal(ins.b.text, literal))
+		rematerialized_binary_immediates_.insert(ins.b.text);
+}
+
 void MirDumper::analyze_store_instruction_feature(
     const lowir2cy86::Instruction& ins) {
-	note_inline_copy_addr(ins.b);
+	if (!(optimization_level_ >= 1 &&
+	      ins.b.kind == lowir2cy86::ValueKind::Temp &&
+	      optimized_addr_definition(ins.b) != nullptr))
+		note_inline_copy_addr(ins.b);
 	if (ins.a.kind != lowir2cy86::ValueKind::Temp)
 		return;
 	map<string, const lowir2cy86::Instruction*>::const_iterator it =
@@ -305,6 +384,8 @@ void MirDumper::analyze_branch_instruction_feature(
 	    fn.blocks[block_index].instructions[instruction_index];
 	if (ins.a.kind != lowir2cy86::ValueKind::Temp)
 		return;
+	if (optimization_level_ >= 1)
+		direct_branch_value_operands_.insert(ins.a.text);
 	map<string, const lowir2cy86::Instruction*>::const_iterator it =
 	    definitions_.find(ins.a.text);
 	if (block_index != 0 && it != definitions_.end() &&

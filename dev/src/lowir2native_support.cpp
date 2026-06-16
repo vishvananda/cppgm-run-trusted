@@ -17,7 +17,7 @@ void write_native_file(const lowir2cy86::Program& program,
 void write_machine_ir_file(const lowir2cy86::Program& program,
                            const Options& options)
 {
-	MirDumper dumper(program, effective_target(options));
+	MirDumper dumper(program, effective_target(options), options.optimization_level);
 	write_text_file(options.machine_ir_file, dumper.dump());
 }
 
