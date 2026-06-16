@@ -209,6 +209,33 @@ bool declarator_has_forwarding_auto_ref(const Declarator& declarator)
 	return false;
 }
 
+bool generated_anonymous_type_name(const string& name)
+{
+	return name.compare(0, 12, "__local_type") == 0 ||
+	       name.compare(0, 16, "__anonymous_enum") == 0;
+}
+
+void apply_typedef_linkage_name(TypePtr type,
+                                const Declarator& declarator,
+                                const QualifiedName& qname)
+{
+	if (qname.name.empty() ||
+	    qname.qualifier != NULL ||
+	    declarator.inner.get() != NULL ||
+	    !declarator.prefix.empty() ||
+	    !declarator.suffixes.empty())
+		return;
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    (bare->kind != pa11::TypeKind::Record &&
+	     bare->kind != pa11::TypeKind::Enum) ||
+	    !generated_anonymous_type_name(bare->name))
+		return;
+	bare->name = qname.name;
+	if (bare->scope != NULL)
+		bare->scope->name = qname.name;
+}
+
 TypePtr apply_simple_auto_declarator(const Declarator& declarator, TypePtr type)
 {
 	if (declarator.inner.get() != NULL)
@@ -275,6 +302,7 @@ if (friend_class_scope != NULL && qname.qualifier == NULL) target = nearest_name
 TypePtr type = specs.auto_decl && init != NULL && !auto_function_declarator ? deduce_auto_declared_type(base, declarator, init) : apply_declarator(declarator, auto_function_declarator ?
 pa11::make_cv(pa11::make_fundamental(FT_INT), specs.cv) : base); if (specs.auto_decl && type->kind != pa11::TypeKind::Function && !function_definition) type =
 deduce_auto_variable_type(type, init); if (specs.typedef_decl) {
+apply_typedef_linkage_name(type, declarator, qname);
 if (type.get() != NULL && type->is_dependent_typename) { TypePtr resolved = resolve_dependent_typename_type(type); if (resolved.get() != NULL && resolved != type) type = substitute_template_type(resolved); }
 Binding* alias = add_alias(target, qname.name, type); add_child(out, Node("type-alias " + qname.name + " " + pa11::describe_type(alias->type))); return alias; } if (specs.constexpr_decl &&
 !pa11::is_reference_type(type) && type->kind != pa11::TypeKind::Function) type = pa11::make_cv(type, pa11::CV_CONST); if (init != NULL && type->kind == pa11::TypeKind::Array && type->unknown_bound) { uint64_t elements = 0;
@@ -297,7 +325,7 @@ if (candidate->kind == BindingKind::Variable) { bool same_variable = candidate->
 (pa11::same_type(candidate->type, type) || array_redeclaration_compatible(candidate->type, type)); if (!same_variable) throw runtime_error("conflicting C linkage declaration"); } } } }
 	if ((target->kind == ScopeKind::Namespace || target->kind == ScopeKind::Class) && (qname.qualifier != NULL || target->kind == ScopeKind::Namespace)) { Binding* existing =
 	pa11::find_owned_binding(target, qname.name, BindingKind::Variable); if (existing != NULL && (pa11::same_type(existing->type, type) || array_redeclaration_compatible(existing->type, type))) { variable = existing;
-	type = existing->type; } } if (variable == NULL && target->kind != ScopeKind::Namespace && target->kind != ScopeKind::Class) { map<string, vector<Binding*> >::iterator found = target->members.find(qname.name); if (found != target->members.end()) for (size_t i = 0; i < found->second.size(); ++i) { Binding* existing = found->second[i]; if (existing->kind == BindingKind::Variable && provisional_initializer_bindings_.count(existing) != 0 && pa11::same_type(existing->type, type)) { variable = existing; break; } } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); else provisional_initializer_bindings_.erase(variable); if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))
+	type = existing->type; } } if (variable == NULL && target->kind != ScopeKind::Namespace && target->kind != ScopeKind::Class) { map<string, vector<Binding*> >::iterator found = target->members.find(qname.name); if (found != target->members.end()) for (size_t i = 0; i < found->second.size(); ++i) { Binding* existing = found->second[i]; if (existing->kind == BindingKind::Variable && provisional_initializer_bindings_.count(existing) != 0 && pa11::same_type(existing->type, type)) { variable = existing; break; } } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); else provisional_initializer_bindings_.erase(variable); { string asm_label = declarator_asm_label(declarator); if (!asm_label.empty()) variable->asm_label = asm_label; } if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))
 	variable->is_reference_member = true; if (target->kind == ScopeKind::Class && specs.no_unique_address_decl)
 	variable->is_no_unique_address = true; return finish_variable_declaration(specs, target, variable, qname, type, init, out); }
 

@@ -23,6 +23,60 @@ bool same_parameter_family_ignoring_pointer_cv(TypePtr left, TypePtr right)
 		                                    pa11::strip_cv(r->base));
 	return false;
 }
+
+bool same_overload_parameter_signature(TypePtr left, TypePtr right)
+{
+	if (left.get() == NULL || right.get() == NULL ||
+	    left->kind != pa11::TypeKind::Function ||
+	    right->kind != pa11::TypeKind::Function)
+		return false;
+	if (left->cv != right->cv ||
+	    left->variadic != right->variadic ||
+	    left->ref_qualifier != right->ref_qualifier ||
+	    left->parameters.size() != right->parameters.size())
+		return false;
+	for (size_t i = 0; i < left->parameters.size(); ++i)
+		if (!pa11::same_type(left->parameters[i], right->parameters[i]) &&
+		    !same_template_signature_type(left->parameters[i],
+		                                  right->parameters[i]))
+			return false;
+	return true;
+}
+
+bool function_template_candidate_binding(
+	Binding* binding,
+	const map<Binding*, TemplateDeclaration*>& placeholders,
+	const map<Binding*, vector<TemplateArgument> >& specializations)
+{
+	if (binding == NULL)
+		return false;
+	if (placeholders.find(binding) != placeholders.end() ||
+	    specializations.find(binding) != specializations.end() ||
+	    !binding->function_specialization_symbol.empty())
+		return true;
+	Binding* alias = binding->aliased_binding;
+	return alias != NULL &&
+	       (placeholders.find(alias) != placeholders.end() ||
+	        specializations.find(alias) != specializations.end() ||
+	        !alias->function_specialization_symbol.empty());
+}
+
+bool same_function_specialization_symbol(Binding* left, Binding* right)
+{
+	return left != NULL &&
+	       right != NULL &&
+	       !left->function_specialization_symbol.empty() &&
+	       left->function_specialization_symbol ==
+		       right->function_specialization_symbol;
+}
+
+bool has_function_template_origin(
+	Binding* binding,
+	const map<Binding*, TemplateDeclaration*>& placeholders)
+{
+	return function_template_origin(placeholders, binding) != NULL;
+}
+
 void append_normalized_object_specialization_arguments(
 	vector<pa11::TemplateInstanceArgument>& out,
 	const vector<pa11::TemplateInstanceArgument>& arguments)
@@ -109,6 +163,67 @@ bool same_object_specialization_type(TypePtr left, TypePtr right)
 	       l->template_primary_name == r->template_primary_name &&
 	       same_object_specialization_arguments(l->template_arguments,
 	                                            r->template_arguments);
+}
+
+TypePtr reference_binding_target(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    (bare->kind != pa11::TypeKind::LValueReference &&
+	     bare->kind != pa11::TypeKind::RValueReference))
+		return TypePtr();
+	return pa11::strip_cv(bare->base);
+}
+
+bool same_reference_binding_target(TypePtr left, TypePtr right)
+{
+	TypePtr l = reference_binding_target(left);
+	TypePtr r = reference_binding_target(right);
+	return l.get() != NULL && r.get() != NULL &&
+	       same_object_specialization_type(l, r);
+}
+
+int reference_binding_tie_break(Binding* candidate,
+                                const vector<Expr>& candidate_args,
+                                Binding* current,
+                                const vector<Expr>& current_args)
+{
+	if (candidate == NULL || current == NULL ||
+	    candidate->type.get() == NULL || current->type.get() == NULL ||
+	    candidate->type->kind != pa11::TypeKind::Function ||
+	    current->type->kind != pa11::TypeKind::Function ||
+	    candidate->type->parameters.size() !=
+		    current->type->parameters.size())
+		return 0;
+	int score = 0;
+	size_t first =
+		candidate->owner != NULL &&
+		candidate->owner->kind == ScopeKind::Class &&
+		!candidate->is_static_member ? 1 : 0;
+	for (size_t i = first; i < candidate->type->parameters.size(); ++i)
+	{
+		if (i >= candidate_args.size() || i >= current_args.size())
+			continue;
+		TypePtr cparam = pa11::strip_cv(candidate->type->parameters[i]);
+		TypePtr bparam = pa11::strip_cv(current->type->parameters[i]);
+		if (!same_reference_binding_target(cparam, bparam))
+			continue;
+		bool candidate_rvalue =
+			cparam->kind == pa11::TypeKind::RValueReference;
+		bool current_rvalue =
+			bparam->kind == pa11::TypeKind::RValueReference;
+		if (candidate_rvalue == current_rvalue)
+			continue;
+		if (candidate_args[i].category == ValueCategory::LValue ||
+		    current_args[i].category == ValueCategory::LValue)
+			continue;
+		score += candidate_rvalue ? 1 : -1;
+	}
+	if (score > 0)
+		return 1;
+	if (score < 0)
+		return -1;
+	return 0;
 }
 }  // namespace
 
@@ -282,11 +397,81 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 			fn->owner != NULL &&
 			fn->owner->kind == ScopeKind::Class &&
 			!fn->is_static_member;
-		Conversion conv;
-		bool conversion_failed = false;
-		try
-		{
-			conv = convert_to(conv_args[j], fn->type->parameters[j]);
+			Conversion conv;
+			bool conversion_failed = false;
+			if (implicit_object_arg)
+			{
+				TypePtr source =
+					pa11::strip_cv(lvalue_to_rvalue_type(conv_args[j].type));
+				TypePtr target = pa11::strip_cv(fn->type->parameters[j]);
+				if (source.get() != NULL &&
+				    target.get() != NULL &&
+				    source->kind == pa11::TypeKind::Pointer &&
+				    target->kind == pa11::TypeKind::Pointer &&
+				    source->base.get() != NULL &&
+				    target->base.get() != NULL)
+				{
+					TypePtr source_record = pa11::strip_cv(source->base);
+					TypePtr target_record = pa11::strip_cv(target->base);
+					bool related_object =
+						same_object_specialization_type(source->base,
+						                                target->base);
+					if (!related_object &&
+					    source_record.get() != NULL &&
+					    target_record.get() != NULL &&
+					    source_record->kind == pa11::TypeKind::Record &&
+					    target_record->kind == pa11::TypeKind::Record)
+						related_object =
+							record_base_distance(source_record,
+							                     target_record) < 1000000;
+					if (related_object)
+					{
+						unsigned source_cv =
+							source->base->kind == pa11::TypeKind::Cv
+							? source->base->cv : pa11::CV_NONE;
+						if (source_cv == pa11::CV_NONE &&
+						    conv_args[j].binding != NULL &&
+						    conv_args[j].binding->name == "this")
+						{
+							for (size_t ai = active_functions_.size(); ai > 0; --ai)
+							{
+								Binding* active = active_functions_[ai - 1];
+								if (active == NULL ||
+								    active->type.get() == NULL ||
+								    active->type->kind != pa11::TypeKind::Function ||
+								    active->type->parameters.empty())
+									continue;
+								TypePtr active_this =
+									pa11::strip_cv(active->type->parameters[0]);
+								if (active_this.get() == NULL ||
+								    active_this->kind != pa11::TypeKind::Pointer ||
+								    active_this->base.get() == NULL)
+									continue;
+								TypePtr active_record =
+									pa11::strip_cv(active_this->base);
+								if (active_record.get() == NULL ||
+								    source_record.get() == NULL ||
+								    active_record->kind != pa11::TypeKind::Record ||
+								    source_record->kind != pa11::TypeKind::Record ||
+								    active_record->scope != source_record->scope)
+									continue;
+								source_cv =
+									active_this->base->kind == pa11::TypeKind::Cv
+									? active_this->base->cv : pa11::CV_NONE;
+								break;
+							}
+						}
+						unsigned target_cv =
+							target->base->kind == pa11::TypeKind::Cv
+							? target->base->cv : pa11::CV_NONE;
+						if ((target_cv & source_cv) != source_cv)
+							return false;
+					}
+				}
+			}
+			try
+			{
+				conv = convert_to(conv_args[j], fn->type->parameters[j]);
 		}
 		catch (const runtime_error&)
 		{
@@ -446,23 +631,94 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 			if (!current_template_placeholder &&
 			    !explicit_instantiated_specialization)
 				continue;
-		}
-			fn = instantiate_template_call_candidate(fn,
-			                                         explicit_template_arguments,
-			                                         args);
-			if (fn == NULL)
-				continue;
+			}
+				{
+					fn = instantiate_template_call_candidate(fn,
+					                                         explicit_template_arguments,
+					                                         args);
+			}
+		if (fn == NULL)
+			continue;
 		if (fn->type->kind != pa11::TypeKind::Function)
 			continue;
-		Binding* duplicate = duplicate_function_candidate(considered, fn);
-			if (duplicate != NULL)
+			Binding* duplicate = duplicate_function_candidate(considered, fn);
+		bool duplicate_handled = false;
+		if (duplicate != NULL &&
+		    duplicate->name == fn->name &&
+		    duplicate->is_static_member == fn->is_static_member &&
+		    same_overload_parameter_signature(duplicate->type, fn->type))
+		{
+			vector<Binding*>::iterator duplicate_pos =
+				find(considered.begin(), considered.end(), duplicate);
+			if (fn->is_inline_definition &&
+			    !duplicate->is_inline_definition &&
+			    duplicate_pos != considered.end())
+			{
+				considered.erase(duplicate_pos);
+				duplicate = NULL;
+			}
+			else
 			{
 				bool fn_template =
-				function_template_placeholders_.find(fn) !=
-				function_template_placeholders_.end();
+					function_template_candidate_binding(
+						fn,
+						function_template_placeholders_,
+						function_template_specialization_arguments_);
+				bool duplicate_template =
+					function_template_candidate_binding(
+						duplicate,
+						function_template_placeholders_,
+						function_template_specialization_arguments_);
+				if (fn_template && duplicate_template)
+				{
+					TemplateDeclaration* fn_origin =
+						function_template_origin(
+							function_template_placeholders_,
+							fn);
+					TemplateDeclaration* duplicate_origin =
+						function_template_origin(
+							function_template_placeholders_,
+							duplicate);
+					bool fn_concrete_duplicate =
+						fn->type.get() != NULL &&
+						duplicate->type.get() != NULL &&
+						!type_structurally_dependent(fn->type) &&
+						type_structurally_dependent(duplicate->type);
+					if (!fn_concrete_duplicate &&
+					    same_function_specialization_symbol(fn,
+					                                        duplicate))
+					{
+						duplicate_handled =
+							duplicate_origin != NULL ||
+							fn_origin == NULL;
+					}
+					else
+						duplicate_handled =
+							!fn_concrete_duplicate &&
+							(fn->aliased_binding == duplicate ||
+							 duplicate->aliased_binding == fn ||
+							 same_function_template_declaration_family(
+								 fn_origin,
+								 duplicate_origin));
+				}
+				else
+					duplicate_handled = fn_template || !duplicate_template;
+			}
+		}
+		if (duplicate_handled)
+			continue;
+		if (duplicate != NULL)
+		{
+			bool fn_template =
+				function_template_candidate_binding(
+					fn,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
 			bool duplicate_template =
-				function_template_placeholders_.find(duplicate) !=
-				function_template_placeholders_.end();
+				function_template_candidate_binding(
+					duplicate,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
 			TemplateDeclaration* fn_origin =
 				function_template_origin(function_template_placeholders_, fn);
 			TemplateDeclaration* duplicate_origin =
@@ -477,7 +733,7 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					    function_template_placeholders_,
 				    fn,
 				    duplicate) &&
-			    !function_template_more_specialized(
+				    !function_template_more_specialized(
 				    function_template_placeholders_,
 				    duplicate,
 				    fn))
@@ -486,11 +742,15 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 		if (duplicate != NULL)
 		{
 			bool fn_template =
-				function_template_placeholders_.find(fn) !=
-				function_template_placeholders_.end();
+				function_template_candidate_binding(
+					fn,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
 			bool duplicate_template =
-				function_template_placeholders_.find(duplicate) !=
-				function_template_placeholders_.end();
+				function_template_candidate_binding(
+					duplicate,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
 				bool replace_duplicate =
 					!fn_template && duplicate_template;
 				int fn_explicit_score =
@@ -504,8 +764,26 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 				if (!replace_duplicate &&
 				    fn_explicit_score > duplicate_explicit_score)
 					replace_duplicate = true;
+				if (!replace_duplicate &&
+				    same_function_specialization_symbol(fn,
+				                                        duplicate) &&
+				    has_function_template_origin(
+					    fn,
+					    function_template_placeholders_) &&
+				    !has_function_template_origin(
+					    duplicate,
+					    function_template_placeholders_))
+					replace_duplicate = true;
 				if (!replace_duplicate && fn_template && !duplicate_template)
 					;
+				else if (!replace_duplicate &&
+				         fn_template &&
+				         duplicate_template &&
+				         fn->type.get() != NULL &&
+				         duplicate->type.get() != NULL &&
+				         !type_structurally_dependent(fn->type) &&
+				         type_structurally_dependent(duplicate->type))
+					replace_duplicate = true;
 				else if (!replace_duplicate)
 					replace_duplicate =
 						fn->is_inline_definition && !duplicate->is_inline_definition;
@@ -548,13 +826,46 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 		if (!better && best != NULL && ranks == best_ranks &&
 		    object_rank == best_object_rank)
 		{
+			int reference_tie =
+				reference_binding_tie_break(fn,
+				                            conv_args,
+				                            best,
+				                            best_args);
 			bool fn_template =
-				function_template_placeholders_.find(fn) !=
-				function_template_placeholders_.end();
+				function_template_candidate_binding(
+					fn,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
 			bool best_template =
-				function_template_placeholders_.find(best) !=
-				function_template_placeholders_.end();
-			if (fn->is_inline_definition && !best->is_inline_definition)
+				function_template_candidate_binding(
+					best,
+					function_template_placeholders_,
+					function_template_specialization_arguments_);
+			bool fn_concrete_template =
+				fn_template &&
+				fn->type.get() != NULL &&
+				!type_structurally_dependent(fn->type);
+			bool fn_dependent_template =
+				fn_template &&
+				fn->type.get() != NULL &&
+				type_structurally_dependent(fn->type);
+			bool best_concrete_template =
+				best_template &&
+				best->type.get() != NULL &&
+				!type_structurally_dependent(best->type);
+			bool best_dependent_template =
+				best_template &&
+				best->type.get() != NULL &&
+				type_structurally_dependent(best->type);
+			if (reference_tie > 0)
+				better = true;
+			else if (reference_tie < 0)
+				;
+			else if (fn_concrete_template && best_dependent_template)
+				better = true;
+			else if (fn_dependent_template && best_concrete_template)
+				;
+			else if (fn->is_inline_definition && !best->is_inline_definition)
 				better = true;
 			else if (!fn->is_inline_definition && best->is_inline_definition)
 				;
@@ -587,11 +898,43 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 				         !fn->is_inline_definition)
 					indistinguishable = false;
 				else if (object_rank == best_object_rank &&
-				         function_template_placeholders_.find(best) ==
-				         function_template_placeholders_.end() &&
-				         function_template_placeholders_.find(fn) !=
-				         function_template_placeholders_.end())
+				         !function_template_candidate_binding(
+					         best,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_) &&
+				         function_template_candidate_binding(
+					         fn,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_))
 					indistinguishable = false;
+				else if (object_rank == best_object_rank &&
+				         function_template_candidate_binding(
+					         best,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_) &&
+				         function_template_candidate_binding(
+					         fn,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_) &&
+				         best->type.get() != NULL &&
+				         fn->type.get() != NULL &&
+				         !type_structurally_dependent(best->type) &&
+				         type_structurally_dependent(fn->type))
+					indistinguishable = false;
+				else if (object_rank == best_object_rank &&
+				         function_template_candidate_binding(
+					         best,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_) &&
+				         function_template_candidate_binding(
+					         fn,
+					         function_template_placeholders_,
+					         function_template_specialization_arguments_) &&
+				         best->type.get() != NULL &&
+				         fn->type.get() != NULL &&
+				         type_structurally_dependent(best->type) &&
+				         !type_structurally_dependent(fn->type))
+					better = true;
 				else if (object_rank == best_object_rank &&
 				         function_template_more_specialized_for_call(
 					         function_template_placeholders_,
@@ -599,15 +942,21 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					         fn,
 					         args.size()))
 					indistinguishable = false;
-				else if (object_rank == best_object_rank &&
-				         function_template_fewer_forwarding_lvalue_parameters_for_call(
-					         function_template_placeholders_,
-					         best,
-					         fn,
-					         args))
-					indistinguishable = false;
-					else if (object_rank == best_object_rank)
-						indistinguishable = true;
+					else if (object_rank == best_object_rank &&
+					         function_template_fewer_forwarding_lvalue_parameters_for_call(
+						         function_template_placeholders_,
+						         best,
+						         fn,
+						         args))
+						indistinguishable = false;
+					else if (object_rank == best_object_rank &&
+					         reference_binding_tie_break(best,
+					                                     best_args,
+					                                     fn,
+					                                     conv_args) > 0)
+						indistinguishable = false;
+						else if (object_rank == best_object_rank)
+							indistinguishable = true;
 				}
 				else
 				{
@@ -679,9 +1028,11 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 		}
 		else if (indistinguishable)
 			ambiguous = true;
-	}
+		}
 	if (best == NULL || ambiguous)
+	{
 		throw runtime_error("cannot resolve call overload");
+	}
 	if (best != NULL &&
 	    best->owner != NULL &&
 	    best->owner->kind == ScopeKind::Class)
@@ -712,6 +1063,12 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 			function_template_placeholders_.find(best);
 		map<Binding*, vector<TemplateArgument> >::iterator args_it =
 			function_template_specialization_arguments_.find(best);
+			bool selected_completion_active =
+				template_it != function_template_placeholders_.end() &&
+				args_it !=
+					function_template_specialization_arguments_.end() &&
+				template_it->second->completing_specializations.count(
+					template_argument_key(args_it->second)) != 0;
 			bool selected_has_body =
 				function_bodies_.find(best) != function_bodies_.end();
 			TemplateDeclaration* replay_declaration =
@@ -749,7 +1106,7 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 								replay_declaration->generic_function_type);
 						if (!parameters_match && !signature_matches)
 							continue;
-						if (compatible_body == NULL)
+						if (compatible_body == NULL && signature_matches)
 							compatible_body = candidate;
 						if (!signature_matches)
 							continue;
@@ -789,20 +1146,47 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					                                   replay_declaration) &&
 				    compatible_body != NULL)
 				{
-				unique_ptr<TemplateDeclaration> clone(
-					new TemplateDeclaration(*compatible_body));
-				clone->owner = replay_declaration->owner;
-				clone->placeholder = replay_declaration->placeholder;
-				clone->class_template_member =
-					replay_declaration->class_template_member;
-				clone->outer_type_substitutions =
-					replay_declaration->outer_type_substitutions;
-				clone->outer_value_substitutions =
-					replay_declaration->outer_value_substitutions;
-				clone->function_specializations.clear();
-				clone->completing_specializations.clear();
-				TemplateDeclaration* clone_ptr = clone.get();
-				template_declarations_.push_back(std::move(clone));
+				TemplateDeclaration* clone_ptr = NULL;
+				for (size_t ti = 0; ti < template_declarations_.size(); ++ti)
+				{
+					TemplateDeclaration* candidate =
+						template_declarations_[ti].get();
+					if (candidate != NULL &&
+					    candidate != compatible_body &&
+					    candidate->name == compatible_body->name &&
+					    candidate->decl_begin ==
+						    compatible_body->decl_begin &&
+					    candidate->decl_end ==
+						    compatible_body->decl_end &&
+					    candidate->owner == replay_declaration->owner &&
+					    candidate->placeholder ==
+						    replay_declaration->placeholder &&
+					    candidate->class_template_member ==
+						    replay_declaration
+							    ->class_template_member)
+					{
+						clone_ptr = candidate;
+						break;
+					}
+				}
+				if (clone_ptr == NULL)
+				{
+					unique_ptr<TemplateDeclaration> clone(
+						new TemplateDeclaration(*compatible_body));
+					clone->owner = replay_declaration->owner;
+					clone->placeholder =
+						replay_declaration->placeholder;
+					clone->class_template_member =
+						replay_declaration->class_template_member;
+					clone->outer_type_substitutions =
+						replay_declaration->outer_type_substitutions;
+					clone->outer_value_substitutions =
+						replay_declaration->outer_value_substitutions;
+					clone->function_specializations.clear();
+					clone->completing_specializations.clear();
+					clone_ptr = clone.get();
+					template_declarations_.push_back(std::move(clone));
+				}
 					replay_declaration = clone_ptr;
 				}
 					if (!template_declaration_has_body(declaration_tokens_,
@@ -849,7 +1233,8 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					}
 				}
 			}
-		if (template_it != function_template_placeholders_.end() &&
+		if (!selected_completion_active &&
+		    template_it != function_template_placeholders_.end() &&
 		    args_it != function_template_specialization_arguments_.end() &&
 		    !(hosted_compatibility_ &&
 			      replay_declaration != NULL &&
@@ -882,8 +1267,12 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					Binding* instantiated = NULL;
 					bool signature_only_replay =
 						unevaluated_expression_depth_ != 0;
+					bool saved_force_body_instantiation =
+						force_function_template_body_instantiation_;
 					if (signature_only_replay)
 						++function_template_candidate_instantiation_depth_;
+					else
+						force_function_template_body_instantiation_ = true;
 					try
 					{
 						instantiated =
@@ -894,10 +1283,16 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 					{
 						if (signature_only_replay)
 							--function_template_candidate_instantiation_depth_;
+						else
+							force_function_template_body_instantiation_ =
+								saved_force_body_instantiation;
 						throw;
 					}
 						if (signature_only_replay)
 							--function_template_candidate_instantiation_depth_;
+						else
+							force_function_template_body_instantiation_ =
+								saved_force_body_instantiation;
 					if (instantiated != NULL)
 					{
 				if (best != instantiated)
@@ -906,17 +1301,39 @@ bool Parser::convert_call_candidate_arguments(Binding* fn,
 			}
 		}
 	}
-		if (best != NULL &&
+		bool final_completion_active = false;
+		if (best != NULL)
+		{
+			map<Binding*, TemplateDeclaration*>::iterator template_it =
+				function_template_placeholders_.find(best);
+			map<Binding*, vector<TemplateArgument> >::iterator args_it =
+				function_template_specialization_arguments_.find(best);
+			final_completion_active =
+				template_it != function_template_placeholders_.end() &&
+				args_it !=
+					function_template_specialization_arguments_.end() &&
+				template_it->second->completing_specializations.count(
+					template_argument_key(args_it->second)) != 0;
+		}
+		if (!final_completion_active &&
+		    best != NULL &&
 		    unevaluated_expression_depth_ == 0 &&
 		    function_template_candidate_instantiation_depth_ == 0 &&
 		    !defer_hosted_function_body(best) &&
 		    !(hosted_compatibility_ &&
+	      hosted_library_function(best) &&
 	      best->is_inline_definition &&
 	      !best->is_object_root))
 	{
 		parse_pending_function_body(best);
 		parse_pending_member_body(best);
 		ensure_function_body_extra_node(best);
+		if (best->aliased_binding != NULL)
+		{
+			parse_pending_function_body(best->aliased_binding);
+			parse_pending_member_body(best->aliased_binding);
+			ensure_function_body_extra_node(best->aliased_binding);
+		}
 		}
 	return canonical_function_binding(best);
 }

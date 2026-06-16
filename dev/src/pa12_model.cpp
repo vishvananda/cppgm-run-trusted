@@ -215,6 +215,10 @@ bool same_template_instance_type(TypePtr left, TypePtr right);
 bool same_template_instance_arguments(
 	const vector<pa11::TemplateInstanceArgument>& left,
 	const vector<pa11::TemplateInstanceArgument>& right);
+bool compatible_template_instance_type(TypePtr left, TypePtr right);
+bool compatible_template_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right);
 
 void append_normalized_template_instance_arguments(
 	vector<pa11::TemplateInstanceArgument>& out,
@@ -279,6 +283,67 @@ bool same_template_instance_arguments(
 	return true;
 }
 
+bool compatible_template_instance_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return compatible_template_instance_type(left.type, right.type);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		if (!compatible_template_instance_type(left.type, right.type))
+			return false;
+		if (left.dependent != right.dependent)
+			return true;
+		return same_template_instance_argument(left, right);
+	}
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!compatible_template_instance_argument(left.pack[i],
+		                                           right.pack[i]))
+			return false;
+	return true;
+}
+
+bool compatible_template_instance_arguments(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	vector<pa11::TemplateInstanceArgument> flat_left;
+	vector<pa11::TemplateInstanceArgument> flat_right;
+	append_normalized_template_instance_arguments(flat_left, left);
+	append_normalized_template_instance_arguments(flat_right, right);
+	if (flat_left.size() != flat_right.size())
+		return false;
+	for (size_t i = 0; i < flat_left.size(); ++i)
+		if (!compatible_template_instance_argument(flat_left[i],
+		                                           flat_right[i]))
+			return false;
+	return true;
+}
+
+bool compatible_template_instance_type(TypePtr left, TypePtr right)
+{
+	if (same_template_instance_type(left, right))
+		return true;
+	TypePtr l = pa11::strip_cv(left);
+	TypePtr r = pa11::strip_cv(right);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       l->is_template_specialization &&
+	       r->is_template_specialization &&
+	       !l->template_primary_name.empty() &&
+	       l->template_primary_name == r->template_primary_name &&
+	       compatible_template_instance_arguments(l->template_arguments,
+	                                              r->template_arguments);
+}
+
 bool same_template_instance_type(TypePtr left, TypePtr right)
 {
 	if (pa11::same_type(left, right))
@@ -308,6 +373,24 @@ bool same_template_specialization_record(TypePtr left, TypePtr right)
 	       l->name == r->name;
 }
 
+string template_record_family_name(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	string name = bare->is_template_specialization &&
+	              !bare->template_primary_name.empty()
+		? bare->template_primary_name : bare->name;
+	if (name.size() > 2 &&
+	    name.compare(name.size() - 2, 2, "<>") == 0)
+		name.erase(name.size() - 2);
+	return name;
+}
+
+string unqualified_record_family_name(const string& name)
+{
+	size_t pos = name.rfind("::");
+	return pos == string::npos ? name : name.substr(pos + 2);
+}
+
 bool same_template_record_family(TypePtr left, TypePtr right)
 {
 	TypePtr l = pa11::strip_cv(left);
@@ -315,13 +398,14 @@ bool same_template_record_family(TypePtr left, TypePtr right)
 	if (l->kind != pa11::TypeKind::Record ||
 	    r->kind != pa11::TypeKind::Record)
 		return false;
-	string lname = l->is_template_specialization &&
-	               !l->template_primary_name.empty()
-		? l->template_primary_name : l->name;
-	string rname = r->is_template_specialization &&
-	               !r->template_primary_name.empty()
-		? r->template_primary_name : r->name;
-	return !lname.empty() && lname == rname;
+	string lname = template_record_family_name(l);
+	string rname = template_record_family_name(r);
+	if (!lname.empty() && lname == rname)
+		return true;
+	return !lname.empty() &&
+	       !rname.empty() &&
+	       unqualified_record_family_name(lname) ==
+		       unqualified_record_family_name(rname);
 }
 
 bool same_scope_path(Scope* left, Scope* right)
@@ -587,6 +671,20 @@ const Suffix* Parser::declarator_function_suffix(const Declarator& declarator) c
 	if (declarator.inner.get() != NULL)
 		return declarator_function_suffix(*declarator.inner);
 	return NULL;
+}
+
+string Parser::declarator_asm_label(const Declarator& declarator) const
+{
+	if (!declarator.asm_label.empty())
+		return declarator.asm_label;
+	for (size_t i = 0; i < declarator.suffixes.size(); ++i)
+	{
+		if (!declarator.suffixes[i].asm_label.empty())
+			return declarator.suffixes[i].asm_label;
+	}
+	if (declarator.inner.get() != NULL)
+		return declarator_asm_label(*declarator.inner);
+	return "";
 }
 
 Binding* Parser::add_alias(Scope* scope, const string& name, TypePtr type)
@@ -944,6 +1042,9 @@ bool Parser::types_reference_compatible(TypePtr target, TypePtr source) const
 		return true;
 	TypePtr t = pa11::strip_cv(target);
 	TypePtr s = pa11::strip_cv(source);
+	if (compatible_template_instance_type(t, s) &&
+	    cv_contains(cv_flags(target), cv_flags(source)))
+		return true;
 	if (t->kind != pa11::TypeKind::Record ||
 	    s->kind != pa11::TypeKind::Record ||
 	    !cv_contains(cv_flags(target), cv_flags(source)))

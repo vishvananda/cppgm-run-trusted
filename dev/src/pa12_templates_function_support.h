@@ -47,6 +47,9 @@ TypePtr remove_pattern_cv_from_argument(TypePtr argument, unsigned cv);
 size_t function_body_start(const std::vector<Token>& tokens,
                            size_t begin,
                            size_t end);
+size_t constructor_body_start(const std::vector<Token>& tokens,
+                              size_t begin,
+                              size_t end);
 std::vector<ParameterInfo> concrete_member_body_parameters(
 	Binding* function,
 	const std::map<Binding*, std::vector<std::string> >&

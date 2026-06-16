@@ -1,3 +1,4 @@
+#include "pa12_templates_function_support.h"
 #include "pa12_templates_instance_support.h"
 #include "pa12_types_support.h"
 
@@ -180,35 +181,25 @@ TypeSubstitutionEngine::substitute_plain_dependent(TypePtr type) const
 
 string TypeSubstitutionEngine::active_dependent_key(TypePtr type) const
 {
-	string key = type->name + "|" + type->template_primary_name + "|" +
+	string key = to_string(reinterpret_cast<uintptr_t>(type.get())) + "|" +
+	             type->name + "|" + type->template_primary_name + "|" +
 	             to_string(type->template_arguments.size()) + "|" +
 	             to_string(
-		             type->dependent_typename_template_argument_lists.size());
-	if (!type->template_arguments.empty()) {
-		vector<TemplateArgument> args;
-		for (size_t i = 0; i < type->template_arguments.size(); ++i)
-			args.push_back(raw_template_argument_from_instance_argument(
-				type->template_arguments[i]));
-		key += "|" + p.template_argument_key(args);
-	}
-	for (size_t i = 0;
-	     i < type->dependent_typename_template_argument_lists.size();
-	     ++i) {
-		vector<TemplateArgument> args;
-		for (size_t j = 0;
-		     j < type->dependent_typename_template_argument_lists[i].size();
-		     ++j)
-			args.push_back(raw_template_argument_from_instance_argument(
-				type->dependent_typename_template_argument_lists[i][j]));
-		key += "|" + p.template_argument_key(args);
-	}
+		             type->dependent_typename_template_argument_lists.size()) +
+	             "|T" + to_string(p.template_type_substitutions_.size()) +
+	             "|V" + to_string(p.template_value_substitutions_.size()) +
+	             "|S" +
+	             to_string(reinterpret_cast<uintptr_t>(p.current_scope())) +
+	             "|D" + to_string(p.validating_template_definition_ ? 1 : 0) +
+	             "|F" +
+	             to_string(p.function_template_candidate_instantiation_depth_);
 	for (size_t i = 0; i < p.template_value_substitutions_.size(); ++i)
 		for (map<string, TemplateArgument>::const_iterator it =
 			     p.template_value_substitutions_[i].begin();
 		     it != p.template_value_substitutions_[i].end();
 		     ++it)
-			key += "|V:" + it->first + "=" +
-			       template_argument_key_part(it->second);
+			key += "|VN:" + it->first + ":" +
+			       to_string(static_cast<int>(it->second.kind));
 	return key;
 }
 
@@ -410,6 +401,8 @@ TypeSubstitutionEngine::substitute_dependent_arguments(
 		type->dependent_typename_template_id,
 		type->dependent_typename_decltype);
 	out->template_primary_name = type->template_primary_name;
+	out->is_extern_template_instantiation =
+		type->is_extern_template_instantiation;
 	for (size_t i = 0; i < substituted_args.size(); ++i)
 		out->template_arguments.push_back(
 			template_instance_argument(substituted_args[i]));
@@ -1231,14 +1224,20 @@ TypePtr TypeSubstitutionEngine::substitute(TypePtr type) const
 		vector<TypePtr> params;
 		bool consumed_variadic_pack = false;
 		for (size_t i = 0; i < type->parameters.size(); ++i) {
-			if (type->variadic && i + 1 == type->parameters.size()) {
-				string pack_name;
-				TemplateArgument subst;
-				if (template_type_has_template_parameter_name(
-					    type->parameters[i],
-					    pack_name) &&
-				    p.find_template_value_substitution(pack_name, subst) &&
-				    subst.kind == TemplateArgumentKind::Pack) {
+			string pack_name;
+			TemplateArgument subst;
+			bool variadic_pack_tail = false;
+			if (type->variadic && i + 1 == type->parameters.size())
+				variadic_pack_tail =
+					template_type_has_template_parameter_name(
+						type->parameters[i],
+						pack_name);
+			if ((p.function_parameter_type_pack_expansion_name(
+				     type->parameters[i],
+				     pack_name) ||
+			     variadic_pack_tail) &&
+			    p.find_template_value_substitution(pack_name, subst) &&
+			    subst.kind == TemplateArgumentKind::Pack) {
 					for (size_t pi = 0; pi < subst.pack.size(); ++pi)
 						if (subst.pack[pi].kind == TemplateArgumentKind::Type)
 							params.push_back(p.substitute_template_type(
@@ -1249,9 +1248,9 @@ TypePtr TypeSubstitutionEngine::substitute(TypePtr type) const
 						else
 							throw runtime_error(
 								"type parameter pack required");
-					consumed_variadic_pack = true;
+					if (variadic_pack_tail)
+						consumed_variadic_pack = true;
 					continue;
-				}
 			}
 			params.push_back(p.substitute_template_type(type->parameters[i]));
 		}

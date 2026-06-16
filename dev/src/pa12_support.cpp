@@ -1,5 +1,6 @@
 #include "pa12_internal.h"
 
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <ostream>
@@ -35,7 +36,109 @@ string quote_string_literal(const string& value)
 	out += '"';
 	return out;
 }
+
+string unqualified_template_primary(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	size_t scope = primary.rfind("::");
+	if (scope != string::npos)
+		primary = primary.substr(scope + 2);
+	return primary;
+}
+
+bool hosted_stream_template_primary(const string& primary)
+{
+	return primary == "ios" ||
+	       primary == "istream" ||
+	       primary == "ostream" ||
+	       primary == "iostream" ||
+	       primary == "basic_ios" ||
+	       primary == "basic_istream" ||
+	       primary == "basic_ostream" ||
+	       primary == "basic_iostream" ||
+	       primary == "basic_streambuf" ||
+	       primary == "basic_filebuf" ||
+	       primary == "basic_ifstream" ||
+	       primary == "basic_ofstream" ||
+	       primary == "basic_fstream" ||
+	       primary == "basic_stringbuf" ||
+	       primary == "basic_istringstream" ||
+	       primary == "basic_ostringstream" ||
+	       primary == "basic_stringstream" ||
+	       primary == "ctype" ||
+	       primary == "ctype_byname" ||
+	       primary == "codecvt" ||
+	       primary == "codecvt_byname" ||
+	       primary == "num_get" ||
+	       primary == "num_put" ||
+	       primary == "numpunct" ||
+	       primary == "numpunct_byname" ||
+	       primary == "time_get" ||
+	       primary == "time_put" ||
+	       primary == "money_get" ||
+	       primary == "money_put" ||
+	       primary == "moneypunct" ||
+	       primary == "moneypunct_byname" ||
+	       primary == "messages";
+}
+
+bool hosted_external_member(Binding* binding, Scope* scope, TypePtr record)
+{
+	if (binding == NULL || scope == NULL)
+		return false;
+	string primary = unqualified_template_primary(record);
+	if (!hosted_stream_template_primary(primary))
+		return false;
+	bool constructor = binding->name == scope->name ||
+	                   (!primary.empty() && binding->name == primary);
+	bool destructor = !binding->name.empty() && binding->name[0] == '~';
+	if (!binding->is_inline_definition)
+		return true;
+	return constructor ||
+	       destructor ||
+	       binding->name == "operator=" ||
+	       binding->is_virtual;
+}
 }  // namespace
+
+bool Parser::hosted_library_function(Binding* binding) const
+{
+	if (!hosted_compatibility_ || binding == NULL)
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace &&
+		    (scope->name == "std" || scope->name == "__gnu_cxx"))
+			return true;
+	return false;
+}
+
+bool Parser::hosted_extern_template_class_function(Binding* binding) const
+{
+	if (!hosted_library_function(binding))
+		return false;
+	for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent)
+	{
+		if (scope->kind != ScopeKind::Class)
+			continue;
+		if (binding->owner != scope)
+			continue;
+		TypePtr record = pa11::record_type_for_scope(scope);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL &&
+		    record->kind == pa11::TypeKind::Record &&
+		    record->is_extern_template_instantiation &&
+		    hosted_external_member(binding, scope, record))
+			return true;
+	}
+	return false;
+}
 
 Node::Node()
 	: category(ValueCategory::PRValue),
@@ -192,15 +295,18 @@ Suffix::Suffix(SuffixKind k)
 	  function_cv(pa11::CV_NONE),
 	  ref_qualifier(0),
 		  noexcept_decl(false),
+		  dynamic_exception_spec(false),
+		  dynamic_exception_types(),
 		  override_decl(false),
 		  final_decl(false),
 		  trailing_return(),
 		  abi_tags(),
+		  asm_label(),
 		  vector_size(0)
 	{
 	}
 
-Declarator::Declarator() : has_name(false)
+Declarator::Declarator() : has_name(false), asm_label()
 {
 }
 
@@ -377,6 +483,11 @@ void dump_node(ostream& out, const Node& node, int depth)
 
 Parser::Parser(const string& srcfile, const Options& options)
 	: pos_(0),
+	  replay_function_type_override_(),
+	  replay_function_type_override_owner_(NULL),
+	  replay_function_type_override_name_(),
+	  replay_function_template_declaration_(NULL),
+	  replay_function_template_arguments_(),
 	  explicit_conversion_context_(0),
 	  root_("translation-unit"),
 	  hosted_compatibility_(options.hosted_compatibility),
@@ -525,10 +636,58 @@ void Parser::expect_eof()
 		throw runtime_error("expected end of file");
 }
 
+bool Parser::at_try_keyword() const
+{
+	return at(KW_TRY) ||
+	       (at_identifier() && current().source == "__try");
+}
+
+bool Parser::at_catch_keyword() const
+{
+	return at(KW_CATCH) ||
+	       (at_identifier() && current().source == "__catch");
+}
+
+bool Parser::consume_try_keyword()
+{
+	if (!at_try_keyword())
+		return false;
+	++pos_;
+	return true;
+}
+
+bool Parser::consume_catch_keyword()
+{
+	if (!at_catch_keyword())
+		return false;
+	++pos_;
+	return true;
+}
+
+void Parser::expect_try_keyword()
+{
+	if (!consume_try_keyword())
+		throw runtime_error("unexpected token: got '" +
+		                    (pos_ < tokens_.size() ? tokens_[pos_].source :
+		                     string("<eof>")) +
+		                    "', expected try");
+}
+
+void Parser::expect_catch_keyword()
+{
+	if (!consume_catch_keyword())
+		throw runtime_error("unexpected token: got '" +
+		                    (pos_ < tokens_.size() ? tokens_[pos_].source :
+		                     string("<eof>")) +
+		                    "', expected catch");
+}
+
 string Parser::consume_identifier()
 {
 	if (!at_identifier())
+	{
 		throw runtime_error("expected identifier");
+	}
 	return tokens_[pos_++].source;
 }
 
@@ -639,6 +798,7 @@ void Parser::parse_translation_unit()
 			instantiate_member_variable_templates(type);
 		}
 	}
+	complete_static_member_initializer_replays();
 }
 
 void Parser::skip_balanced(ETokenType open, ETokenType close)
@@ -714,18 +874,58 @@ bool Parser::at_gnu_asm() const
 	        (current().source == "__asm" || current().source == "__asm__"));
 }
 
-void Parser::skip_gnu_asm()
+string Parser::parse_gnu_asm_label()
 {
 	if (!at_gnu_asm())
-		return;
+		return "";
 	++pos_;
 	if (at(KW_VOLATILE) ||
 	    (at_identifier() &&
 	     (current().source == "__volatile" ||
 	      current().source == "__volatile__")))
 		++pos_;
-	if (at(OP_LPAREN))
-		skip_balanced(OP_LPAREN, OP_RPAREN);
+	string label;
+	if (!consume(OP_LPAREN))
+		return label;
+	int depth = 1;
+	while (depth > 0 && !at_eof())
+	{
+		if (at(OP_LPAREN))
+		{
+			++depth;
+			++pos_;
+			continue;
+		}
+		if (at(OP_RPAREN))
+		{
+			--depth;
+			++pos_;
+			continue;
+		}
+		if (depth == 1 &&
+		    current().kind == posttoken::TokenKind::Literal)
+		{
+			StringLiteralInfo info;
+			if (AnalyzeStringLiteral(current().source, info) &&
+			    info.type == FT_CHAR &&
+			    info.ud_suffix.empty() &&
+			    !info.bytes.empty())
+			{
+				size_t bytes = info.bytes.size();
+				if (info.bytes[bytes - 1] == 0)
+					--bytes;
+				for (size_t i = 0; i < bytes; ++i)
+					label.push_back(static_cast<char>(info.bytes[i]));
+			}
+		}
+		++pos_;
+	}
+	return label;
+}
+
+void Parser::skip_gnu_asm()
+{
+	parse_gnu_asm_label();
 }
 
 }  // namespace internal

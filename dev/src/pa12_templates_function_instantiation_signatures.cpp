@@ -463,11 +463,24 @@ void FunctionTemplateInstantiationEngine::copy_placeholder_properties(
 	binding->is_static_member = declaration->placeholder->is_static_member;
 	binding->is_constexpr = declaration->placeholder->is_constexpr;
 	binding->is_explicit = declaration->placeholder->is_explicit;
+	binding->is_defaulted = declaration->placeholder->is_defaulted;
+	binding->is_explicit_defaulted_definition =
+		declaration->placeholder->is_explicit_defaulted_definition;
+	binding->is_generated_default_constructor =
+		declaration->placeholder->is_generated_default_constructor;
+	binding->is_generated_copy_move_constructor =
+		declaration->placeholder->is_generated_copy_move_constructor;
+	binding->is_noop_constructor =
+		declaration->placeholder->is_noop_constructor;
 	binding->is_private = declaration->placeholder->is_private;
 	binding->is_protected_member =
 		declaration->placeholder->is_protected_member;
-	binding->ref_qualifier = declaration->placeholder->ref_qualifier;
-	binding->unwind_no = declaration->placeholder->unwind_no;
+		binding->ref_qualifier = declaration->placeholder->ref_qualifier;
+		binding->unwind_no = declaration->placeholder->unwind_no;
+		binding->dynamic_exception_spec =
+			declaration->placeholder->dynamic_exception_spec;
+		binding->dynamic_exception_types =
+			declaration->placeholder->dynamic_exception_types;
 	if (declaration->placeholder->reserve_primary_function_symbol)
 		binding->reserve_primary_function_symbol = true;
 	if (!copy_defaults)

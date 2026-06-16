@@ -296,9 +296,9 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes,
 				{
 					suffixes.push_back(parse_function_suffix());
 				}
-				catch (const exception&)
-				{
-					bool trailing_return = false;
+					catch (const exception& err)
+					{
+						bool trailing_return = false;
 					int depth = 0;
 					for (size_t p = save; p < tokens_.size(); ++p)
 					{
@@ -347,10 +347,13 @@ void Parser::parse_suffixes(vector<Suffix>& suffixes,
 									        tokens_[close].type == OP_LAND))
 										++close;
 									if (close < tokens_.size() &&
-									    tokens_[close].kind ==
-									    posttoken::TokenKind::Simple &&
-									    (tokens_[close].type == OP_LBRACE ||
-									     tokens_[close].type == KW_TRY))
+									    ((tokens_[close].kind ==
+									      posttoken::TokenKind::Simple &&
+									      (tokens_[close].type == OP_LBRACE ||
+									       tokens_[close].type == KW_TRY)) ||
+									     (tokens_[close].kind ==
+									      posttoken::TokenKind::Identifier &&
+									      tokens_[close].source == "__try")))
 										throw;
 									break;
 								}

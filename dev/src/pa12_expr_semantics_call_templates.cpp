@@ -1,4 +1,5 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_templates_function_support.h"
 #include "pa12_types_support.h"
 
 #include <algorithm>
@@ -283,6 +284,29 @@ bool hosted_std_function_template_declaration(
 		? declaration->placeholder->owner
 		: declaration->owner;
 	return scope_has_namespace_named(scope, "std");
+}
+
+void apply_hosted_invoke_return_type(const TemplateDeclaration* declaration,
+                                     Binding* instantiated,
+                                     const vector<TemplateArgument>& arguments)
+{
+	if ((!hosted_std_function_template_declaration(declaration,
+	                                               "__invoke_impl") &&
+	     !hosted_std_function_template_declaration(declaration,
+	                                               "__invoke_r")) ||
+	    instantiated == NULL ||
+	    instantiated->type.get() == NULL ||
+	    instantiated->type->kind != pa11::TypeKind::Function ||
+	    arguments.empty() ||
+	    arguments[0].kind != TemplateArgumentKind::Type ||
+	    arguments[0].type.get() == NULL)
+		return;
+	TypePtr modeled = pa11::make_function(arguments[0].type,
+	                                      instantiated->type->parameters,
+	                                      instantiated->type->variadic);
+	modeled->cv = instantiated->type->cv;
+	modeled->ref_qualifier = instantiated->type->ref_qualifier;
+	instantiated->type = modeled;
 }
 
 bool hosted_basic_string_type(TypePtr type)
@@ -775,10 +799,10 @@ Binding* Parser::instantiate_template_call_candidate(
 	{
 		map<Binding*, vector<TemplateArgument> >::const_iterator stored =
 			function_template_specialization_arguments_.find(fn);
-			if (!placeholder_candidate &&
-			    stored != function_template_specialization_arguments_.end() &&
-			    !template_arguments_dependent(stored->second))
-				explicit_args = stored->second;
+		if (!placeholder_candidate &&
+		    stored != function_template_specialization_arguments_.end() &&
+		    !template_arguments_dependent(stored->second))
+			explicit_args = stored->second;
 	}
 	if (!type_is_template_dependent(fn->type) &&
 	    explicit_args.empty() &&
@@ -816,7 +840,41 @@ Binding* Parser::instantiate_template_call_candidate(
 						    pa11::TypeKind::Function &&
 					    pa11::same_type(found->second[mi]->type,
 					                    modeled))
+					{
+						vector<TemplateArgument> full_args =
+							complete_template_arguments(declaration,
+							                            modeled_args);
+						string key = template_argument_key(full_args);
+						declaration->function_specializations[key] =
+							found->second[mi];
+						function_template_placeholders_[
+							found->second[mi]] = declaration;
+						function_template_specialization_arguments_[
+							found->second[mi]] = full_args;
+						if (found->second[mi]->function_specialization_symbol
+							    .empty())
+							found->second[mi]
+								->function_specialization_symbol =
+								declaration->class_template_member
+								? (constructor_template_function_template_symbol(
+									   declaration) ||
+								   class_template_member_function_template_symbol(
+									   declaration)
+									   ? abi_function_template_specialization_symbol(
+										 declaration,
+										 full_args,
+										 found->second[mi],
+										 &declaration_tokens_)
+									   : abi_binding_symbol(
+										 found->second[mi],
+										 map<string, size_t>()))
+								: abi_function_template_specialization_symbol(
+									  declaration,
+									  full_args,
+									  found->second[mi],
+									  &declaration_tokens_);
 						return found->second[mi];
+					}
 			Binding* binding = add_value(owner,
 			                             BindingKind::Function,
 			                             fn->name,
@@ -824,11 +882,39 @@ Binding* Parser::instantiate_template_call_candidate(
 			binding->is_static_member = fn->is_static_member;
 			binding->is_constexpr = fn->is_constexpr;
 			binding->is_private = fn->is_private;
-			binding->is_protected_member = fn->is_protected_member;
-			binding->ref_qualifier = fn->ref_qualifier;
-			binding->unwind_no = fn->unwind_no;
+				binding->is_protected_member = fn->is_protected_member;
+				binding->ref_qualifier = fn->ref_qualifier;
+				binding->unwind_no = fn->unwind_no;
+				binding->dynamic_exception_spec = fn->dynamic_exception_spec;
+				binding->dynamic_exception_types = fn->dynamic_exception_types;
+			vector<TemplateArgument> full_args =
+				complete_template_arguments(declaration, modeled_args);
+			string key = template_argument_key(full_args);
+			map<string, Binding*>::iterator previous =
+				declaration->function_specializations.find(key);
+			if (previous != declaration->function_specializations.end() &&
+			    previous->second != binding)
+				previous->second->aliased_binding = binding;
+			declaration->function_specializations[key] = binding;
+			function_template_placeholders_[binding] = declaration;
 			function_template_specialization_arguments_[binding] =
-				modeled_args;
+				full_args;
+			binding->function_specialization_symbol =
+				declaration->class_template_member
+				? (constructor_template_function_template_symbol(declaration) ||
+				   class_template_member_function_template_symbol(declaration)
+					   ? abi_function_template_specialization_symbol(
+						 declaration,
+						 full_args,
+						 binding,
+						 &declaration_tokens_)
+					   : abi_binding_symbol(binding,
+					                        map<string, size_t>()))
+				: abi_function_template_specialization_symbol(
+					  declaration,
+					  full_args,
+					  binding,
+					  &declaration_tokens_);
 			return binding;
 		}
 	}
@@ -908,6 +994,10 @@ Binding* Parser::instantiate_template_call_candidate(
 				--function_template_candidate_instantiation_depth_;
 		candidate_depth_entered = false;
 		declaration->friend_class_scope = saved_friend_class_scope;
+		if (hosted_compatibility_)
+			apply_hosted_invoke_return_type(declaration,
+			                                instantiated,
+			                                deduced);
 		if (hosted_compatibility_ &&
 		    hosted_std_function_template_declaration(declaration,
 		                                             "operator+") &&

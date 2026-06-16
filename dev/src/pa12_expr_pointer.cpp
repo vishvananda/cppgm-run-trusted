@@ -179,6 +179,7 @@ Expr Parser::make_address_expr(const string& text, Expr inner)
 	{
 		parse_pending_function_body(inner.binding);
 		parse_pending_member_body(inner.binding);
+		ensure_function_body_extra_node(inner.binding);
 	}
 	Expr out;
 	out.valid = true;

@@ -23,6 +23,10 @@ struct FunctionTemplateInstantiationEngine
 	bool save_force_new_function_binding;
 	bool save_defer_function_template_bodies;
 	bool save_suppress_implicit_template_base_init;
+	Scope* save_replay_function_type_override_owner;
+	string save_replay_function_type_override_name;
+	TemplateDeclaration* save_replay_function_template_declaration;
+	vector<TemplateArgument> save_replay_function_template_arguments;
 	bool save_override_function_parameter_names;
 	vector<string> save_function_parameter_name_override;
 	bool completion_active;
@@ -36,11 +40,13 @@ struct FunctionTemplateInstantiationEngine
 
 	void complete_arguments();
 	Binding* redirect_to_matching_definition();
-	Binding* reuse_existing_specialization(
-		map<string, Binding*>::iterator existing,
-		bool full_args_dependent);
-	void share_existing_specialization_if_available();
-	void begin_completion();
+		Binding* reuse_existing_specialization(
+			map<string, Binding*>::iterator existing,
+			bool full_args_dependent);
+		void share_existing_specialization_if_available();
+		bool specialization_matches_declaration_owner(Binding* binding);
+		bool specialization_signature_matches(Binding* binding);
+		void begin_completion();
 	void enter_substitution_scope();
 	void restore_parser_state();
 	void restore_state();

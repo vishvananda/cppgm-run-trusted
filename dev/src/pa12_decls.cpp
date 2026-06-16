@@ -1,16 +1,24 @@
 #include "pa12_internal.h"
 #include "pa12_templates_function_support.h"
-
 #include <algorithm>
 #include <stdexcept>
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
-
+bool is_destructor_binding(Binding* binding);
+bool hosted_library_namespace_scope(Scope* scope);
+bool same_virtual_completion_record(TypePtr left, TypePtr right);
+bool virtual_completion_active(const vector<TypePtr>& active, TypePtr type);
+void stamp_template_member_function_symbol(Binding* binding);
+bool virtual_signature_matches(Binding* base, Binding* derived);
+bool class_has_polymorphic_base(TypePtr type);
+TypePtr primary_polymorphic_base(TypePtr type);
+bool has_declared_destructor(TypePtr record);
+bool inherits_virtual_destructor(TypePtr record);
+size_t local_static_decl_span_begin(const vector<Token>& tokens,
+                                    size_t begin,
+                                    size_t end);
 namespace {
-
 bool record_has_nonpublic_field(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -23,299 +31,7 @@ bool record_has_nonpublic_field(TypePtr record)
 			return true;
 	return false;
 }
-
-bool is_destructor_binding(Binding* binding)
-{
-	return binding != NULL && !binding->name.empty() && binding->name[0] == '~';
-}
-
-bool same_virtual_instance_type(TypePtr left, TypePtr right);
-
-void append_normalized_virtual_instance_arguments(
-	vector<pa11::TemplateInstanceArgument>& out,
-	const vector<pa11::TemplateInstanceArgument>& arguments)
-{
-	for (size_t i = 0; i < arguments.size(); ++i)
-	{
-		if (arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack)
-		{
-			append_normalized_virtual_instance_arguments(
-				out,
-				arguments[i].pack);
-			continue;
-		}
-		out.push_back(arguments[i]);
-	}
-}
-
-bool same_virtual_instance_arguments(
-	const vector<pa11::TemplateInstanceArgument>& left,
-	const vector<pa11::TemplateInstanceArgument>& right);
-
-bool same_virtual_instance_argument(
-	const pa11::TemplateInstanceArgument& left,
-	const pa11::TemplateInstanceArgument& right)
-{
-	if (left.kind != right.kind)
-		return false;
-	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
-		return same_virtual_instance_type(left.type, right.type);
-	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
-		return left.dependent == right.dependent &&
-		       left.value_negated == right.value_negated &&
-		       left.value == right.value &&
-		       left.value_name == right.value_name &&
-		       left.value_owner_template_name ==
-			       right.value_owner_template_name &&
-		       left.value_member_name == right.value_member_name &&
-		       same_virtual_instance_type(left.type, right.type) &&
-		       same_virtual_instance_arguments(
-			       left.value_owner_template_arguments,
-			       right.value_owner_template_arguments);
-	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
-		return left.template_name == right.template_name &&
-		       left.dependent == right.dependent;
-	if (left.pack.size() != right.pack.size())
-		return false;
-	for (size_t i = 0; i < left.pack.size(); ++i)
-		if (!same_virtual_instance_argument(left.pack[i], right.pack[i]))
-			return false;
-	return true;
-}
-
-bool same_virtual_instance_arguments(
-	const vector<pa11::TemplateInstanceArgument>& left,
-	const vector<pa11::TemplateInstanceArgument>& right)
-{
-	vector<pa11::TemplateInstanceArgument> flat_left;
-	vector<pa11::TemplateInstanceArgument> flat_right;
-	append_normalized_virtual_instance_arguments(flat_left, left);
-	append_normalized_virtual_instance_arguments(flat_right, right);
-	if (flat_left.size() != flat_right.size())
-		return false;
-	for (size_t i = 0; i < flat_left.size(); ++i)
-		if (!same_virtual_instance_argument(flat_left[i], flat_right[i]))
-			return false;
-	return true;
-}
-
-bool same_virtual_instance_type(TypePtr left, TypePtr right)
-{
-	if (pa11::same_type(left, right))
-		return true;
-	TypePtr l = pa11::strip_cv(left);
-	TypePtr r = pa11::strip_cv(right);
-	return l->kind == pa11::TypeKind::Record &&
-	       r->kind == pa11::TypeKind::Record &&
-	       l->is_template_specialization &&
-	       r->is_template_specialization &&
-	       !l->template_primary_name.empty() &&
-	       l->template_primary_name == r->template_primary_name &&
-	       same_virtual_instance_arguments(l->template_arguments,
-	                                       r->template_arguments);
-}
-
-bool same_virtual_completion_record(TypePtr left, TypePtr right)
-{
-	if (left.get() == NULL || right.get() == NULL)
-		return left.get() == right.get();
-	if (left.get() == right.get())
-		return true;
-	return same_virtual_instance_type(left, right);
-}
-
-bool virtual_completion_active(const vector<TypePtr>& active, TypePtr type)
-{
-	for (size_t i = 0; i < active.size(); ++i)
-		if (same_virtual_completion_record(active[i], type))
-			return true;
-	return false;
-}
-
-void stamp_template_member_function_symbol(Binding* binding)
-{
-	if (binding == NULL ||
-	    binding->kind != BindingKind::Function ||
-	    !binding->function_specialization_symbol.empty() ||
-	    binding->owner == NULL ||
-	    binding->owner->kind != ScopeKind::Class)
-		return;
-	TypePtr record = pa11::record_type_for_scope(binding->owner);
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	if (record.get() == NULL ||
-	    record->kind != pa11::TypeKind::Record ||
-	    !record->is_template_specialization)
-		return;
-	binding->function_specialization_symbol =
-		abi_binding_symbol(binding, map<string, size_t>());
-}
-
-unsigned pointed_record_cv(TypePtr ptr)
-{
-	TypePtr bare = pa11::strip_cv(ptr);
-	if (bare->kind != pa11::TypeKind::Pointer)
-		return pa11::CV_NONE;
-	TypePtr pointee = bare->base;
-	return pointee->kind == pa11::TypeKind::Cv ? pointee->cv : pa11::CV_NONE;
-}
-
-bool same_parameter_tail(const vector<TypePtr>& left,
-                         const vector<TypePtr>& right)
-{
-	if (left.size() != right.size())
-		return false;
-	if (left.empty())
-		return true;
-	if (pointed_record_cv(left[0]) != pointed_record_cv(right[0]))
-		return false;
-	for (size_t i = 1; i < left.size(); ++i)
-		if (!pa11::same_type(left[i], right[i]))
-			return false;
-	return true;
-}
-
-bool record_derives_from(TypePtr source, TypePtr target)
-{
-	TypePtr wanted = pa11::strip_cv(target);
-	for (TypePtr cur = pa11::strip_cv(source);
-	     cur.get() != NULL && cur->kind == pa11::TypeKind::Record;
-	     cur = cur->base.get() != NULL ? pa11::strip_cv(cur->base) : TypePtr())
-		if (pa11::same_type(cur, wanted))
-			return true;
-	return false;
-}
-
-bool covariant_return(TypePtr derived_return, TypePtr base_return)
-{
-	TypePtr d = pa11::strip_cv(derived_return);
-	TypePtr b = pa11::strip_cv(base_return);
-	if (d->kind == pa11::TypeKind::Pointer &&
-	    b->kind == pa11::TypeKind::Pointer)
-	{
-		TypePtr dr = pa11::strip_cv(d->base);
-		TypePtr br = pa11::strip_cv(b->base);
-		return dr->kind == pa11::TypeKind::Record &&
-		       br->kind == pa11::TypeKind::Record &&
-		       record_derives_from(dr, br);
-	}
-	if (d->kind == pa11::TypeKind::LValueReference &&
-	    b->kind == pa11::TypeKind::LValueReference)
-	{
-		TypePtr dr = pa11::strip_cv(d->base);
-		TypePtr br = pa11::strip_cv(b->base);
-		return dr->kind == pa11::TypeKind::Record &&
-		       br->kind == pa11::TypeKind::Record &&
-		       record_derives_from(dr, br);
-	}
-	return false;
-}
-
-bool virtual_signature_matches(Binding* base, Binding* derived)
-{
-	if (base == NULL || derived == NULL ||
-	    base->type.get() == NULL || derived->type.get() == NULL ||
-	    base->type->kind != pa11::TypeKind::Function ||
-	    derived->type->kind != pa11::TypeKind::Function)
-		return false;
-	if (is_destructor_binding(base) || is_destructor_binding(derived))
-		return is_destructor_binding(base) && is_destructor_binding(derived);
-	if (base->name != derived->name ||
-	    base->type->variadic != derived->type->variadic ||
-	    !same_parameter_tail(base->type->parameters, derived->type->parameters))
-		return false;
-	if (pa11::same_type(base->type->base, derived->type->base))
-		return true;
-	return covariant_return(derived->type->base, base->type->base);
-}
-
-bool class_has_polymorphic_base(TypePtr type)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	vector<TypePtr> bases = pa11::record_direct_bases(bare);
-	for (size_t i = 0; i < bases.size(); ++i)
-	{
-		TypePtr base = bases[i].get() != NULL
-			? pa11::strip_cv(bases[i]) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->is_polymorphic)
-			return true;
-	}
-	return false;
-}
-
-TypePtr primary_polymorphic_base(TypePtr type)
-{
-	TypePtr bare = pa11::strip_cv(type);
-	vector<TypePtr> bases = pa11::record_direct_bases(bare);
-	for (size_t i = 0; i < bases.size(); ++i)
-	{
-		TypePtr base = bases[i].get() != NULL
-			? pa11::strip_cv(bases[i]) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->is_polymorphic)
-			return base;
-	}
-	return TypePtr();
-}
-
-bool has_declared_destructor(TypePtr record)
-{
-	TypePtr bare = pa11::strip_cv(record);
-	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
-		return false;
-	return bare->scope->members.find("~" + bare->scope->name) !=
-	       bare->scope->members.end();
-}
-
-bool inherits_virtual_destructor(TypePtr record)
-{
-	TypePtr bare = pa11::strip_cv(record);
-	vector<TypePtr> pending = pa11::record_direct_bases(bare);
-	vector<TypePtr> seen;
-	for (size_t pending_i = 0; pending_i < pending.size(); ++pending_i)
-	{
-		TypePtr cur = pending[pending_i].get() != NULL
-			? pa11::strip_cv(pending[pending_i]) : TypePtr();
-		if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record)
-			continue;
-		bool already = false;
-		for (size_t i = 0; i < seen.size(); ++i)
-			if (pa11::same_type(seen[i], cur))
-				already = true;
-		if (already)
-			continue;
-		seen.push_back(cur);
-		for (size_t i = 0; i < cur->virtual_entries.size(); ++i)
-		{
-			Binding* fn = cur->virtual_entries[i].function;
-			if (fn != NULL && is_destructor_binding(fn))
-				return true;
-		}
-		vector<TypePtr> bases = pa11::record_direct_bases(cur);
-		pending.insert(pending.end(), bases.begin(), bases.end());
-	}
-	return false;
-}
-
-size_t local_static_decl_span_begin(const vector<Token>& tokens,
-                                    size_t begin,
-                                    size_t end)
-{
-	size_t pos = begin;
-	while (pos < end && tokens[pos].kind == posttoken::TokenKind::Simple &&
-	       (tokens[pos].type == KW_STATIC ||
-	        tokens[pos].type == KW_THREAD_LOCAL ||
-	        tokens[pos].type == KW_CONST ||
-	        tokens[pos].type == KW_VOLATILE ||
-	        tokens[pos].type == KW_CONSTEXPR))
-		++pos;
-	return pos;
-}
-
 }  // namespace
-
 void Parser::parse_declaration_into(Node& out)
 {
 	if (consume(OP_SEMICOLON))
@@ -385,8 +101,6 @@ void Parser::parse_declaration_into(Node& out)
 	}
 	parse_simple_or_function_declaration(out, true);
 }
-
-
 void Parser::skip_template_parameter_clause()
 {
 	expect(OP_LT);
@@ -401,7 +115,6 @@ void Parser::skip_template_parameter_clause()
 			++pos_;
 	}
 }
-
 bool Parser::parse_structured_binding_declaration(const DeclSpecs& specs,
                                                  Node& out,
                                                  bool emit_node)
@@ -487,7 +200,6 @@ bool Parser::parse_structured_binding_declaration(const DeclSpecs& specs,
 	}
 	return true;
 }
-
 void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 {
 	bool declaration_no_unique_address = false;
@@ -601,7 +313,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		}
 		return;
 	}
-
 	if (current_scope()->kind == ScopeKind::Class && at(OP_COLON))
 	{
 		expect(OP_COLON);
@@ -620,7 +331,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		expect(OP_SEMICOLON);
 		return;
 	}
-
 	Scope* declarator_scope = NULL;
 	if (at(OP_COLON2) ||
 	    (at_identifier() &&
@@ -684,18 +394,22 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		}
 		if (at_gnu_asm())
 		{
-			skip_gnu_asm();
+			string label = parse_gnu_asm_label();
+			if (!label.empty())
+				declarator.asm_label = label;
 			continue;
 		}
 		break;
 	}
-	if ((at(OP_LBRACE) || at(KW_TRY)) && declares_function)
+	if ((at(OP_LBRACE) || at_try_keyword()) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 		          "simple-declaration");
 		bool defer_body =
-			defer_function_template_bodies_ &&
-			current_scope()->kind == ScopeKind::Namespace;
+			current_scope()->kind == ScopeKind::Namespace &&
+			(defer_function_template_bodies_ ||
+			 (hosted_compatibility_ &&
+			  hosted_library_namespace_scope(current_scope())));
 			Binding* function =
 				declare_one(specs,
 				            base,
@@ -703,13 +417,83 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				            NULL,
 				            !defer_body,
 				            node);
+			if (force_new_function_binding_ &&
+			    replay_function_type_override_.get() != NULL &&
+			    replay_function_type_override_->kind == pa11::TypeKind::Function &&
+			    function->owner == replay_function_type_override_owner_ &&
+			    function->name == replay_function_type_override_name_)
+			{
+				bool replay_signature_match =
+					function->type.get() != NULL &&
+					function->type->kind == pa11::TypeKind::Function &&
+					function->type->variadic ==
+						replay_function_type_override_->variadic &&
+					function->type->parameters.size() ==
+						replay_function_type_override_->parameters.size();
+				for (size_t pi = 0;
+				     replay_signature_match &&
+				     pi < function->type->parameters.size();
+				     ++pi)
+					replay_signature_match =
+						pa11::same_type(function->type->parameters[pi],
+						                replay_function_type_override_->
+							                parameters[pi]);
+				if (replay_signature_match)
+				{
+					function->type = replay_function_type_override_;
+					if (replay_function_template_declaration_ != NULL)
+					{
+						function_template_specialization_arguments_[
+							function] =
+							replay_function_template_arguments_;
+						if (replay_function_template_declaration_
+							    ->class_template_member)
+							function->function_specialization_symbol =
+								constructor_template_function_template_symbol(
+									replay_function_template_declaration_) ||
+								class_template_member_function_template_symbol(
+									replay_function_template_declaration_)
+								? abi_function_template_specialization_symbol(
+									replay_function_template_declaration_,
+									replay_function_template_arguments_,
+									function,
+									&declaration_tokens_)
+								: abi_binding_symbol(
+									function,
+									map<string, size_t>());
+						else
+							function->function_specialization_symbol =
+								abi_function_template_specialization_symbol(
+									replay_function_template_declaration_,
+									replay_function_template_arguments_,
+									function,
+									&declaration_tokens_);
+					}
+					if (!node.children.empty() &&
+					    node.children.back().binding == function)
+					{
+						Node& fn = node.children.back();
+						fn.type = replay_function_type_override_;
+						fn.line =
+							string(!defer_body
+							       ? "function-definition "
+							       : "function-declaration ") +
+							qualified_decl_name(function) + " " +
+							pa11::describe_type(function->type);
+					}
+				}
+			}
 			if (current_scope()->kind == ScopeKind::Class)
 			{
 				if (force_new_function_binding_ &&
 				    active_class_instantiations_.empty() &&
 				    function_template_candidate_instantiation_depth_ == 0)
 				{
-					parse_function_body(function, declarator, node);
+					parse_function_body(function,
+					                    declarator,
+					                    node,
+					                    specs.inline_decl ||
+					                    specs.constexpr_decl);
 					if (emit_node && !node.children.empty())
 						add_child(out, node.children.back());
 					else if (!node.children.empty())
@@ -723,12 +507,12 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			if (suffix != NULL)
 				pending.parameters = suffix->parameters;
 			pending.body_pos = pos_;
-			if (consume(KW_TRY))
+			if (consume_try_keyword())
 			{
 				skip_balanced(OP_LBRACE, OP_RBRACE);
-				while (at(KW_CATCH))
+				while (at_catch_keyword())
 				{
-					consume(KW_CATCH);
+					consume_catch_keyword();
 					skip_balanced(OP_LPAREN, OP_RPAREN);
 					skip_balanced(OP_LBRACE, OP_RBRACE);
 				}
@@ -759,12 +543,12 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			if (suffix != NULL)
 				pending.parameters = suffix->parameters;
 			pending.body_pos = pos_;
-			if (consume(KW_TRY))
+			if (consume_try_keyword())
 			{
 				skip_balanced(OP_LBRACE, OP_RBRACE);
-				while (at(KW_CATCH))
+				while (at_catch_keyword())
 				{
-					consume(KW_CATCH);
+					consume_catch_keyword();
 					skip_balanced(OP_LPAREN, OP_RPAREN);
 					skip_balanced(OP_LBRACE, OP_RBRACE);
 				}
@@ -781,7 +565,10 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			}
 			return;
 		}
-		parse_function_body(function, declarator, node);
+		parse_function_body(function,
+		                    declarator,
+		                    node,
+		                    specs.inline_decl || specs.constexpr_decl);
 		if (emit_node)
 		{
 			if (node.line.empty())
@@ -794,7 +581,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			extra_lowir_nodes_.push_back(node.children.back());
 		return;
 	}
-
 		if (at(OP_ASS) && lookahead(KW_DELETE, 1) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
@@ -820,7 +606,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		}
 		return;
 	}
-
 		if (at(OP_ASS) && lookahead(KW_DEFAULT, 1) && declares_function)
 	{
 		Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
@@ -841,16 +626,49 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			            node);
 		expect(OP_ASS);
 		expect(KW_DEFAULT);
-		if (function != NULL)
-			function->is_defaulted = true;
+			if (function != NULL)
+			{
+					function->is_defaulted = true;
+						if (defaulted_definition)
+							{
+								function->is_explicit_defaulted_definition = true;
+								function->unwind_no = true;
+								function->is_generated_default_constructor = false;
+								function->is_generated_copy_move_constructor = false;
+							function->is_generated_copy_move_assignment = false;
+							function->is_generated_default_destructor = false;
+							if (current_scope()->kind != ScopeKind::Class)
+								function->is_object_root = true;
+					}
+					if (current_scope()->kind == ScopeKind::Class)
+						function->is_inline_definition = true;
+					else if (defaulted_definition)
+						function->is_inline_definition = false;
+				}
 		expect(OP_SEMICOLON);
-		if (defaulted_definition &&
-		    function != NULL &&
-		    !node.children.empty())
-		{
-			Node& fn = node.children.back();
-			map<Binding*, vector<string> >::const_iterator names =
-				function_parameter_names_.find(function);
+			if (defaulted_definition &&
+			    function != NULL &&
+			    !node.children.empty())
+			{
+				Node& fn = node.children.back();
+				fn.token_text = "defaulted-definition";
+				if (fn.binding != NULL)
+				{
+							fn.binding->is_defaulted = true;
+							fn.binding->is_explicit_defaulted_definition = true;
+							fn.binding->unwind_no = true;
+							fn.binding->is_generated_default_constructor = false;
+						fn.binding->is_generated_copy_move_constructor = false;
+						fn.binding->is_generated_copy_move_assignment = false;
+						fn.binding->is_generated_default_destructor = false;
+						if (current_scope()->kind != ScopeKind::Class)
+					{
+						fn.binding->is_object_root = true;
+						fn.binding->is_inline_definition = false;
+					}
+				}
+				map<Binding*, vector<string> >::const_iterator names =
+					function_parameter_names_.find(function);
 			for (size_t i = 0; i < function->type->parameters.size(); ++i)
 			{
 				string pname = i == 0 ? "this" : "__param" + to_string(i);
@@ -915,7 +733,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			extra_lowir_nodes_.push_back(node.children.back());
 		return;
 	}
-
 		if (at(OP_ASS) &&
 		    current_scope()->kind == ScopeKind::Class &&
 		    declares_function)
@@ -946,7 +763,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		}
 		return;
 	}
-
 	Expr init;
 	bool has_init = false;
 	bool brace_init = false;
@@ -1061,7 +877,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	}
 	if (pushed_initializer_scope)
 		scopes_ = saved_initializer_scopes;
-
 	size_t decl_span_begin = local_static_decl_span_begin(tokens_,
 	                                                      decl_start,
 	                                                      pos_);
@@ -1106,7 +921,6 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 			add_child(out, node);
 	}
 }
-
 Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) const
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -1139,7 +953,6 @@ Binding* Parser::find_overridden_virtual(TypePtr record, Binding* function) cons
 	}
 	return NULL;
 }
-
 void Parser::complete_class_virtuals(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -1262,7 +1075,6 @@ void Parser::complete_class_virtuals(TypePtr type)
 		bare->is_polymorphic && !class_has_polymorphic_base(bare);
 	bare->layout_valid = false;
 }
-
 Binding* Parser::declare_function_entity(const DeclSpecs& specs,
                                          Scope* target,
                                          const string& name,
@@ -1355,8 +1167,18 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			target->kind == ScopeKind::Class &&
 			!class_protected_access_.empty() &&
 			class_protected_access_.back();
-			function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+				function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+				function->dynamic_exception_spec =
+					suffix != NULL && suffix->dynamic_exception_spec;
+				if (suffix != NULL)
+					function->dynamic_exception_types =
+						suffix->dynamic_exception_types;
 			function->ref_qualifier = ref_qualifier;
+			{
+				string asm_label = declarator_asm_label(declarator);
+				if (!asm_label.empty())
+					function->asm_label = asm_label;
+			}
 			if (suffix != NULL && !suffix->abi_tags.empty())
 				function->abi_tags = suffix->abi_tags;
 			if (suffix != NULL &&
@@ -1476,7 +1298,5 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 	add_child(out, fn);
 	return function;
 }
-
-
 }  // namespace internal
 }  // namespace pa12

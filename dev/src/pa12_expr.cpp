@@ -756,6 +756,35 @@ Expr Parser::parse_unary_expression()
 		    scope_chain_contains(current_scope(), visible_type->owner))
 			prefer_visible_call = false;
 	}
+	bool qualified_explicit_template_call = false;
+	if (!prefer_visible_call &&
+	    (at(OP_COLON2) || (at_identifier() &&
+	                       (lookahead(OP_COLON2, 1) ||
+	                        lookahead(OP_LT, 1)))))
+	{
+		size_t template_call_save = pos_;
+		++direct_template_call_depth_;
+		try
+		{
+			QualifiedName qname = parse_id_expression_name();
+			qualified_explicit_template_call =
+				qname.qualified &&
+				qname.has_template_arguments &&
+				at(OP_LPAREN) &&
+				find_alias_template(qname.qualifier, qname.name) ==
+					NULL &&
+				find_class_template(qname.qualifier, qname.name) ==
+					NULL;
+		}
+		catch (const exception&)
+		{
+			qualified_explicit_template_call = false;
+		}
+		--direct_template_call_depth_;
+		pos_ = template_call_save;
+	}
+	if (qualified_explicit_template_call)
+		return parse_postfix_expression();
 	if (!prefer_visible_call && expression_starts_type_name(target))
 	{
 		if (at(OP_LPAREN))

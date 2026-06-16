@@ -89,6 +89,11 @@ bool Parser::parse_friend_declaration()
 	function->is_constexpr = function->is_constexpr || specs.constexpr_decl;
 	const Suffix* suffix = declarator_function_suffix(declarator);
 	function->unwind_no = suffix != NULL && suffix->noexcept_decl;
+	function->dynamic_exception_spec =
+		suffix != NULL && suffix->dynamic_exception_spec;
+	if (suffix != NULL)
+		function->dynamic_exception_types =
+			suffix->dynamic_exception_types;
 	function->ref_qualifier = suffix != NULL ? suffix->ref_qualifier : 0;
 	if (pa11::strip_cv(type->base)->kind == pa11::TypeKind::Record &&
 	    pa11::strip_cv(type->base)->scope != NULL)

@@ -62,7 +62,10 @@ void emit_deleting_entry_vptr_stores(Block& block, TypePtr record, int& temp)
 	                       to_string(vtable_address_point_offset(record)));
 	block.instrs.push_back("    store ptr " + addr_point + ", " + self);
 	TypePtr bare = pa11::strip_cv(record);
-	vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare);
+	vector<pair<TypePtr, uint64_t> > views =
+		record_uses_hosted_external_stream_vtable(bare)
+		? vector<pair<TypePtr, uint64_t> >()
+		: vtt_ordered_vtable_views(bare);
 	set<uint64_t> stored_view_offsets;
 	for (size_t i = 0; i < views.size(); ++i)
 	{

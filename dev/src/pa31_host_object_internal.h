@@ -46,6 +46,7 @@ const uint32_t GRP_COMDAT = 1;
 const uint32_t R_X86_64_64 = 1;
 const uint32_t R_X86_64_PC32 = 2;
 const uint32_t R_X86_64_PLT32 = 4;
+const uint32_t R_X86_64_GOTPCREL = 9;
 const uint32_t R_X86_64_TPOFF32 = 23;
 struct Blob
 {
@@ -408,6 +409,28 @@ struct X86
 		u8(op);
 		memop(src, mem);
 	}
+	void x87_fldt(const Mem& mem)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		u8(0xdb);
+		memop(5, mem);
+	}
+	void x87_fstpt(const Mem& mem)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		u8(0xdb);
+		memop(7, mem);
+	}
+	void x87_fucomip_st1()
+	{
+		u8(0xdf);
+		u8(0xe9);
+	}
+	void x87_fstp_st0()
+	{
+		u8(0xdd);
+		u8(0xd8);
+	}
 	void movd_xmm_from_reg(int bits, int xmm, int reg)
 	{
 		u8(0x66);
@@ -469,9 +492,11 @@ struct EhRange
 	struct CatchInfo
 	{
 		string type_symbol;
+		vector<string> exception_spec_types;
 		int selector;
 		bool catch_all;
-		CatchInfo() : selector(0), catch_all(false) {}
+		bool exception_spec;
+		CatchInfo() : selector(0), catch_all(false), exception_spec(false) {}
 	};
 struct FunctionInfo
 {
@@ -505,10 +530,11 @@ struct Unit
 	void emit_functions();
 	void emit_aliases();
 	void emit_eh_frame();
-	void emit_lifecycle_arrays();
-	Section& function_text_section(const Function& fn);
-	bool is_thread_local_global(const string& name) const;
-	string tls_wrapper_for_global(const string& name) const;
+		void emit_lifecycle_arrays();
+		Section& function_text_section(const Function& fn);
+		bool is_thread_local_global(const string& name) const;
+		bool is_imported_global(const string& name) const;
+		string tls_wrapper_for_global(const string& name) const;
 	void emit_tls_wrapper_for_global(const Global& g);
 	bool prunes_function(const string& name) const;
 	set<string> emitted_tls_wrappers;
@@ -552,11 +578,17 @@ struct FuncGen
 	bool emit_control_instruction(const Instruction& ins);
 	void load_value(const Value& v, const Type& target, int reg);
 	void load_float_value(const Value& v, const Type& target, int xmm);
+	void load_f80_value_to_x87(const Value& v);
 	void store_value(const Value& dst, const Type& type, int reg);
 	void store_float_value(const Value& dst, const Type& type, int xmm);
-	void storage_address(const Value& v, int reg);
-	void value_storage_address(const Value& v, int reg);
-	void tls_address(const string& name, int reg);
+	void store_f80_literal_to_frame(const string& text, size_t off);
+	void store_f80_literal_to_address(const string& text, int reg);
+	void copy_f80_value_to_frame(const Value& src, size_t off);
+	void copy_f80_value_to_address(const Value& src, int reg);
+		void storage_address(const Value& v, int reg);
+		void value_storage_address(const Value& v, int reg);
+		void tls_address(const string& name, int reg);
+		void imported_global_address(const string& name, int reg);
 	void copy_bytes(const Value& src, const Value& dst, const Span& span);
 	void copy_memory(int src_reg, int dst_reg, size_t bytes);
 	void copy_memory_to_frame(int src_reg, size_t dst_off, size_t bytes);

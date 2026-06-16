@@ -1,4 +1,5 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -7,6 +8,28 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
+static bool constructor_this_matches_record(TypePtr record, Binding* ctor)
+{
+	if (record.get() == NULL ||
+	    ctor == NULL ||
+	    ctor->type.get() == NULL ||
+	    ctor->type->kind != pa11::TypeKind::Function ||
+	    ctor->type->parameters.empty())
+		return false;
+	TypePtr this_type = pa11::strip_cv(ctor->type->parameters[0]);
+	if (this_type.get() == NULL ||
+	    this_type->kind != pa11::TypeKind::Pointer)
+		return false;
+	TypePtr this_record = pa11::strip_cv(this_type->base);
+	record = pa11::strip_cv(record);
+	return this_record.get() != NULL &&
+	       record.get() != NULL &&
+	       this_record->kind == pa11::TypeKind::Record &&
+	       record->kind == pa11::TypeKind::Record &&
+	       (pa11::same_type(this_record, record) ||
+	        same_template_specialization_record(this_record, record));
+}
 
 static bool record_has_conversion_function_candidate(TypePtr record,
                                                      set<Scope*>& seen)
@@ -28,6 +51,30 @@ static bool record_has_conversion_function_candidate(TypePtr record,
 	vector<TypePtr> bases = pa11::record_direct_bases(bare);
 	for (size_t i = 0; i < bases.size(); ++i)
 		if (record_has_conversion_function_candidate(bases[i], seen))
+			return true;
+	return false;
+}
+
+static bool hosted_std_vector_record(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != pa11::TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    bare->scope == NULL)
+		return false;
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t sep = primary.rfind("::");
+	if (sep != string::npos)
+		primary = primary.substr(sep + 2);
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	if (primary != "vector")
+		return false;
+	for (Scope* scope = bare->scope; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
 			return true;
 	return false;
 }
@@ -139,7 +186,46 @@ Binding* Parser::instantiate_constructor_template_candidate(
 {
 	map<Binding*, TemplateDeclaration*>::iterator template_it =
 		function_template_placeholders_.find(ctor);
+	if (template_it == function_template_placeholders_.end() &&
+	    ctor != NULL &&
+	    ctor->type.get() != NULL &&
+	    type_structurally_dependent(ctor->type))
+	{
+		for (map<Binding*, TemplateDeclaration*>::iterator it =
+			     function_template_placeholders_.begin();
+		     it != function_template_placeholders_.end();
+		     ++it)
+		{
+			Binding* placeholder = it->first;
+			TemplateDeclaration* declaration = it->second;
+			if (placeholder == NULL ||
+			    declaration == NULL ||
+			    !declaration->constructor_template ||
+			    placeholder->owner != ctor->owner ||
+			    placeholder->name != ctor->name ||
+			    placeholder->type.get() == NULL ||
+			    !same_template_signature_type(placeholder->type,
+			                                  ctor->type))
+				continue;
+			ctor = placeholder;
+			template_it = it;
+			break;
+		}
+	}
 	if (template_it == function_template_placeholders_.end())
+		return ctor;
+	TemplateDeclaration* declaration = template_it->second;
+	TypePtr bare_record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	map<const void*, TemplateDeclaration*>::iterator owner_template =
+		bare_record.get() != NULL
+		? record_template_declarations_.find(bare_record.get())
+		: record_template_declarations_.end();
+	if (declaration != NULL &&
+	    declaration->constructor_template &&
+	    declaration->class_template_member &&
+	    owner_template != record_template_declarations_.end() &&
+	    expr_template_parameter_lists_match(declaration->parameters,
+	                                        owner_template->second->parameters))
 		return ctor;
 	Expr this_arg;
 	this_arg.valid = true;
@@ -154,6 +240,11 @@ Binding* Parser::instantiate_constructor_template_candidate(
 	map<Binding*, vector<TemplateArgument> > explicit_args;
 	ctor = instantiate_template_call_candidate(ctor, explicit_args, deduction_args);
 	if (ctor == NULL)
+		return NULL;
+	if (declaration != NULL &&
+	    declaration->constructor_template &&
+	    declaration->inherited_constructor_base == NULL &&
+	    !constructor_this_matches_record(record, ctor))
 		return NULL;
 	if (default_arguments_.find(ctor) == default_arguments_.end())
 	{
@@ -218,6 +309,12 @@ bool Parser::should_replace_duplicate_constructor(Binding* ctor,
 	bool replace_duplicate = !ctor_template && duplicate_template;
 	if (!replace_duplicate && ctor_template && !duplicate_template)
 		return false;
+	if (!replace_duplicate && ctor_template && duplicate_template &&
+	    ctor->type.get() != NULL &&
+	    duplicate->type.get() != NULL &&
+	    !type_structurally_dependent(ctor->type) &&
+	    type_structurally_dependent(duplicate->type))
+		replace_duplicate = true;
 	if (!replace_duplicate)
 		replace_duplicate =
 			ctor->is_inline_definition && !duplicate->is_inline_definition;
@@ -403,10 +500,13 @@ void Parser::select_constructor_candidate(
 	{
 		Binding* ctor = constructors[i];
 		if (has_user_declared_constructor &&
-		    ctor->is_generated_default_constructor)
+		    ctor->is_generated_default_constructor &&
+		    !ctor->is_defaulted)
 			continue;
 		ctor = instantiate_constructor_template_candidate(record, ctor, args);
-		if (ctor == NULL || active_function_matches(ctor))
+		if (ctor == NULL)
+			continue;
+		if (active_function_matches(ctor))
 			continue;
 		if (ctor->kind != BindingKind::Function ||
 		    ctor->type->kind != pa11::TypeKind::Function ||
@@ -417,7 +517,53 @@ void Parser::select_constructor_candidate(
 		if (duplicate != NULL)
 		{
 			if (!should_replace_duplicate_constructor(ctor, duplicate))
+			{
+				bool ctor_template =
+					function_template_placeholders_.find(ctor) !=
+					function_template_placeholders_.end();
+				bool duplicate_template =
+					function_template_placeholders_.find(duplicate) !=
+					function_template_placeholders_.end();
+				if (ctor_template && !duplicate_template)
+					continue;
+				map<Binding*, TemplateDeclaration*>::iterator templ =
+					function_template_placeholders_.find(ctor);
+				map<Binding*, vector<TemplateArgument> >::iterator args_it =
+					function_template_specialization_arguments_.find(ctor);
+				if (templ != function_template_placeholders_.end() &&
+				    function_template_placeholders_.find(duplicate) ==
+					    function_template_placeholders_.end())
+					function_template_placeholders_[duplicate] =
+						templ->second;
+				if (args_it !=
+					    function_template_specialization_arguments_.end() &&
+				    function_template_specialization_arguments_.find(duplicate) ==
+					    function_template_specialization_arguments_.end())
+					function_template_specialization_arguments_[duplicate] =
+						args_it->second;
+				if (duplicate->function_specialization_symbol.empty())
+					duplicate->function_specialization_symbol =
+						ctor->function_specialization_symbol;
+				if (ctor->is_inline_definition)
+					duplicate->is_inline_definition = true;
+				if (default_arguments_.find(duplicate) ==
+				    default_arguments_.end())
+				{
+					map<Binding*, vector<Expr> >::const_iterator defaults =
+						default_arguments_.find(ctor);
+					if (defaults != default_arguments_.end())
+						default_arguments_[duplicate] = defaults->second;
+				}
+				if (function_parameter_names_.find(duplicate) ==
+				    function_parameter_names_.end())
+				{
+					map<Binding*, vector<string> >::const_iterator names =
+						function_parameter_names_.find(ctor);
+					if (names != function_parameter_names_.end())
+						function_parameter_names_[duplicate] = names->second;
+				}
 				continue;
+			}
 			considered.erase(find(considered.begin(),
 			                      considered.end(),
 			                      duplicate));
@@ -532,20 +678,25 @@ bool Parser::use_hosted_allocator_constructor_fallback(
 Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 {
 	if (best == NULL ||
-	    unevaluated_expression_depth_ != 0 ||
-	    (best->is_inline_definition &&
-	     function_bodies_.find(best) != function_bodies_.end()))
+	    unevaluated_expression_depth_ != 0)
 		return best;
 	map<Binding*, TemplateDeclaration*>::iterator template_it =
 		function_template_placeholders_.find(best);
 	map<Binding*, vector<TemplateArgument> >::iterator args_it =
 		function_template_specialization_arguments_.find(best);
+	if (template_it == function_template_placeholders_.end() &&
+	    args_it == function_template_specialization_arguments_.end() &&
+	    best->is_inline_definition &&
+	    function_bodies_.find(best) != function_bodies_.end())
+		return best;
 	TemplateDeclaration* replay_declaration =
 		template_it != function_template_placeholders_.end()
 		? template_it->second : NULL;
 	if (replay_declaration == NULL)
 		return best;
-	if (!template_declaration_has_body(tokens_, replay_declaration))
+	replay_declaration =
+		replacement_function_template_definition(replay_declaration);
+	if (!template_declaration_has_body(declaration_tokens_, replay_declaration))
 	{
 		TemplateDeclaration* compatible_body = NULL;
 		for (map<pair<TemplateDeclaration*, string>,
@@ -561,7 +712,8 @@ Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 				TemplateDeclaration* candidate = mit->second[di];
 				if (candidate == replay_declaration ||
 				    !candidate->constructor_template ||
-				    !template_declaration_has_body(tokens_, candidate) ||
+				    !template_declaration_has_body(declaration_tokens_,
+				                                   candidate) ||
 				    candidate->generic_function_type.get() == NULL ||
 				    !expr_template_parameter_lists_match(
 					    candidate->parameters,
@@ -576,10 +728,12 @@ Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 				replay_declaration = candidate;
 				break;
 			}
-			if (template_declaration_has_body(tokens_, replay_declaration))
+			if (template_declaration_has_body(declaration_tokens_,
+			                                  replay_declaration))
 				break;
 		}
-		if (!template_declaration_has_body(tokens_, replay_declaration) &&
+		if (!template_declaration_has_body(declaration_tokens_,
+		                                   replay_declaration) &&
 		    compatible_body != NULL)
 		{
 			unique_ptr<TemplateDeclaration> clone(
@@ -599,7 +753,7 @@ Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 	}
 	if (template_it == function_template_placeholders_.end() ||
 	    args_it == function_template_specialization_arguments_.end() ||
-	    !template_declaration_has_body(tokens_, replay_declaration))
+	    !template_declaration_has_body(declaration_tokens_, replay_declaration))
 		return best;
 	vector<TemplateArgument> selected_args = args_it->second;
 	if (selected_args.size() < replay_declaration->parameters.size())
@@ -617,8 +771,23 @@ Binding* Parser::instantiate_selected_constructor_body(Binding* best)
 		}
 		--function_template_candidate_instantiation_depth_;
 	}
-	Binding* instantiated =
-		instantiate_function_template(replay_declaration, selected_args);
+	bool saved_force_body_instantiation =
+		force_function_template_body_instantiation_;
+	force_function_template_body_instantiation_ = true;
+	Binding* instantiated = NULL;
+	try
+	{
+		instantiated =
+			instantiate_function_template(replay_declaration, selected_args);
+	}
+	catch (...)
+	{
+		force_function_template_body_instantiation_ =
+			saved_force_body_instantiation;
+		throw;
+	}
+	force_function_template_body_instantiation_ =
+		saved_force_body_instantiation;
 	if (instantiated != NULL && best != instantiated)
 		best->aliased_binding = instantiated;
 	return instantiated != NULL ? instantiated : best;
@@ -669,10 +838,12 @@ Binding* Parser::wrap_inherited_constructor_if_needed(TypePtr record,
 	                    record->scope->name,
 	                    fn_type);
 	wrapper->is_inline_definition = true;
-	wrapper->is_explicit = best->is_explicit;
-	wrapper->is_constexpr = best->is_constexpr;
-	wrapper->unwind_no = best->unwind_no;
-	wrapper->ref_qualifier = best->ref_qualifier;
+		wrapper->is_explicit = best->is_explicit;
+		wrapper->is_constexpr = best->is_constexpr;
+		wrapper->unwind_no = best->unwind_no;
+		wrapper->dynamic_exception_spec = best->dynamic_exception_spec;
+		wrapper->dynamic_exception_types = best->dynamic_exception_types;
+		wrapper->ref_qualifier = best->ref_qualifier;
 	vector<string> names(1, "this");
 	map<Binding*, vector<string> >::const_iterator base_names =
 		function_parameter_names_.find(best);
@@ -727,16 +898,40 @@ Binding* Parser::wrap_inherited_constructor_if_needed(TypePtr record,
 	return wrapper;
 }
 
+bool Parser::hosted_vector_initializer_list_constructor(TypePtr record,
+                                                        Binding* ctor)
+{
+	bool hosted_vector = hosted_std_vector_record(record);
+	bool function_type = ctor != NULL &&
+	                     ctor->type.get() != NULL &&
+	                     ctor->type->kind == pa11::TypeKind::Function;
+	bool enough_params = function_type && ctor->type->parameters.size() >= 2;
+	if (!hosted_compatibility_ ||
+	    ctor == NULL ||
+	    !hosted_vector ||
+	    !function_type ||
+	    !enough_params)
+		return false;
+	TypePtr param = ctor->type->parameters[1];
+	if (pa11::is_reference_type(param))
+		param = param->base;
+	return is_std_initializer_list_type(pa11::strip_cv(param), NULL);
+}
+
 void Parser::finalize_constructor_candidate(TypePtr record, Binding*& best)
 {
+	bool hosted_vector_initializer_list_ctor =
+		hosted_vector_initializer_list_constructor(record, best);
 	bool defer_hosted_body =
-		hosted_compatibility_ &&
 		best != NULL &&
-		best->is_inline_definition &&
 		!best->is_object_root &&
-		!(best->owner != NULL &&
-		  best->owner->kind == ScopeKind::Class &&
-		  best->name == best->owner->name);
+		(hosted_vector_initializer_list_ctor ||
+		(hosted_extern_template_class_function(best) ||
+		 (hosted_compatibility_ &&
+		  best->is_inline_definition &&
+		  !(best->owner != NULL &&
+		    best->owner->kind == ScopeKind::Class &&
+		    best->name == best->owner->name))));
 	if (best != NULL &&
 	    unevaluated_expression_depth_ == 0 &&
 	    !defer_hosted_body)
@@ -773,10 +968,10 @@ Binding* Parser::resolve_constructor_candidate(TypePtr type,
 	{
 		validate_aggregate_braced_initialization(record);
 		ensure_aggregate_constructor(record, args.size());
-	}
-	map<string, vector<Binding*> >::const_iterator found =
-		record->scope->members.find(record->scope->name);
-	bool found_zero_arg_constructor = false;
+		}
+			map<string, vector<Binding*> >::const_iterator found =
+				record->scope->members.find(record->scope->name);
+			bool found_zero_arg_constructor = false;
 	if (found != record->scope->members.end())
 		for (size_t i = 0; i < found->second.size(); ++i)
 			if (found->second[i]->kind == BindingKind::Function &&
@@ -837,8 +1032,11 @@ Binding* Parser::resolve_constructor_candidate(TypePtr type,
 		                                          best_args,
 		                                          ambiguous);
 	if (best == NULL || ambiguous)
+	{
 		throw runtime_error("no matching constructor");
-	if (unevaluated_expression_depth_ == 0)
+	}
+	if (unevaluated_expression_depth_ == 0 &&
+	    !hosted_vector_initializer_list_constructor(record, best))
 	{
 		best = instantiate_selected_constructor_body(best);
 		best = wrap_inherited_constructor_if_needed(record, best);
@@ -846,6 +1044,49 @@ Binding* Parser::resolve_constructor_candidate(TypePtr type,
 	finalize_constructor_candidate(record, best);
 	converted = best_args;
 	return best;
+}
+
+Expr Parser::make_constructor_list_init_expr(TypePtr type,
+                                             const Expr& init,
+                                             bool copy_initialization)
+{
+	TypePtr record = pa11::strip_cv(type);
+	if (!init.braced_init_list || init.node.children.empty() ||
+	    record->kind != pa11::TypeKind::Record || record->scope == NULL)
+		throw runtime_error("no matching constructor");
+	map<string, vector<Binding*> >::const_iterator found =
+		record->scope->members.find(record->scope->name);
+	if (found == record->scope->members.end())
+		throw runtime_error("no matching constructor");
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* ctor = found->second[i];
+		if (ctor->kind != BindingKind::Function ||
+		    ctor->type.get() == NULL ||
+		    ctor->type->kind != pa11::TypeKind::Function ||
+		    ctor->type->parameters.size() < 2 ||
+		    !constructor_accepts_argument_count(ctor, 1))
+			continue;
+		TypePtr param = ctor->type->parameters[1];
+		if (pa11::is_reference_type(param))
+			param = param->base;
+		param = pa11::strip_cv(param);
+		if (!is_std_initializer_list_type(param, NULL))
+			continue;
+		try
+		{
+			Expr list = make_initializer_list_expr(init, param);
+			vector<Expr> args;
+			args.push_back(list);
+			return make_constructor_init_expr(type,
+			                                  args,
+			                                  copy_initialization);
+		}
+		catch (const runtime_error&)
+		{
+		}
+	}
+	throw runtime_error("no matching constructor");
 }
 
 Expr Parser::make_constructor_init_expr(TypePtr type,
@@ -903,7 +1144,19 @@ Expr Parser::make_constructor_init_expr(TypePtr type,
 		out.node.token_text = "force-constructor";
 	if (unevaluated_expression_depth_ == 0)
 	{
-		parse_pending_member_body(ctor);
+		if (ctor != NULL &&
+		    ctor->is_defaulted &&
+		    ctor->type.get() != NULL &&
+		    ctor->type->kind == pa11::TypeKind::Function &&
+		    ctor->type->parameters.size() == 1)
+		{
+			Binding* synthesized = ensure_default_constructor(type);
+			if (synthesized != NULL)
+				ctor = synthesized;
+			out.node.direct_call = ctor;
+		}
+		if (!hosted_vector_initializer_list_constructor(record, ctor))
+			parse_pending_member_body(ctor);
 		if (ctor != NULL &&
 		    ctor->is_generated_default_constructor &&
 		    !ctor->is_inline_definition)
@@ -1104,10 +1357,12 @@ Binding* Parser::instantiate_lambda_helper_call(Binding* helper,
 		          concrete_type);
 	binding->language_linkage = helper->language_linkage;
 	binding->is_inline_definition = true;
-	binding->is_namespace_static = helper->is_namespace_static;
-	binding->is_constexpr = helper->is_constexpr;
-	binding->unwind_no = helper->unwind_no;
-	binding->ref_qualifier = helper->ref_qualifier;
+		binding->is_namespace_static = helper->is_namespace_static;
+		binding->is_constexpr = helper->is_constexpr;
+		binding->unwind_no = helper->unwind_no;
+		binding->dynamic_exception_spec = helper->dynamic_exception_spec;
+		binding->dynamic_exception_types = helper->dynamic_exception_types;
+		binding->ref_qualifier = helper->ref_qualifier;
 	function_template_specialization_arguments_[binding] = full_args;
 
 	map<Binding*, Node>::const_iterator body_it = function_bodies_.find(helper);

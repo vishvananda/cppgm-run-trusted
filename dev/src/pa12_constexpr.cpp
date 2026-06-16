@@ -1,6 +1,7 @@
 #include "pa12_internal.h"
 #include "pa12_constexpr_eval.h"
 #include "pa12_templates_function_support.h"
+#include "pa12_templates_instance_support.h"
 #include <cstdlib>
 #include <limits>
 #include <sstream>
@@ -1298,10 +1299,39 @@ bool Parser::try_evaluate_constexpr_binding(Binding* binding,
 		     ++it)
 		{
 			Binding* candidate = it->first;
+			if (candidate == NULL ||
+			    candidate->name != binding->name)
+				continue;
+			bool same_owner = false;
+			bool template_owner_match = false;
 			if (candidate != NULL &&
-			    candidate->name == binding->name &&
-			    candidate->owner == binding->owner &&
-			    pa11::same_type(candidate->type, binding->type))
+			    candidate->owner != NULL &&
+			    binding->owner != NULL)
+			{
+				same_owner = candidate->owner == binding->owner;
+				if (!same_owner &&
+				    candidate->owner->kind == ScopeKind::Class &&
+				    binding->owner->kind == ScopeKind::Class)
+				{
+					TypePtr candidate_record =
+						pa11::record_type_for_scope(candidate->owner);
+					TypePtr binding_record =
+						pa11::record_type_for_scope(binding->owner);
+					template_owner_match =
+						candidate_record.get() != NULL &&
+						binding_record.get() != NULL &&
+						same_template_record_type(candidate_record,
+						                          binding_record);
+					same_owner = template_owner_match;
+				}
+			}
+			if (!same_owner)
+				continue;
+			bool same_declared_type =
+				candidate->type.get() != NULL &&
+				binding->type.get() != NULL &&
+				pa11::same_type(candidate->type, binding->type);
+			if (template_owner_match || same_declared_type)
 			{
 				found = it;
 				break;

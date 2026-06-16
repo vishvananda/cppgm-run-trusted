@@ -55,6 +55,9 @@ struct AbiSubstitutionContext
 
 std::string abi_source_name(const std::string& name);
 std::string abi_base36_number(size_t value);
+std::string abi_substitution_code(size_t index);
+size_t abi_find_substitution(const AbiSubstitutionContext& ctx,
+                             const std::string& encoded);
 std::string abi_binding_source_name(const Binding* binding);
 std::string abi_fundamental_type(EFundamentalType type);
 std::string abi_type(TypePtr type,
@@ -140,6 +143,15 @@ std::string abi_template_argument_with_substitutions(
 std::string abi_template_instance_argument_with_substitutions(
 	const pa11::TemplateInstanceArgument& arg,
 	AbiSubstitutionContext& ctx);
+const pa11::TemplateInstanceArgument* abi_pack_expansion_element(
+	const pa11::TemplateInstanceArgument& arg);
+std::vector<std::string> abi_qualified_type_scope_names(TypePtr type);
+std::string abi_named_scope_prefix_with_substitutions(
+	const std::vector<std::string>& scopes,
+	AbiSubstitutionContext& ctx);
+std::string abi_named_scope_prefix_probe_with_substitutions(
+	const std::vector<std::string>& scopes,
+	AbiSubstitutionContext& ctx);
 std::string abi_function_return_type_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx);
@@ -156,6 +168,11 @@ std::string abi_template_argument_for_parameter_with_substitutions(
 	AbiSubstitutionContext& ctx);
 std::vector<Scope*> abi_scope_path_outer_first(Scope* scope);
 bool abi_scope_is_std_namespace(Scope* scope);
+bool abi_std_abbreviation_is_terminal(const std::string& abbreviation);
+std::string abi_std_abbreviation(TypePtr type, AbiSubstitutionContext* ctx);
+std::string abi_scope_component_with_substitutions(
+	Scope* scope,
+	AbiSubstitutionContext& ctx);
 std::string abi_scope_prefix_with_substitutions(
 	const std::vector<Scope*>& scopes,
 	AbiSubstitutionContext& ctx);

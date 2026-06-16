@@ -240,6 +240,8 @@ struct CyEmitter {
 		case InstrKind::EhCatchAll:
 			emit_eh_catch_all(ins);
 			break;
+		case InstrKind::EhFilter:
+			break;
 		case InstrKind::EhEnd:
 			emit_eh_end();
 			break;

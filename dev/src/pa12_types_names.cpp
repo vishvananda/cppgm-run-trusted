@@ -16,6 +16,18 @@ void collect_alias_dependency_names_from_instance_argument(
 void collect_alias_dependency_names_from_argument(const TemplateArgument& argument,
                                                   set<string>& names);
 
+bool hosted_library_record_type(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
+		return false;
+	for (Scope* scope = bare->scope; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace &&
+		    (scope->name == "std" || scope->name == "__gnu_cxx"))
+			return true;
+	return false;
+}
+
 void collect_alias_dependency_names_from_type(TypePtr type, set<string>& names)
 {
 	if (type.get() == NULL)
@@ -245,6 +257,74 @@ bool Parser::try_parse_type_name(TypePtr& out)
 			(root_type.get() != NULL &&
 			 root_type->kind == pa11::TypeKind::TemplateParameter);
 	}
+	auto hosted_invoke_result_type = [&](TypePtr invoke_result) -> TypePtr {
+		if (!hosted_compatibility_)
+			return TypePtr();
+		TypePtr bare = invoke_result.get() != NULL
+			? pa11::strip_cv(invoke_result) : TypePtr();
+		if (bare.get() == NULL ||
+		    bare->kind != pa11::TypeKind::Record)
+			return TypePtr();
+		string primary = bare->template_primary_name.empty()
+			? bare->name : bare->template_primary_name;
+		size_t sep = primary.rfind("::");
+		if (sep != string::npos)
+			primary = primary.substr(sep + 2);
+		size_t arg_pos = primary.find('<');
+		if (arg_pos != string::npos)
+			primary = primary.substr(0, arg_pos);
+		if (primary != "__invoke_result")
+			return TypePtr();
+		vector<TemplateArgument> args;
+		map<const void*, vector<TemplateArgument> >::const_iterator stored =
+			record_template_arguments_.find(bare.get());
+		if (stored != record_template_arguments_.end())
+			args = stored->second;
+		else
+			for (size_t ai = 0; ai < bare->template_arguments.size(); ++ai)
+				args.push_back(template_argument_from_instance_argument(
+					bare->template_arguments[ai]));
+		vector<TemplateArgument> flat_args;
+		for (size_t ai = 0; ai < args.size(); ++ai)
+		{
+			vector<TemplateArgument> expanded =
+				expand_template_argument_pack(args[ai]);
+			flat_args.insert(flat_args.end(),
+			                 expanded.begin(),
+			                 expanded.end());
+		}
+		args = flat_args;
+		vector<TypePtr> call_types;
+		for (size_t ai = 0; ai < args.size(); ++ai)
+		{
+			TemplateArgument arg = substitute_template_argument(args[ai]);
+			if (arg.kind == TemplateArgumentKind::Pack)
+			{
+				for (size_t pi = 0; pi < arg.pack.size(); ++pi)
+				{
+					TemplateArgument elem =
+						substitute_template_argument(arg.pack[pi]);
+					if (elem.kind != TemplateArgumentKind::Type)
+						return TypePtr();
+					TypePtr type = substitute_template_type(elem.type);
+					if (type_structurally_dependent(type))
+						return TypePtr();
+					call_types.push_back(type);
+				}
+				continue;
+			}
+			if (arg.kind != TemplateArgumentKind::Type)
+				return TypePtr();
+			TypePtr type = substitute_template_type(arg.type);
+			if (type_structurally_dependent(type))
+				return TypePtr();
+			call_types.push_back(type);
+		}
+		Expr call;
+		if (try_make_invocable_type_trait_call(call_types, call))
+			return call.type;
+		return TypePtr();
+	};
 	if ((typename_disambiguator ||
 	     (template_id_qualifier && parsing_base_specifier_) ||
 	     dependent_base_qualifier) &&
@@ -311,6 +391,16 @@ bool Parser::try_parse_type_name(TypePtr& out)
 							}
 				complete_template_record(owner);
 				string member_name = consume_identifier();
+				if (hosted_compatibility_ && member_name == "type")
+				{
+					TypePtr invoke_type = hosted_invoke_result_type(owner);
+					if (invoke_type.get() != NULL)
+					{
+						resolved = invoke_type;
+						resolved_type_scope = NULL;
+						continue;
+					}
+				}
 				if (at(OP_LT))
 				{
 					vector<TemplateArgument> member_args;
@@ -934,7 +1024,7 @@ out = instantiate_class_template(templ, arguments); } catch (...) { if (defer_co
 if (typename_disambiguator && at(OP_COLON2)) { TypePtr resolved = out; Scope* resolved_type_scope = NULL; string dependent_name = name + "<>"; vector<vector<TemplateArgument> > argument_lists;
 argument_lists.push_back(arguments); bool dependent_lookup = false; bool resolved_ok = true; while (consume(OP_COLON2)) { dependent_name += "::"; consume(KW_TEMPLATE); if (!at_identifier()) { resolved_ok = false; break;
 } string member_name = consume_identifier(); dependent_name += member_name; TypePtr owner = resolved.get() != NULL ? pa11::strip_cv(resolved) : TypePtr(); if (owner.get() != NULL &&
-owner->kind == pa11::TypeKind::Record && owner->scope != NULL) { complete_template_record(owner); if (at(OP_LT)) { vector<TemplateArgument> member_args; TemplateDeclaration* member_alias =
+owner->kind == pa11::TypeKind::Record && owner->scope != NULL) { complete_template_record(owner); if (hosted_compatibility_ && member_name == "type") { TypePtr invoke_type = hosted_invoke_result_type(owner); if (invoke_type.get() != NULL) { resolved = invoke_type; resolved_type_scope = NULL; continue; } } if (at(OP_LT)) { vector<TemplateArgument> member_args; TemplateDeclaration* member_alias =
 find_alias_template(owner->scope, member_name); TemplateDeclaration* member_class = member_alias == NULL ? find_class_template(owner->scope, member_name) : NULL; if (member_alias == NULL && member_class == NULL) {
 resolved_ok = false; break; } parse_template_argument_list(member_args); argument_lists.push_back(member_args); resolved = member_alias != NULL ? instantiate_alias_template(member_alias, member_args)
 : instantiate_class_template(member_class, member_args); resolved_type_scope = NULL; continue; } vector<Binding*> found = lookup_qualified_set(owner->scope, member_name, pa11::LOOKUP_TYPE); if (found.empty()) {
@@ -1017,6 +1107,8 @@ return true; } }
 			    template_type_substitutions_.empty() &&
 			    template_value_substitutions_.empty() &&
 			    defer_class_template_completion_depth_ == 0 &&
+			    !(hosted_compatibility_ &&
+			      hosted_library_record_type(out)) &&
 			    !type_is_template_dependent(out) &&
 			    !type_parse_mentions_active_record(out,
 			                                 active_class_instantiations_,

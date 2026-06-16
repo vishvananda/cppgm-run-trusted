@@ -62,6 +62,7 @@ void complete_hosted_shared_ptr_layout(TypePtr type)
 	bare->nonvirtual_size = 16;
 	bare->nonvirtual_align = 8;
 	bare->layout_valid = true;
+	bare->hosted_layout_synthesized = true;
 }
 
 }  // namespace
@@ -418,7 +419,8 @@ void Parser::complete_template_record(TypePtr type)
 		if (!active_validation_record && !active_validation_base)
 			return;
 	}
-	if (bare->complete)
+	bool replay_synthesized_layout = bare->hosted_layout_synthesized;
+	if (bare->complete && !replay_synthesized_layout)
 		return;
 	candidate_only_class_template_specializations_.erase(bare.get());
 	map<const void*, TemplateDeclaration*>::iterator found =
@@ -458,6 +460,12 @@ void Parser::complete_template_record(TypePtr type)
 	}
 	if (!declaration->has_definition)
 		return;
+	if (replay_synthesized_layout)
+	{
+		bare->complete = false;
+		bare->layout_valid = false;
+		bare->hosted_layout_synthesized = false;
+	}
 	vector<TemplateArgument> args = record_template_arguments_[bare.get()];
 	bool dependent = template_arguments_dependent(args);
 	map<string, TypePtr> owner_subst;
@@ -527,6 +535,7 @@ void Parser::complete_template_record(TypePtr type)
 	declaration->completing_specializations.insert(key);
 
 	size_t save_pos = pos_;
+	int save_local_type_counter = local_type_counter_;
 	bool tokens_are_declaration_tokens =
 		tokens_.size() == declaration_tokens_.size() &&
 		(tokens_.empty() ||
@@ -618,8 +627,16 @@ void Parser::complete_template_record(TypePtr type)
 			tokens_ = complete_save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
+		local_type_counter_ = save_local_type_counter;
 		declaration->completing_specializations.erase(key);
-		bare->complete = false;
+		if (replay_synthesized_layout)
+		{
+			bare->complete = true;
+			bare->layout_valid = true;
+			bare->hosted_layout_synthesized = true;
+		}
+		else
+			bare->complete = false;
 		if (hosted_compatibility_ &&
 		    hosted_shared_ptr_template(declaration) &&
 		    (string(err.what()) == "incomplete object type" ||
@@ -652,8 +669,16 @@ void Parser::complete_template_record(TypePtr type)
 			tokens_ = complete_save_tokens;
 		scopes_ = save_scopes;
 		pos_ = save_pos;
+		local_type_counter_ = save_local_type_counter;
 		declaration->completing_specializations.erase(key);
-		bare->complete = false;
+		if (replay_synthesized_layout)
+		{
+			bare->complete = true;
+			bare->layout_valid = true;
+			bare->hosted_layout_synthesized = true;
+		}
+		else
+			bare->complete = false;
 		throw;
 	}
 	active_class_instantiations_.pop_back();
@@ -665,6 +690,7 @@ void Parser::complete_template_record(TypePtr type)
 	scopes_ = save_scopes;
 	pos_ = save_pos;
 	declaration->completing_specializations.erase(key);
+	bare->hosted_layout_synthesized = false;
 	instantiate_member_variable_templates(type);
 }
 

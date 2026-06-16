@@ -1,5 +1,6 @@
 #include "pa12_internal.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 using namespace std;
@@ -111,31 +112,246 @@ TypePtr adjust_parameter_type(TypePtr type)
 	}
 
 	void Parser::parse_function_suffix_tail(Suffix& suffix)
-	{ for (;;) { if (at_simple_cv()) { suffix.function_cv |= consume_cv_flag(); continue; } if (consume(OP_AMP)) { suffix.ref_qualifier = 1; continue; } if (consume(OP_LAND)) { suffix.ref_qualifier = 2; continue; }
-	if (consume(KW_NOEXCEPT)) { suffix.noexcept_decl = true; if (at(OP_LPAREN)) skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (consume(KW_THROW)) { suffix.noexcept_decl = true; if (at(OP_LPAREN))
-	skip_balanced(OP_LPAREN, OP_RPAREN); continue; } if (parse_gnu_attribute_suffix(suffix)) { continue; } if (at_gnu_asm()) { skip_gnu_asm(); continue; } if (at_identifier() && current().source == "override") { ++pos_; suffix.override_decl = true; continue; } if (at_identifier() && current().source == "final") { ++pos_;
-suffix.final_decl = true; continue; } if (consume(OP_ARROW)) { vector<Scope*> saved_scopes = scopes_; Scope* parameter_scope = pa11::create_child_scope(current_scope(), ScopeKind::Function, "");
-scopes_.push_back(parameter_scope); map<string, vector<Binding*> > parameter_packs; for (size_t i = 0; i < suffix.parameters.size(); ++i) { const ParameterInfo& parameter = suffix.parameters[i];
-if (!parameter.pack_expression_name.empty() && !parameter.pack_name.empty()) { TemplateArgument subst; if (find_template_value_substitution( parameter.pack_name, subst) && subst.kind == TemplateArgumentKind::Pack &&
-subst.pack.empty()) { parameter_packs[parameter.pack_expression_name]; continue; } } if (parameter.name.empty() || parameter.type.get() == NULL) continue; TypePtr parameter_type =
-substitute_template_type(parameter.type); Binding* binding = pa11::add_binding(parameter_scope, BindingKind::Parameter, parameter.name, parameter_type); if (!parameter.pack_expression_name.empty())
-parameter_packs[parameter.pack_expression_name] .push_back(binding); } function_parameter_pack_substitutions_.push_back(parameter_packs); size_t trailing_return_begin = pos_; try {
-suffix.trailing_return = parse_type_id(); TypePtr trailing_bare = suffix.trailing_return.get() != NULL ? pa11::strip_cv(suffix.trailing_return) : TypePtr(); bool concrete_substitution_context =
-!validating_template_definition_ && (!template_type_substitutions_.empty() || !template_value_substitutions_.empty()); if (concrete_substitution_context) { if (!template_type_substitutions_.empty())
-for (map<string, TypePtr>::const_iterator it = template_type_substitutions_.back().begin(); it != template_type_substitutions_.back().end(); ++it) if (type_is_template_dependent(it->second))
-concrete_substitution_context = false; if (!template_value_substitutions_.empty()) for (map<string, TemplateArgument>::const_iterator it = template_value_substitutions_.back().begin();
-it != template_value_substitutions_.back().end(); ++it) if (template_argument_has_template_parameter( it->second, record_template_arguments_)) concrete_substitution_context = false; } if (trailing_bare.get() != NULL &&
-trailing_bare->is_dependent_typename && trailing_bare->dependent_typename_decltype && concrete_substitution_context) suffix.trailing_return = substitute_template_type(suffix.trailing_return); } catch (const exception&) {
-bool concrete_substitution_context = !validating_template_definition_ && (!template_type_substitutions_.empty() || !template_value_substitutions_.empty()); if (concrete_substitution_context) {
-if (!template_type_substitutions_.empty()) for (map<string, TypePtr>::const_iterator it = template_type_substitutions_.back().begin(); it != template_type_substitutions_.back().end(); ++it)
-if (type_is_template_dependent(it->second)) concrete_substitution_context = false; if (!template_value_substitutions_.empty()) for (map<string, TemplateArgument>::const_iterator it =
-template_value_substitutions_.back().begin(); it != template_value_substitutions_.back().end(); ++it) if (template_argument_has_template_parameter( it->second, record_template_arguments_))
-concrete_substitution_context = false; } if (concrete_substitution_context && !active_class_instantiation_dependent()) { function_parameter_pack_substitutions_.pop_back(); scopes_ = saved_scopes; throw; }
-if (!template_type_substitutions_.empty() || !template_value_substitutions_.empty() || !active_class_instantiations_.empty() || validating_template_definition_) { pos_ = trailing_return_begin; int angle = 0;
-int paren = 0; int square = 0; while (!at_eof()) { if (angle == 0 && paren == 0 && square == 0 && (at(OP_LBRACE) || at(OP_SEMICOLON) || at(OP_COLON))) break; if (at(OP_LT)) ++angle; else if (at(OP_GT) && angle > 0)
---angle; else if (at(OP_LPAREN)) ++paren; else if (at(OP_RPAREN) && paren > 0) --paren; else if (at(OP_LSQUARE)) ++square; else if (at(OP_RSQUARE) && square > 0) --square; ++pos_; } suffix.trailing_return =
-pa11::make_dependent_typename_type( "__dependent_trailing_return", false, false, false); function_parameter_pack_substitutions_.pop_back(); scopes_ = saved_scopes; continue; }
-function_parameter_pack_substitutions_.pop_back(); scopes_ = saved_scopes; throw; } function_parameter_pack_substitutions_.pop_back(); scopes_ = saved_scopes; continue; } break; } }
+	{
+		for (;;)
+		{
+			if (at_simple_cv())
+			{
+				suffix.function_cv |= consume_cv_flag();
+				continue;
+			}
+			if (consume(OP_AMP))
+			{
+				suffix.ref_qualifier = 1;
+				continue;
+			}
+			if (consume(OP_LAND))
+			{
+				suffix.ref_qualifier = 2;
+				continue;
+			}
+			if (consume(KW_NOEXCEPT))
+			{
+				suffix.noexcept_decl = true;
+				if (at(OP_LPAREN))
+					skip_balanced(OP_LPAREN, OP_RPAREN);
+				continue;
+			}
+			if (consume(KW_THROW))
+			{
+				if (consume(OP_LPAREN))
+				{
+					if (consume(OP_RPAREN))
+						suffix.noexcept_decl = true;
+					else
+					{
+						suffix.dynamic_exception_spec = true;
+						for (;;)
+						{
+							suffix.dynamic_exception_types.push_back(parse_type_id());
+							if (!consume(OP_COMMA))
+								break;
+						}
+						expect(OP_RPAREN);
+					}
+				}
+				continue;
+			}
+			if (parse_gnu_attribute_suffix(suffix))
+				continue;
+			if (at_gnu_asm())
+			{
+				string label = parse_gnu_asm_label();
+				if (!label.empty())
+					suffix.asm_label = label;
+				continue;
+			}
+			if (at_identifier() && current().source == "requires")
+			{
+				++pos_;
+				if (at(OP_LPAREN))
+					skip_balanced(OP_LPAREN, OP_RPAREN);
+				else
+					while (!at_eof() &&
+					       !at(OP_LBRACE) &&
+					       !at(OP_COLON) &&
+					       !at(OP_SEMICOLON) &&
+					       !at(OP_ASS))
+						++pos_;
+				continue;
+			}
+			if (at_identifier() && current().source == "override")
+			{
+				++pos_;
+				suffix.override_decl = true;
+				continue;
+			}
+			if (at_identifier() && current().source == "final")
+			{
+				++pos_;
+				suffix.final_decl = true;
+				continue;
+			}
+			if (!consume(OP_ARROW))
+				break;
+
+			vector<Scope*> saved_scopes = scopes_;
+			Scope* parameter_scope =
+				pa11::create_child_scope(current_scope(),
+				                         ScopeKind::Function,
+				                         "");
+			scopes_.push_back(parameter_scope);
+			map<string, vector<Binding*> > parameter_packs;
+			for (size_t i = 0; i < suffix.parameters.size(); ++i)
+			{
+				const ParameterInfo& parameter = suffix.parameters[i];
+				if (!parameter.pack_expression_name.empty() &&
+				    !parameter.pack_name.empty())
+				{
+					TemplateArgument subst;
+					if (find_template_value_substitution(parameter.pack_name,
+					                                     subst) &&
+					    subst.kind == TemplateArgumentKind::Pack &&
+					    subst.pack.empty())
+					{
+						parameter_packs[parameter.pack_expression_name];
+						continue;
+					}
+				}
+				if (parameter.name.empty() || parameter.type.get() == NULL)
+					continue;
+				TypePtr parameter_type =
+					substitute_template_type(parameter.type);
+				Binding* binding =
+					pa11::add_binding(parameter_scope,
+					                  BindingKind::Parameter,
+					                  parameter.name,
+					                  parameter_type);
+				if (!parameter.pack_expression_name.empty())
+					parameter_packs[parameter.pack_expression_name]
+						.push_back(binding);
+			}
+			function_parameter_pack_substitutions_.push_back(parameter_packs);
+			size_t trailing_return_begin = pos_;
+			try
+			{
+				suffix.trailing_return = parse_type_id();
+				TypePtr trailing_bare =
+					suffix.trailing_return.get() != NULL
+					? pa11::strip_cv(suffix.trailing_return) : TypePtr();
+				bool concrete_substitution_context =
+					!validating_template_definition_ &&
+					(!template_type_substitutions_.empty() ||
+					 !template_value_substitutions_.empty());
+				if (concrete_substitution_context)
+				{
+					if (!template_type_substitutions_.empty())
+						for (map<string, TypePtr>::const_iterator it =
+							     template_type_substitutions_.back().begin();
+						     it != template_type_substitutions_.back().end();
+						     ++it)
+							if (type_is_template_dependent(it->second))
+								concrete_substitution_context = false;
+					if (!template_value_substitutions_.empty())
+						for (map<string, TemplateArgument>::const_iterator it =
+							     template_value_substitutions_.back().begin();
+						     it != template_value_substitutions_.back().end();
+						     ++it)
+							if (template_argument_has_template_parameter(
+								    it->second,
+								    record_template_arguments_))
+								concrete_substitution_context = false;
+				}
+				if (trailing_bare.get() != NULL &&
+				    trailing_bare->is_dependent_typename &&
+				    trailing_bare->dependent_typename_decltype &&
+				    concrete_substitution_context)
+					suffix.trailing_return =
+						substitute_template_type(suffix.trailing_return);
+			}
+			catch (const exception&)
+			{
+				bool concrete_substitution_context =
+					!validating_template_definition_ &&
+					(!template_type_substitutions_.empty() ||
+					 !template_value_substitutions_.empty());
+				if (concrete_substitution_context)
+				{
+					if (!template_type_substitutions_.empty())
+						for (map<string, TypePtr>::const_iterator it =
+							     template_type_substitutions_.back().begin();
+						     it != template_type_substitutions_.back().end();
+						     ++it)
+							if (type_is_template_dependent(it->second))
+								concrete_substitution_context = false;
+					if (!template_value_substitutions_.empty())
+						for (map<string, TemplateArgument>::const_iterator it =
+							     template_value_substitutions_.back().begin();
+						     it != template_value_substitutions_.back().end();
+						     ++it)
+							if (template_argument_has_template_parameter(
+								    it->second,
+								    record_template_arguments_))
+								concrete_substitution_context = false;
+				}
+				if (concrete_substitution_context &&
+				    !active_class_instantiation_dependent())
+				{
+					function_parameter_pack_substitutions_.pop_back();
+					scopes_ = saved_scopes;
+					throw;
+				}
+				if (!template_type_substitutions_.empty() ||
+				    !template_value_substitutions_.empty() ||
+				    !active_class_instantiations_.empty() ||
+				    validating_template_definition_)
+				{
+					pos_ = trailing_return_begin;
+					int angle = 0;
+					int paren = 0;
+					int square = 0;
+					while (!at_eof())
+					{
+						if (angle == 0 &&
+						    paren == 0 &&
+						    square == 0 &&
+						    (at(OP_LBRACE) ||
+						     at(OP_SEMICOLON) ||
+						     at(OP_COLON)))
+							break;
+						if (at(OP_LT))
+							++angle;
+						else if (at(OP_GT) && angle > 0)
+							--angle;
+						else if (at(OP_LPAREN))
+							++paren;
+						else if (at(OP_RPAREN) && paren > 0)
+							--paren;
+						else if (at(OP_LSQUARE))
+							++square;
+						else if (at(OP_RSQUARE) && square > 0)
+							--square;
+						++pos_;
+					}
+					suffix.trailing_return =
+						pa11::make_dependent_typename_type(
+							"__dependent_trailing_return",
+							false,
+							false,
+							false);
+					function_parameter_pack_substitutions_.pop_back();
+					scopes_ = saved_scopes;
+					continue;
+				}
+				function_parameter_pack_substitutions_.pop_back();
+				scopes_ = saved_scopes;
+				throw;
+			}
+			function_parameter_pack_substitutions_.pop_back();
+			scopes_ = saved_scopes;
+			continue;
+		}
+	}
 
 void Parser::parse_parameter_clause(vector<ParameterInfo>& parameters,
                                     bool& variadic)
@@ -250,10 +466,10 @@ ParameterInfo Parser::parse_parameter_declaration()
 			declarator = parse_declarator(true);
 			info.type = adjust_parameter_type(apply_declarator(declarator, base));
 		}
-		catch (const exception&)
-		{
-			pos_ = save;
-		}
+			catch (const exception&)
+			{
+				pos_ = save;
+			}
 		if (info.type.get() != NULL)
 			{
 				if (declarator_has_name(declarator))
@@ -372,7 +588,8 @@ bool Parser::starts_declaration()
 	}
 	if (at(KW_TYPEDEF) || at(KW_CONSTEXPR) || at(KW_EXTERN) ||
 	    at(KW_STATIC) || at(KW_DECLTYPE) || at(KW_TYPENAME) ||
-	    starts_class_key() || at(KW_ENUM) || at(KW_STATIC_ASSERT))
+	    at(KW_AUTO) || starts_class_key() || at(KW_ENUM) ||
+	    at(KW_STATIC_ASSERT))
 	{
 		pos_ = attr_save;
 		return true;

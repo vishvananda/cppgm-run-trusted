@@ -1,5 +1,4 @@
 #include "cy86_x86.h"
-
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -8,18 +7,11 @@
 #include <map>
 #include <set>
 #include <stdexcept>
-
 using namespace std;
-
-namespace cy86 {
-namespace {
-
-const uint64_t kImageBase = 0x400000;
-const uint64_t kHeaderSize = 64 + 56;
+namespace cy86 { namespace {
+const uint64_t kImageBase = 0x400000, kHeaderSize = 64 + 56;
 const uint64_t kCodeBase = kImageBase + kHeaderSize;
-
-enum XReg
-{
+enum XReg {
 	RAX = 0, RCX = 1, RDX = 2, RBX = 3,
 	RSP = 4, RBP = 5, RSI = 6, RDI = 7,
 	R8 = 8, R9 = 9, R10 = 10, R11 = 11,
@@ -777,8 +769,16 @@ void emit_farith(Emitter& e, const Statement& stmt, int width, uint8_t opcode, c
 	emit_fstp_operand(e, stmt.operands[0], width, 16, ctx);
 }
 
+void emit_setcc_zeroed_rax(Emitter& e, uint8_t setcc)
+{
+	emit_mov_imm_reg(e, 64, RAX, 0);
+	e.u8(0x0f);
+	e.u8(setcc);
+	e.modrm(3, 0, RAX);
+}
+
 void emit_fcompare(Emitter& e, const Statement& stmt, int width,
-                   uint8_t setcc, const Context& ctx)
+                   uint8_t setcc, bool unordered_true, const Context& ctx)
 {
 	emit_fld_operand(e, stmt.operands[2], width, 16, ctx);
 	emit_fld_operand(e, stmt.operands[1], width, 32, ctx);
@@ -786,9 +786,13 @@ void emit_fcompare(Emitter& e, const Statement& stmt, int width,
 	e.u8(0xf1);
 	e.u8(0xdd);
 	e.u8(0xd8);
-	e.u8(0x0f);
-	e.u8(setcc);
-	e.modrm(3, 0, RAX);
+	emit_setcc_zeroed_rax(e, setcc);
+	emit_mov_reg_reg(e, 64, R10, RAX);
+	emit_setcc_zeroed_rax(e, unordered_true ? 0x9a : 0x9b);
+	if (unordered_true)
+		emit_or_reg_reg(e, 64, RAX, R10);
+	else
+		emit_and_reg_reg(e, 64, RAX, R10);
 	emit_store_operand(e, stmt.operands[0], 8, RAX, ctx);
 }
 
@@ -1015,12 +1019,12 @@ void emit_instruction(Emitter& e, const Statement& stmt, const Context& ctx)
 	else if (core == "fsub") emit_farith(e, stmt, width, 0xe9, ctx);
 	else if (core == "fmul") emit_farith(e, stmt, width, 0xc9, ctx);
 	else if (core == "fdiv") emit_farith(e, stmt, width, 0xf9, ctx);
-	else if (core == "feq") emit_fcompare(e, stmt, width, 0x94, ctx);
-	else if (core == "fne") emit_fcompare(e, stmt, width, 0x95, ctx);
-	else if (core == "flt") emit_fcompare(e, stmt, width, 0x92, ctx);
-	else if (core == "fgt") emit_fcompare(e, stmt, width, 0x97, ctx);
-	else if (core == "fle") emit_fcompare(e, stmt, width, 0x96, ctx);
-	else if (core == "fge") emit_fcompare(e, stmt, width, 0x93, ctx);
+	else if (core == "feq") emit_fcompare(e, stmt, width, 0x94, false, ctx);
+	else if (core == "fne") emit_fcompare(e, stmt, width, 0x95, true, ctx);
+	else if (core == "flt") emit_fcompare(e, stmt, width, 0x92, false, ctx);
+	else if (core == "fgt") emit_fcompare(e, stmt, width, 0x97, false, ctx);
+	else if (core == "fle") emit_fcompare(e, stmt, width, 0x96, false, ctx);
+	else if (core == "fge") emit_fcompare(e, stmt, width, 0x93, false, ctx);
 	else if (stmt.opcode.compare(0, 7, "syscall") == 0) emit_syscall(e, stmt, ctx);
 	else if (stmt.opcode.find("convf80") != string::npos || stmt.opcode.find("f80conv") != string::npos) emit_float_conversion(e, stmt, ctx);
 	else throw runtime_error("unsupported opcode");

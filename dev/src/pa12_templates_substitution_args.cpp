@@ -31,6 +31,8 @@ bool Parser::resolve_dependent_value_member_argument(
 	    !arg.dependent ||
 	    arg.value_owner_template_name.empty())
 		return false;
+	if (resolve_hosted_dependent_value_member_argument(arg, out))
+		return true;
 	size_t active_hash = dependent_value_member_cache_prefix(arg);
 	string active_key = to_string(active_hash);
 	if (find(active_dependent_value_member_keys_.begin(),
@@ -840,13 +842,26 @@ bool Parser::resolve_dependent_value_member_argument(
 						}
 				}
 			}
-			owner = alias_declaration != NULL
-				? const_cast<Parser*>(this)->instantiate_alias_template(
-					alias_declaration,
-					owner_args)
-			: const_cast<Parser*>(this)->instantiate_class_template(
-				declaration,
-				owner_args);
+			try
+			{
+				owner = alias_declaration != NULL
+					? const_cast<Parser*>(this)->instantiate_alias_template(
+						alias_declaration,
+						owner_args)
+				: const_cast<Parser*>(this)->instantiate_class_template(
+					declaration,
+					owner_args);
+			}
+			catch (const runtime_error& err)
+			{
+				string message = err.what();
+				if (hosted_compatibility_ &&
+				    (message == "missing template argument" ||
+				     message == "template argument kind mismatch" ||
+				     message == "template pack argument kind mismatch"))
+					return false;
+				throw;
+			}
 	}
 	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
 	if (owner.get() == NULL ||

@@ -297,10 +297,20 @@ bool Parser::deduce_function_template_parameter_pack(
 		return true;
 	}
 	size_t take = args.size() - arg_index - remaining_function_parameters;
-	vector<TemplateArgument> pack;
+	vector<const Expr*> actuals;
 	for (size_t j = 0; j < take; ++j)
 	{
 		const Expr& actual_expr = args[arg_index + j];
+		if (actual_expr.pack_expansion)
+			for (size_t p = 0; p < actual_expr.pack.size(); ++p)
+				actuals.push_back(&actual_expr.pack[p]);
+		else
+			actuals.push_back(&actual_expr);
+	}
+	vector<TemplateArgument> pack;
+	for (size_t j = 0; j < actuals.size(); ++j)
+	{
+		const Expr& actual_expr = *actuals[j];
 		if (actual_expr.braced_init_list && actual_expr.type.get() == NULL)
 			return false;
 		TypePtr argument = expression_object_type(actual_expr.type);
@@ -926,7 +936,7 @@ bool Parser::deduce_function_template_arguments(
 	bool finished =
 		finish_deduced_function_template_arguments(declaration,
 		                                           deduced,
-		                                           deduced_packs,
+	                                           deduced_packs,
 	                                           fixed_arguments,
 	                                           out);
 	return finished;

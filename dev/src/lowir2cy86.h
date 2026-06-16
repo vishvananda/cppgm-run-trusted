@@ -129,6 +129,7 @@ enum class InstrKind
 	EhCleanup,
 	EhCatch,
 	EhCatchAll,
+	EhFilter,
 	EhEnd,
 	Throw,
 	Exception,

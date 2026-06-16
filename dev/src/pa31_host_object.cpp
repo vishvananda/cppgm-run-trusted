@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -18,7 +19,7 @@ size_t align_up(size_t value, size_t align)
 }
 uint64_t parse_int(const string& text)
 {
-	return static_cast<uint64_t>(strtoll(text.c_str(), NULL, 0));
+	return static_cast<uint64_t>(strtoull(text.c_str(), NULL, 0));
 }
 bool is_identifier(const string& text)
 {
@@ -73,7 +74,6 @@ string simple_cpp_type_code(const Type& type)
 		return "Pv";
 	return "";
 }
-
 string simple_cpp_function_symbol(const string& body,
                                   const vector<Parameter>& params)
 {
@@ -157,15 +157,45 @@ void sleb(Blob& b, int64_t value)
 }
 uint64_t parse_f64_bits(const string& text)
 {
+	if (text == "snan")
+		return 0x7ff4000000000000ULL;
 	union { double f; uint64_t u; } bits;
 	bits.f = strtod(text.c_str(), NULL);
 	return bits.u;
 }
 uint32_t parse_f32_bits(const string& text)
 {
+	if (text == "snan")
+		return 0x7fa00000U;
 	union { float f; uint32_t u; } bits;
 	bits.f = strtof(text.c_str(), NULL);
 	return bits.u;
+}
+vector<unsigned char> parse_f80_bytes(const string& text)
+{
+	vector<unsigned char> bytes(16, 0);
+	bool negative = !text.empty() && text[0] == '-';
+	string body = negative ? text.substr(1) : text;
+	if (body == "inf")
+	{
+		bytes[7] = 0x80;
+		bytes[8] = 0xff;
+		bytes[9] = negative ? 0xff : 0x7f;
+		return bytes;
+	}
+	if (body == "nan" || body == "snan")
+	{
+		bytes[7] = body == "snan" ? 0xa0 : 0xc0;
+		bytes[8] = 0xff;
+		bytes[9] = negative ? 0xff : 0x7f;
+		return bytes;
+	}
+	long double value = strtold(text.c_str(), NULL);
+	memcpy(&bytes[0], &value,
+	       min(sizeof(value), static_cast<size_t>(10)));
+	for (size_t i = 10; i < bytes.size(); ++i)
+		bytes[i] = 0;
+	return bytes;
 }
 string target_symbol(const Program& program, const string& name)
 {
@@ -209,6 +239,7 @@ bool noop_constructor_instruction(const Function& fn, const Instruction& ins)
 	if (ins.kind == InstrKind::EhTry ||
 	    ins.kind == InstrKind::EhEnd ||
 	    ins.kind == InstrKind::EhCatchAll ||
+	    ins.kind == InstrKind::EhFilter ||
 	    ins.kind == InstrKind::Exception ||
 	    ins.kind == InstrKind::Jump)
 		return true;
@@ -223,6 +254,8 @@ bool pruned_noop_constructor_function(const Function& fn)
 {
 	if (fn.declaration ||
 	    symbol_bind(fn.metadata) != 2 ||
+	    (metadata(fn.metadata, "object_root") == "yes" &&
+	     metadata(fn.metadata, "generated_default_ctor") != "yes") ||
 	    metadata(fn.metadata, "unwind") != "no" ||
 	    !constructor_object_symbol(metadata(fn.metadata, "object")) ||
 	    !lowir2cy86::is_void_type(fn.ret) ||
@@ -410,23 +443,82 @@ void FuncGen::store_float_temp(const string& name, const Type& type, int xmm)
 	map<string, size_t>::const_iterator p = fn.param_offsets.find(name);
 	const size_t off = p != fn.param_offsets.end() ? p->second :
 	                   fn.temp_offsets.find(name)->second;
+	if (lowir2cy86::is_f80_type(type))
+	{
+		x.x87_fstpt(frame_mem(off));
+		return;
+	}
 	if (type.bits == 32)
 		x.sse_mr(0xf3, 0x11, frame_mem(off), xmm);
 	else
 		x.sse_mr(0xf2, 0x11, frame_mem(off), xmm);
 }
-void FuncGen::tls_address(const string& name, int reg)
+void FuncGen::store_f80_literal_to_frame(const string& text, size_t off)
 {
-	x.u8(0xe8);
-	const size_t off = x.pos();
+	vector<unsigned char> bytes = parse_f80_bytes(text);
+	uint64_t lo = 0;
+	for (size_t i = 0; i < 8; ++i)
+		lo |= static_cast<uint64_t>(bytes[i]) << (i * 8);
+	uint64_t hi = static_cast<uint64_t>(bytes[8]) |
+	              (static_cast<uint64_t>(bytes[9]) << 8);
+	x.mov_imm(64, RAX, lo);
+	x.mov_mr(64, frame_mem(off), RAX);
+	x.mov_imm(32, RAX, hi);
+	x.mov_mr(32, frame_object_mem(off, 8), RAX);
+	zero_frame_tail(off, 12, 16);
+}
+void FuncGen::store_f80_literal_to_address(const string& text, int reg)
+{
+	vector<unsigned char> bytes = parse_f80_bytes(text);
+	uint64_t lo = 0;
+	for (size_t i = 0; i < 8; ++i)
+		lo |= static_cast<uint64_t>(bytes[i]) << (i * 8);
+	uint64_t hi = static_cast<uint64_t>(bytes[8]) |
+	              (static_cast<uint64_t>(bytes[9]) << 8);
+	x.mov_imm(64, RAX, lo);
+	x.mov_mr(64, Mem(reg, 0), RAX);
+	x.mov_imm(32, RAX, hi);
+	x.mov_mr(32, Mem(reg, 8), RAX);
+	zero_memory_tail(reg, 12, 16);
+}
+void FuncGen::copy_f80_value_to_frame(const Value& src, size_t off)
+{
+	if (src.kind == ValueKind::Literal)
+	{
+		store_f80_literal_to_frame(src.text, off);
+		return;
+	}
+	value_storage_address(src, R11);
+	copy_memory_to_frame(R11, off, 16);
+}
+void FuncGen::copy_f80_value_to_address(const Value& src, int reg)
+{
+	if (src.kind == ValueKind::Literal)
+	{
+		store_f80_literal_to_address(src.text, reg);
+		return;
+	}
+	value_storage_address(src, R10);
+	copy_memory(R10, reg, 16);
+}
+	void FuncGen::tls_address(const string& name, int reg)
+	{
+		x.u8(0xe8);
+		const size_t off = x.pos();
 	x.u32(0);
 	unit.obj.reloc(text, off, unit.tls_wrapper_for_global(name),
 	               R_X86_64_PLT32, -4);
-	if (reg != RAX)
-		x.mov_rr(64, reg, RAX);
-}
-void FuncGen::load_value(const Value& v, const Type& target, int reg)
-{
+		if (reg != RAX)
+			x.mov_rr(64, reg, RAX);
+	}
+	void FuncGen::imported_global_address(const string& name, int reg)
+	{
+		x.mov_rm(64, reg, Mem(RIP, 0));
+		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, name),
+		               R_X86_64_GOTPCREL, -4);
+	}
+	void FuncGen::load_value(const Value& v, const Type& target, int reg)
+	{
 	if (v.kind == ValueKind::Literal)
 	{
 		x.mov_imm(width_for(target), reg, parse_int(v.text));
@@ -441,9 +533,18 @@ void FuncGen::load_value(const Value& v, const Type& target, int reg)
 			if (width_for(target) == 8)
 				x.movzx8(reg, reg);
 			return;
-		}
-		Mem mem(RIP, 0);
-		x.mov_rm(width_for(target), reg, mem);
+			}
+			if (unit.is_imported_global(v.text))
+			{
+				const int addr_reg = reg == R11 ? R10 : R11;
+				imported_global_address(v.text, addr_reg);
+				x.mov_rm(width_for(target), reg, Mem(addr_reg, 0));
+				if (width_for(target) == 8)
+					x.movzx8(reg, reg);
+				return;
+			}
+			Mem mem(RIP, 0);
+			x.mov_rm(width_for(target), reg, mem);
 		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, v.text),
 		               R_X86_64_PC32, -4);
 		if (width_for(target) == 8)
@@ -470,6 +571,8 @@ void FuncGen::load_value(const Value& v, const Type& target, int reg)
 }
 void FuncGen::load_float_value(const Value& v, const Type& target, int xmm)
 {
+	if (lowir2cy86::is_f80_type(target))
+		throw runtime_error("f80 value is loaded through x87");
 	if (v.kind == ValueKind::Literal)
 	{
 		if (target.bits == 32)
@@ -488,13 +591,18 @@ void FuncGen::load_float_value(const Value& v, const Type& target, int xmm)
 	bool have_mem = false;
 	if (v.kind == ValueKind::Global)
 	{
-		if (unit.is_thread_local_global(v.text))
-		{
-			tls_address(v.text, RAX);
-			mem = Mem(RAX, 0);
-		}
-		else
-			mem = Mem(RIP, 0);
+			if (unit.is_thread_local_global(v.text))
+			{
+				tls_address(v.text, RAX);
+				mem = Mem(RAX, 0);
+			}
+			else if (unit.is_imported_global(v.text))
+			{
+				imported_global_address(v.text, R11);
+				mem = Mem(R11, 0);
+			}
+			else
+				mem = Mem(RIP, 0);
 		have_mem = true;
 	}
 	else if (v.kind == ValueKind::Slot || v.kind == ValueKind::Temp)
@@ -508,9 +616,24 @@ void FuncGen::load_float_value(const Value& v, const Type& target, int xmm)
 		x.sse_rm(0xf3, 0x10, xmm, mem);
 	else
 		x.sse_rm(0xf2, 0x10, xmm, mem);
-	if (v.kind == ValueKind::Global && !unit.is_thread_local_global(v.text))
-		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, v.text),
-		               R_X86_64_PC32, -4);
+		if (v.kind == ValueKind::Global &&
+		    !unit.is_thread_local_global(v.text) &&
+		    !unit.is_imported_global(v.text))
+			unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, v.text),
+			               R_X86_64_PC32, -4);
+}
+void FuncGen::load_f80_value_to_x87(const Value& v)
+{
+	if (v.kind == ValueKind::Literal)
+	{
+		x.sub_rsp(16);
+		store_f80_literal_to_address(v.text, RSP);
+		x.x87_fldt(Mem(RSP, 0));
+		x.add_rsp(16);
+		return;
+	}
+	value_storage_address(v, R11);
+	x.x87_fldt(Mem(R11, 0));
 }
 void FuncGen::store_value(const Value& dst, const Type& type, int reg)
 {
@@ -518,16 +641,23 @@ void FuncGen::store_value(const Value& dst, const Type& type, int reg)
 		x.mov_mr(width_for(type), frame_mem(fn.slot_offsets.find(dst.text)->second), reg);
 	else if (dst.kind == ValueKind::Global)
 	{
-		if (unit.is_thread_local_global(dst.text))
-		{
-			const int value_reg = reg == RAX ? R10 : reg;
+			if (unit.is_thread_local_global(dst.text))
+			{
+				const int value_reg = reg == RAX ? R10 : reg;
 			if (reg == RAX)
 				x.mov_rr(64, R10, RAX);
 			tls_address(dst.text, R11);
 			x.mov_mr(width_for(type), Mem(R11, 0), value_reg);
-			return;
-		}
-		Mem mem(RIP, 0);
+				return;
+			}
+			if (unit.is_imported_global(dst.text))
+			{
+				const int addr_reg = reg == R11 ? R10 : R11;
+				imported_global_address(dst.text, addr_reg);
+				x.mov_mr(width_for(type), Mem(addr_reg, 0), reg);
+				return;
+			}
+			Mem mem(RIP, 0);
 		x.mov_mr(width_for(type), mem, reg);
 		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, dst.text),
 		               R_X86_64_PC32, -4);
@@ -551,13 +681,18 @@ void FuncGen::store_float_value(const Value& dst, const Type& type, int xmm)
 	}
 	else if (dst.kind == ValueKind::Global)
 	{
-		if (unit.is_thread_local_global(dst.text))
-		{
-			tls_address(dst.text, RAX);
-			mem = Mem(RAX, 0);
-		}
-		else
-			mem = Mem(RIP, 0);
+			if (unit.is_thread_local_global(dst.text))
+			{
+				tls_address(dst.text, RAX);
+				mem = Mem(RAX, 0);
+			}
+			else if (unit.is_imported_global(dst.text))
+			{
+				imported_global_address(dst.text, R11);
+				mem = Mem(R11, 0);
+			}
+			else
+				mem = Mem(RIP, 0);
 		have_mem = true;
 	}
 	else if (dst.kind == ValueKind::Temp)
@@ -572,9 +707,11 @@ void FuncGen::store_float_value(const Value& dst, const Type& type, int xmm)
 		x.sse_mr(0xf3, 0x11, mem, xmm);
 	else
 		x.sse_mr(0xf2, 0x11, mem, xmm);
-	if (dst.kind == ValueKind::Global && !unit.is_thread_local_global(dst.text))
-		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, dst.text),
-		               R_X86_64_PC32, -4);
+		if (dst.kind == ValueKind::Global &&
+		    !unit.is_thread_local_global(dst.text) &&
+		    !unit.is_imported_global(dst.text))
+			unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, dst.text),
+			               R_X86_64_PC32, -4);
 }
 void FuncGen::storage_address(const Value& v, int reg)
 {
@@ -586,12 +723,17 @@ void FuncGen::storage_address(const Value& v, int reg)
 	}
 	if (v.kind == ValueKind::Global)
 	{
-		if (unit.is_thread_local_global(v.text))
-		{
-			tls_address(v.text, reg);
-			return;
-		}
-		x.lea(reg, Mem(RIP, 0));
+			if (unit.is_thread_local_global(v.text))
+			{
+				tls_address(v.text, reg);
+				return;
+			}
+			if (unit.is_imported_global(v.text))
+			{
+				imported_global_address(v.text, reg);
+				return;
+			}
+			x.lea(reg, Mem(RIP, 0));
 		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, v.text),
 		               R_X86_64_PC32, -4);
 		return;
@@ -612,12 +754,17 @@ void FuncGen::value_storage_address(const Value& v, int reg)
 	}
 	if (v.kind == ValueKind::Global)
 	{
-		if (unit.is_thread_local_global(v.text))
-		{
-			tls_address(v.text, reg);
-			return;
-		}
-		x.lea(reg, Mem(RIP, 0));
+			if (unit.is_thread_local_global(v.text))
+			{
+				tls_address(v.text, reg);
+				return;
+			}
+			if (unit.is_imported_global(v.text))
+			{
+				imported_global_address(v.text, reg);
+				return;
+			}
+			x.lea(reg, Mem(RIP, 0));
 		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, v.text),
 		               R_X86_64_PC32, -4);
 		return;
@@ -749,10 +896,15 @@ void FuncGen::emit_return(const Instruction& ins)
 				x.mov_rm(lowir2cy86::direct_object_abi_chunk_width_bits(ins.type, 1),
 				         RDX, Mem(R10, 8));
 		}
-		else if (lowir2cy86::is_float_type(ins.type))
-			load_float_value(ins.a, ins.type, 0);
+	else if (lowir2cy86::is_float_type(ins.type))
+	{
+		if (lowir2cy86::is_f80_type(ins.type))
+			load_f80_value_to_x87(ins.a);
 		else
-			load_value(ins.a, ins.type, RAX);
+			load_float_value(ins.a, ins.type, 0);
+	}
+	else
+		load_value(ins.a, ins.type, RAX);
 	}
 	x.u8(0xc9);
 	x.u8(0xc3);
@@ -773,7 +925,10 @@ void FuncGen::emit_return(const Instruction& ins)
 	}
 bool FuncGen::emit_const_instruction(const Instruction& ins)
 {
-	if (lowir2cy86::is_float_type(ins.type))
+	if (lowir2cy86::is_f80_type(ins.type))
+		store_f80_literal_to_frame(ins.a.text,
+		                           fn.temp_offsets.find(ins.dest)->second);
+	else if (lowir2cy86::is_float_type(ins.type))
 	{
 		load_float_value(ins.a, ins.type, 0);
 		store_float_temp(ins.dest, ins.type, 0);
@@ -785,10 +940,12 @@ bool FuncGen::emit_const_instruction(const Instruction& ins)
 	}
 	return true;
 }
-
 bool FuncGen::emit_copy_instruction(const Instruction& ins)
 {
-	if (lowir2cy86::is_float_type(ins.type))
+	if (lowir2cy86::is_f80_type(ins.type))
+		copy_f80_value_to_frame(ins.a,
+		                        fn.temp_offsets.find(ins.dest)->second);
+	else if (lowir2cy86::is_float_type(ins.type))
 	{
 		load_float_value(ins.a, ins.type, 0);
 		store_float_temp(ins.dest, ins.type, 0);
@@ -807,11 +964,14 @@ bool FuncGen::emit_copy_instruction(const Instruction& ins)
 	}
 	return true;
 }
-
 bool FuncGen::emit_load_instruction(const Instruction& ins)
 {
 	storage_address(ins.a, R11);
-	if (lowir2cy86::is_float_type(ins.type))
+	if (lowir2cy86::is_f80_type(ins.type))
+		copy_memory_to_frame(R11,
+		                     fn.temp_offsets.find(ins.dest)->second,
+		                     lowir2cy86::storage_size(ins.type));
+	else if (lowir2cy86::is_float_type(ins.type))
 	{
 		if (ins.type.bits == 32) x.sse_rm(0xf3, 0x10, 0, Mem(R11, 0));
 		else x.sse_rm(0xf2, 0x10, 0, Mem(R11, 0));
@@ -828,10 +988,14 @@ bool FuncGen::emit_load_instruction(const Instruction& ins)
 	}
 	return true;
 }
-
 bool FuncGen::emit_store_instruction(const Instruction& ins)
 {
-	if (lowir2cy86::is_float_type(ins.type))
+	if (lowir2cy86::is_f80_type(ins.type))
+	{
+		storage_address(ins.b, R11);
+		copy_f80_value_to_address(ins.a, R11);
+	}
+	else if (lowir2cy86::is_float_type(ins.type))
 	{
 		load_float_value(ins.a, ins.type, 0);
 		store_float_value(ins.b, ins.type, 0);
@@ -858,7 +1022,6 @@ bool FuncGen::emit_store_instruction(const Instruction& ins)
 	}
 	return true;
 }
-
 bool FuncGen::emit_index_instruction(const Instruction& ins)
 {
 	load_value(ins.a, lowir2cy86::parse_type_text("ptr"), RAX);
@@ -869,9 +1032,18 @@ bool FuncGen::emit_index_instruction(const Instruction& ins)
 	store_temp(ins.dest, lowir2cy86::parse_type_text("ptr"), RAX);
 	return true;
 }
-
 bool FuncGen::emit_unary_value_instruction(const Instruction& ins)
 {
+	if (ins.op == "neg" && lowir2cy86::is_f80_type(ins.type))
+	{
+		const size_t off = fn.temp_offsets.find(ins.dest)->second;
+		copy_f80_value_to_frame(ins.a, off);
+		x.mov_rm(8, RAX, frame_object_mem(off, 9));
+		x.mov_imm(8, R10, 0x80);
+		x.binary(0x31, 8, RAX, R10);
+		x.mov_mr(8, frame_object_mem(off, 9), RAX);
+		return true;
+	}
 	if (ins.op == "neg" && lowir2cy86::is_float_type(ins.type))
 	{
 		const int width = ins.type.bits == 32 ? 32 : 64;
@@ -901,11 +1073,23 @@ bool FuncGen::emit_unary_value_instruction(const Instruction& ins)
 		}
 		return true;
 	}
+	if ((ins.op == "neg" || ins.op == "bitnot") &&
+	    (lowir2cy86::is_integer_type(ins.type) ||
+	     lowir2cy86::is_ptr_type(ins.type)))
+	{
+		const int width = width_for(ins.type);
+		const int subop = ins.op == "neg" ? 3 : 2;
+		load_value(ins.a, ins.type, RAX);
+		x.rex(width == 64, subop, 0, RAX, width == 8 && RAX >= 4);
+		x.u8(width == 8 ? 0xf6 : 0xf7);
+		x.modrm(3, subop, RAX);
+		store_temp(ins.dest, ins.type, RAX);
+		return true;
+	}
 	load_value(ins.a, ins.type, RAX);
 	store_temp(ins.dest, ins.type, RAX);
 	return true;
 }
-
 bool FuncGen::emit_value_instruction(const Instruction& ins)
 {
 	if (ins.kind == InstrKind::VaStart) { emit_va_start(ins); return true; }
@@ -926,7 +1110,6 @@ bool FuncGen::emit_value_instruction(const Instruction& ins)
 	if (ins.kind == InstrKind::Unary) return emit_unary_value_instruction(ins);
 	return false;
 }
-
 void FuncGen::emit_stack_alloc(const Instruction& ins)
 {
 	if (!lowir2cy86::is_ptr_type(ins.type))
@@ -940,116 +1123,6 @@ void FuncGen::emit_stack_alloc(const Instruction& ins)
 	x.mov_rr(64, RAX, RSP);
 	store_temp(ins.dest, ins.type, RAX);
 }
-
-bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)
-{
-	if (ins.kind == InstrKind::Binary)
-	{
-		if (lowir2cy86::is_float_type(ins.type) && ins.type.bits == 64)
-		{
-			load_float_value(ins.a, ins.type, 0);
-			load_float_value(ins.b, ins.type, 1);
-			if (ins.op == "add") x.sse_rr(0xf2, 0x58, 0, 1);
-			else if (ins.op == "sub") x.sse_rr(0xf2, 0x5c, 0, 1);
-			else if (ins.op == "mul") x.sse_rr(0xf2, 0x59, 0, 1);
-			else if (ins.op == "div") x.sse_rr(0xf2, 0x5e, 0, 1);
-			else throw runtime_error("unsupported float binary");
-			store_float_temp(ins.dest, ins.type, 0);
-		}
-		else
-		{
-			load_value(ins.a, ins.type, RAX);
-			load_value(ins.b, ins.type, R10);
-			if (ins.op == "add") x.binary(0x01, width_for(ins.type), RAX, R10);
-			else if (ins.op == "sub") x.binary(0x29, width_for(ins.type), RAX, R10);
-			else if (ins.op == "mul") x.imul(width_for(ins.type), RAX, R10);
-			else if (ins.op == "and") x.binary(0x21, width_for(ins.type), RAX, R10);
-			else if (ins.op == "or") x.binary(0x09, width_for(ins.type), RAX, R10);
-			else if (ins.op == "xor") x.binary(0x31, width_for(ins.type), RAX, R10);
-			else if (ins.op == "div" || ins.op == "mod")
-			{
-				x.idiv_reg(width_for(ins.type), R10);
-				if (ins.op == "mod")
-					x.mov_rr(width_for(ins.type), RAX, RDX);
-			}
-			else if (ins.op == "udiv" || ins.op == "umod")
-			{
-				x.div_reg(width_for(ins.type), R10);
-				if (ins.op == "umod")
-					x.mov_rr(width_for(ins.type), RAX, RDX);
-			}
-			else if (ins.op == "shl" || ins.op == "shr" || ins.op == "ushr")
-			{
-				x.mov_rr(64, RCX, R10);
-				x.shift_cl(width_for(ins.type),
-				           ins.op == "shl" ? 4 : (ins.op == "shr" ? 7 : 5),
-				           RAX);
-			}
-			else throw runtime_error("unsupported binary");
-			store_temp(ins.dest, ins.type, RAX);
-		}
-		return true;
-	}
-	if (ins.kind == InstrKind::Cmp)
-	{
-		if (lowir2cy86::is_float_type(ins.type))
-		{
-			load_float_value(ins.a, ins.type, 0);
-			load_float_value(ins.b, ins.type, 1);
-			x.sse_rr(ins.type.bits == 32 ? 0 : 0x66, 0x2e, 0, 1);
-			uint8_t cc = 0x94;
-			if (ins.op == "ne") cc = 0x95;
-			else if (ins.op == "lt") cc = 0x92;
-			else if (ins.op == "gt") cc = 0x97;
-			else if (ins.op == "le") cc = 0x96;
-			else if (ins.op == "ge") cc = 0x93;
-			else if (ins.op != "eq") throw runtime_error("unsupported float cmp");
-			x.setcc(cc);
-			x.mov_rr(64, R10, RAX);
-			if (ins.op == "ne")
-			{
-				x.setcc(0x9a);
-				x.binary(0x09, 64, RAX, R10);
-			}
-			else
-			{
-				x.setcc(0x9b);
-				x.binary(0x21, 64, RAX, R10);
-			}
-		}
-		else
-		{
-			load_value(ins.a, ins.type, RAX);
-			load_value(ins.b, ins.type, R10);
-			x.cmp(width_for(ins.type), RAX, R10);
-			x.setcc(cmp_cc(ins.op));
-		}
-		store_temp(ins.dest, ins.type, RAX);
-		return true;
-	}
-	if (ins.kind != InstrKind::Convert)
-		return false;
-	if (ins.op == "sitofp" && lowir2cy86::is_float_type(ins.type))
-	{
-		load_value(ins.a, ins.src_type, RAX);
-		x.cvtsi2sd(width_for(ins.src_type), 0, RAX);
-		store_float_temp(ins.dest, ins.type, 0);
-	}
-	else if (ins.op == "fpext" && ins.src_type.bits == 32 &&
-	         ins.type.bits == 64)
-	{
-		load_float_value(ins.a, ins.src_type, 0);
-		x.sse_rr(0xf3, 0x5a, 0, 0);
-		store_float_temp(ins.dest, ins.type, 0);
-	}
-	else
-	{
-		load_value(ins.a, ins.type, RAX);
-		store_temp(ins.dest, ins.type, RAX);
-	}
-	return true;
-}
-
 bool FuncGen::emit_protected_instruction(const Instruction& ins)
 {
 	if (ins.kind == InstrKind::Call)
@@ -1095,7 +1168,6 @@ bool FuncGen::emit_protected_instruction(const Instruction& ins)
 	zero_bytes(x, Mem(R11, 0), ins.span.bytes);
 	return true;
 }
-
 bool FuncGen::emit_eh_instruction(const Instruction& ins, const string& block)
 {
 	if (ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup)
@@ -1120,6 +1192,17 @@ bool FuncGen::emit_eh_instruction(const Instruction& ins, const string& block)
 	if (ins.kind == InstrKind::EhCatchAll)
 	{
 		CatchInfo c; c.selector = ins.order_a; c.catch_all = true;
+		catches[block].push_back(c);
+		return true;
+	}
+	if (ins.kind == InstrKind::EhFilter)
+	{
+		CatchInfo c;
+		c.selector = ins.order_a;
+		c.exception_spec = true;
+		for (size_t i = 0; i < ins.args.size(); ++i)
+			c.exception_spec_types.push_back(
+				target_symbol(unit.program, ins.args[i].text));
 		catches[block].push_back(c);
 		return true;
 	}
@@ -1154,7 +1237,6 @@ bool FuncGen::emit_eh_instruction(const Instruction& ins, const string& block)
 	x.u8(0x0f); x.u8(0x0b);
 	return true;
 }
-
 bool FuncGen::emit_control_instruction(const Instruction& ins)
 {
 	if (ins.kind == InstrKind::Jump)
@@ -1169,7 +1251,6 @@ bool FuncGen::emit_control_instruction(const Instruction& ins)
 		return false;
 	return true;
 }
-
 void FuncGen::emit_instruction(const Instruction& ins, const string& block)
 {
 	if (emit_value_instruction(ins) ||
@@ -1196,7 +1277,20 @@ void emit_param_store(X86& x, const Function& fn, size_t index,
 	static const int regs[] = {RDI, RSI, RDX, RCX, R8, R9};
 	const Parameter& p = fn.params[index];
 	const size_t off = fn.param_offsets.find(p.name)->second;
-	if (lowir2cy86::is_float_type(p.type) && p.type.bits <= 64)
+	if (lowir2cy86::is_f80_type(p.type))
+	{
+		for (size_t pos = 0; pos < lowir2cy86::storage_size(p.type);)
+		{
+			const size_t left = lowir2cy86::storage_size(p.type) - pos;
+			const int width = left >= 8 ? 64 : (left >= 4 ? 32 : 8);
+			x.mov_rm(width, RAX,
+			         Mem(RBP, static_cast<int32_t>(stack + pos)));
+			x.mov_mr(width, frame_object_mem(off, pos), RAX);
+			pos += static_cast<size_t>(width / 8);
+		}
+		stack += lowir2cy86::stack_storage_size(p.type);
+	}
+	else if (lowir2cy86::is_float_type(p.type) && p.type.bits <= 64)
 	{
 		if (fp < 8)
 		{
@@ -1255,6 +1349,7 @@ void FuncGen::emit(FunctionInfo& info)
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 			if (fn.blocks[b].instructions[i].kind == InstrKind::EhTry ||
 			    fn.blocks[b].instructions[i].kind == InstrKind::EhCleanup ||
+			    fn.blocks[b].instructions[i].kind == InstrKind::EhFilter ||
 			    fn.blocks[b].instructions[i].kind == InstrKind::Exception ||
 			    fn.blocks[b].instructions[i].kind == InstrKind::Resume)
 				has_eh = true;

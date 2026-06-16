@@ -1,15 +1,11 @@
 #include "pa12_templates_function_abi_internal.h"
 #include "pa12_templates_instance_support.h"
 #include "pa12_types_support.h"
-
 #include <algorithm>
 #include <stdexcept>
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
-
 string abi_base36_number(size_t value)
 {
 	static const char digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -22,14 +18,12 @@ string abi_base36_number(size_t value)
 	while (value != 0);
 	return encoded;
 }
-
 string abi_substitution_code(size_t index)
 {
 	if (index == 0)
 		return "S_";
 	return "S" + abi_base36_number(index - 1) + "_";
 }
-
 size_t abi_find_substitution(const AbiSubstitutionContext& ctx,
                              const string& encoded)
 {
@@ -42,7 +36,6 @@ size_t abi_find_substitution(const AbiSubstitutionContext& ctx,
 			return i;
 	return static_cast<size_t>(-1);
 }
-
 void abi_add_substitution_alias(AbiSubstitutionContext& ctx,
                                 const string& alias,
                                 const string& target)
@@ -54,7 +47,6 @@ void abi_add_substitution_alias(AbiSubstitutionContext& ctx,
 		return;
 	ctx.substitution_aliases[alias] = found;
 }
-
 void abi_add_substitution(AbiSubstitutionContext& ctx, const string& encoded)
 {
 	if (encoded.empty() ||
@@ -62,7 +54,6 @@ void abi_add_substitution(AbiSubstitutionContext& ctx, const string& encoded)
 		return;
 	ctx.substitutions.push_back(encoded);
 }
-
 string abi_use_or_add_substitution(AbiSubstitutionContext& ctx,
                                    const string& encoded)
 {
@@ -72,12 +63,23 @@ string abi_use_or_add_substitution(AbiSubstitutionContext& ctx,
 	abi_add_substitution(ctx, encoded);
 	return encoded;
 }
-
+string abi_type_probe_with_substitutions(TypePtr type,
+                                         AbiSubstitutionContext& ctx);
+string abi_use_or_add_type_substitution(AbiSubstitutionContext& ctx,
+                                        TypePtr type,
+                                        const string& encoded,
+                                        const string& initial_probe)
+{
+	string out = abi_use_or_add_substitution(ctx, encoded);
+	abi_add_substitution_alias(ctx, initial_probe, encoded);
+	string substituted_probe = abi_type_probe_with_substitutions(type, ctx);
+	abi_add_substitution_alias(ctx, substituted_probe, encoded);
+	return out;
+}
 string abi_type_with_substitutions(TypePtr type,
                                    AbiSubstitutionContext& ctx);
 string abi_type_probe_with_substitutions(TypePtr type,
                                          AbiSubstitutionContext& ctx);
-
 bool abi_type_encoding_active(const AbiSubstitutionContext& ctx,
                               const void* key)
 {
@@ -86,13 +88,11 @@ bool abi_type_encoding_active(const AbiSubstitutionContext& ctx,
 	            ctx.active_type_encodings.end(),
 	            key) != ctx.active_type_encodings.end();
 }
-
 struct AbiActiveTypeEncoding
 {
 	AbiSubstitutionContext& ctx;
 	const void* key;
 	bool pushed;
-
 	AbiActiveTypeEncoding(AbiSubstitutionContext& context, const void* value)
 		: ctx(context), key(value), pushed(false)
 	{
@@ -102,14 +102,12 @@ struct AbiActiveTypeEncoding
 			pushed = true;
 		}
 	}
-
 	~AbiActiveTypeEncoding()
 	{
 		if (pushed)
 			ctx.active_type_encodings.pop_back();
 	}
 };
-
 string abi_template_parameter_type_with_substitutions(
 	const string& name,
 	AbiSubstitutionContext& ctx)
@@ -142,7 +140,6 @@ string abi_template_parameter_type_with_substitutions(
 	}
 	return abi_use_or_add_substitution(ctx, encoded);
 }
-
 string abi_record_type_with_substitutions(TypePtr type,
                                           AbiSubstitutionContext& ctx,
                                           bool include_namespace);
@@ -161,7 +158,6 @@ string abi_template_argument_with_substitutions(
 	string abi_template_instance_argument_with_substitutions(
 		const pa11::TemplateInstanceArgument& arg,
 		AbiSubstitutionContext& ctx);
-
 const pa11::TemplateInstanceArgument* abi_pack_expansion_element(
 	const pa11::TemplateInstanceArgument& arg)
 {
@@ -191,7 +187,6 @@ const pa11::TemplateInstanceArgument* abi_pack_expansion_element(
 		return element;
 	return NULL;
 }
-
 	string abi_dependent_template_argument_type_with_substitutions(
 		TypePtr type,
 		AbiSubstitutionContext& ctx)
@@ -205,7 +200,6 @@ const pa11::TemplateInstanceArgument* abi_pack_expansion_element(
 			ctx,
 			abi_dependent_typename_type_with_substitutions(type, ctx, false));
 	}
-
 string abi_vendor_transform_type_argument_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx)
@@ -255,7 +249,6 @@ string abi_vendor_transform_type_argument_with_substitutions(
 			       type->base, ctx);
 	return abi_type_with_substitutions(type, ctx);
 }
-
 string abi_vendor_transform_instance_argument_with_substitutions(
 	const pa11::TemplateInstanceArgument& arg,
 	AbiSubstitutionContext& ctx)
@@ -265,7 +258,6 @@ string abi_vendor_transform_instance_argument_with_substitutions(
 			arg.type, ctx);
 	return abi_template_instance_argument_with_substitutions(arg, ctx);
 }
-
 string abi_dependent_typename_scope_prefix_with_substitutions(
 	AbiSubstitutionContext& ctx)
 {
@@ -293,7 +285,6 @@ string abi_dependent_typename_scope_prefix_with_substitutions(
 	return abi_scope_prefix_with_substitutions(
 		ctx.dependent_typename_scope_prefix, ctx);
 }
-
 string abi_dependent_typename_type_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx,
@@ -302,7 +293,6 @@ string abi_dependent_typename_type_with_substitutions(
 	vector<string> parts = abi_split_qualified_name(type->name);
 	if (parts.empty())
 		return abi_source_name(type->name);
-
 	if (!type->dependent_typename_qualified &&
 	    type->dependent_typename_template_id)
 	{
@@ -333,7 +323,6 @@ string abi_dependent_typename_type_with_substitutions(
 			return out;
 		}
 	}
-
 	if (!type->dependent_typename_qualified &&
 	    type->dependent_typename_template_id)
 	{
@@ -364,7 +353,6 @@ string abi_dependent_typename_type_with_substitutions(
 			return out;
 		}
 	}
-
 	if (!type->dependent_typename_qualified &&
 	    type->dependent_typename_template_id)
 	{
@@ -395,7 +383,6 @@ string abi_dependent_typename_type_with_substitutions(
 			return out;
 		}
 	}
-
 	string out;
 	string root_part = parts[0];
 	bool unqualified_template_root =
@@ -502,14 +489,12 @@ string abi_dependent_typename_type_with_substitutions(
 		out += "E";
 	return out;
 }
-
 bool abi_scope_is_std_namespace(Scope* scope)
 {
 	return scope != NULL &&
 	       scope->kind == ScopeKind::Namespace &&
 	       scope->name == "std";
 }
-
 bool abi_record_in_std_namespace(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -525,16 +510,95 @@ bool abi_record_in_std_namespace(TypePtr type)
 	}
 	return false;
 }
-
-string abi_std_abbreviation(TypePtr type)
+bool abi_record_directly_in_std_namespace(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->scope != NULL &&
+	       bare->scope->parent != NULL &&
+	       abi_scope_is_std_namespace(bare->scope->parent);
+}
+TypePtr abi_resolve_template_parameter_argument_type(TypePtr type,
+                                                     AbiSubstitutionContext* ctx)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    ctx == NULL ||
+	    !ctx->use_actual_template_parameter_types ||
+	    (bare->kind != pa11::TypeKind::TemplateParameter &&
+	     bare->kind != pa11::TypeKind::TemplateTemplateParameter))
+		return bare;
+	map<string, size_t>::const_iterator found =
+		ctx->template_parameters.find(bare->name);
+	if (found == ctx->template_parameters.end() ||
+	    found->second >= ctx->actual_template_arguments.size() ||
+	    ctx->actual_template_arguments[found->second].kind !=
+		    TemplateArgumentKind::Type)
+		return bare;
+	return pa11::strip_cv(ctx->actual_template_arguments[found->second].type);
+}
+bool abi_template_argument_is_fundamental(
+	const pa11::TemplateInstanceArgument& arg,
+	EFundamentalType fundamental,
+	AbiSubstitutionContext* ctx)
+{
+	TypePtr type = arg.kind == pa11::TemplateInstanceArgumentKind::Type
+		? pa11::strip_cv(arg.type) : TypePtr();
+	type = abi_resolve_template_parameter_argument_type(type, ctx);
+	return type.get() != NULL &&
+	       type->kind == pa11::TypeKind::Fundamental &&
+	       type->fundamental == fundamental;
+}
+bool abi_template_argument_is_std_unary_type_template(
+	const pa11::TemplateInstanceArgument& arg,
+	const string& primary,
+	EFundamentalType parameter,
+	AbiSubstitutionContext* ctx)
+{
+	TypePtr type = arg.kind == pa11::TemplateInstanceArgumentKind::Type
+		? pa11::strip_cv(arg.type) : TypePtr();
+	type = abi_resolve_template_parameter_argument_type(type, ctx);
+	if (type.get() == NULL ||
+	    !type->is_template_specialization ||
+	    !abi_record_directly_in_std_namespace(type))
+		return false;
+	string name = !type->template_primary_name.empty()
+		? type->template_primary_name : type->name;
+	size_t args = name.find('<');
+	if (args != string::npos)
+		name = name.substr(0, args);
+	return name == primary &&
+	       type->template_arguments.size() == 1 &&
+	       abi_template_argument_is_fundamental(
+		       type->template_arguments[0], parameter, ctx);
+}
+bool abi_template_argument_is_char_traits_char(
+	const pa11::TemplateInstanceArgument& arg,
+	AbiSubstitutionContext* ctx)
+{
+	return abi_template_argument_is_std_unary_type_template(
+		arg, "char_traits", FT_CHAR, ctx);
+}
+bool abi_template_argument_is_allocator_char(
+	const pa11::TemplateInstanceArgument& arg,
+	AbiSubstitutionContext* ctx)
+{
+	return abi_template_argument_is_std_unary_type_template(
+		arg, "allocator", FT_CHAR, ctx);
+}
+bool abi_std_abbreviation_is_terminal(const string& abbreviation)
+{
+	return abbreviation == "Ss" ||
+	       abbreviation == "Si" ||
+	       abbreviation == "So" ||
+	       abbreviation == "Sd";
+}
+string abi_std_abbreviation(TypePtr type, AbiSubstitutionContext* ctx = NULL)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
 	if (bare.get() == NULL || !abi_record_in_std_namespace(bare))
 		return "";
-	bool directly_in_std =
-		bare->scope != NULL &&
-		bare->scope->parent != NULL &&
-		abi_scope_is_std_namespace(bare->scope->parent);
+	bool directly_in_std = abi_record_directly_in_std_namespace(bare);
 	string name = bare->is_template_specialization &&
 	              !bare->template_primary_name.empty()
 		? bare->template_primary_name : bare->name;
@@ -543,18 +607,43 @@ string abi_std_abbreviation(TypePtr type)
 		name = name.substr(0, args);
 	if (directly_in_std && name == "allocator")
 		return "Sa";
-	if (directly_in_std && name == "basic_string")
+	if (!directly_in_std || !bare->is_template_specialization)
+		return "";
+	if ((name == "basic_istream" ||
+	     name == "basic_ostream" ||
+	     name == "basic_iostream") &&
+	    bare->template_arguments.size() == 2 &&
+	    abi_template_argument_is_fundamental(
+		    bare->template_arguments[0], FT_CHAR, ctx) &&
+	    abi_template_argument_is_char_traits_char(
+		    bare->template_arguments[1], ctx))
+	{
+		if (name == "basic_istream")
+			return "Si";
+		if (name == "basic_ostream")
+			return "So";
+		return "Sd";
+	}
+	if (name == "basic_string" &&
+	    bare->template_arguments.size() == 3 &&
+	    abi_template_argument_is_fundamental(
+		    bare->template_arguments[0], FT_CHAR, ctx) &&
+	    abi_template_argument_is_char_traits_char(
+		    bare->template_arguments[1], ctx) &&
+	    abi_template_argument_is_allocator_char(
+		    bare->template_arguments[2], ctx))
+		return "Ss";
+	if (name == "basic_string")
 		return "Sb";
 	return "";
 }
-
 string abi_record_unscoped_with_substitutions(TypePtr type,
                                               AbiSubstitutionContext& ctx)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
 	if (bare.get() == NULL)
 		return abi_source_name("v");
-	string special = abi_std_abbreviation(bare);
+	string special = abi_std_abbreviation(bare, &ctx);
 	string name = bare->is_template_specialization &&
 	              !bare->template_primary_name.empty()
 		? bare->template_primary_name : bare->name;
@@ -563,7 +652,8 @@ string abi_record_unscoped_with_substitutions(TypePtr type,
 		name = name.substr(0, args);
 	string primary = special.empty() ? abi_source_name(name) : special;
 	string out = primary;
-	if (bare->is_template_specialization)
+	if (bare->is_template_specialization &&
+	    !abi_std_abbreviation_is_terminal(special))
 	{
 		if (special.empty())
 		{
@@ -581,7 +671,6 @@ string abi_record_unscoped_with_substitutions(TypePtr type,
 	}
 	return out;
 }
-
 vector<Scope*> abi_scope_path_outer_first(Scope* scope)
 {
 	vector<Scope*> reversed;
@@ -596,7 +685,6 @@ vector<Scope*> abi_scope_path_outer_first(Scope* scope)
 	}
 	return vector<Scope*>(reversed.rbegin(), reversed.rend());
 }
-
 string abi_scope_component_with_substitutions(Scope* scope,
                                              AbiSubstitutionContext& ctx)
 {
@@ -615,7 +703,6 @@ string abi_scope_component_with_substitutions(Scope* scope,
 	}
 	return "";
 }
-
 string abi_scope_prefix_with_substitutions(const vector<Scope*>& scopes,
                                           AbiSubstitutionContext& ctx)
 {
@@ -645,33 +732,52 @@ string abi_scope_prefix_with_substitutions(const vector<Scope*>& scopes,
 	}
 	string out;
 	string prefix_key;
+	string prefix_text;
 	for (size_t i = 0; i < scopes.size(); ++i)
 	{
 		string component = abi_scope_component_with_substitutions(scopes[i],
 		                                                         ctx);
 		if (component.empty())
 			continue;
+		bool terminal_standard =
+			abi_std_abbreviation_is_terminal(component);
+		if (terminal_standard && prefix_key == "St")
+		{
+			if (out.size() >= 2 && out.compare(out.size() - 2, 2, "St") == 0)
+				out.resize(out.size() - 2);
+			prefix_key.clear();
+			prefix_text.clear();
+		}
 		string key = prefix_key.empty()
-			? component : string("N") + prefix_key + component + "E";
+			? component : string("N") + prefix_text + component + "E";
+		if (prefix_key == "St" && scopes[i]->kind == ScopeKind::Class)
+			key = "St" + component;
 		if (component == "St")
 		{
 			out += component;
 			prefix_key = key;
+			prefix_text += component;
 			continue;
 		}
-		size_t found = abi_find_substitution(ctx, key);
+		size_t found = terminal_standard ? static_cast<size_t>(-1) :
+			abi_find_substitution(ctx, key);
 		if (found != static_cast<size_t>(-1))
 			out += abi_substitution_code(found);
 		else
 		{
 			out += component;
-			abi_add_substitution(ctx, key);
+			if (!terminal_standard)
+				abi_add_substitution(ctx, key);
+			if (!terminal_standard &&
+			    scopes[i]->kind == ScopeKind::Class &&
+			    prefix_key == "St")
+				abi_add_substitution_alias(ctx, "St" + component, key);
 		}
 		prefix_key = key;
+		prefix_text += component;
 	}
 	return out;
 }
-
 string abi_namespace_scope_prefix_key(const vector<Scope*>& scopes)
 {
 	string key;
@@ -688,7 +794,6 @@ string abi_namespace_scope_prefix_key(const vector<Scope*>& scopes)
 	}
 	return key;
 }
-
 void abi_alias_function_template_argument_scope(
 	AbiSubstitutionContext& ctx,
 	const vector<Scope*>& scopes,
@@ -707,7 +812,6 @@ void abi_alias_function_template_argument_scope(
 		return;
 	abi_add_substitution_alias(ctx, key, encoded);
 }
-
 string abi_record_type_with_substitutions(TypePtr type,
                                           AbiSubstitutionContext& ctx,
                                           bool include_namespace)
@@ -715,10 +819,15 @@ string abi_record_type_with_substitutions(TypePtr type,
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
 	if (bare.get() == NULL)
 		return "v";
-	if (!abi_std_abbreviation(bare).empty())
-		return abi_use_or_add_substitution(
-			ctx, abi_record_unscoped_with_substitutions(bare, ctx));
+	string special = abi_std_abbreviation(bare, &ctx);
+	if (!special.empty())
+	{
+		string encoded = abi_record_unscoped_with_substitutions(bare, ctx);
+		return abi_std_abbreviation_is_terminal(special)
+			? encoded : abi_use_or_add_substitution(ctx, encoded);
+	}
 	vector<Scope*> scopes;
+	vector<string> named_scopes;
 	string scope_prefix;
 	if (include_namespace && bare->scope != NULL)
 	{
@@ -727,6 +836,8 @@ string abi_record_type_with_substitutions(TypePtr type,
 		    !(scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0])))
 			scope_prefix = abi_scope_prefix_with_substitutions(scopes, ctx);
 	}
+	else if (include_namespace && bare->scope == NULL)
+		named_scopes = abi_qualified_type_scope_names(bare);
 	if (bare->is_template_specialization && !scopes.empty() &&
 	    !(scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0])))
 	{
@@ -772,6 +883,13 @@ string abi_record_type_with_substitutions(TypePtr type,
 		else
 			encoded = "N" + scope_prefix + leaf + "E";
 	}
+	else if (!named_scopes.empty())
+	{
+		string named_prefix =
+			abi_named_scope_prefix_with_substitutions(named_scopes, ctx);
+		encoded = named_scopes.size() == 1 && named_scopes[0] == "std"
+			? "St" + leaf : "N" + named_prefix + leaf + "E";
+	}
 	else if (include_namespace &&
 	         bare->is_template_specialization &&
 	         bare->scope == NULL &&
@@ -790,7 +908,6 @@ string abi_record_type_with_substitutions(TypePtr type,
 	abi_alias_function_template_argument_scope(ctx, scopes, encoded);
 	return result;
 }
-
 string abi_template_instance_argument_with_substitutions(
 	const pa11::TemplateInstanceArgument& arg,
 	AbiSubstitutionContext& ctx)
@@ -895,7 +1012,6 @@ string abi_template_instance_argument_with_substitutions(
 	}
 	return abi_template_name(arg.template_name);
 }
-
 string abi_template_argument_with_substitutions(
 	const TemplateArgument& arg,
 	AbiSubstitutionContext& ctx)
@@ -1004,7 +1120,6 @@ string abi_template_argument_with_substitutions(
 		  : string("v");
 	return abi_template_name(name);
 }
-
 string abi_template_argument_for_parameter_with_substitutions(
 	const TemplateParameterInfo& parameter,
 	const TemplateArgument& arg,
@@ -1037,7 +1152,6 @@ string abi_template_argument_for_parameter_with_substitutions(
 	}
 	return abi_template_argument_with_substitutions(arg, ctx);
 }
-
 string abi_type_with_substitutions(TypePtr type,
                                    AbiSubstitutionContext& ctx)
 {
@@ -1078,24 +1192,38 @@ string abi_type_with_substitutions(TypePtr type,
 			quals += "K";
 		if ((type->cv & pa11::CV_VOLATILE) != 0)
 			quals += "V";
-		return abi_use_or_add_substitution(
-			ctx, quals + abi_type_with_substitutions(type->base, ctx));
+		return abi_use_or_add_type_substitution(
+			ctx,
+			type,
+			quals + abi_type_with_substitutions(type->base, ctx),
+			probe);
 	}
 	if (type->kind == pa11::TypeKind::Pointer)
-		return abi_use_or_add_substitution(
-			ctx, "P" + abi_type_with_substitutions(type->base, ctx));
-	if (type->kind == pa11::TypeKind::LValueReference)
-		return abi_use_or_add_substitution(
-			ctx, "R" + abi_type_with_substitutions(type->base, ctx));
-	if (type->kind == pa11::TypeKind::RValueReference)
-		return abi_use_or_add_substitution(
-			ctx, "O" + abi_type_with_substitutions(type->base, ctx));
-	if (type->kind == pa11::TypeKind::Array)
-		return abi_use_or_add_substitution(
+		return abi_use_or_add_type_substitution(
 			ctx,
+			type,
+			"P" + abi_type_with_substitutions(type->base, ctx),
+			probe);
+	if (type->kind == pa11::TypeKind::LValueReference)
+		return abi_use_or_add_type_substitution(
+			ctx,
+			type,
+			"R" + abi_type_with_substitutions(type->base, ctx),
+			probe);
+	if (type->kind == pa11::TypeKind::RValueReference)
+		return abi_use_or_add_type_substitution(
+			ctx,
+			type,
+			"O" + abi_type_with_substitutions(type->base, ctx),
+			probe);
+	if (type->kind == pa11::TypeKind::Array)
+		return abi_use_or_add_type_substitution(
+			ctx,
+			type,
 			"A" + (type->unknown_bound ? string("") :
 			       to_string(type->bound)) + "_" +
-			abi_type_with_substitutions(type->base, ctx));
+			abi_type_with_substitutions(type->base, ctx),
+			probe);
 	if (type->kind == pa11::TypeKind::Function)
 	{
 		string out;
@@ -1109,7 +1237,7 @@ string abi_type_with_substitutions(TypePtr type,
 		if (type->parameters.empty())
 			out += "v";
 		out += "E";
-		return abi_use_or_add_substitution(ctx, out);
+		return abi_use_or_add_type_substitution(ctx, type, out, probe);
 	}
 	if (type->kind == pa11::TypeKind::Record ||
 	    type->kind == pa11::TypeKind::Enum)
@@ -1138,7 +1266,6 @@ string abi_type_with_substitutions(TypePtr type,
 	}
 	return abi_fundamental_type(type->fundamental);
 }
-
 string abi_function_return_type_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx)
@@ -1165,192 +1292,17 @@ string abi_function_return_type_with_substitutions(
 	}
 	return abi_type_with_substitutions(type, ctx);
 }
-
 string abi_function_parameter_type_with_substitutions(
 	TypePtr type,
 	AbiSubstitutionContext& ctx)
 {
 	bool saved = ctx.suppress_dependent_typename_marker;
 	ctx.suppress_dependent_typename_marker = true;
-	string out = abi_type_with_substitutions(type, ctx);
+	TypePtr encoded_type = pa11::is_reference_type(type)
+		? type : pa11::strip_top_level_cv(type);
+	string out = abi_type_with_substitutions(encoded_type, ctx);
 	ctx.suppress_dependent_typename_marker = saved;
 	return out;
 }
-
-string abi_type_probe_with_substitutions(TypePtr type,
-                                         AbiSubstitutionContext& ctx);
-string abi_record_type_probe_with_substitutions(TypePtr type,
-                                                AbiSubstitutionContext& ctx,
-                                                bool include_namespace);
-
-string abi_scope_prefix_probe_with_substitutions(const vector<Scope*>& scopes,
-                                                AbiSubstitutionContext& ctx)
-{
-	string out;
-	string prefix_key;
-	for (size_t i = 0; i < scopes.size(); ++i)
-	{
-		string component;
-		if (scopes[i]->kind == ScopeKind::Namespace)
-			component = abi_scope_component_with_substitutions(scopes[i],
-			                                                  ctx);
-		else if (scopes[i]->kind == ScopeKind::Class)
-			component = abi_record_type_probe_with_substitutions(
-				pa11::record_type_for_scope(scopes[i]), ctx, false);
-		if (component.empty())
-			continue;
-		string key = prefix_key.empty()
-			? component : string("N") + prefix_key + component + "E";
-		size_t found = component == "St" ? static_cast<size_t>(-1) :
-			abi_find_substitution(ctx, key);
-		out += found == static_cast<size_t>(-1)
-			? component : abi_substitution_code(found);
-		prefix_key = key;
-	}
-	return out;
-}
-
-string abi_template_instance_argument_probe_with_substitutions(
-	const pa11::TemplateInstanceArgument& arg,
-	AbiSubstitutionContext& ctx)
-{
-	if (arg.kind == pa11::TemplateInstanceArgumentKind::Type)
-		return abi_type_probe_with_substitutions(arg.type, ctx);
-	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value)
-	{
-		if (!arg.value_name.empty())
-			return "L" + abi_type_probe_with_substitutions(arg.type, ctx) +
-			       abi_encoded_stable_value_name(arg.value_name) + "E";
-		if (abi_type_is_dependent_parameter(arg.type))
-			return "Li" + to_string(arg.value) + "E";
-		return "L" + abi_type_probe_with_substitutions(arg.type, ctx) +
-		       to_string(arg.value) + "E";
-	}
-	if (arg.kind == pa11::TemplateInstanceArgumentKind::Pack)
-	{
-		const pa11::TemplateInstanceArgument* expansion =
-			abi_pack_expansion_element(arg);
-		if (expansion != NULL)
-			return "Dp" +
-			       abi_template_instance_argument_probe_with_substitutions(
-				       *expansion, ctx);
-		string out = "J";
-		for (size_t i = 0; i < arg.pack.size(); ++i)
-			out += abi_template_instance_argument_probe_with_substitutions(
-				arg.pack[i], ctx);
-		out += "E";
-		return out;
-	}
-	return abi_template_name(arg.template_name);
-}
-
-string abi_record_type_probe_with_substitutions(TypePtr type,
-                                                AbiSubstitutionContext& ctx,
-                                                bool include_namespace)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
-		return "v";
-	string special = abi_std_abbreviation(bare);
-	string name = bare->is_template_specialization &&
-	              !bare->template_primary_name.empty()
-		? bare->template_primary_name : bare->name;
-	size_t args = name.find('<');
-	if (args != string::npos)
-		name = name.substr(0, args);
-	string leaf = special.empty() ? abi_source_name(name) : special;
-	vector<Scope*> scopes;
-	string scope_prefix;
-	if (special.empty() && include_namespace && bare->scope != NULL)
-	{
-		scopes = abi_scope_path_outer_first(bare->scope->parent);
-		if (!scopes.empty() &&
-		    !(scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0])))
-			scope_prefix =
-				abi_scope_prefix_probe_with_substitutions(scopes, ctx);
-	}
-	if (bare->is_template_specialization)
-	{
-		leaf += "I";
-		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
-			leaf += abi_template_instance_argument_probe_with_substitutions(
-				bare->template_arguments[i], ctx);
-		leaf += "E";
-	}
-	if (!special.empty())
-		return leaf;
-	if (!scopes.empty())
-	{
-		if (scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0]))
-			return "St" + leaf;
-		return "N" + scope_prefix + leaf + "E";
-	}
-	return leaf;
-}
-
-string abi_type_probe_with_substitutions(TypePtr type,
-                                         AbiSubstitutionContext& ctx)
-{
-	if (type.get() == NULL)
-		return "v";
-	if (type->is_dependent_typename)
-		return abi_dependent_typename_type(type,
-		                                   ctx.template_parameters,
-		                                   ctx.expression_tokens,
-		                                   !ctx.suppress_dependent_typename_marker);
-	if (type->kind == pa11::TypeKind::Cv)
-	{
-		string quals;
-		if ((type->cv & pa11::CV_CONST) != 0)
-			quals += "K";
-		if ((type->cv & pa11::CV_VOLATILE) != 0)
-			quals += "V";
-		return quals + abi_type_probe_with_substitutions(type->base, ctx);
-	}
-	if (type->kind == pa11::TypeKind::Pointer)
-		return "P" + abi_type_probe_with_substitutions(type->base, ctx);
-	if (type->kind == pa11::TypeKind::LValueReference)
-		return "R" + abi_type_probe_with_substitutions(type->base, ctx);
-	if (type->kind == pa11::TypeKind::RValueReference)
-		return "O" + abi_type_probe_with_substitutions(type->base, ctx);
-	if (type->kind == pa11::TypeKind::Array)
-		return "A" + (type->unknown_bound ? string("") :
-		       to_string(type->bound)) + "_" +
-		       abi_type_probe_with_substitutions(type->base, ctx);
-	if (type->kind == pa11::TypeKind::Function)
-	{
-		string out;
-		if ((type->cv & pa11::CV_CONST) != 0)
-			out += "K";
-		if ((type->cv & pa11::CV_VOLATILE) != 0)
-			out += "V";
-		out += "F" + abi_type_probe_with_substitutions(type->base, ctx);
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-			out += abi_type_probe_with_substitutions(type->parameters[i],
-			                                        ctx);
-		if (type->parameters.empty())
-			out += "v";
-		return out + "E";
-	}
-	if (type->kind == pa11::TypeKind::Record ||
-	    type->kind == pa11::TypeKind::Enum)
-		return abi_record_type_probe_with_substitutions(type, ctx, true);
-	if (type->kind == pa11::TypeKind::TemplateParameter ||
-	    type->kind == pa11::TypeKind::TemplateTemplateParameter)
-	{
-		map<string, size_t>::const_iterator found =
-			ctx.template_parameters.find(type->name);
-		size_t index = found == ctx.template_parameters.end() ? 0 : found->second;
-		return index == 0 ? string("T_") :
-		       string("T") + to_string(index - 1) + "_";
-	}
-	if (type->kind == pa11::TypeKind::MemberPointer)
-		return "M" + abi_type_probe_with_substitutions(type->member_class,
-		                                               ctx) +
-		       abi_type_probe_with_substitutions(type->base, ctx);
-	return abi_fundamental_type(type->fundamental);
-}
-
-
 }  // namespace internal
 }  // namespace pa12

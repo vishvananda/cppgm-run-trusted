@@ -1,4 +1,5 @@
 #include "pa12_expr_parser_support.h"
+#include "pa12_templates_function_abi_internal.h"
 #include "pa12_templates_function_support.h"
 #include <algorithm>
 #include <cctype>
@@ -18,7 +19,8 @@ case FT_LONG_INT: return "l"; case FT_UNSIGNED_LONG_INT: return "m"; case FT_LON
 case FT_FLOAT: return "f"; case FT_DOUBLE: return "d"; default: return "i"; }
 } string lambda_abi_source_name(const string& name) { return to_string(name.size()) + name;
 } string lambda_abi_type(TypePtr type) { if (type.get() == NULL)
-return "v"; if (type->kind == pa11::TypeKind::Cv) { string out;
+return "v"; try { return abi_type(type, map<string, size_t>(), NULL); } catch (const exception&) {}
+if (type->kind == pa11::TypeKind::Cv) { string out;
 if ((type->cv & pa11::CV_CONST) != 0) out += "K"; if ((type->cv & pa11::CV_VOLATILE) != 0) out += "V";
 return out + lambda_abi_type(type->base); } if (type->kind == pa11::TypeKind::LValueReference) return "R" + lambda_abi_type(type->base);
 if (type->kind == pa11::TypeKind::RValueReference) return "O" + lambda_abi_type(type->base); if (type->kind == pa11::TypeKind::Pointer) return "P" + lambda_abi_type(type->base);
@@ -219,7 +221,7 @@ pa11::create_child_scope(closure_parent, ScopeKind::Class, name); TypePtr closur
 params, suffix.variadic); operator_function_type->cv = mutable_lambda ? pa11::CV_NONE :
 suffix.function_cv == pa11::CV_NONE ? pa11::CV_CONST : suffix.function_cv; TypePtr operator_type = make_member_function_type(closure_scope, operator_function_type);
 Binding* call_op = add_function_binding(closure_scope, "operator()", operator_type,
-false); call_op->language_linkage = current_language_linkage(); call_op->is_inline_definition = true; call_op->unwind_no = suffix.noexcept_decl;
+false); call_op->language_linkage = current_language_linkage(); call_op->is_inline_definition = true; call_op->unwind_no = suffix.noexcept_decl; call_op->dynamic_exception_spec = suffix.dynamic_exception_spec; call_op->dynamic_exception_types = suffix.dynamic_exception_types;
 call_op->ref_qualifier = suffix.ref_qualifier; vector<string> operator_names(1, "this"); vector<Expr> operator_defaults(1);
 for (size_t i = 0; i < suffix.parameters.size(); ++i) { operator_names.push_back(suffix.parameters[i].name); operator_defaults.push_back(suffix.parameters[i].default_value); }
 function_parameter_names_[call_op] = operator_names; if (lambda_template_scope) lambda_template_parameters_[call_op] = lambda_parameters;
@@ -259,7 +261,7 @@ capture.field->is_reference_member = default_by_reference && !capture.is_this; c
 parsed_operator_for_captures.children[0].type; rewrite_lambda_captures(parsed_operator_for_captures, capture_fields, this_binding,
 this_type); remember_function_body(call_op, parsed_operator_for_captures); } if (!lambda_template_scope) extra_lowir_nodes_.push_back(operator_wrapper.children.back());
 function_type->base = result; Scope* target = nearest_namespace_scope(current_scope()); Binding* function = add_value(target, BindingKind::Function, name, function_type);
-function->language_linkage = current_language_linkage(); function->is_inline_definition = true; function->is_namespace_static = true; function->unwind_no = suffix.noexcept_decl;
+function->language_linkage = current_language_linkage(); function->is_inline_definition = true; function->is_namespace_static = true; function->unwind_no = suffix.noexcept_decl; function->dynamic_exception_spec = suffix.dynamic_exception_spec; function->dynamic_exception_types = suffix.dynamic_exception_types;
 function->ref_qualifier = suffix.ref_qualifier; Node fn("function-definition " + qualified_decl_name(function) + " " + pa11::describe_type(function_type)); fn.binding = function;
 fn.type = function_type; Scope* function_scope = pa11::create_child_scope(current_scope(), ScopeKind::Function, name); map<Binding*, Binding*> replacements;
 vector<string> helper_names; const Node& parsed_operator = operator_wrapper.children.back(); size_t operator_param_index = 1; for (size_t i = 0; i < suffix.parameters.size(); ++i)
@@ -313,9 +315,28 @@ args[i].pack_expansion) dependent_new_args = true; if (!type_is_template_depende
 } else if (args.empty()) ctor = ensure_default_constructor(record, true); if (ctor != NULL && unevaluated_expression_depth_ == 0)
 { parse_pending_function_body(ctor); parse_pending_member_body(ctor); }
 } Binding* opnew = NULL; if (have_placement) {
-vector<Binding*> news = lookup_unqualified_set(current_scope(), "operatornew", pa11::LOOKUP_FUNCTION); for (size_t i = 0; i < news.size(); ++i) {
-if (news[i]->type->parameters.size() == 2) { opnew = news[i]; break;
-} } } Expr out;
+	vector<Binding*> news = lookup_unqualified_set(current_scope(),
+		array_new ? "operatornew[]" : "operatornew",
+		pa11::LOOKUP_FUNCTION);
+	Expr size_arg;
+	size_arg.valid = true;
+	size_arg.type = pa11::make_fundamental(FT_UNSIGNED_LONG_INT);
+	size_arg.category = ValueCategory::PRValue;
+	size_arg.constant_expression = true;
+	size_arg.has_constant_value = true;
+	size_arg.constant_value = 0;
+	size_arg.node = Node("literal prvalue " +
+		pa11::describe_type(size_arg.type) + " 0");
+	vector<Expr> new_args;
+	new_args.push_back(size_arg);
+	new_args.push_back(placement);
+	vector<Expr> converted_new_args;
+	map<Binding*, vector<TemplateArgument> > explicit_template_arguments;
+	opnew = resolve_call_candidate(news,
+	                               new_args,
+	                               explicit_template_arguments,
+	                               converted_new_args);
+} Expr out;
 out.valid = true; out.binding = opnew; out.type = pa11::make_pointer(type); out.category = ValueCategory::PRValue;
 out.node = Node(string("new-expression prvalue ") + pa11::describe_type(out.type) + (array_new ? " array" : "")); out.node.direct_call = ctor;
 out.node.binding = opnew; if (have_initializer_parens) out.node.token_text = "paren-init"; if (have_placement)
@@ -429,7 +450,17 @@ expect(OP_RPAREN); } catch (...) {
 template_argument_expression_depth_ = save_template_argument_depth; throw; }
 template_argument_expression_depth_ = save_template_argument_depth; return parse_postfix_suffixes(inner); } Expr inner = parse_unary_expression();
 return make_cast_expr(target, "OP_LPAREN:", inner); } Expr Parser::parse_functional_cast(TypePtr target) {
-	expect(OP_LPAREN); if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record) { vector<Expr> args;
+	expect(OP_LPAREN);
+	try
+	{
+		target = substitute_template_type(target);
+	}
+	catch (const runtime_error&)
+	{
+		if (!type_is_template_dependent(target))
+			throw;
+	}
+	if (pa11::strip_cv(target)->kind == pa11::TypeKind::Record) { vector<Expr> args;
 	if (!at(OP_RPAREN)) args = parse_argument_list(); expect(OP_RPAREN); bool dependent_args = false;
 	for (size_t i = 0; i < args.size(); ++i)
 	if (type_is_template_dependent(args[i].type) || args[i].pack_expansion)
@@ -599,7 +630,50 @@ out.push_back(elem); return true; } if (active_class_instantiation_dependent())
 { pos_ = save; out.clear(); return false;
 } throw runtime_error("pack expansion qualifier is not a record"); } vector<Binding*> found =
 lookup_qualified_set(record->scope, member_name, pa11::LOOKUP_VALUE); if (found.empty()) throw runtime_error("pack expansion member not found"); out.push_back(make_static_member_pack_element(found[0]));
-} return true; } vector<Expr> Parser::parse_argument_list()
+} return true; }
+static size_t top_level_argument_ellipsis(const vector<Token>& tokens,
+                                          size_t begin)
+{
+	int paren = 0;
+	int square = 0;
+	int brace = 0;
+	int angle = 0;
+	for (size_t i = begin; i < tokens.size(); ++i)
+	{
+		if (tokens[i].kind != posttoken::TokenKind::Simple)
+			continue;
+		ETokenType type = tokens[i].type;
+		if (type == OP_LPAREN)
+			++paren;
+		else if (type == OP_RPAREN)
+		{
+			if (paren == 0 && square == 0 && brace == 0 && angle == 0)
+				break;
+			if (paren > 0)
+				--paren;
+		}
+		else if (type == OP_LSQUARE)
+			++square;
+		else if (type == OP_RSQUARE && square > 0)
+			--square;
+		else if (type == OP_LBRACE)
+			++brace;
+		else if (type == OP_RBRACE && brace > 0)
+			--brace;
+		else if (type == OP_LT && paren == 0 && square == 0 && brace == 0)
+			++angle;
+		else if (type == OP_GT && angle > 0)
+			--angle;
+		else if (type == OP_COMMA && paren == 0 && square == 0 &&
+		         brace == 0 && angle == 0)
+			break;
+		else if (type == OP_DOTS && paren == 0 && square == 0 &&
+		         brace == 0 && angle == 0)
+			return i;
+	}
+	return tokens.size();
+}
+vector<Expr> Parser::parse_argument_list()
 { vector<Expr> args; for (;;) {
 vector<Scope*> saved_arg_scopes = scopes_;
 vector<Expr> expanded; bool expanded_member_pack = false; try {
@@ -610,7 +684,12 @@ if (!consume(OP_COMMA)) break; continue; }
 saved_arg_scopes = scopes_;
 size_t arg_begin = pos_; Expr arg; try {
 arg = at(OP_LBRACE) ? parse_braced_init_list() : parse_assignment_expression();
-} catch (...) { scopes_ = saved_arg_scopes; throw; }
+} catch (...) { scopes_ = saved_arg_scopes; size_t ellipsis = top_level_argument_ellipsis(tokens_, arg_begin);
+if (ellipsis != tokens_.size()) { vector<Expr> pattern_expansion; pos_ = ellipsis + 1;
+if (try_expand_expression_pack_pattern(arg_begin, ellipsis, pattern_expansion)) {
+args.insert(args.end(), pattern_expansion.begin(), pattern_expansion.end()); if (!consume(OP_COMMA))
+break; continue; } }
+throw; }
 scopes_ = saved_arg_scopes;
 size_t arg_end = pos_; if (consume(OP_DOTS)) { if (arg.pack_expansion)
 args.insert(args.end(), arg.pack.begin(), arg.pack.end()); else { vector<Expr> pattern_expansion;

@@ -69,6 +69,8 @@ bool is_unsigned_integral_type(EFundamentalType type)
 
 bool source_looks_floating(const string& source)
 {
+	if (source == "inf" || source == "nan" || source == "snan")
+		return true;
 	for (size_t i = 0; i < source.size(); ++i)
 	{
 		const char c = source[i];
@@ -98,6 +100,48 @@ vector<unsigned char> raw_bytes(T value)
 	return out;
 }
 
+bool pseudo_float_literal(const string& source)
+{
+	return source == "inf" || source == "nan" || source == "snan";
+}
+
+vector<unsigned char> pseudo_float_bytes(const string& source,
+                                         int width_bits)
+{
+	vector<unsigned char> out;
+	if (width_bits == 32)
+	{
+		uint32_t bits = 0x7f800000U;
+		if (source == "nan")
+			bits = 0x7fc00000U;
+		else if (source == "snan")
+			bits = 0x7fa00000U;
+		append_le(out, bits, 4);
+		return out;
+	}
+	if (width_bits == 64)
+	{
+		uint64_t bits = 0x7ff0000000000000ULL;
+		if (source == "nan")
+			bits = 0x7ff8000000000000ULL;
+		else if (source == "snan")
+			bits = 0x7ff4000000000000ULL;
+		append_le(out, bits, 8);
+		return out;
+	}
+	if (width_bits == 80)
+	{
+		out.assign(10, 0);
+		out[7] = source == "snan" ? 0xa0 : 0x80;
+		if (source == "nan")
+			out[7] = 0xc0;
+		out[8] = 0xff;
+		out[9] = 0x7f;
+		return out;
+	}
+	throw runtime_error("invalid pseudo floating literal width");
+}
+
 LiteralValue make_integer_literal(const string& source,
                                   EFundamentalType type,
                                   uint64_t value)
@@ -121,7 +165,13 @@ LiteralValue make_float_literal(const string& source, EFundamentalType type)
 	out.alignment = fundamental_size(type);
 	out.floating = true;
 	out.arithmetic = true;
-	if (type == FT_FLOAT)
+	if (pseudo_float_literal(source))
+	{
+		int width = type == FT_FLOAT ? 32 :
+		            (type == FT_DOUBLE ? 64 : 80);
+		out.bytes = pseudo_float_bytes(source, width);
+	}
+	else if (type == FT_FLOAT)
 		out.bytes = raw_bytes(PA2Decode_float(source));
 	else if (type == FT_DOUBLE)
 		out.bytes = raw_bytes(PA2Decode_double(source));
@@ -132,6 +182,8 @@ LiteralValue make_float_literal(const string& source, EFundamentalType type)
 
 bool valid_float_suffix(const string& source)
 {
+	if (pseudo_float_literal(source))
+		return true;
 	if (source.find('_') != string::npos)
 		return false;
 	if (source.empty())
@@ -435,6 +487,8 @@ vector<unsigned char> convert_literal_width(const LiteralValue& value,
                                             int width_bits)
 {
 	const size_t nbytes = static_cast<size_t>(width_bits == 80 ? 10 : width_bits / 8);
+	if (value.floating && pseudo_float_literal(value.source))
+		return pseudo_float_bytes(value.source, width_bits);
 	vector<unsigned char> out = value.bytes;
 	if (out.size() > nbytes)
 	{

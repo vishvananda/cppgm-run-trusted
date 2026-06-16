@@ -1,6 +1,8 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
+#include <memory>
 #include <stdexcept>
 
 using namespace std;
@@ -21,6 +23,30 @@ bool is_function_reference(TypePtr type)
 	return (type->kind == pa11::TypeKind::LValueReference ||
 	        type->kind == pa11::TypeKind::RValueReference) &&
 	       pa11::strip_cv(type->base)->kind == pa11::TypeKind::Function;
+}
+
+bool concrete_outer_template_substitutions(
+	const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL ||
+	    (declaration->outer_type_substitutions.empty() &&
+	     declaration->outer_value_substitutions.empty()))
+		return false;
+	for (size_t i = 0; i < declaration->outer_type_substitutions.size(); ++i)
+		for (map<string, TypePtr>::const_iterator it =
+			     declaration->outer_type_substitutions[i].begin();
+		     it != declaration->outer_type_substitutions[i].end();
+		     ++it)
+			if (type_structurally_dependent(it->second))
+				return false;
+	for (size_t i = 0; i < declaration->outer_value_substitutions.size(); ++i)
+		for (map<string, TemplateArgument>::const_iterator it =
+			     declaration->outer_value_substitutions[i].begin();
+		     it != declaration->outer_value_substitutions[i].end();
+		     ++it)
+			if (it->second.dependent)
+				return false;
+	return true;
 }
 
 bool is_member_function_pointer(TypePtr type)
@@ -131,12 +157,165 @@ TypePtr member_function_pointer_type(Binding* binding)
 	return pa11::make_member_pointer(class_type, member_fn);
 }
 
+TypePtr replacement_owner_record(TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return TypePtr();
+	TypePtr owner_record =
+		declaration->placeholder != NULL &&
+		declaration->placeholder->owner != NULL &&
+		declaration->placeholder->owner->kind == ScopeKind::Class
+		? pa11::record_type_for_scope(declaration->placeholder->owner)
+		: (declaration->owner != NULL &&
+		   declaration->owner->kind == ScopeKind::Class
+		   ? pa11::record_type_for_scope(declaration->owner) : TypePtr());
+	return owner_record.get() != NULL
+		? pa11::strip_cv(owner_record) : TypePtr();
+}
+
 }  // namespace
 
-TemplateDeclaration* Parser::replacement_function_template_definition(
-	TemplateDeclaration* declaration)
+TemplateDeclaration* Parser::replacement_owner_template(
+	TypePtr owner_record) const
 {
-	if (declaration->has_definition)
+	TemplateDeclaration* owner_template =
+		class_template_declaration_for_match(owner_record);
+	if (owner_template != NULL || owner_record.get() == NULL)
+		return owner_template;
+	map<const void*, TemplateDeclaration*>::const_iterator found =
+		record_template_declarations_.find(owner_record.get());
+	return found != record_template_declarations_.end()
+		? found->second : NULL;
+}
+
+TemplateDeclaration* Parser::replacement_member_function_template_definition(
+	TemplateDeclaration* declaration,
+	TypePtr owner_record,
+	TemplateDeclaration* owner_template,
+	bool declaration_has_body)
+{
+	if (owner_template == NULL ||
+	    (declaration_has_body && !declaration->class_template_member))
+		return NULL;
+	bool prefer_concrete_owner =
+		owner_record.get() != NULL &&
+		owner_record->kind == pa11::TypeKind::Record &&
+		owner_record->is_template_specialization &&
+		!type_structurally_dependent(owner_record);
+	TemplateDeclaration* fallback_replacement = NULL;
+	map<pair<TemplateDeclaration*, string>,
+	    vector<TemplateDeclaration*> >::iterator mit =
+		member_function_templates_.find(
+			make_pair(owner_template, declaration->name));
+	if (mit != member_function_templates_.end())
+	{
+		for (size_t j = 0; j < mit->second.size(); ++j)
+		{
+			TemplateDeclaration* replacement = mit->second[j];
+			bool same_template_parameters =
+				replacement != NULL &&
+				template_parameter_lists_match_local(
+					replacement->parameters,
+					declaration->parameters);
+			bool same_signature =
+				replacement != NULL &&
+				replacement->generic_function_type.get() != NULL &&
+				same_function_template_signature_type(
+					replacement->generic_function_type,
+					declaration->generic_function_type);
+			bool same_arity = false;
+			if (replacement != NULL &&
+			    replacement->generic_function_type.get() != NULL &&
+			    declaration->generic_function_type.get() != NULL &&
+			    replacement->generic_function_type->kind ==
+				    pa11::TypeKind::Function &&
+			    declaration->generic_function_type->kind ==
+				    pa11::TypeKind::Function)
+				same_arity =
+					replacement->generic_function_type
+						->parameters.size() ==
+					declaration->generic_function_type
+						->parameters.size();
+			bool compatible =
+				same_signature ||
+				(replacement != NULL &&
+				 declaration->class_template_member &&
+				 replacement->class_template_member &&
+				 same_template_parameters &&
+				 (same_arity ||
+				  template_declaration_has_body(
+					  declaration_tokens_,
+					  replacement)));
+			if (replacement == declaration ||
+			    !template_declaration_has_body(declaration_tokens_,
+			                                   replacement) ||
+			    replacement->generic_function_type.get() == NULL ||
+			    !compatible)
+				continue;
+			if (!same_signature)
+			{
+				TemplateDeclaration* result = NULL;
+				for (size_t ti = 0; ti < template_declarations_.size(); ++ti)
+				{
+					TemplateDeclaration* candidate =
+						template_declarations_[ti].get();
+					if (candidate != NULL &&
+					    candidate != replacement &&
+					    candidate->name == replacement->name &&
+					    candidate->owner == replacement->owner &&
+					    candidate->decl_begin ==
+						    replacement->decl_begin &&
+					    candidate->decl_end ==
+						    replacement->decl_end &&
+					    candidate->placeholder ==
+						    declaration->placeholder &&
+					    candidate->generic_function_type.get() != NULL &&
+					    same_function_template_signature_type(
+						    candidate->generic_function_type,
+						    declaration->generic_function_type))
+					{
+						result = candidate;
+						break;
+					}
+				}
+				if (result != NULL)
+					return result;
+				unique_ptr<TemplateDeclaration> adjusted(
+					new TemplateDeclaration(*replacement));
+				adjusted->generic_function_type =
+					declaration->generic_function_type;
+				adjusted->placeholder = declaration->placeholder;
+				adjusted->function_parameter_names =
+					declaration->function_parameter_names;
+				result = adjusted.get();
+				template_declarations_.push_back(std::move(adjusted));
+				if (prefer_concrete_owner &&
+				    !concrete_outer_template_substitutions(result))
+				{
+					if (fallback_replacement == NULL)
+						fallback_replacement = result;
+					continue;
+				}
+				return result;
+			}
+			if (prefer_concrete_owner &&
+			    !concrete_outer_template_substitutions(replacement))
+			{
+				if (fallback_replacement == NULL)
+					fallback_replacement = replacement;
+				continue;
+			}
+			return replacement;
+		}
+	}
+	return fallback_replacement;
+}
+
+TemplateDeclaration* Parser::replacement_free_function_template_definition(
+	TemplateDeclaration* declaration,
+	bool declaration_has_body)
+{
+	if (declaration_has_body)
 		return declaration;
 	map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator sit =
 		function_templates_.find(declaration->owner);
@@ -161,6 +340,27 @@ TemplateDeclaration* Parser::replacement_function_template_definition(
 		return replacement;
 	}
 	return declaration;
+}
+
+TemplateDeclaration* Parser::replacement_function_template_definition(
+	TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return declaration;
+	bool declaration_has_body =
+		template_declaration_has_body(declaration_tokens_, declaration);
+	TypePtr owner_record = replacement_owner_record(declaration);
+	TemplateDeclaration* member =
+		replacement_member_function_template_definition(
+			declaration,
+			owner_record,
+			replacement_owner_template(owner_record),
+			declaration_has_body);
+	return member != NULL
+		? member
+		: replacement_free_function_template_definition(
+			declaration,
+			declaration_has_body);
 }
 
 void collect_owner_template_context(
@@ -239,6 +439,48 @@ bool overload_expr_is_address(const Expr& expr)
 	       expr.node.has_op &&
 	       expr.node.op == OP_AMP &&
 	       !expr.node.children.empty();
+}
+
+Expr selected_overload_expr_result(const Expr& expr,
+                                   Binding* found,
+                                   bool target_member_function_pointer,
+                                   const string& found_name)
+{
+	Expr out = expr;
+	out.overloads.clear();
+	out.binding = found;
+	bool address_expr = overload_expr_is_address(expr);
+	Expr selected_id;
+	selected_id.valid = true;
+	selected_id.binding = found;
+	selected_id.type = found->type;
+	selected_id.category = ValueCategory::LValue;
+	selected_id.node = Node("id-expression lvalue " +
+	                        pa11::describe_type(found->type) + " " +
+	                        found_name);
+	selected_id.node.binding = found;
+	annotate_expr_node(selected_id);
+	if (address_expr)
+	{
+		out.type = target_member_function_pointer
+			? member_function_pointer_type(found)
+			: pa11::make_pointer(found->type);
+		out.category = ValueCategory::PRValue;
+		out.node = Node("unary-expression prvalue " +
+		                pa11::describe_type(out.type) + " OP_AMP:&");
+		add_child(out.node, selected_id.node);
+		out.node.has_op = true;
+		out.node.op = OP_AMP;
+		out.node.token_text = "&";
+	}
+	else
+	{
+		out.type = found->type;
+		out.category = ValueCategory::LValue;
+		out.node = selected_id.node;
+	}
+	annotate_expr_node(out);
+	return out;
 }
 
 Binding* Parser::instantiate_target_overload_candidate(
@@ -417,47 +659,17 @@ Expr Parser::select_overload_expr(const Expr& expr, TypePtr target)
 	}
 	if (found == NULL)
 		throw runtime_error("no overloaded function id target");
-	if (unevaluated_expression_depth_ == 0)
+	if (unevaluated_expression_depth_ == 0 &&
+	    !defer_hosted_function_body(found))
 	{
 		parse_pending_function_body(found);
 		parse_pending_member_body(found);
+		ensure_function_body_extra_node(found);
 	}
-
-	Expr out = expr;
-	out.overloads.clear();
-	out.binding = found;
-	bool address_expr = overload_expr_is_address(expr);
-	Expr selected_id;
-	selected_id.valid = true;
-	selected_id.binding = found;
-	selected_id.type = found->type;
-	selected_id.category = ValueCategory::LValue;
-	selected_id.node = Node("id-expression lvalue " +
-	                        pa11::describe_type(found->type) + " " +
-	                        qualified_decl_name(found));
-	selected_id.node.binding = found;
-	annotate_expr_node(selected_id);
-	if (address_expr)
-	{
-		out.type = target_member_function_pointer
-			? member_function_pointer_type(found)
-			: pa11::make_pointer(found->type);
-		out.category = ValueCategory::PRValue;
-		out.node = Node("unary-expression prvalue " +
-		                pa11::describe_type(out.type) + " OP_AMP:&");
-		add_child(out.node, selected_id.node);
-		out.node.has_op = true;
-		out.node.op = OP_AMP;
-		out.node.token_text = "&";
-	}
-	else
-	{
-		out.type = found->type;
-		out.category = ValueCategory::LValue;
-		out.node = selected_id.node;
-	}
-	annotate_expr_node(out);
-	return out;
+	return selected_overload_expr_result(expr,
+	                                     found,
+	                                     target_member_function_pointer,
+	                                     qualified_decl_name(found));
 }
 
 Expr Parser::make_dependent_call_expr(const Expr& callee,
@@ -594,15 +806,32 @@ void Parser::prepare_member_call(Expr& callee, vector<Expr>& args)
 				pa11::strip_cv(this_param)->kind ==
 				pa11::TypeKind::Pointer
 				? pa11::strip_cv(this_param)->base : TypePtr();
-			TypePtr object_type = expression_object_type(object.type);
-			TypePtr object_bare = object_type.get() != NULL
-				? pa11::strip_cv(object_type) : TypePtr();
-			if (object_bare.get() != NULL &&
-			    object_bare->kind == pa11::TypeKind::Pointer)
-				object_type = object_bare->base;
-			if (this_object.get() != NULL &&
-			    object_type.get() != NULL &&
-			    pa11::type_has_const(object_type) &&
+				TypePtr object_type = expression_object_type(object.type);
+				TypePtr object_bare = object_type.get() != NULL
+					? pa11::strip_cv(object_type) : TypePtr();
+				if (object_bare.get() != NULL &&
+				    object_bare->kind == pa11::TypeKind::Pointer)
+					object_type = object_bare->base;
+				TypePtr object_record = object_type;
+				TypePtr object_record_bare =
+					object_record.get() != NULL
+					? pa11::strip_cv(object_record) : TypePtr();
+				TypePtr this_record =
+					this_object.get() != NULL
+					? pa11::strip_cv(this_object) : TypePtr();
+				if (object_record_bare.get() != NULL &&
+				    this_record.get() != NULL &&
+				    object_record_bare->kind == pa11::TypeKind::Record &&
+				    this_record->kind == pa11::TypeKind::Record &&
+				    !pa11::same_type(object_record_bare, this_record) &&
+				    !same_template_specialization_record(object_record_bare,
+				                                         this_record) &&
+				    record_base_distance(object_record_bare, this_record) >=
+					    1000000)
+					continue;
+				if (this_object.get() != NULL &&
+				    object_type.get() != NULL &&
+				    pa11::type_has_const(object_type) &&
 			    !pa11::type_has_const(this_object))
 				continue;
 			if (candidate->ref_qualifier == 1 &&

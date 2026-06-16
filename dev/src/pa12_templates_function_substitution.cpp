@@ -75,7 +75,14 @@ namespace internal {
 				saved_names != function_parameter_names_.end() &&
 				name_index < saved_names->second.size()
 				? saved_names->second[name_index] : string();
-			if (function_parameter_pack_name(declaration, pattern, pack_name) &&
+			bool parameter_pack =
+				declaration != NULL &&
+				function_parameter_pack_name(declaration, pattern, pack_name);
+			if (!parameter_pack)
+				parameter_pack =
+					function_parameter_type_pack_expansion_name(pattern,
+					                                            pack_name);
+			if (parameter_pack &&
 			    find_template_value_substitution(pack_name, subst) &&
 			    subst.kind == TemplateArgumentKind::Pack)
 			{

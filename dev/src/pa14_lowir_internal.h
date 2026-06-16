@@ -1,9 +1,6 @@
 #pragma once
-
 #include "pa14_lowir.h"
-
 #include "pa12_internal.h"
-
 #include <map>
 #include <functional>
 #include <memory>
@@ -12,12 +9,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
 using namespace std;
-
 namespace pa14 {
 namespace internal {
-
 using pa11::Binding;
 using pa11::BindingKind;
 using pa11::Scope;
@@ -26,25 +20,21 @@ using pa11::TypeKind;
 using pa11::TypePtr;
 using pa12::internal::Node;
 using pa12::internal::ValueCategory;
-
+struct ProgramLowerer;
 struct Value
 {
 	string type;
 	string text;
-
 	Value() {}
 	Value(const string& t, const string& v) : type(t), text(v) {}
 };
-
 struct Block
 {
 	string name;
 	vector<string> instrs;
 	bool terminated;
-
 	explicit Block(const string& n) : name(n), terminated(false) {}
 };
-
 struct FunctionOut
 {
 	const Binding* binding;
@@ -57,7 +47,6 @@ struct FunctionOut
 	vector<string> slots;
 	vector<Block> blocks;
 	vector<pair<string, string> > constructor_base_entry_arg_rewrites;
-
 	FunctionOut()
 		: binding(NULL),
 		  has_range_for_state(false),
@@ -69,18 +58,15 @@ FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
 FunctionOut make_destructor_base_entry(const FunctionOut& lowered,
                                        const string& name,
                                        bool native_lowering = false);
-
 struct InitAction
 {
 	string target;
 	string kind;
 	string symbol;
-
 	InitAction() {}
 	InitAction(const string& t, const string& k, const string& s)
 		: target(t), kind(k), symbol(s) {}
 };
-
 struct Cleanup
 {
 	Binding* binding;
@@ -88,7 +74,6 @@ struct Cleanup
 	string addr;
 	string instruction;
 	bool force_destructor_call;
-
 	Cleanup() : binding(NULL), force_destructor_call(false) {}
 	Cleanup(Binding* b, TypePtr t, bool force = false)
 		: binding(b), type(t), force_destructor_call(force) {}
@@ -97,7 +82,6 @@ struct Cleanup
 	explicit Cleanup(const string& instr)
 		: binding(NULL), instruction(instr), force_destructor_call(false) {}
 };
-
 struct PendingConstructorConversion
 {
 	size_t index;
@@ -105,10 +89,10 @@ struct PendingConstructorConversion
 	TypePtr from;
 	TypePtr to;
 };
-
 bool starts_with(const string& text, const string& prefix);
 TypePtr object_type(TypePtr type);
 TypePtr strip_for_value(TypePtr type);
+TypePtr substituted_expression_type(const Node& expr);
 bool is_reference(TypePtr type);
 bool is_float_type(TypePtr type);
 bool is_unsigned_type(TypePtr type);
@@ -122,6 +106,9 @@ bool record_pass_by_address(TypePtr type);
 bool record_return_by_address(TypePtr type);
 bool record_has_nontrivial_value_transfer(TypePtr type);
 bool record_has_storage_copy(TypePtr type);
+bool hosted_shared_ptr_record(TypePtr type);
+bool function_signature_has_unresolved_storage(const Binding* binding);
+bool node_tree_has_unresolved_storage(const Node& node);
 string lowir_literal(TypePtr type, const Node& node);
 string lowir_parameter(TypePtr type);
 string metadata_suffix(const vector<string>& items);
@@ -133,6 +120,9 @@ bool node_contains_call_expression(const Node& node);
 bool record_has_default_constructor_for_array(TypePtr type);
 bool record_has_base_subobject(TypePtr source, TypePtr target);
 uint64_t base_subobject_offset(TypePtr source, TypePtr target);
+Binding* find_record_copy_move_assignment(TypePtr type, bool move);
+Binding* canonical_constructor_binding(Binding* binding);
+const Binding* canonical_constructor_binding(const Binding* binding);
 Binding* find_constructor(TypePtr type, size_t arg_count);
 const Node* record_prvalue_child_for_xvalue(const Node& arg);
 bool defaulted_copy_move_constructor_needs_helper(Binding* binding, TypePtr type);
@@ -143,8 +133,13 @@ bool inline_defaulted_copy_move_storage_constructor(Binding* binding,
                                                    const Node& init);
 Binding* find_destructor(TypePtr type);
 bool type_needs_destructor(TypePtr type);
+bool type_has_generated_noop_destructor(TypePtr type);
+bool temp_cleanups_are_generated_noop_destructors(
+	const vector<pair<Value, TypePtr> >& temps);
 bool default_init_no_op(TypePtr type);
 bool no_op_generated_default_constructor(Binding* ctor, TypePtr type);
+void demand_suppressed_default_init_subobjects(ProgramLowerer& program,
+                                               TypePtr type);
 bool has_inline_constructor(TypePtr type);
 bool is_brace_elision_aggregate(TypePtr type);
 bool is_string_literal_node(const Node& node);
@@ -154,9 +149,21 @@ bool record_has_user_assignment_operator(TypePtr type);
 string zero_integer_type(uint64_t size);
 bool same_record_initializer(const Node& init, TypePtr type);
 bool record_has_base(TypePtr source, TypePtr target);
+bool record_uses_hosted_external_stream_vtable(TypePtr record);
+bool hosted_external_stream_function_binding(const Binding* binding);
 bool is_class_constructor_binding(const Binding* binding);
 bool is_class_destructor_binding(const Binding* binding);
 TypePtr class_record_for_member(const Binding* binding);
+bool lowir_synthesizable_noop_constructor(const Binding* binding);
+bool lowir_synthesizable_defaulted_storage_copy_constructor(
+	const Binding* binding);
+bool lowir_hosted_tree_copy_move_constructor(const Binding* binding);
+Node lowir_make_defaulted_storage_copy_constructor_node(
+	const Binding* binding);
+bool lowir_extern_template_class_external_binding(const Binding* binding);
+bool suppress_noop_generated_constructor_call(const Node& node); void collect_hosted_streambuf_virtual_body_demands(const vector<Node>& extra, set<const Binding*>& out);
+bool hosted_library_binding(const Binding* binding);
+bool hosted_library_body_candidate(const Binding* binding);
 Binding* anonymous_storage_member_target(Binding* binding);
 bool record_is_template_specialization(TypePtr record);
 bool binding_has_template_specialization_context(const Binding* binding);
@@ -166,6 +173,7 @@ string record_lowir_name(TypePtr record);
 string rtti_record_symbol_part(TypePtr record);
 bool template_record_uses_abi_global_symbol(TypePtr record);
 string template_record_global_symbol_part(TypePtr record);
+bool type_contains_template_symbol_pattern(TypePtr type);
 string vtable_symbol_for_record(TypePtr record);
 string vtable_view_symbol_for_record(TypePtr record,
                                      TypePtr view_base,
@@ -189,7 +197,6 @@ vector<pair<TypePtr, uint64_t> > polymorphic_vtable_views(TypePtr record);
 TypePtr hidden_virtual_base_context_record(TypePtr type);
 vector<TypePtr> hidden_virtual_bases_for_record(TypePtr record);
 vector<TypePtr> hidden_virtual_bases_for_parameter(TypePtr type);
-
 struct ProgramLowerer
 {
 	vector<string> declares;
@@ -200,6 +207,7 @@ struct ProgramLowerer
 	map<const Binding*, string> symbols;
 	map<string, int> used_symbols;
 	map<string, string> function_symbols;
+	map<string, string> function_symbols_by_object;
 		set<string> defined_functions;
 		set<string> declared_functions;
 		set<string> defined_globals;
@@ -213,6 +221,7 @@ struct ProgramLowerer
 	map<const Binding*, const Node*> inline_definitions;
 	map<const Binding*, Node> synthetic_inline_definitions;
 	map<const Binding*, Node> deferred_global_definitions;
+	set<const Binding*> pending_deferred_global_definition_demands;
 		map<const Binding*, size_t> inline_definition_ranks;
 	map<pair<const Binding*, size_t>, vector<TypePtr> >
 		hidden_parameter_virtual_bases;
@@ -220,6 +229,8 @@ struct ProgramLowerer
 	set<const Binding*> demanded_inline_complete_entries;
 	set<const Binding*> demanded_constructor_base_entries;
 	set<const Binding*> demanded_destructor_base_entries;
+	set<const Binding*> referenced_constructor_base_entries;
+	set<const Binding*> constructor_base_entry_only_references;
 	set<const void*> static_downcast_source_records;
 	set<const void*> emitted_vtables;
 	set<const void*> emitted_rtti;
@@ -240,9 +251,7 @@ struct ProgramLowerer
 	bool needs_empty_init_function;
 	bool needs_eh_declarations;
 		int generated_assignment_emit_depth;
-
 		typedef vector<const Binding*>::iterator PendingInlineIterator;
-
 		ProgramLowerer(bool native = false, bool host_object = false);
 	string symbol_for(const Binding* binding);
 	string constructor_symbol_for(const Binding* binding, bool base_entry);
@@ -268,12 +277,14 @@ struct ProgramLowerer
 	void demand_lifecycle_base_entry_declaration(const Binding* binding);
 	void demand_global_declaration(const Binding* binding);
 	bool demand_deferred_global_definition(const Binding* binding);
+	bool deferred_global_definition_demanded(const Binding* binding) const;
 	bool template_static_member_constant_load_required(
 		const Binding* binding) const;
 	void demand_template_static_member_definitions_for_function(
 		const Binding* binding);
 	string ensure_local_static_guard(const Binding* binding);
 	void ensure_thread_local_wrapper(const string& global_name);
+	void ensure_atexit_declaration();
 	void ensure_eh_declarations();
 	Binding* demand_implicit_copy_assignment(TypePtr type, bool move);
 	void queue_synthetic_assignment_function(Binding* binding,
@@ -364,9 +375,7 @@ struct ProgramLowerer
 	void write_global_zero_items(ostringstream& out, TypePtr elem);
 	void write(const string& outfile) const;
 };
-
 	vector<size_t> ordered_function_indices(const ProgramLowerer& program);
-
 	struct ActiveCatchContext
 	{
 		string rtti;
@@ -378,18 +387,15 @@ struct ProgramLowerer
 		{
 		}
 	};
-
 	class FunctionLowerer
 	{
 public:
 	FunctionLowerer(ProgramLowerer& program,
 	                const Node& fn,
 	                bool destructor_base_entry = false);
-
 	FunctionOut lower();
 	FunctionOut lower_deleting_destructor_entry(const string& name,
 	                                            const string& header);
-
 private:
 	struct CallEmissionState
 	{
@@ -416,7 +422,6 @@ private:
 		string call_text;
 		string tmp;
 		bool cleanup_temps_in_call;
-
 		CallEmissionState()
 			: direct(NULL),
 			  arg_start(1),
@@ -432,7 +437,6 @@ private:
 		{
 		}
 	};
-
 	ProgramLowerer& program_;
 	const Node& fn_;
 	bool destructor_base_entry_;
@@ -470,7 +474,6 @@ private:
 		vector<const Node*> constructor_unwind_actions_;
 		string active_unwind_dispatch_;
 		vector<ActiveCatchContext> active_catches_;
-
 	void add_slot(const string& name, const string& type);
 	string slot_for(const Binding* binding);
 	string fresh_temp();
@@ -481,10 +484,10 @@ private:
 		void terminate(const string& text);
 		void collect_label_cleanup_depths(const Node& node, size_t depth);
 		void emit_goto_cleanups(const string& label);
-
 		void lower_params();
 	void lower_param_stores();
 	bool lower_defaulted_storage_special_member();
+	bool lower_hosted_vector_bool_move_body();
 	void lower_stmt(const Node& node);
 	void lower_compound(const Node& node);
 	void lower_deleting_destructor_compound(const Node& node);
@@ -534,6 +537,9 @@ private:
 	                                Value value,
 	                                const function<Value()>& member_addr);
 	void lower_base_init(const Node& node);
+	bool lower_defaulted_assignment_fields(TypePtr record,
+	                                       bool move,
+	                                       const string& other_name);
 	Value emit_base_subobject_addr(Value object, TypePtr source, TypePtr target);
 	const Binding* hidden_virtual_base_parameter_binding(
 		const Node& expr) const;
@@ -593,6 +599,10 @@ private:
 			const function<Value()>& addr_for,
 			TypePtr type,
 			const Node& init);
+		bool lower_braced_copy_constructor_init(
+			const function<Value()>& addr_for,
+			TypePtr type,
+			const Node& init);
 		bool lower_braced_record_constructor_init(
 			const function<Value()>& addr_for,
 			TypePtr type,
@@ -607,6 +617,18 @@ private:
 		                            Binding* ctor,
 		                            const vector<const Node*>& args,
 		                            bool base_entry = false);
+		bool lower_hosted_shared_ptr_constructor(
+			const function<Value()>& addr_for,
+			Binding* ctor,
+			const vector<const Node*>& args);
+		bool lower_hosted_vector_initializer_list_constructor(
+			const function<Value()>& addr_for,
+			Binding* ctor,
+			const vector<const Node*>& args);
+		bool lower_hosted_vector_bool_move_constructor(
+			const function<Value()>& addr_for,
+			Binding* ctor,
+			const vector<const Node*>& args);
 		void append_constructor_hidden_parameter_args(
 			Binding* ctor,
 			const vector<const Node*>& args,
@@ -668,7 +690,6 @@ private:
 	void lower_switch_items(const Node& node,
 	                        vector<pair<string, const Node*> >& cases,
 	                        const Node*& default_node);
-
 		Value emit_rvalue(const Node& expr);
 		Value emit_statement_expression(const Node& expr);
 		Value emit_member_pointer_function_rvalue(const Node& expr);
@@ -689,9 +710,15 @@ private:
 	Value emit_builtin_operator_new_delete(const Node& expr);
 	Value emit_builtin_overflow(const Node& expr);
 	Value emit_builtin_flt_rounds(const Node& expr);
-	Value emit_builtin_fpclassify(const Node& expr);
-	Value emit_builtin_float_constant(const Node& expr);
-	Value emit_lvalue_addr(const Node& expr);
+		Value emit_builtin_fpclassify(const Node& expr);
+		Value emit_builtin_fp_test(const Node& expr);
+		Value emit_builtin_float_constant(const Node& expr);
+		Value emit_initializer_list_accessor_call(const Node& expr,
+		                                          bool& handled);
+		Value emit_lvalue_addr(const Node& expr);
+	Value hosted_hash_node_object_addr(const Node& object,
+	                                   TypePtr object_expr_type);
+	Value emit_hosted_hash_node_next_call(const Node& expr, bool& handled);
 	Value emit_member_lvalue_addr(const Node& expr);
 	Value emit_literal(const Node& expr);
 	Value emit_id_rvalue(const Node& expr);
@@ -716,9 +743,10 @@ private:
 		Value emit_plain_assignment(const Node& expr, TypePtr lhs_type);
 		Value emit_unary(const Node& expr);
 	Value emit_postfix(const Node& expr);
-	Value emit_call(const Node& expr);
-	void init_call_target(const Node& expr, CallEmissionState& call);
-	void preallocate_call_result_slot(const Node& expr,
+		Value emit_call(const Node& expr);
+		void init_call_target(const Node& expr, CallEmissionState& call);
+		void init_direct_call_target(const Node& expr, CallEmissionState& call); void init_indirect_call_target(const Node& expr, CallEmissionState& call); void validate_call_target(const Node& expr, CallEmissionState& call);
+		void preallocate_call_result_slot(const Node& expr,
 	                                  CallEmissionState& call);
 	void prepare_call_setup_protection(const Node& expr,
 	                                   CallEmissionState& call);
@@ -779,9 +807,16 @@ private:
 	                                   Value& out);
 	bool emit_active_cleanup_scalar_call(CallEmissionState& call,
 	                                     Value& out);
+	bool emit_hosted_vector_bool_insert_aux(CallEmissionState& call);
 	Value emit_plain_scalar_call(CallEmissionState& call);
 	bool lower_indirect_record_call(const function<Value()>& addr_for,
 	                                const Node& expr);
+	bool lower_hosted_make_shared_call(const function<Value()>& addr_for,
+	                                   const Node& expr);
+	bool lower_hosted_basic_string_cstr_init(
+		const function<Value()>& addr_for,
+		TypePtr type,
+		const Node& arg);
 	void lower_call_argument(const Node& arg,
 	                         TypePtr param,
 	                         vector<string>& args,
@@ -816,9 +851,13 @@ private:
 	void ensure_throw_runtime_declarations();
 	void ensure_rethrow_runtime_declaration();
 	void ensure_noexcept_terminate_helper();
+	void ensure_unexpected_runtime_declaration();
 	void emit_rethrow();
+	void emit_dynamic_exception_filter(const Binding* binding);
 	void emit_noexcept_terminate_landing(TypePtr ret,
 	                                      bool indirect_result);
+	void emit_unexpected_landing(TypePtr ret,
+	                             bool indirect_result);
 	string ensure_exception_object_global(TypePtr object);
 	string emit_exception_allocation(TypePtr object,
 	                                 bool protect_throw,
@@ -857,7 +896,5 @@ private:
 	                                 const string& no);
 	void branch_on(const Node& expr, const string& yes, const string& no);
 };
-
-
 }  // namespace internal
 }  // namespace pa14

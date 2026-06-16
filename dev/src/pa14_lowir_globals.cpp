@@ -48,6 +48,17 @@ bool record_has_destructor(TypePtr type)
 	return false;
 }
 
+bool function_address_requires_runtime_init(const Binding* binding)
+{
+	return binding != NULL &&
+	       (binding_has_template_specialization_context(binding) ||
+	        !binding->function_specialization_symbol.empty() ||
+	        (binding->aliased_binding != NULL &&
+	         (binding_has_template_specialization_context(
+		          binding->aliased_binding) ||
+	          !binding->aliased_binding->function_specialization_symbol.empty())));
+}
+
 bool global_static_scalar_initializer(const Node& init)
 {
 	if (starts_with(init.line, "literal"))
@@ -55,10 +66,16 @@ bool global_static_scalar_initializer(const Node& init)
 	if (starts_with(init.line, "id-expression") &&
 	    init.binding != NULL &&
 	    init.binding->kind == BindingKind::Function)
-		return true;
+		return !function_address_requires_runtime_init(init.binding);
 	if (starts_with(init.line, "unary-expression") && init.has_op &&
 	    init.op == OP_PLUS && !init.children.empty())
 		return global_static_scalar_initializer(init.children[0]);
+	if (starts_with(init.line, "unary-expression") && init.has_op &&
+	    init.op == OP_AMP && !init.children.empty() &&
+	    init.children[0].binding != NULL &&
+	    init.children[0].binding->kind == BindingKind::Function)
+		return !function_address_requires_runtime_init(
+			init.children[0].binding);
 	if (starts_with(init.line, "binary-expression") && init.has_op &&
 	    (init.op == OP_PLUS || init.op == OP_MINUS) &&
 	    init.children.size() == 2)
@@ -122,7 +139,27 @@ bool global_needs_runtime_init(TypePtr type, const Node& init)
 		    init.direct_call->type->parameters.size() == 1)
 			return false;
 		if (bare->kind == TypeKind::Record)
-			return record_has_constructor(type);
+		{
+			if (record_has_constructor(type))
+				return true;
+			pa11::layout_record_type(bare);
+			size_t index = 0;
+			for (size_t i = 0; i < bare->fields.size(); ++i)
+			{
+				Binding* field = bare->fields[i];
+				if (field == NULL || field->is_static_member)
+					continue;
+				if (index < init.children.size() &&
+				    global_needs_runtime_init(field->type,
+				                              init.children[index]))
+					return true;
+				++index;
+			}
+			for (size_t i = 0; i < init.children.size(); ++i)
+				if (!global_static_scalar_initializer(init.children[i]))
+					return true;
+			return false;
+		}
 		if (bare->kind == TypeKind::Array)
 		{
 			for (size_t i = 0; i < init.children.size(); ++i)
@@ -424,7 +461,31 @@ void ProgramLowerer::emit_global(const Node& node)
 		return;
 	string name = symbol_for(node.binding);
 	if (!defined_globals.insert(name).second)
+	{
+		if (!node.children.empty())
+		{
+			bool already_has_initializer = false;
+			for (map<const Binding*, Node>::const_iterator it =
+				     global_definition_nodes.begin();
+			     it != global_definition_nodes.end();
+			     ++it)
+				if (it->first != NULL &&
+				    symbol_for(it->first) == name &&
+				    !it->second.children.empty())
+				{
+					already_has_initializer = true;
+					break;
+				}
+			if (!already_has_initializer)
+			{
+				global_definition_nodes[node.binding] = node;
+				TypePtr type = node.binding->type;
+				TypePtr bare = pa11::strip_cv(type);
+				global_runtime_init(*this, node, type, bare);
+			}
+		}
 		return;
+	}
 	global_definition_bindings.push_back(node.binding);
 	global_definition_nodes[node.binding] = node;
 	if (node.binding->is_thread_local)

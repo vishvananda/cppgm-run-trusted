@@ -1,7 +1,6 @@
 #include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_support.h"
 #include "pa12_templates_instance_support.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -24,6 +23,18 @@ void build_owner_template_substitutions(
 	map<string, TypePtr>& subst,
 	map<string, TemplateArgument>& value_subst,
 	set<string>& pack_subst);
+void copy_member_template_placeholder_state(
+	Binding* placeholder,
+	Binding* source,
+	map<Binding*, vector<string> >& function_parameter_names,
+	map<Binding*, vector<Expr> >& default_arguments,
+	bool copy_static_member);
+void assign_member_template_alias_state(Binding* alias, Binding* source);
+void merge_member_template_alias_state(Binding* concrete, Binding* source);
+bool ordinary_member_definition_matches_placeholder(
+	const TemplateDeclaration* declaration,
+	Binding* function,
+	const vector<Token>& tokens);
 void Parser::instantiate_member_function_templates(TypePtr type,
                                                    bool object_root)
 {
@@ -78,12 +89,12 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					template_argument_from_instance_argument(
 						bare->template_arguments[i]));
 			record_template_declarations_[bare.get()] = owner_declaration;
-			record_template_arguments_[bare.get()] = owner_arguments;
-		}
+		record_template_arguments_[bare.get()] = owner_arguments;
 	}
-	TemplateDeclaration* primary_owner_declaration = owner_declaration;
-	if (owner_declaration != NULL &&
-	    owner_declaration->class_specialization &&
+	}
+		TemplateDeclaration* primary_owner_declaration = owner_declaration;
+		if (owner_declaration != NULL &&
+		    owner_declaration->class_specialization &&
 	    bare->is_template_specialization &&
 	    !bare->template_primary_name.empty())
 	{
@@ -118,143 +129,9 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 			active.erase(key);
 		}
 	} active_guard(active_member_function_template_records_, cache_key);
-	auto make_concrete_outer_substitutions =
-		[&](TemplateDeclaration* declaration,
-		    const map<string, TypePtr>& owner_type_subst,
-		    const map<string, TemplateArgument>& owner_value_subst,
-		    vector<map<string, TypePtr> >& type_substitutions,
-		    vector<map<string, TemplateArgument> >& value_substitutions) {
-			type_substitutions.clear();
-			value_substitutions.clear();
-			map<string, TypePtr> renamed_types;
-			map<string, TemplateArgument> renamed_values;
-			for (size_t p = declaration->decl_begin;
-			     p + 1 < declaration->decl_end;
-			     ++p)
-			{
-				if (tokens_[p].kind != posttoken::TokenKind::Identifier ||
-				    tokens_[p].source != owner_declaration->name ||
-				    tokens_[p + 1].kind != posttoken::TokenKind::Simple ||
-				    tokens_[p + 1].type != OP_LT)
-					continue;
-				size_t after_args = p + 1;
-				int angle = 0;
-				int paren = 0;
-				int square = 0;
-				int brace = 0;
-				while (after_args < declaration->decl_end)
-				{
-					const Token& tok = tokens_[after_args];
-					if (tok.kind == posttoken::TokenKind::Simple)
-					{
-						if (tok.type == OP_LPAREN)
-							++paren;
-						else if (tok.type == OP_RPAREN && paren > 0)
-							--paren;
-						else if (tok.type == OP_LSQUARE)
-							++square;
-						else if (tok.type == OP_RSQUARE && square > 0)
-							--square;
-						else if (tok.type == OP_LBRACE)
-							++brace;
-						else if (tok.type == OP_RBRACE && brace > 0)
-							--brace;
-						else if (paren == 0 && square == 0 && brace == 0)
-						{
-							if (tok.type == OP_LT)
-								++angle;
-							else if (tok.type == OP_GT)
-							{
-								--angle;
-								if (angle == 0)
-								{
-									++after_args;
-									break;
-								}
-							}
-						}
-					}
-					++after_args;
-				}
-				if (after_args >= declaration->decl_end ||
-				    tokens_[after_args].kind != posttoken::TokenKind::Simple ||
-				    tokens_[after_args].type != OP_COLON2)
-					continue;
-				vector<TemplateArgument> pattern_args;
-				size_t save_pos = pos_;
-				vector<map<string, TypePtr> > save_subst =
-					template_type_substitutions_;
-				vector<map<string, TemplateArgument> > save_value_subst =
-					template_value_substitutions_;
-				try
-				{
-					template_type_substitutions_.insert(
-						template_type_substitutions_.end(),
-						declaration->outer_type_substitutions.begin(),
-						declaration->outer_type_substitutions.end());
-					template_value_substitutions_.insert(
-						template_value_substitutions_.end(),
-						declaration->outer_value_substitutions.begin(),
-						declaration->outer_value_substitutions.end());
-					pos_ = p + 1;
-					parse_template_argument_list(pattern_args);
-				}
-				catch (const exception&)
-				{
-					pos_ = save_pos;
-					template_type_substitutions_ = save_subst;
-					template_value_substitutions_ = save_value_subst;
-					continue;
-				}
-				pos_ = save_pos;
-				template_type_substitutions_ = save_subst;
-				template_value_substitutions_ = save_value_subst;
-				for (size_t a = 0;
-				     a < pattern_args.size() &&
-				     a < owner_arguments.size();
-				     ++a)
-				{
-					const TemplateArgument& pattern = pattern_args[a];
-					const TemplateArgument& actual = owner_arguments[a];
-					string pack_name;
-					if (pack_argument_parameter_name(pattern, pack_name))
-					{
-						renamed_types[pack_name] =
-							pa11::make_template_parameter_type(pack_name);
-						renamed_values[pack_name] = actual;
-						continue;
-					}
-					if (pattern.kind == TemplateArgumentKind::Type)
-					{
-						TypePtr pattern_type =
-							pa11::strip_cv(pattern.type);
-						if (pattern_type.get() != NULL &&
-						    pattern_type->kind ==
-							    pa11::TypeKind::TemplateParameter &&
-						    actual.kind == TemplateArgumentKind::Type)
-							renamed_types[pattern_type->name] =
-								actual.type;
-					}
-					else if (pattern.kind == TemplateArgumentKind::Value &&
-					         pattern.dependent &&
-					         !pattern.value_name.empty())
-						renamed_values[pattern.value_name] = actual;
-					else if (pattern.kind == TemplateArgumentKind::Template &&
-					         !pattern.value_name.empty())
-						renamed_values[pattern.value_name] = actual;
-				}
-				break;
-			}
-			type_substitutions.push_back(owner_type_subst);
-			value_substitutions.push_back(owner_value_subst);
-			if (!renamed_types.empty())
-				type_substitutions.push_back(renamed_types);
-			if (!renamed_values.empty())
-				value_substitutions.push_back(renamed_values);
-		};
-		for (map<pair<TemplateDeclaration*, string>,
-		         vector<TemplateDeclaration*> >::iterator it =
-			     member_function_templates_.begin();
+			for (map<pair<TemplateDeclaration*, string>,
+			         vector<TemplateDeclaration*> >::iterator it =
+				     member_function_templates_.begin();
 		     it != member_function_templates_.end();
 		     ++it)
 		{
@@ -268,23 +145,27 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					it->second,
 					primary_owner_arguments,
 					record_template_arguments_);
-			for (size_t i = 0; i < it->second.size(); ++i)
-			{
-				TemplateDeclaration* declaration = it->second[i];
-				if (!declaration->class_specialization &&
-				    have_matching_member_class_specialization)
-					continue;
-				bool matching_owner_definition =
-					member_template_definition_matches_owner(
+				for (size_t i = 0; i < it->second.size(); ++i)
+				{
+					TemplateDeclaration* declaration = it->second[i];
+					if (!declaration->class_specialization &&
+					    have_matching_member_class_specialization)
+					{
+						continue;
+					}
+					bool matching_owner_definition =
+						member_template_definition_matches_owner(
 						this,
 						it->first.first,
 						owner_declaration,
 						primary_owner_declaration,
 						declaration,
-						primary_owner_arguments,
-						record_template_arguments_);
-				if (!matching_owner_definition)
-					continue;
+							primary_owner_arguments,
+							record_template_arguments_);
+					if (!matching_owner_definition)
+					{
+						continue;
+					}
 				bool dependent_qualified_conversion_definition =
 				declaration->name == "operator " &&
 				declaration->has_definition &&
@@ -314,9 +195,9 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					    declaration->has_definition &&
 					    bare->scope != NULL &&
 				    !declaration->constructor_template)
-				{
-					bool rebound_out_of_class_member_template = false;
-					bool handled_ordinary_member_definition = false;
+					{
+						bool rebound_out_of_class_member_template = false;
+						bool handled_ordinary_member_definition = false;
 					vector<Binding*> candidate_placeholders;
 					if (declaration->name == "operator ")
 					{
@@ -332,26 +213,40 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					}
 					else
 					{
-						map<string, vector<Binding*> >::iterator found =
-							bare->scope->members.find(declaration->name);
-						if (found != bare->scope->members.end())
-							candidate_placeholders = found->second;
-					}
-					for (size_t j = 0; j < candidate_placeholders.size(); ++j)
-						{
-							Binding* placeholder = candidate_placeholders[j];
-							map<Binding*, TemplateDeclaration*>::iterator existing =
-								function_template_placeholders_.find(placeholder);
-									bool ordinary_member_definition =
+							map<string, vector<Binding*> >::iterator found =
+								bare->scope->members.find(declaration->name);
+							if (found != bare->scope->members.end())
+								candidate_placeholders = found->second;
+						}
+							for (size_t j = 0; j < candidate_placeholders.size(); ++j)
+								{
+									Binding* placeholder = candidate_placeholders[j];
+									map<Binding*, TemplateDeclaration*>::iterator existing =
+										function_template_placeholders_.find(placeholder);
+										bool ordinary_member_definition =
 									existing == function_template_placeholders_.end() &&
 									declaration->has_definition &&
 								declaration->generic_function_type.get() != NULL &&
 								declaration->generic_function_type->kind ==
 									pa11::TypeKind::Function &&
-								declaration->generic_function_type->parameters.empty() &&
-								placeholder != NULL &&
-								placeholder->kind == BindingKind::Function;
-							map<string, TypePtr> subst;
+										declaration->generic_function_type->parameters.empty() &&
+										placeholder != NULL &&
+										placeholder->kind == BindingKind::Function;
+								if (ordinary_member_definition &&
+								    !ordinary_member_definition_matches_placeholder(
+									    declaration,
+									    placeholder,
+									    tokens_))
+									continue;
+								if (ordinary_member_definition &&
+								    candidate_placeholders.size() > 1 &&
+								    hosted_library_function(placeholder) &&
+								    placeholder->is_virtual)
+								{
+									handled_ordinary_member_definition = true;
+									continue;
+								}
+								map<string, TypePtr> subst;
 							map<string, TemplateArgument> value_subst;
 							set<string> pack_subst;
 							for (size_t k = 0;
@@ -450,6 +345,7 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 										}
 							if (ordinary_member_definition)
 							{
+								placeholder->is_inline_definition = true;
 								size_t body_pos =
 									function_body_start(tokens_,
 									                    declaration->decl_begin,
@@ -564,11 +460,7 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 										placeholder_names =
 											function_parameter_names_.find(
 												placeholder);
-									if ((placeholder_names ==
-									     function_parameter_names_.end() ||
-									     !member_parameter_names_have_non_this(
-										     placeholder_names->second)) &&
-									    member_parameter_names_have_non_this(
+									if (member_parameter_names_have_non_this(
 										    declaration->function_parameter_names))
 									{
 										function_parameter_names_[placeholder] =
@@ -615,23 +507,37 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 											    placeholder)
 												already_pending = true;
 									if (!already_pending)
+									{
 										enqueue_pending_member_body(bare->scope,
 										                            pending);
+									}
 									handled_ordinary_member_definition = true;
 								}
-								else
-								{
-									try
+									else
 									{
-										parse_pending_member_body_now(pending);
-										placeholder->is_object_root = true;
-										ensure_function_body_extra_node(placeholder);
-										handled_ordinary_member_definition = true;
+										try
+										{
+											bool parsed =
+												parse_pending_member_body_now(pending);
+											placeholder->is_object_root = true;
+											if (parsed)
+												ensure_function_body_extra_node(placeholder);
+											else
+												enqueue_pending_member_body(bare->scope,
+												                            pending);
+											handled_ordinary_member_definition = true;
+										}
+										catch (const exception&)
+										{
+											if (hosted_compatibility_)
+											{
+												placeholder->is_object_root = true;
+												enqueue_pending_member_body(bare->scope,
+												                            pending);
+												handled_ordinary_member_definition = true;
+											}
+										}
 									}
-									catch (const exception&)
-									{
-									}
-								}
 								continue;
 							}
 							TypePtr matched_type;
@@ -644,6 +550,12 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 								existing->second->generic_function_type.get() != NULL &&
 								existing->second->generic_function_type->kind ==
 									pa11::TypeKind::Function;
+							if (dependent_definition_placeholder &&
+							    !ordinary_member_definition_matches_placeholder(
+								    declaration,
+								    placeholder,
+								    tokens_))
+								continue;
 							TypePtr generic_for_match =
 								dependent_definition_placeholder
 								? existing->second->generic_function_type
@@ -745,6 +657,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 						clone->emitted_variable_specializations.clear();
 						make_concrete_outer_substitutions(
 							declaration,
+							owner_declaration,
+							owner_arguments,
 							subst,
 							value_subst,
 							clone->outer_type_substitutions,
@@ -948,33 +862,15 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							if (declaration->constructor_template)
 								discard_implicit_default_constructor(bare,
 								                                     placeholder);
-						if (declaration->placeholder != NULL)
-					{
-						placeholder->is_explicit =
-							declaration->placeholder->is_explicit;
-						placeholder->is_constexpr =
-							declaration->placeholder->is_constexpr;
-						placeholder->unwind_no =
-							declaration->placeholder->unwind_no;
-						placeholder->ref_qualifier =
-							declaration->placeholder->ref_qualifier;
-							map<Binding*, vector<string> >::iterator names =
-								function_parameter_names_.find(
-									declaration->placeholder);
-							if (names != function_parameter_names_.end())
-							{
-								function_parameter_names_[placeholder] =
-									names->second;
-								placeholder->function_parameter_names =
-									names->second;
-							}
-							map<Binding*, vector<Expr> >::iterator defaults =
-								default_arguments_.find(
-									declaration->placeholder);
-							if (defaults != default_arguments_.end())
-								default_arguments_[placeholder] =
-									defaults->second;
-					}
+							if (declaration->placeholder != NULL)
+						{
+							copy_member_template_placeholder_state(
+								placeholder,
+								declaration->placeholder,
+								function_parameter_names_,
+								default_arguments_,
+								false);
+						}
 						unique_ptr<TemplateDeclaration> clone(
 							new TemplateDeclaration(*declaration));
 						clone->owner = bare->scope;
@@ -989,10 +885,12 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 						clone->function_specializations.clear();
 					clone->completing_specializations.clear();
 					clone->emitted_variable_specializations.clear();
-					make_concrete_outer_substitutions(
-						declaration,
-						subst,
-						value_subst,
+								make_concrete_outer_substitutions(
+									declaration,
+									owner_declaration,
+									owner_arguments,
+									subst,
+									value_subst,
 						clone->outer_type_substitutions,
 						clone->outer_value_substitutions);
 						TemplateDeclaration* clone_ptr = clone.get();
@@ -1081,13 +979,21 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 				     !template_parameter_lists_match(declaration->parameters,
 				                                     owner_declaration->parameters)))
 					continue;
-				bool class_template_member_function_template =
-					!declaration->constructor_template &&
-					declaration->class_template_member &&
-					declaration->outer_type_substitutions.empty() &&
-					declaration->outer_value_substitutions.empty() &&
-					!template_parameter_lists_match(declaration->parameters,
-					                                owner_declaration->parameters);
+					bool class_template_member_function_template =
+						!declaration->constructor_template &&
+						declaration->class_template_member &&
+						declaration->outer_type_substitutions.empty() &&
+						declaration->outer_value_substitutions.empty() &&
+						!template_parameter_lists_match(declaration->parameters,
+						                                owner_declaration->parameters);
+					bool class_template_member_constructor =
+						declaration->constructor_template &&
+						declaration->has_definition &&
+						declaration->class_template_member &&
+						declaration->outer_type_substitutions.empty() &&
+						declaration->outer_value_substitutions.empty() &&
+						template_parameter_lists_match(declaration->parameters,
+						                               owner_declaration->parameters);
 				if (!declaration->constructor_template &&
 				    declaration->class_template_member &&
 				    !class_template_member_function_template)
@@ -1098,9 +1004,11 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 					                                    owner_declaration->parameters))
 						continue;
 				}
-					if (!declaration->constructor_template &&
-					    (!declaration->class_template_member ||
-					     class_template_member_function_template))
+						if ((!declaration->constructor_template ||
+						     class_template_member_constructor) &&
+						    (!declaration->class_template_member ||
+						     class_template_member_function_template ||
+						     class_template_member_constructor))
 					{
 						bool already_cloned = false;
 						map<string, vector<Binding*> >::iterator existing_members =
@@ -1161,44 +1069,50 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							template_type_substitutions_ = save_subst;
 							template_value_substitutions_ = save_value_subst;
 							template_type_parameter_packs_ = save_pack_subst;
-									Binding* placeholder =
-										add_value(bare->scope,
-										          BindingKind::Function,
-										          declaration->name,
-										          fn_type);
+									Binding* placeholder = NULL;
+									if (class_template_member_constructor)
+									{
+										map<string, vector<Binding*> >::iterator found =
+											bare->scope->members.find(
+												declaration->name);
+										if (found != bare->scope->members.end())
+											for (size_t j = 0;
+											     j < found->second.size();
+											     ++j)
+											{
+												Binding* candidate =
+													found->second[j];
+												if (candidate->kind ==
+													    BindingKind::Function &&
+												    same_constructor_type_for_owner(
+													    candidate->type,
+													    fn_type,
+													    bare))
+												{
+													placeholder = candidate;
+													break;
+												}
+											}
+									}
+									if (placeholder == NULL)
+										placeholder =
+											add_value(bare->scope,
+											          BindingKind::Function,
+											          declaration->name,
+											          fn_type);
 									if (declaration->constructor_template)
 										discard_implicit_default_constructor(
 											bare,
 											placeholder);
-									if (declaration->placeholder != NULL)
-						{
-							placeholder->is_static_member =
-								declaration->placeholder->is_static_member;
-							placeholder->is_explicit =
-								declaration->placeholder->is_explicit;
-							placeholder->is_constexpr =
-								declaration->placeholder->is_constexpr;
-							placeholder->unwind_no =
-								declaration->placeholder->unwind_no;
-							placeholder->ref_qualifier =
-								declaration->placeholder->ref_qualifier;
-							map<Binding*, vector<string> >::iterator names =
-								function_parameter_names_.find(
-									declaration->placeholder);
-							if (names != function_parameter_names_.end())
+										if (declaration->placeholder != NULL)
 							{
-								function_parameter_names_[placeholder] =
-									names->second;
-								placeholder->function_parameter_names =
-									names->second;
+								copy_member_template_placeholder_state(
+									placeholder,
+									declaration->placeholder,
+									function_parameter_names_,
+									default_arguments_,
+									true);
 							}
-							map<Binding*, vector<Expr> >::iterator defaults =
-								default_arguments_.find(
-									declaration->placeholder);
-							if (defaults != default_arguments_.end())
-								default_arguments_[placeholder] =
-									defaults->second;
-						}
 						unique_ptr<TemplateDeclaration> clone(
 							new TemplateDeclaration(*declaration));
 						clone->owner = bare->scope;
@@ -1208,6 +1122,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 						clone->emitted_variable_specializations.clear();
 							make_concrete_outer_substitutions(
 								declaration,
+								owner_declaration,
+								owner_arguments,
 								subst,
 								value_subst,
 								clone->outer_type_substitutions,
@@ -1226,6 +1142,62 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 									clone_ptr;
 							function_templates_[bare->scope][declaration->name].
 								push_back(clone_ptr);
+							if (class_template_member_constructor)
+							{
+								size_t body_pos =
+									constructor_body_start(
+										tokens_,
+										declaration->decl_begin,
+										declaration->decl_end);
+								if (body_pos != declaration->decl_end)
+								{
+									placeholder->is_inline_definition = true;
+									if (member_parameter_names_have_non_this(
+										    declaration->function_parameter_names))
+									{
+										function_parameter_names_[placeholder] =
+											declaration->function_parameter_names;
+										placeholder->function_parameter_names =
+											declaration->function_parameter_names;
+									}
+									PendingFunctionBody pending;
+									pending.function = placeholder;
+									pending.node = Node(
+										"function-definition " +
+										qualified_decl_name(placeholder) + " " +
+										pa11::describe_type(placeholder->type));
+									pending.node.binding = placeholder;
+									pending.node.type = placeholder->type;
+									pending.parameters =
+										concrete_member_body_parameters(
+											placeholder,
+											function_parameter_names_);
+									pending.body_pos = body_pos;
+									pending.class_type =
+										pa11::record_type_for_scope(bare->scope);
+									pending.constructor_body = true;
+									pending.scopes.clear();
+									pending.scopes.push_back(
+										declaration->lexical_scope != NULL
+										? declaration->lexical_scope
+										: owner_declaration->owner);
+									pending.friend_class_scopes =
+										active_friend_class_scopes_;
+									pending.type_substitutions =
+										template_type_substitutions_;
+									pending.value_substitutions =
+										template_value_substitutions_;
+									pending.pack_substitutions =
+										template_type_parameter_packs_;
+									pending.type_substitutions.push_back(subst);
+									pending.value_substitutions.push_back(
+										value_subst);
+									pending.pack_substitutions.push_back(
+										pack_subst);
+									enqueue_pending_member_body(bare->scope,
+									                            pending);
+								}
+							}
 						continue;
 					}
 					string key = template_argument_key(owner_arguments);
@@ -1395,12 +1367,8 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 								          BindingKind::Function,
 								          declaration->name,
 								          binding->type);
-							alias->is_inline_definition =
-								binding->is_inline_definition;
-							alias->is_explicit = binding->is_explicit;
-							alias->is_constexpr = binding->is_constexpr;
-							alias->unwind_no = binding->unwind_no;
-							alias->ref_qualifier = binding->ref_qualifier;
+									assign_member_template_alias_state(alias,
+									                                   binding);
 							string concrete_symbol =
 								abi_binding_symbol(alias,
 								                   map<string, size_t>());
@@ -1460,10 +1428,12 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 							     concrete->type,
 							     binding->type,
 							     bare)))
-						{
-							concrete->aliased_binding = binding;
-							map<Binding*, vector<string> >::iterator names =
-								function_parameter_names_.find(concrete);
+								{
+									concrete->aliased_binding = binding;
+									merge_member_template_alias_state(concrete,
+									                                  binding);
+									map<Binding*, vector<string> >::iterator names =
+										function_parameter_names_.find(concrete);
 							if (names != function_parameter_names_.end())
 							{
 								function_parameter_names_[binding] = names->second;
@@ -1493,7 +1463,5 @@ void Parser::instantiate_member_function_templates(TypePtr type,
 	completed_member_function_template_records_[cache_key] =
 		member_function_template_generation_;
 	}
-
-
 }  // namespace internal
 }  // namespace pa12

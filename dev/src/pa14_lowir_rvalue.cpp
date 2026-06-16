@@ -47,6 +47,18 @@ bool direct_call_bit_count(const Node& expr)
 	       name == "__builtin_popcountg";
 }
 
+bool direct_call_fp_test(const Node& expr)
+{
+	if (expr.direct_call == NULL)
+		return false;
+	const string& name = expr.direct_call->name;
+	return name == "__builtin_isfinite" ||
+	       name == "__builtin_isinf" ||
+	       name == "__builtin_isnan" ||
+	       name == "__builtin_isnormal" ||
+	       name == "__builtin_signbit";
+}
+
 }  // namespace
 
 Value FunctionLowerer::emit_statement_expression(const Node& expr)
@@ -196,6 +208,8 @@ Value FunctionLowerer::emit_call_rvalue(const Node& expr)
 		return emit_builtin_flt_rounds(expr);
 	if (direct_call_named(expr, "__builtin_fpclassify"))
 		return emit_builtin_fpclassify(expr);
+	if (direct_call_fp_test(expr))
+		return emit_builtin_fp_test(expr);
 	if (direct_call_float_constant(expr))
 		return emit_builtin_float_constant(expr);
 	if (direct_call_named(expr, "__builtin_complex"))
@@ -213,6 +227,11 @@ Value FunctionLowerer::emit_call_rvalue(const Node& expr)
 	if (expr.direct_call != NULL &&
 	    expr.direct_call->name.compare(0, 5, "__c11") == 0)
 		return emit_c11_atomic_builtin(expr);
+	bool handled_hash_next = false;
+	Value hash_next = emit_hosted_hash_node_next_call(expr,
+	                                                  handled_hash_next);
+	if (handled_hash_next)
+		return hash_next;
 	Value value = emit_call(expr);
 	if (!is_reference(expr.type))
 		return value;

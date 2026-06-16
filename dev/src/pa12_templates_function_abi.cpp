@@ -19,6 +19,14 @@ string abi_source_name(const string& name)
 		unqualified = unqualified.substr(pos + 2);
 	if (unqualified == "operator[]")
 		return "ix";
+	if (unqualified == "operatornew")
+		return "nw";
+	if (unqualified == "operatornew[]")
+		return "na";
+	if (unqualified == "operatordelete")
+		return "dl";
+	if (unqualified == "operatordelete[]")
+		return "da";
 	if (unqualified == "operator=")
 		return "aS";
 	if (unqualified == "operator+")
@@ -47,6 +55,8 @@ string abi_source_name(const string& name)
 		return "eq";
 	if (unqualified == "operator!=")
 		return "ne";
+	if (unqualified == "operator!")
+		return "nt";
 	if (unqualified == "operator<")
 		return "lt";
 	if (unqualified == "operator>")
@@ -141,6 +151,11 @@ string abi_fundamental_type(EFundamentalType type)
 	case FT_UNSIGNED_INT128: return "o";
 	case FT_FLOAT: return "f";
 	case FT_DOUBLE: return "d";
+	case FT_LONG_DOUBLE: return "e";
+	case FT_WCHAR_T: return "w";
+	case FT_CHAR16_T: return "Ds";
+	case FT_CHAR32_T: return "Di";
+	case FT_NULLPTR_T: return "Dn";
 	default: return "i";
 	}
 }
@@ -174,6 +189,129 @@ string abi_encode_name_path(const vector<string>& scopes,
 	return out;
 }
 
+static string abi_named_scope_component(const string& name)
+{
+	return name == "std" ? string("St") : abi_source_name(name);
+}
+
+static string abi_encode_qualified_type_name(const vector<string>& scopes,
+                                             const string& name)
+{
+	if (scopes.empty())
+		return abi_source_name(name);
+	string leaf = abi_source_name(name);
+	if (scopes.size() == 1 && scopes[0] == "std")
+		return "St" + leaf;
+	string out = "N";
+	for (size_t i = 0; i < scopes.size(); ++i)
+		out += abi_named_scope_component(scopes[i]);
+	out += leaf;
+	out += "E";
+	return out;
+}
+
+static bool abi_plain_scope_is_std_namespace(Scope* scope)
+{
+	return scope != NULL &&
+	       scope->kind == ScopeKind::Namespace &&
+	       scope->name == "std";
+}
+
+static bool abi_plain_record_directly_in_std_namespace(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->scope != NULL &&
+	       bare->scope->parent != NULL &&
+	       abi_plain_scope_is_std_namespace(bare->scope->parent);
+}
+
+static bool abi_plain_template_argument_is_fundamental(
+	const pa11::TemplateInstanceArgument& arg,
+	EFundamentalType fundamental)
+{
+	TypePtr type = arg.kind == pa11::TemplateInstanceArgumentKind::Type
+		? pa11::strip_cv(arg.type) : TypePtr();
+	return type.get() != NULL &&
+	       type->kind == pa11::TypeKind::Fundamental &&
+	       type->fundamental == fundamental;
+}
+
+static bool abi_plain_template_argument_is_std_unary_type_template(
+	const pa11::TemplateInstanceArgument& arg,
+	const string& primary,
+	EFundamentalType parameter)
+{
+	TypePtr type = arg.kind == pa11::TemplateInstanceArgumentKind::Type
+		? pa11::strip_cv(arg.type) : TypePtr();
+	if (type.get() == NULL ||
+	    !type->is_template_specialization ||
+	    !abi_plain_record_directly_in_std_namespace(type))
+		return false;
+	string name = !type->template_primary_name.empty()
+		? type->template_primary_name : type->name;
+	size_t args = name.find('<');
+	if (args != string::npos)
+		name = name.substr(0, args);
+	return name == primary &&
+	       type->template_arguments.size() == 1 &&
+	       abi_plain_template_argument_is_fundamental(
+		       type->template_arguments[0], parameter);
+}
+
+static string abi_plain_std_record_abbreviation(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    !abi_plain_record_directly_in_std_namespace(bare))
+		return "";
+	string name = bare->is_template_specialization &&
+	              !bare->template_primary_name.empty()
+		? bare->template_primary_name : bare->name;
+	size_t args = name.find('<');
+	if (args != string::npos)
+		name = name.substr(0, args);
+	if (name == "allocator")
+		return "Sa";
+	if (!bare->is_template_specialization)
+		return "";
+	if ((name == "basic_istream" ||
+	     name == "basic_ostream" ||
+	     name == "basic_iostream") &&
+	    bare->template_arguments.size() == 2 &&
+	    abi_plain_template_argument_is_fundamental(
+		    bare->template_arguments[0], FT_CHAR) &&
+	    abi_plain_template_argument_is_std_unary_type_template(
+		    bare->template_arguments[1], "char_traits", FT_CHAR))
+	{
+		if (name == "basic_istream")
+			return "Si";
+		if (name == "basic_ostream")
+			return "So";
+		return "Sd";
+	}
+	if (name == "basic_string" &&
+	    bare->template_arguments.size() == 3 &&
+	    abi_plain_template_argument_is_fundamental(
+		    bare->template_arguments[0], FT_CHAR) &&
+	    abi_plain_template_argument_is_std_unary_type_template(
+		    bare->template_arguments[1], "char_traits", FT_CHAR) &&
+	    abi_plain_template_argument_is_std_unary_type_template(
+		    bare->template_arguments[2], "allocator", FT_CHAR))
+		return "Ss";
+	if (name == "basic_string")
+		return "Sb";
+	return "";
+}
+
+static bool abi_plain_std_abbreviation_is_terminal(const string& abbreviation)
+{
+	return abbreviation == "Ss" ||
+	       abbreviation == "Si" ||
+	       abbreviation == "So" ||
+	       abbreviation == "Sd";
+}
+
 string abi_encode_binding_name(
 	const Binding* binding,
 	const map<string, size_t>& template_parameters)
@@ -205,6 +343,14 @@ string abi_encode_binding_name(
 			else
 				reversed.push_back(abi_source_name(scope->name));
 		}
+	}
+	for (size_t i = 0; i + 1 < reversed.size(); ++i)
+	{
+		if (!abi_plain_std_abbreviation_is_terminal(reversed[i]) ||
+		    (reversed[i + 1] != "St" && reversed[i + 1] != "3std"))
+			continue;
+		reversed.erase(reversed.begin() + i + 1);
+		break;
 	}
 	string leaf = abi_source_name(binding != NULL ? binding->name : string("v"));
 	if (reversed.empty())
@@ -1116,13 +1262,18 @@ string abi_record_type(TypePtr type,
                        bool include_namespace)
 {
 	TypePtr bare = pa11::strip_cv(type);
+	string special = abi_plain_std_record_abbreviation(bare);
+	if (!special.empty() && abi_plain_std_abbreviation_is_terminal(special))
+		return special;
 	string name = bare->is_template_specialization &&
 	              !bare->template_primary_name.empty()
 		? bare->template_primary_name : bare->name;
 	size_t args = name.find('<');
 	if (args != string::npos)
 		name = name.substr(0, args);
-	string out = abi_source_name(name);
+	vector<string> name_parts = abi_split_qualified_name(name);
+	string leaf_name = name_parts.empty() ? name : name_parts.back();
+	string out = special.empty() ? abi_source_name(leaf_name) : special;
 	if (bare->is_template_specialization)
 	{
 		out += "I";
@@ -1135,6 +1286,8 @@ string abi_record_type(TypePtr type,
 	}
 	if (include_namespace && bare->scope != NULL)
 	{
+		if (!special.empty())
+			return out;
 		vector<string> reversed_namespaces;
 		for (Scope* scope = bare->scope->parent;
 		     scope != NULL;
@@ -1157,6 +1310,11 @@ string abi_record_type(TypePtr type,
 			nested += "E";
 			return nested;
 		}
+	}
+	if (include_namespace && bare->scope == NULL && name_parts.size() > 1)
+	{
+		name_parts.pop_back();
+		return abi_encode_qualified_type_name(name_parts, leaf_name);
 	}
 	return out;
 }

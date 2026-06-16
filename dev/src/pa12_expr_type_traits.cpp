@@ -447,6 +447,8 @@ bool Parser::is_nothrow_constructible_type_trait(const vector<TypePtr>& types)
 	}
 	if (bare->kind != pa11::TypeKind::Record)
 		return true;
+	if (types.size() == 1)
+		return default_constructor_is_nothrow(target);
 	if (types.size() == 2)
 	{
 		TypePtr arg = pa11::strip_cv(types[1]);
@@ -461,10 +463,7 @@ bool Parser::is_nothrow_constructible_type_trait(const vector<TypePtr>& types)
 			if (ctor == NULL ||
 			    deleted_functions_.find(ctor) != deleted_functions_.end())
 				return false;
-			if (!ctor->is_generated_copy_move_constructor &&
-			    !ctor->is_defaulted)
-				return ctor->unwind_no;
-			return true;
+			return copy_move_constructor_is_nothrow(bare, move);
 		}
 	}
 	vector<Expr> args;

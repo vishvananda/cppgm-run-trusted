@@ -140,6 +140,8 @@ private:
 	Operand parse_identifier_operand()
 	{
 		const string name = expect_identifier();
+		if (name == "inf" || name == "nan" || name == "snan")
+			return make_immediate_operand(parse_literal_value(name));
 		RegisterRef reg;
 		if (parse_register(name, reg))
 		{

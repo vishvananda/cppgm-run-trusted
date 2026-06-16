@@ -89,6 +89,20 @@ Expr expression_pack_element(const Expr& expr, size_t index)
 	return expr.pack_expansion ? expr.pack[index] : expr;
 }
 
+bool token_range_mentions_name(const vector<Token>& tokens,
+                               size_t begin,
+                               size_t end,
+                               const string& name)
+{
+	if (name.empty())
+		return false;
+	for (size_t i = begin; i < end && i < tokens.size(); ++i)
+		if (tokens[i].kind == posttoken::TokenKind::Identifier &&
+		    tokens[i].source == name)
+			return true;
+	return false;
+}
+
 }  // namespace
 
 bool Parser::make_binary_pack_expr(ETokenType op,
@@ -347,6 +361,7 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		     it != sit->end();
 		     ++it)
 			if (it->second.kind == TemplateArgumentKind::Pack &&
+			    token_range_mentions_name(tokens_, begin, end, it->first) &&
 			    seen.insert(it->first).second)
 			{
 				NamedPack named;
@@ -360,6 +375,8 @@ bool Parser::try_expand_expression_pack_pattern(size_t begin,
 		     it != function_parameter_pack_substitutions_.back().end();
 		     ++it)
 		{
+			if (!token_range_mentions_name(tokens_, begin, end, it->first))
+				continue;
 			NamedFunctionPack named;
 			named.name = it->first;
 			named.bindings = it->second;

@@ -85,6 +85,8 @@ void validate_function_metadata(const Metadata& metadata)
 			continue;
 		if (key == "object_root" && one_of(value, {"yes", "no"}))
 			continue;
+		if (key == "generated_default_ctor" && one_of(value, {"yes", "no"}))
+			continue;
 		if (key == "arity" &&
 		    one_of(value, {"fixed", "variadic", "prototype_relaxed"}))
 			continue;
@@ -326,7 +328,9 @@ void validate_call(const Function& fn, const Program& program, const Instruction
 		throw runtime_error("indirect call missing signature");
 			if (ins.a.kind == ValueKind::Function &&
 			    program.function_by_name.find(ins.a.text) == program.function_by_name.end())
-				throw runtime_error("undefined function");
+			{
+					throw runtime_error("undefined function");
+			}
 	for (size_t i = 0; i < ins.args.size(); ++i)
 		validate_symbol_value(fn, program, ins.args[i]);
 	for (size_t i = 0; i < ins.signature.params.size(); ++i)
@@ -475,6 +479,10 @@ void validate_instruction_operands(Function& fn,
 		break;
 	case InstrKind::EhCatch:
 		validate_addressable(fn, program, ins.a);
+		break;
+	case InstrKind::EhFilter:
+		for (size_t i = 0; i < ins.args.size(); ++i)
+			validate_addressable(fn, program, ins.args[i]);
 		break;
 	case InstrKind::Addr:
 	case InstrKind::Jump:
@@ -698,6 +706,7 @@ bool function_uses_eh(const Function& fn)
 			const InstrKind kind = ins.kind;
 			if (kind == InstrKind::EhTry || kind == InstrKind::EhCleanup ||
 			    kind == InstrKind::EhCatch || kind == InstrKind::EhCatchAll ||
+			    kind == InstrKind::EhFilter ||
 			    kind == InstrKind::EhEnd || kind == InstrKind::Throw ||
 			    kind == InstrKind::Exception ||
 			    kind == InstrKind::ExceptionSelector || kind == InstrKind::Resume)

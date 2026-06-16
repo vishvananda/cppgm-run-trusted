@@ -17,6 +17,46 @@ size_t function_body_start(const vector<Token>& tokens,
 	return end;
 }
 
+size_t constructor_body_start(const vector<Token>& tokens,
+                              size_t begin,
+                              size_t end)
+{
+	int paren = 0;
+	int square = 0;
+	int brace = 0;
+	int angle = 0;
+	for (size_t i = begin; i < end && i < tokens.size(); ++i)
+	{
+		if (tokens[i].kind != posttoken::TokenKind::Simple)
+			continue;
+		ETokenType type = tokens[i].type;
+		if (type == OP_LPAREN)
+			++paren;
+		else if (type == OP_RPAREN && paren > 0)
+			--paren;
+		else if (type == OP_LSQUARE)
+			++square;
+		else if (type == OP_RSQUARE && square > 0)
+			--square;
+		else if (type == OP_LBRACE)
+		{
+			if (paren == 0 && square == 0 && brace == 0 && angle == 0)
+				return i;
+			++brace;
+		}
+		else if (type == OP_RBRACE && brace > 0)
+			--brace;
+		else if (type == OP_LT && paren == 0 && square == 0 && brace == 0)
+			++angle;
+		else if (type == OP_GT && angle > 0)
+			--angle;
+		else if (type == OP_COLON && paren == 0 && square == 0 &&
+		         brace == 0 && angle == 0)
+			return i;
+	}
+	return end;
+}
+
 vector<ParameterInfo> concrete_member_body_parameters(
 	Binding* function,
 	const map<Binding*, vector<string> >& function_parameter_names)

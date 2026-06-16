@@ -19,6 +19,24 @@ bool abi_binding_has_only_std_namespace(const vector<Scope*>& scopes)
 	return scopes.size() == 1 && abi_scope_is_std_namespace(scopes[0]);
 }
 
+bool abi_terminal_std_class_scope(Scope* scope, AbiSubstitutionContext& ctx)
+{
+	if (scope == NULL || scope->kind != ScopeKind::Class)
+		return false;
+	TypePtr record = pa11::record_type_for_scope(scope);
+	string abbreviation = abi_std_abbreviation(record, &ctx);
+	return abi_std_abbreviation_is_terminal(abbreviation);
+}
+
+void abi_filter_terminal_std_class_scope(vector<Scope*>& scopes,
+                                         AbiSubstitutionContext& ctx)
+{
+	if (scopes.size() >= 2 &&
+	    abi_scope_is_std_namespace(scopes[0]) &&
+	    abi_terminal_std_class_scope(scopes[1], ctx))
+		scopes.erase(scopes.begin());
+}
+
 vector<Scope*> abi_dependent_typename_scope_prefix_for_binding(
 	const Binding* binding)
 {
@@ -29,12 +47,80 @@ vector<Scope*> abi_dependent_typename_scope_prefix_for_binding(
 	return abi_scope_path_outer_first(binding->owner);
 }
 
+bool abi_binding_alias_preserves_owner(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    binding->aliased_binding == NULL ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class)
+		return false;
+	TypePtr record = pa11::record_type_for_scope(binding->owner);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return record.get() != NULL &&
+	       record->kind == pa11::TypeKind::Record &&
+	       record->is_template_specialization;
+}
+
+bool abi_binding_alias_symbol_equivalent(const Binding* binding)
+{
+	if (binding == NULL || binding->aliased_binding == NULL)
+		return false;
+	const Binding* alias = binding->aliased_binding;
+	if (binding->kind != BindingKind::Function ||
+	    alias->kind != BindingKind::Function)
+		return true;
+	if (!binding->function_specialization_symbol.empty() ||
+	    !alias->function_specialization_symbol.empty())
+		return true;
+	if (binding->owner != alias->owner ||
+	    binding->name != alias->name ||
+	    binding->is_static_member != alias->is_static_member)
+		return true;
+	return pa11::same_type(binding->type, alias->type);
+}
+
+void abi_append_member_function_name_qualifiers(string& encoded,
+                                                const Binding* binding,
+                                                TypePtr fn_type)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    binding->is_static_member ||
+	    fn_type.get() == NULL ||
+	    fn_type->kind != pa11::TypeKind::Function)
+		return;
+	bool const_member = (fn_type->cv & pa11::CV_CONST) != 0;
+	bool volatile_member = (fn_type->cv & pa11::CV_VOLATILE) != 0;
+	if (!fn_type->parameters.empty() &&
+	    pa11::strip_cv(fn_type->parameters[0])->kind ==
+		    pa11::TypeKind::Pointer)
+	{
+		TypePtr self = pa11::strip_cv(fn_type->parameters[0])->base;
+		const_member = const_member || pa11::type_has_const(self);
+	}
+	if (const_member)
+		encoded += "K";
+	if (volatile_member)
+		encoded += "V";
+	int ref_qualifier =
+		binding->ref_qualifier != 0
+		? binding->ref_qualifier : fn_type->ref_qualifier;
+	if (ref_qualifier == 1)
+		encoded += "R";
+	else if (ref_qualifier == 2)
+		encoded += "O";
+}
+
 string abi_encode_binding_name_with_substitutions(
 	const Binding* binding,
 	AbiSubstitutionContext& ctx)
 {
 	string leaf = abi_binding_source_name(binding);
 	vector<Scope*> scopes = abi_binding_scope_path_outer_first(binding);
+	abi_filter_terminal_std_class_scope(scopes, ctx);
 	string encoded;
 	if (scopes.empty())
 		encoded = leaf;
@@ -43,29 +129,8 @@ string abi_encode_binding_name_with_substitutions(
 	else
 	{
 		encoded = "N";
-		if (binding != NULL &&
-		    binding->kind == BindingKind::Function &&
-		    binding->owner != NULL &&
-		    binding->owner->kind == ScopeKind::Class &&
-		    !binding->is_static_member &&
-		    binding->type.get() != NULL &&
-		    binding->type->kind == pa11::TypeKind::Function)
-		{
-			bool const_member = (binding->type->cv & pa11::CV_CONST) != 0;
-			bool volatile_member = (binding->type->cv & pa11::CV_VOLATILE) != 0;
-			if (!binding->type->parameters.empty() &&
-			    pa11::strip_cv(binding->type->parameters[0])->kind ==
-				    pa11::TypeKind::Pointer)
-			{
-				TypePtr self =
-					pa11::strip_cv(binding->type->parameters[0])->base;
-				const_member = const_member || pa11::type_has_const(self);
-			}
-			if (const_member)
-				encoded += "K";
-			if (volatile_member)
-				encoded += "V";
-		}
+		abi_append_member_function_name_qualifiers(
+			encoded, binding, binding != NULL ? binding->type : TypePtr());
 		encoded += abi_scope_prefix_with_substitutions(scopes, ctx);
 		encoded += leaf;
 		encoded += "E";
@@ -80,6 +145,7 @@ string abi_encode_function_template_name_with_substitutions(
 	AbiSubstitutionContext& ctx)
 {
 	vector<Scope*> scopes = abi_binding_scope_path_outer_first(binding);
+	abi_filter_terminal_std_class_scope(scopes, ctx);
 	string scope_prefix;
 	if (!scopes.empty() && !abi_binding_has_only_std_namespace(scopes))
 		scope_prefix = abi_scope_prefix_with_substitutions(scopes, ctx);
@@ -190,6 +256,52 @@ TypePtr abi_owner_record_for_special_member(const Binding* binding)
 	return owner_record;
 }
 
+size_t abi_local_find_substitution(const AbiSubstitutionContext& ctx,
+                                   const string& encoded)
+{
+	map<string, size_t>::const_iterator alias =
+		ctx.substitution_aliases.find(encoded);
+	if (alias != ctx.substitution_aliases.end())
+		return alias->second;
+	for (size_t i = 0; i < ctx.substitutions.size(); ++i)
+		if (ctx.substitutions[i] == encoded)
+			return i;
+	return static_cast<size_t>(-1);
+}
+
+void abi_seed_member_owner_type_substitution(const Binding* binding,
+                                             AbiSubstitutionContext& ctx)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    binding->is_static_member)
+		return;
+	TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
+	owner_record = owner_record.get() != NULL
+		? pa11::strip_cv(owner_record) : TypePtr();
+	if (owner_record.get() == NULL ||
+	    owner_record->kind != pa11::TypeKind::Record)
+		return;
+	map<string, size_t> empty_template_parameters;
+	AbiSubstitutionContext clean_ctx(empty_template_parameters, NULL, NULL);
+	string canonical_owner =
+		abi_record_type_with_substitutions(owner_record, clean_ctx, true);
+	size_t existing = abi_local_find_substitution(ctx, canonical_owner);
+	if (existing != static_cast<size_t>(-1))
+	{
+		string substituted_probe =
+			abi_record_type_probe_with_substitutions(owner_record,
+			                                        ctx,
+			                                        true);
+		if (!substituted_probe.empty())
+			ctx.substitution_aliases[substituted_probe] = existing;
+		return;
+	}
+	abi_record_type_with_substitutions(owner_record, ctx, true);
+}
+
 	string abi_special_member_symbol_with_substitutions(
 		const Binding* binding,
 		AbiSubstitutionContext& ctx)
@@ -256,17 +368,24 @@ string abi_constructor_template_specialization_symbol(
 	encoded_name += "E";
 	string bare;
 	TypePtr bare_fn_type =
-		declaration->constructor_template &&
-		binding->type.get() != NULL &&
-		binding->type->kind == pa11::TypeKind::Function
-		? binding->type : fn_type;
+		fn_type.get() != NULL &&
+		fn_type->kind == pa11::TypeKind::Function
+		? fn_type : binding->type;
 	size_t first_param = 1;
 	for (size_t i = first_param; i < bare_fn_type->parameters.size(); ++i)
-		bare += abi_function_parameter_type_with_substitutions(
+	{
+		string encoded_param = abi_function_parameter_type_with_substitutions(
 			bare_fn_type->parameters[i], ctx);
+		string pack_name;
+		bare += function_parameter_pack_name(declaration,
+		                                     bare_fn_type->parameters[i],
+		                                     pack_name)
+			? "Dp" + encoded_param : encoded_param;
+	}
 	if (bare_fn_type->parameters.size() == first_param)
 		bare += "v";
-	return "_Z" + encoded_name + bare;
+	string symbol = "_Z" + encoded_name + bare;
+	return symbol;
 }
 
 string abi_binding_symbol_with_substitutions(
@@ -275,7 +394,9 @@ string abi_binding_symbol_with_substitutions(
 {
 	if (binding == NULL)
 		return "_Z0v";
-	if (binding->aliased_binding != NULL)
+	if (binding->aliased_binding != NULL &&
+	    !abi_binding_alias_preserves_owner(binding) &&
+	    abi_binding_alias_symbol_equivalent(binding))
 		binding = binding->aliased_binding;
 	if (binding->kind == BindingKind::Function &&
 	    !binding->function_specialization_symbol.empty())
@@ -309,19 +430,8 @@ string abi_binding_symbol_with_substitutions(
 			vector<Scope*> scopes =
 				abi_binding_scope_path_outer_first(binding);
 			encoded_name = "N";
-			bool const_member = (binding->type->cv & pa11::CV_CONST) != 0;
-			bool volatile_member =
-				(binding->type->cv & pa11::CV_VOLATILE) != 0;
-			if (!binding->type->parameters.empty() &&
-			    pa11::strip_cv(binding->type->parameters[0])->kind ==
-				    pa11::TypeKind::Pointer &&
-			    pa11::type_has_const(
-				    pa11::strip_cv(binding->type->parameters[0])->base))
-				const_member = true;
-			if (const_member)
-				encoded_name += "K";
-			if (volatile_member)
-				encoded_name += "V";
+			abi_append_member_function_name_qualifiers(
+				encoded_name, binding, binding->type);
 			encoded_name += abi_scope_prefix_with_substitutions(scopes, ctx);
 			encoded_name += "cv" +
 				abi_type_with_substitutions(binding->type->base,
@@ -336,6 +446,7 @@ string abi_binding_symbol_with_substitutions(
 	else
 		encoded_name =
 			abi_encode_binding_name_with_substitutions(binding, ctx);
+	abi_seed_member_owner_type_substitution(binding, ctx);
 	string bare;
 	size_t first_param =
 		binding->owner != NULL &&
@@ -390,16 +501,16 @@ string abi_function_template_specialization_symbol_with_substitutions(
 	{
 		TypePtr owner_record = pa11::record_type_for_scope(binding->owner);
 		encoded_name = "N";
-		if (fn_type.get() != NULL &&
-		    fn_type->kind == pa11::TypeKind::Function &&
-		    !fn_type->parameters.empty() &&
-		    pa11::strip_cv(fn_type->parameters[0])->kind ==
-			    pa11::TypeKind::Pointer &&
-		    pa11::type_has_const(
-			    pa11::strip_cv(fn_type->parameters[0])->base))
-			encoded_name += "K";
-		encoded_name +=
-			abi_record_type_with_substitutions(owner_record, ctx, false);
+		abi_append_member_function_name_qualifiers(
+			encoded_name, binding, fn_type);
+		string owner_name =
+			abi_record_type_with_substitutions(owner_record, ctx, true);
+		if (owner_name.size() >= 2 &&
+		    owner_name[0] == 'N' &&
+		    owner_name[owner_name.size() - 1] == 'E')
+			encoded_name += owner_name.substr(1, owner_name.size() - 2);
+		else
+			encoded_name += owner_name;
 	}
 	if (constructor_template)
 	{
@@ -427,7 +538,6 @@ string abi_function_template_specialization_symbol_with_substitutions(
 	         binding->owner->kind == ScopeKind::Class)
 	{
 		string member_name = abi_binding_source_name(binding);
-		abi_add_substitution(ctx, member_name);
 		encoded_name += member_name + "I";
 		abi_append_template_argument_list_with_substitutions(
 			encoded_name, declaration, full_args, ctx);

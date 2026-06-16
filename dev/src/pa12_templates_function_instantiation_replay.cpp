@@ -57,6 +57,22 @@ Binding* FunctionTemplateInstantiationEngine::replay_function_template()
 	size_t replay_extra_begin = p.extra_lowir_nodes_.size();
 	Node node;
 	TypePtr replay_substituted_function_type;
+	TypePtr saved_replay_function_type_override =
+		p.replay_function_type_override_;
+	if (declaration->generic_function_type.get() != NULL &&
+	    declaration->generic_function_type->kind == pa11::TypeKind::Function)
+	{
+		replay_substituted_function_type =
+			p.substitute_function_template_type(
+				declaration,
+				declaration->generic_function_type);
+		p.replay_function_type_override_ =
+			replay_substituted_function_type;
+		p.replay_function_type_override_owner_ = declaration->owner;
+		p.replay_function_type_override_name_ = declaration->name;
+		p.replay_function_template_declaration_ = declaration;
+		p.replay_function_template_arguments_ = full_args;
+	}
 	++p.suppress_qualifier_template_member_instantiation_depth_;
 	try
 	{
@@ -68,10 +84,14 @@ Binding* FunctionTemplateInstantiationEngine::replay_function_template()
 	{
 		--p.suppress_qualifier_template_member_instantiation_depth_;
 		p.active_friend_class_scopes_.resize(friend_scope_depth);
+		p.replay_function_type_override_ =
+			saved_replay_function_type_override;
 		throw;
 	}
 	--p.suppress_qualifier_template_member_instantiation_depth_;
 	p.active_friend_class_scopes_.resize(friend_scope_depth);
+	p.replay_function_type_override_ =
+		saved_replay_function_type_override;
 	restore_parser_state();
 	return finish_replayed_function(
 		node,
@@ -250,9 +270,13 @@ Node FunctionTemplateInstantiationEngine::replay_inherited_constructor()
 		false);
 	if (declaration->placeholder != NULL)
 	{
-		binding->is_explicit = declaration->placeholder->is_explicit;
-		binding->is_constexpr = declaration->placeholder->is_constexpr;
-		binding->unwind_no = declaration->placeholder->unwind_no;
+			binding->is_explicit = declaration->placeholder->is_explicit;
+			binding->is_constexpr = declaration->placeholder->is_constexpr;
+			binding->unwind_no = declaration->placeholder->unwind_no;
+			binding->dynamic_exception_spec =
+				declaration->placeholder->dynamic_exception_spec;
+			binding->dynamic_exception_types =
+				declaration->placeholder->dynamic_exception_types;
 	}
 	binding->is_inline_definition = true;
 	vector<string> names(1, "this");
@@ -347,7 +371,9 @@ Node FunctionTemplateInstantiationEngine::replay_constructor_template(
 	p.parse_simple_or_function_declaration(node, true);
 	if (node.binding == NULL && node.children.empty() &&
 	    p.extra_lowir_nodes_.size() <= extra_before)
+	{
 		throw runtime_error("constructor template instantiation failed");
+	}
 	if (node.binding == NULL && node.children.empty())
 	{
 		node = p.extra_lowir_nodes_.back();
@@ -381,8 +407,16 @@ Binding* FunctionTemplateInstantiationEngine::finish_replayed_function(
 	copy_replayed_placeholder_properties(fn.binding);
 	if (declaration->placeholder != NULL)
 		merge_replayed_parameter_names(fn.binding);
-	if (!substituted_type_is_valid(fn.binding->type) &&
-	    substituted_type_is_valid(replay_substituted_function_type))
+	bool replay_type_valid =
+		substituted_type_is_valid(replay_substituted_function_type);
+	bool use_replay_type =
+		replay_type_valid &&
+		(!substituted_type_is_valid(fn.binding->type) ||
+		 (declaration->class_template_member &&
+		  declaration->placeholder != NULL &&
+		  !pa11::same_type(fn.binding->type,
+		                   replay_substituted_function_type)));
+	if (use_replay_type)
 		apply_replayed_function_type(fn, replay_substituted_function_type);
 	assign_specialization_symbol(fn.binding, false);
 	assign_aliased_class_member_symbol(fn.binding);
@@ -484,12 +518,23 @@ Binding* FunctionTemplateInstantiationEngine::finish_replayed_declaration(
 {
 	if (!declaration->class_template_member)
 		assign_specialization_symbol(fn.binding, true);
-	if (declaration->placeholder != NULL)
-		fn.binding->unwind_no = declaration->placeholder->unwind_no;
+		if (declaration->placeholder != NULL)
+		{
+			fn.binding->unwind_no = declaration->placeholder->unwind_no;
+			fn.binding->dynamic_exception_spec =
+				declaration->placeholder->dynamic_exception_spec;
+			fn.binding->dynamic_exception_types =
+				declaration->placeholder->dynamic_exception_types;
+		}
 	finish_replayed_defaults(fn.binding);
 	if (replaced_specialization != NULL &&
 	    replaced_specialization != fn.binding)
 		replaced_specialization->aliased_binding = fn.binding;
+	map<string, Binding*>::iterator active =
+		declaration->function_specializations.find(key);
+	if (active != declaration->function_specializations.end() &&
+	    active->second != fn.binding)
+		active->second->aliased_binding = fn.binding;
 	p.function_template_placeholders_[fn.binding] = declaration;
 	p.function_template_specialization_arguments_[fn.binding] = full_args;
 	parse_replayed_pending_bodies(fn.binding);
@@ -531,12 +576,23 @@ Binding* FunctionTemplateInstantiationEngine::finish_replayed_definition(
 	fn.binding->is_inline_definition = true;
 	if (!declaration->class_template_member)
 		assign_specialization_symbol(fn.binding, true);
-	if (declaration->placeholder != NULL)
-		fn.binding->unwind_no = declaration->placeholder->unwind_no;
+		if (declaration->placeholder != NULL)
+		{
+			fn.binding->unwind_no = declaration->placeholder->unwind_no;
+			fn.binding->dynamic_exception_spec =
+				declaration->placeholder->dynamic_exception_spec;
+			fn.binding->dynamic_exception_types =
+				declaration->placeholder->dynamic_exception_types;
+		}
 	finish_replayed_defaults(fn.binding);
 	if (replaced_specialization != NULL &&
 	    replaced_specialization != fn.binding)
 		replaced_specialization->aliased_binding = fn.binding;
+	map<string, Binding*>::iterator active =
+		declaration->function_specializations.find(key);
+	if (active != declaration->function_specializations.end() &&
+	    active->second != fn.binding)
+		active->second->aliased_binding = fn.binding;
 	if (p.function_template_candidate_instantiation_depth_ != 0)
 		prune_candidate_replay_bodies(fn.binding, replay_extra_begin);
 	else

@@ -140,7 +140,9 @@ bool instance_argument_structurally_dependent_seen(
 	const pa11::TemplateInstanceArgument& argument,
 	set<const void*>& seen)
 {
-	if (argument.dependent || !argument.value_name.empty() ||
+	if (argument.dependent ||
+	    (argument.kind != pa11::TemplateInstanceArgumentKind::Value &&
+	     !argument.value_name.empty()) ||
 	    !argument.value_owner_template_name.empty() ||
 	    !argument.value_member_name.empty())
 		return true;

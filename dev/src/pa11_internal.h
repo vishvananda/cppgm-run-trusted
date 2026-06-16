@@ -104,6 +104,7 @@ struct Type
 	bool scoped_enum;
 	bool complete;
 	bool is_template_specialization;
+	bool is_extern_template_instantiation;
 	bool is_dependent_typename;
 	bool dependent_typename_qualified;
 	bool dependent_typename_template_id;
@@ -127,6 +128,7 @@ struct Type
 	vector<TypePtr> virtual_bases;
 	vector<uint64_t> virtual_base_offsets;
 	bool layout_valid;
+	bool hosted_layout_synthesized;
 	bool is_polymorphic;
 	bool introduces_vptr;
 	bool is_final_record;
@@ -162,8 +164,10 @@ struct Binding
 	bool is_static_member;
 	bool is_local_static;
 	bool is_namespace_static;
+	bool is_extern_declaration;
 	string local_static_discriminator;
 		Binding* local_static_function_owner;
+	string asm_label;
 	string function_specialization_symbol;
 	vector<string> function_parameter_names;
 	vector<string> abi_tags;
@@ -174,8 +178,9 @@ struct Binding
 	bool is_generated_copy_move_constructor;
 	bool is_generated_copy_move_assignment;
 	bool is_generated_default_destructor;
-		bool is_defaulted;
-		bool is_explicit;
+			bool is_defaulted;
+			bool is_explicit_defaulted_definition;
+			bool is_explicit;
 		bool has_default_arguments;
 		bool is_private;
 	bool is_protected_member;
@@ -183,9 +188,11 @@ struct Binding
 	bool is_no_unique_address;
 	bool is_reference_member;
 	bool is_hidden_friend;
-	bool is_thread_local;
-	bool is_object_root;
-	bool is_dependent_template_artifact;
+		bool is_thread_local;
+		bool is_object_root;
+		bool is_extern_template_instantiation;
+		bool is_dependent_template_artifact;
+	bool is_explicit_specialization_member;
 	bool is_template_static_member_definition;
 	bool is_template_static_member_explicit_definition;
 	bool reserve_primary_function_symbol;
@@ -197,6 +204,8 @@ struct Binding
 	int virtual_slot_index;
 	int virtual_slot_width;
 	bool unwind_no;
+	bool dynamic_exception_spec;
+	vector<TypePtr> dynamic_exception_types;
 	int ref_qualifier;
 	bool is_noop_constructor;
 	bool is_noop_destructor;

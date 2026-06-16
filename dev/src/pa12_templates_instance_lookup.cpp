@@ -41,6 +41,7 @@ size_t alias_cache_type_hash(TypePtr type)
 	out = alias_cache_hash_combine(out, static_cast<size_t>(type->kind));
 	out = alias_cache_hash_combine(out, type->fundamental);
 	out = alias_cache_hash_combine(out, type->is_template_specialization);
+	out = alias_cache_hash_combine(out, type->is_extern_template_instantiation);
 	out = alias_cache_hash_combine(out, type->is_dependent_typename);
 	out = alias_cache_hash_combine(
 		out,

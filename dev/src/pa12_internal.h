@@ -18,25 +18,9 @@ using pa11::Scope;
 using pa11::ScopeKind;
 using pa11::TypePtr;
 
-enum class ValueCategory
-{
-	LValue,
-	PRValue,
-	XValue
-};
-enum class PtrKind
-{
-	Pointer,
-	LValueReference,
-	RValueReference,
-	MemberPointer
-};
-enum class SuffixKind
-{
-	Array,
-	Function,
-	Attribute
-};
+enum class ValueCategory { LValue, PRValue, XValue };
+enum class PtrKind { Pointer, LValueReference, RValueReference, MemberPointer };
+enum class SuffixKind { Array, Function, Attribute };
 struct Node
 {
 	string line;
@@ -155,10 +139,13 @@ struct Suffix
 	unsigned function_cv;
 	int ref_qualifier;
 	bool noexcept_decl;
+	bool dynamic_exception_spec;
+	vector<TypePtr> dynamic_exception_types;
 	bool override_decl;
 	bool final_decl;
 	TypePtr trailing_return;
 	vector<string> abi_tags;
+	string asm_label;
 	uint64_t vector_size;
 	explicit Suffix(SuffixKind k);
 };
@@ -169,6 +156,7 @@ struct Declarator
 	unique_ptr<Declarator> inner;
 	bool has_name;
 	QualifiedName name;
+	string asm_label;
 	Declarator();
 };
 struct PendingFunctionBody
@@ -241,22 +229,17 @@ struct ConstexprValue
 bool constexpr_zero_value_for_type(TypePtr type, ConstexprValue& out);
 bool constexpr_integral_compare(ETokenType op, TypePtr left_type, const ConstexprValue& lhs, const ConstexprValue& rhs, ConstexprValue& out);
 bool constexpr_string_literal_element(const Node& node, const ConstexprValue& index, ConstexprValue& out);
-struct TemplateValidationState;
-struct TemplateArgumentCompleter;
-struct TypeSubstitutionEngine;
-struct FunctionTemplateInstantiationEngine;
+	struct TemplateValidationState; struct TemplateArgumentCompleter; struct TypeSubstitutionEngine; struct FunctionTemplateInstantiationEngine;
 class Parser
 {
-	friend struct TemplateValidationState;
-	friend struct TemplateArgumentCompleter;
-	friend struct TypeSubstitutionEngine;
-	friend struct FunctionTemplateInstantiationEngine;
+		friend struct TemplateValidationState; friend struct TemplateArgumentCompleter; friend struct TypeSubstitutionEngine; friend struct FunctionTemplateInstantiationEngine;
 public:
 	Parser(const string& srcfile, const Options& options);
 	void parse_translation_unit();
 	const Node& root() const;
 	const vector<Node>& generated_nodes() const;
 	const vector<Node>& extra_lowir_nodes() const;
+	void complete_static_member_initializer_replays();
 	bool demand_lowir_function_body(Binding* function);
 	TypePtr substitute_type_for_template_match( TypePtr type, const map<string, TemplateArgument>& deduced);
 	TypePtr expand_alias_template_for_match( TypePtr type, const map<string, TemplateArgument>& deduced);
@@ -266,6 +249,9 @@ public:
 	bool try_evaluate_dependent_value_expression_argument( const TemplateArgument& arg, TemplateArgument& out);
 	TemplateDeclaration* class_template_declaration_for_match( TypePtr type) const;
 	private:
+	bool hosted_library_function(Binding* binding) const;
+	bool hosted_extern_template_class_function(Binding* binding) const;
+	TemplateDeclaration* replacement_owner_template(TypePtr owner_record) const;
 		vector<Token> tokens_;
 		vector<Token> declaration_tokens_;
 		size_t pos_;
@@ -273,6 +259,11 @@ public:
 	vector<Scope*> scopes_;
 	vector<TypePtr> function_returns_;
 	vector<Binding*> active_functions_;
+	TypePtr replay_function_type_override_;
+	Scope* replay_function_type_override_owner_;
+	string replay_function_type_override_name_;
+	TemplateDeclaration* replay_function_template_declaration_;
+	vector<TemplateArgument> replay_function_template_arguments_;
 	set<Binding*> auto_return_functions_;
 	map<Binding*, TypePtr> auto_return_patterns_;
 	map<Binding*, TypePtr> auto_return_deduced_;
@@ -287,16 +278,8 @@ public:
 	bool hosted_compatibility_;
 	int local_type_counter_;
 	int range_for_counter_;
-	bool force_new_function_binding_;
-	bool defer_function_template_bodies_;
-	bool force_function_template_body_instantiation_;
-	bool suppress_implicit_template_base_init_;
-	bool parsing_base_specifier_;
-	bool validating_template_definition_;
-	bool override_function_parameter_names_;
-	bool replaying_dependent_decltype_;
-	bool parsing_default_template_argument_;
-	bool single_linkage_specification_declaration_;
+		bool force_new_function_binding_, defer_function_template_bodies_, force_function_template_body_instantiation_, suppress_implicit_template_base_init_, parsing_base_specifier_;
+		bool validating_template_definition_, override_function_parameter_names_, replaying_dependent_decltype_, parsing_default_template_argument_, single_linkage_specification_declaration_;
 	int defer_class_template_completion_depth_;
 	int function_template_candidate_instantiation_depth_;
 	int direct_template_call_depth_;
@@ -305,13 +288,8 @@ public:
 	int unevaluated_expression_depth_;
 	int suppress_qualifier_template_member_instantiation_depth_;
 	int short_circuit_static_member_demand_depth_;
-		set<const void*> generated_default_ctors_;
-	set<pair<const void*, size_t> > generated_aggregate_ctors_;
-	set<const void*> generated_copy_ctors_;
-	set<const void*> generated_move_ctors_;
-	set<const void*> generated_copy_assignments_;
-	set<const void*> generated_move_assignments_;
-	set<const void*> generated_dtors_;
+			set<const void*> generated_default_ctors_, generated_copy_ctors_, generated_move_ctors_, generated_copy_assignments_, generated_move_assignments_, generated_dtors_;
+		set<pair<const void*, size_t> > generated_aggregate_ctors_;
 	map<Binding*, Node> default_member_initializers_;
 	map<Binding*, Node> static_member_initializers_;
 	map<Binding*, vector<Expr> > default_arguments_;
@@ -392,6 +370,12 @@ public:
 	bool consume(ETokenType type);
 	void expect(ETokenType type);
 	void expect_eof();
+	bool at_try_keyword() const;
+	bool at_catch_keyword() const;
+	bool consume_try_keyword();
+	bool consume_catch_keyword();
+	void expect_try_keyword();
+	void expect_catch_keyword();
 	string consume_identifier();
 	string consume_literal();
 	string consume_operator_function_name();
@@ -424,6 +408,7 @@ public:
 		bool find_template_type_substitution(const string& name, TypePtr& out) const;
 			bool find_template_value_substitution(const string& name, TemplateArgument& out) const;
 			bool active_type_parameter_pack(const string& name) const;
+			bool function_parameter_type_pack_expansion_name(TypePtr pattern, string& name) const;
 			bool type_substitution_hides_value_substitution( const string& name) const;
 			bool parameter_pack_expansion_name(const string& name) const;
 		bool find_function_parameter_pack_substitution(const string& name, vector<Binding*>& out) const;
@@ -454,20 +439,27 @@ public:
 	void mark_template_specialization_demanded(TypePtr type);
 	void mark_template_argument_demanded(const TemplateArgument& argument);
 	void complete_member_class_template_record(Binding* binding);
-			void instantiate_member_function_templates(TypePtr type, bool object_root = false);
-			void add_member_function_template(std::vector<TemplateDeclaration*>& members, TemplateDeclaration* declaration);
+				void instantiate_member_function_templates(TypePtr type, bool object_root = false);
+				void make_concrete_outer_substitutions(TemplateDeclaration* declaration, TemplateDeclaration* owner_declaration, const vector<TemplateArgument>& owner_arguments, const map<string, TypePtr>& owner_type_subst, const map<string, TemplateArgument>& owner_value_subst, vector<map<string, TypePtr> >& type_substitutions, vector<map<string, TemplateArgument> >& value_substitutions);
+				void add_member_function_template(std::vector<TemplateDeclaration*>& members, TemplateDeclaration* declaration);
 	void instantiate_member_variable_templates(TypePtr type);
 			void validate_class_template_definition(TemplateDeclaration* declaration);
 			void validate_function_template_definition(TemplateDeclaration* declaration);
 			bool type_is_template_dependent(TypePtr type) const;
-			TypePtr substitute_template_type(TypePtr type) const;
-			TypePtr substitute_template_type_in_scope(TypePtr type, Scope* scope) const;
-				TypePtr substitute_function_template_type( TemplateDeclaration* declaration, TypePtr type) const;
-			TypePtr resolve_dependent_typename_type(TypePtr type) const;
-			bool try_resolve_type_pack_element( const vector<TemplateArgument>& arguments, TypePtr& out);
+				TypePtr substitute_template_type(TypePtr type) const;
+				TypePtr substitute_template_type_in_scope(TypePtr type, Scope* scope) const;
+					TypePtr substitute_function_template_type( TemplateDeclaration* declaration, TypePtr type) const;
+				TypePtr resolve_dependent_typename_type(TypePtr type) const;
+				TypePtr hosted_hash_node_value_type(TypePtr node_type) const; TypePtr hosted_lookup_type_member(Scope* scope, const string& name) const;
+				TypePtr hosted_allocator_member_type(TypePtr allocator_type, const string& member_name) const; TypePtr hosted_allocator_value_type(TypePtr allocator_type) const; TypePtr hosted_get_value_type_from_context() const;
+				TypePtr hosted_allocator_rebind_value_type() const; TypePtr hosted_active_template_parameter_type(const string& parameter_name) const; TypePtr hosted_rebind_allocator_type(TypePtr allocator_type, TypePtr rebound_type) const;
+				TypePtr hosted_allocator_rebind_member_type(const string& member_name) const; TypePtr hosted_bool_constant_type(bool value) const; bool hosted_invoke_result_call_types(TypePtr invoke_result, vector<TypePtr>& call_types) const;
+				TypePtr hosted_call_result_type(const vector<TypePtr>& call_types) const; TypePtr hosted_invoke_result_type(TypePtr invoke_result) const; TypePtr resolve_hosted_invoke_call_type(TypePtr call_type) const;
+				bool try_resolve_type_pack_element( const vector<TemplateArgument>& arguments, TypePtr& out);
 			bool dependent_typename_template_argument_list( TypePtr type, size_t& index, vector<TemplateArgument>& arguments) const;
 			TemplateArgument template_argument_from_instance_argument( const pa11::TemplateInstanceArgument& argument) const;
 			TemplateArgument substitute_template_argument( const TemplateArgument& arg) const;
+			TypePtr hosted_dependent_value_traits_record(const string& owner_parameter) const; bool resolve_hosted_dependent_value_member_argument(const TemplateArgument& arg, TemplateArgument& out) const;
 			TypePtr make_integer_sequence_type( const vector<TemplateArgument>& arguments);
 		bool resolve_dependent_value_member_argument( const TemplateArgument& arg, TemplateArgument& out) const;
 		TypePtr substitute_template_type_parameter(TypePtr type, const string& name, TypePtr replacement) const;
@@ -532,6 +524,7 @@ public:
 	bool starts_attribute() const;
 	void skip_attributes(bool* no_unique_address = NULL);
 	bool at_gnu_asm() const;
+	string parse_gnu_asm_label();
 	void skip_gnu_asm();
 	bool starts_class_key() const;
 	bool starts_ptr_operator() const;
@@ -561,8 +554,16 @@ public:
 	const QualifiedName& declarator_name(const Declarator& declarator) const;
 	bool declarator_has_name(const Declarator& declarator) const;
 	const Suffix* declarator_function_suffix(const Declarator& declarator) const;
-			void parse_function_body(Binding* function, const Declarator& declarator, Node& function_node);
-			void parse_function_body_from_parameters(Binding* function, const vector<ParameterInfo>& parameters, Node& function_node);
+	string declarator_asm_label(const Declarator& declarator) const;
+			void parse_function_body(Binding* function,
+			                         const Declarator& declarator,
+			                         Node& function_node,
+			                         bool inline_definition_spec = false);
+			void parse_function_body_from_parameters(
+				Binding* function,
+				const vector<ParameterInfo>& parameters,
+				Node& function_node,
+				bool inline_definition_spec = false);
 			void parse_constructor_body_from_parameters(Binding* function, TypePtr class_type, const vector<ParameterInfo>& parameters, Node& function_node);
 			Binding* add_constructor_this_parameter(Node& fn, Scope* function_scope, const string& function_name, TypePtr this_type);
 			map<string, vector<Binding*> > bind_constructor_body_parameters(Binding* function, const vector<ParameterInfo>& parameters, Scope* function_scope, Node& fn);
@@ -698,6 +699,8 @@ public:
 		void ensure_aggregate_constructors_for_init(TypePtr type, const Node& init);
 	Binding* ensure_copy_move_constructor(TypePtr type, bool move);
 	bool copy_move_constructor_available(TypePtr type, bool move);
+	bool default_constructor_is_nothrow(TypePtr type);
+	bool copy_move_constructor_is_nothrow(TypePtr type, bool move);
 	Binding* ensure_copy_move_assignment(TypePtr type, bool move);
 	bool copy_move_assignment_available(TypePtr type, bool move);
 	Binding* ensure_default_destructor(TypePtr type, bool force_trivial = false);
@@ -731,9 +734,11 @@ public:
 		Conversion try_reference_conversion_functions(const Expr& selected, TypePtr target);
 		bool conversion_function_template_candidate(Binding* op) const;
 			Binding* instantiate_conversion_function_template_candidate(Binding* op, TypePtr target);
-			Conversion convert_value(const Expr& expr, TypePtr target);
-			Expr select_overload_expr(const Expr& expr, TypePtr target);
-			TemplateDeclaration* replacement_function_template_definition(TemplateDeclaration* declaration);
+				Conversion convert_value(const Expr& expr, TypePtr target);
+				Expr select_overload_expr(const Expr& expr, TypePtr target);
+				TemplateDeclaration* replacement_member_function_template_definition(TemplateDeclaration* declaration, TypePtr owner_record, TemplateDeclaration* owner_template, bool declaration_has_body);
+				TemplateDeclaration* replacement_free_function_template_definition(TemplateDeclaration* declaration, bool declaration_has_body);
+				TemplateDeclaration* replacement_function_template_definition(TemplateDeclaration* declaration);
 			Binding* instantiate_target_overload_candidate(Binding* candidate, TypePtr wanted, const map<Binding*, vector<TemplateArgument> >& explicit_template_arguments);
 			bool make_call_pack_expr(const Expr& callee, const vector<Expr>& args, Expr& out);
 		bool make_template_id_callee_pack_expr(const Expr& callee, Expr& out);
@@ -765,10 +770,12 @@ public:
 		bool use_hosted_allocator_constructor_fallback(TypePtr record, const vector<Expr>& args, Binding*& best, vector<Expr>& best_args, bool& ambiguous);
 		Binding* instantiate_selected_constructor_body(Binding* best);
 		Binding* wrap_inherited_constructor_if_needed(TypePtr record, Binding* best);
-		void finalize_constructor_candidate(TypePtr record, Binding*& best);
-		Binding* resolve_constructor_candidate(TypePtr type, const vector<Expr>& args, bool copy_initialization, vector<Expr>& converted);
-		Expr make_constructor_init_expr(TypePtr type, const vector<Expr>& args, bool copy_initialization);
-		Expr make_call_expr(Expr callee, vector<Expr> args);
+			bool hosted_vector_initializer_list_constructor(TypePtr record, Binding* ctor);
+			void finalize_constructor_candidate(TypePtr record, Binding*& best);
+			Binding* resolve_constructor_candidate(TypePtr type, const vector<Expr>& args, bool copy_initialization, vector<Expr>& converted);
+			Expr make_constructor_init_expr(TypePtr type, const vector<Expr>& args, bool copy_initialization);
+			Expr make_constructor_list_init_expr(TypePtr type, const Expr& init, bool copy_initialization);
+			Expr make_call_expr(Expr callee, vector<Expr> args);
 		bool make_member_pointer_call_expr(const Expr& callee, const vector<Expr>& args, Expr& out);
 		bool make_record_callable_call_expr(const Expr& callee, const vector<Expr>& args, Expr& out);
 		bool make_simple_builtin_call_expr(const Expr& callee, const vector<Expr>& args, Expr& out);
@@ -873,6 +880,7 @@ public:
 	string op_leaf(ETokenType type, const string& source) const;
 	string operator_function_name(ETokenType type, const string& source) const;
 	bool consume_explicit_specifier();
+	void complete_static_member_initializer_replays(Node& node);
 	void skip_balanced(ETokenType open, ETokenType close);
 	void skip_template_parameter_clause();
 };

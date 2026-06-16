@@ -73,11 +73,27 @@ bool template_argument_kind_matches_parameter(
 		return argument.kind == TemplateArgumentKind::Type;
 	if (parameter.kind == TemplateParameterKind::NonType)
 		return argument.kind == TemplateArgumentKind::Value;
-	if (argument.kind != TemplateArgumentKind::Template ||
-	    argument.template_declaration == NULL)
+	if (argument.kind != TemplateArgumentKind::Template)
 		return false;
+	if (argument.template_declaration == NULL)
+		return true;
+	if (argument.template_declaration->kind == TemplateDeclarationKind::Alias)
+		return true;
 	const vector<TemplateParameterInfo>& params =
 		argument.template_declaration->parameters;
+	if (parameter.template_parameters.size() == 1 &&
+	    parameter.template_parameters[0].kind == TemplateParameterKind::Type)
+	{
+		size_t required = 0;
+		for (size_t i = 0; i < params.size(); ++i)
+		{
+			if (params[i].kind != TemplateParameterKind::Type)
+				return false;
+			if (!params[i].has_default && !params[i].is_pack)
+				++required;
+		}
+		return required <= 1;
+	}
 	size_t actual = 0;
 	for (size_t expected = 0;
 	     expected < parameter.template_parameters.size();
@@ -232,7 +248,9 @@ bool dependent_typename_disabled_enable_if_argument(
 	size_t qualifier = root_name.rfind("::");
 	if (qualifier != string::npos)
 		root_name = root_name.substr(qualifier + 2);
-	return root_name == "enable_if" || root_name == "__enable_if_t";
+	return root_name == "enable_if" ||
+	       root_name == "enable_if_t" ||
+	       root_name == "__enable_if_t";
 }
 
 }  // namespace

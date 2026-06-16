@@ -196,8 +196,12 @@ void Parser::parse_using_family(Node& out)
 					                          BindingKind::Function,
 					                          current_scope()->name,
 					                          fn_type);
-					ctor->is_explicit = inherited->is_explicit;
-					ctor->unwind_no = inherited->unwind_no;
+						ctor->is_explicit = inherited->is_explicit;
+						ctor->unwind_no = inherited->unwind_no;
+						ctor->dynamic_exception_spec =
+							inherited->dynamic_exception_spec;
+						ctor->dynamic_exception_types =
+							inherited->dynamic_exception_types;
 					map<Binding*, vector<string> >::const_iterator nit =
 						function_parameter_names_.find(inherited);
 					vector<string> inherited_names =

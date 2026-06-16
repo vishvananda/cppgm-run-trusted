@@ -28,6 +28,38 @@ bool parameter_names_have_non_this(const vector<string>& names)
 	return false;
 }
 
+bool generated_parameter_name(const string& name)
+{
+	return name.compare(0, 7, "__param") == 0;
+}
+
+void merge_placeholder_parameter_names(vector<string>& names,
+                                       const vector<string>& source_names)
+{
+	if (names.empty() || source_names.empty())
+		return;
+	bool names_have_this = names[0] == "this";
+	bool source_has_this = source_names[0] == "this";
+	for (size_t i = 0; i < names.size(); ++i)
+	{
+		size_t source_index = i;
+		if (names_have_this && !source_has_this)
+		{
+			if (i == 0)
+				continue;
+			source_index = i - 1;
+		}
+		else if (!names_have_this && source_has_this)
+			source_index = i + 1;
+		if (source_index >= source_names.size() ||
+		    source_names[source_index].empty() ||
+		    generated_parameter_name(source_names[source_index]))
+			continue;
+		if (names[i].empty() || generated_parameter_name(names[i]))
+			names[i] = source_names[source_index];
+	}
+}
+
 void normalize_member_function_parameter_names(Binding* function,
                                                vector<string>& names)
 {
@@ -127,7 +159,65 @@ void expand_function_template_pack_parameter_names(
 		names = expanded;
 }
 
+void mark_function_body_pack_parameters(
+	TemplateDeclaration* declaration,
+	Binding* function,
+	vector<ParameterInfo>& parameters)
+{
+	if (declaration == NULL ||
+	    declaration->generic_function_type.get() == NULL ||
+	    declaration->generic_function_type->kind != pa11::TypeKind::Function ||
+	    function == NULL ||
+	    function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function)
+		return;
+	size_t generic_count = declaration->generic_function_type->parameters.size();
+	bool generic_has_owner_parameter =
+		function->owner != NULL &&
+		function->owner->kind == ScopeKind::Class &&
+		!function->is_static_member &&
+		generic_count != 0;
+	size_t body_index = 0;
+	for (size_t i = 0; i < generic_count && body_index < parameters.size(); ++i)
+	{
+		if (generic_has_owner_parameter && i == 0)
+			continue;
+		string pack_name;
+		bool pack_parameter = function_parameter_pack_name(
+			declaration,
+			declaration->generic_function_type->parameters[i],
+			pack_name);
+		size_t remaining_patterns = 0;
+		for (size_t j = i + 1; j < generic_count; ++j)
+			if (!(generic_has_owner_parameter && j == 0))
+				++remaining_patterns;
+		size_t repeat = 1;
+		if (pack_parameter)
+			repeat = parameters.size() > body_index + remaining_patterns
+				? parameters.size() - body_index - remaining_patterns
+				: 0;
+		string expression_name =
+			body_index < parameters.size() ? parameters[body_index].name
+			                               : string();
+		size_t pack_suffix = expression_name.find("__pack");
+		if (pack_suffix != string::npos && pack_suffix != 0)
+			expression_name = expression_name.substr(0, pack_suffix);
+		if (pack_parameter && expression_name.empty())
+			expression_name = generated_pack_parameter_name(pack_name);
+		for (size_t pidx = 0;
+		     pack_parameter && pidx < repeat && body_index + pidx < parameters.size();
+		     ++pidx)
+		{
+			parameters[body_index + pidx].pack_name = pack_name;
+			parameters[body_index + pidx].pack_expression_name =
+				expression_name;
+		}
+		body_index += repeat;
+	}
+}
+
 vector<ParameterInfo> function_body_parameters_from_type(
+	TemplateDeclaration* declaration,
 	Binding* function,
 	const vector<string>& names)
 {
@@ -165,6 +255,7 @@ vector<ParameterInfo> function_body_parameters_from_type(
 			                               base_name + "__pack") == 0)
 				parameters[j].pack_expression_name = base_name;
 	}
+	mark_function_body_pack_parameters(declaration, function, parameters);
 	return parameters;
 }
 
@@ -253,16 +344,28 @@ void FunctionTemplateInstantiationEngine::load_parameter_names(
 	TypePtr type,
 	vector<string>& names)
 {
+	if (parameter_names_have_non_this(declaration->function_parameter_names))
+		names = declaration->function_parameter_names;
+	vector<string> source_names;
 	if (source != NULL)
 	{
 		map<Binding*, vector<string> >::const_iterator saved_names =
 			p.function_parameter_names_.find(source);
 		if (saved_names != p.function_parameter_names_.end())
-			names = saved_names->second;
+			source_names = saved_names->second;
 	}
-	if (!parameter_names_have_non_this(names) &&
-	    parameter_names_have_non_this(declaration->function_parameter_names))
-		names = declaration->function_parameter_names;
+	if (names.empty())
+		names = source_names;
+	else
+		merge_placeholder_parameter_names(names, source_names);
+	if (target != NULL &&
+	    target->is_static_member &&
+	    type.get() != NULL &&
+	    type->kind == pa11::TypeKind::Function &&
+	    !names.empty() &&
+	    names[0] == "this" &&
+	    names.size() == type->parameters.size() + 1)
+		names.erase(names.begin());
 	normalize_member_function_parameter_names(target, names);
 	expand_function_template_pack_parameter_names(declaration, target, names);
 	if (type.get() != NULL && type->kind == pa11::TypeKind::Function &&
@@ -282,7 +385,8 @@ PendingFunctionBody FunctionTemplateInstantiationEngine::build_pending_body(
 	                    pa11::describe_type(binding->type));
 	pending.node.binding = binding;
 	pending.node.type = binding->type;
-	pending.parameters = function_body_parameters_from_type(binding, names);
+	pending.parameters =
+		function_body_parameters_from_type(declaration, binding, names);
 	pending.body_pos = body_pos;
 	pending.class_type = binding->owner != NULL
 		? pa11::record_type_for_scope(binding->owner) : TypePtr();

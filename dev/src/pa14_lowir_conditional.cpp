@@ -196,5 +196,106 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 	return Value(type, tmp);
 }
 
+bool FunctionLowerer::lower_record_conditional_init(
+	const function<Value()>& addr_for,
+	TypePtr type,
+	const Node& init)
+{
+	if (!starts_with(init.line, "conditional-expression") ||
+	    init.children.size() != 3)
+		return false;
+	Binding* copy = find_copy_move_constructor(type, false);
+	if (copy == NULL && !type_needs_cleanup(type))
+	{
+		Value target = addr_for();
+		function<Value()> target_addr = [target]() { return target; };
+		string yes = fresh_block("condobj_then");
+		string no = fresh_block("condobj_else");
+		string end = fresh_block("condobj_end");
+		Value cond = emit_rvalue(init.children[0]);
+		if (is_float_type(init.children[0].type))
+			cond = bool_value(cond, init.children[0].type);
+		terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
+		start_block(yes);
+		lower_object_init(target_addr, type, init.children[1]);
+		terminate("jump ^" + end);
+		start_block(no);
+		lower_object_init(target_addr, type, init.children[2]);
+		terminate("jump ^" + end);
+		start_block(end);
+		return true;
+	}
+	Value target = addr_for();
+	string slot = fresh_aux_slot("arg", slot_lowir_type(type));
+	string temp_name = fresh_temp();
+	instr(temp_name + " = addr $" + slot);
+	Value temp_addr("ptr", temp_name);
+	function<Value()> result_addr = [temp_addr]() { return temp_addr; };
+	string yes = fresh_block("condobj_then");
+	string no = fresh_block("condobj_else");
+	string end = fresh_block("condobj_end");
+	Value cond = emit_rvalue(init.children[0]);
+	if (is_float_type(init.children[0].type))
+		cond = bool_value(cond, init.children[0].type);
+	terminate("branch " + cond.text + ", ^" + yes + ", ^" + no);
+	start_block(yes);
+	lower_object_init(result_addr, type, init.children[1]);
+	terminate("jump ^" + end);
+	start_block(no);
+	lower_object_init(result_addr, type, init.children[2]);
+	terminate("jump ^" + end);
+	start_block(end);
+	Binding* temp_dtor = find_destructor(type);
+	bool call_temp_dtor =
+		temp_dtor != NULL && !temp_dtor->is_generated_default_destructor;
+	function<void()> destroy_result = [this, result_addr, type,
+	                                  temp_dtor, call_temp_dtor]() {
+		if (call_temp_dtor)
+		{
+			program_.demand_function_declaration(temp_dtor);
+			program_.demand_inline_function(temp_dtor);
+			Value target = result_addr();
+			string arg = target.text;
+			if (!arg.empty() && (arg[0] == '@' || arg[0] == '$'))
+			{
+				string tmp = fresh_temp();
+				instr(tmp + " = addr " + arg);
+				arg = tmp;
+			}
+			instr("call void @" + program_.symbol_for(temp_dtor) +
+			      "(" + arg + ")");
+		}
+		else if (type_needs_cleanup(type))
+			lower_destructor_for_object(result_addr, type);
+	};
+	if (copy != NULL)
+	{
+		program_.demand_function_declaration(copy);
+		program_.demand_inline_function(copy);
+		string dispatch = fresh_block("call_unwind_dispatch");
+		string done = fresh_block("call_unwind_end");
+		instr("eh_try ^" + dispatch);
+		++eh_try_depth_;
+		instr("call void @" + program_.symbol_for(copy) +
+		      "(" + target.text + ", " + temp_addr.text + ")");
+		destroy_result();
+		--eh_try_depth_;
+		instr("eh_end");
+		terminate("jump ^" + done);
+		start_block(dispatch);
+		destroy_result();
+		emit_unwind_cleanups();
+		terminate("resume");
+		start_block(done);
+		return true;
+	}
+	if (record_has_storage_copy(type))
+		instr("copyobj " + to_string(pa11::type_size(type)) + "x" +
+		      to_string(pa11::type_align(type)) + " " + temp_addr.text +
+		      ", " + target.text);
+	destroy_result();
+	return true;
+}
+
 }  // namespace internal
 }  // namespace pa14

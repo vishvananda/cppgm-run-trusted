@@ -1,13 +1,11 @@
 #include "pa14_lowir_internal.h"
-
+#include "pa12_templates_function_abi_internal.h"
+#include "pa12_types_support.h"
 #include <cctype>
 #include <sstream>
-
 namespace pa14 {
 namespace internal {
-
 namespace {
-
 string typeinfo_name_symbol(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -16,33 +14,20 @@ string typeinfo_name_symbol(TypePtr record)
 	return "__typeinfo_name__" + bare->tag + "_" +
 	       rtti_record_symbol_part(bare);
 }
-
 string typeinfo_builtin_code(EFundamentalType type)
 {
-	if (type == FT_BOOL)
-		return "b";
-	if (type == FT_CHAR)
-		return "c";
-	if (type == FT_SIGNED_CHAR)
-		return "a";
-	if (type == FT_UNSIGNED_CHAR)
-		return "h";
-	if (type == FT_SHORT_INT)
-		return "s";
-	if (type == FT_UNSIGNED_SHORT_INT)
-		return "t";
-	if (type == FT_INT)
-		return "i";
-	if (type == FT_UNSIGNED_INT)
-		return "j";
-	if (type == FT_LONG_INT)
-		return "l";
-	if (type == FT_UNSIGNED_LONG_INT)
-		return "m";
-	if (type == FT_LONG_LONG_INT)
-		return "x";
-	if (type == FT_UNSIGNED_LONG_LONG_INT)
-		return "y";
+	if (type == FT_BOOL) return "b";
+	if (type == FT_CHAR) return "c";
+	if (type == FT_SIGNED_CHAR) return "a";
+	if (type == FT_UNSIGNED_CHAR) return "h";
+	if (type == FT_SHORT_INT) return "s";
+	if (type == FT_UNSIGNED_SHORT_INT) return "t";
+	if (type == FT_INT) return "i";
+	if (type == FT_UNSIGNED_INT) return "j";
+	if (type == FT_LONG_INT) return "l";
+	if (type == FT_UNSIGNED_LONG_INT) return "m";
+	if (type == FT_LONG_LONG_INT) return "x";
+	if (type == FT_UNSIGNED_LONG_LONG_INT) return "y";
 	if (type == FT_INT128)
 		return "n";
 	if (type == FT_UNSIGNED_INT128)
@@ -61,7 +46,6 @@ string typeinfo_builtin_code(EFundamentalType type)
 		return "Di";
 	return "";
 }
-
 string typeinfo_builtin_part(TypePtr type)
 {
 	string part = pa11::describe_type(pa11::strip_cv(type));
@@ -70,20 +54,15 @@ string typeinfo_builtin_part(TypePtr type)
 			part[i] = '_';
 	return part;
 }
-
 string typeinfo_component_for_type(TypePtr type);
 string typeinfo_spelling_component_for_type(TypePtr type);
-
 bool typeinfo_argument_incomplete(
 	const pa11::TemplateInstanceArgument& arg);
-
 int64_t virtual_base_rtti_offset_flags(TypePtr record, TypePtr vbase);
-
 void emit_virtual_base_offset_entries(ostringstream& out,
                                       TypePtr table_record,
                                       TypePtr complete_record,
                                       uint64_t view_offset);
-
 bool typeinfo_type_incomplete(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -105,7 +84,6 @@ bool typeinfo_type_incomplete(TypePtr type)
 	}
 	return false;
 }
-
 bool typeinfo_argument_incomplete(
 	const pa11::TemplateInstanceArgument& arg)
 {
@@ -116,7 +94,6 @@ bool typeinfo_argument_incomplete(
 			return true;
 	return false;
 }
-
 string template_value_typeinfo_component(TypePtr type, uint64_t value)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -131,7 +108,6 @@ string template_value_typeinfo_component(TypePtr type, uint64_t value)
 		code = "i";
 	return "L" + code + to_string(value) + "E";
 }
-
 string template_value_typeinfo_component(
 	const pa11::TemplateInstanceArgument& arg)
 {
@@ -144,7 +120,6 @@ string template_value_typeinfo_component(
 	}
 	return template_value_typeinfo_component(arg.type, arg.value);
 }
-
 string typeinfo_component_for_argument(
 	const pa11::TemplateInstanceArgument& arg)
 {
@@ -164,7 +139,32 @@ string typeinfo_component_for_argument(
 	out += "E";
 	return out;
 }
-
+bool argument_has_named_value(
+	const pa11::TemplateInstanceArgument& arg)
+{
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Value &&
+	    !arg.dependent &&
+	    !arg.value_name.empty())
+		return true;
+	if (arg.kind == pa11::TemplateInstanceArgumentKind::Pack)
+		for (size_t i = 0; i < arg.pack.size(); ++i)
+			if (argument_has_named_value(arg.pack[i]))
+				return true;
+	for (size_t i = 0; i < arg.value_owner_template_arguments.size(); ++i)
+		if (argument_has_named_value(arg.value_owner_template_arguments[i]))
+			return true;
+	return false;
+}
+bool record_has_named_value_argument(TypePtr record)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return false;
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		if (argument_has_named_value(bare->template_arguments[i]))
+			return true;
+	return false;
+}
 string template_typeinfo_component(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -177,7 +177,16 @@ string template_typeinfo_component(TypePtr record)
 	out += "E";
 	return out;
 }
-
+string abi_record_typeinfo_component(TypePtr record)
+{
+	map<string, size_t> template_parameters;
+	pa12::internal::AbiSubstitutionContext ctx(template_parameters,
+	                                          NULL,
+	                                          NULL);
+	return pa12::internal::abi_record_type_with_substitutions(record,
+	                                                         ctx,
+	                                                         true);
+}
 string typeinfo_component_for_type(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -228,13 +237,12 @@ string typeinfo_component_for_type(TypePtr type)
 	}
 	if (bare->kind == TypeKind::Record &&
 	    record_is_template_specialization(bare))
-		return template_typeinfo_component(bare);
+		return abi_record_typeinfo_component(bare);
 	if (bare->kind == TypeKind::Record || bare->kind == TypeKind::Enum)
 		return to_string(bare->name.size()) + bare->name;
 	string name = pa11::describe_type(bare);
 	return to_string(name.size()) + name;
 }
-
 string typeinfo_spelling_component_for_type(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -254,23 +262,21 @@ string typeinfo_spelling_component_for_type(TypePtr type)
 		return "O" + typeinfo_spelling_component_for_type(type->base);
 	if (type->kind == TypeKind::Pointer)
 		return "P" + typeinfo_spelling_component_for_type(type->base);
+	if (type->kind == TypeKind::Function)
+	{
+		string name = pa11::describe_type(type);
+		return to_string(name.size()) + name;
+	}
 	if (type->kind == TypeKind::Array)
 		return "A" +
 		       (type->unknown_bound ? string("") : to_string(type->bound)) +
 		       "_" + typeinfo_spelling_component_for_type(type->base);
 	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind == TypeKind::Function ||
-	    bare->kind == TypeKind::MemberPointer)
-	{
-		string name = pa11::describe_type(bare);
-		return to_string(name.size()) + name;
-	}
 	if (bare->kind == TypeKind::Record &&
 	    record_is_template_specialization(bare))
-		return template_typeinfo_component(bare);
+		return abi_record_typeinfo_component(bare);
 	return typeinfo_component_for_type(type);
 }
-
 string lambda_typeinfo_name_spelling(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -314,13 +320,18 @@ string lambda_typeinfo_name_spelling(TypePtr record)
 	}
 	return "";
 }
-
 string typeinfo_name_spelling(TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
 	string lambda_name = lambda_typeinfo_name_spelling(bare);
 	if (!lambda_name.empty())
 		return lambda_name;
+	if (record_is_template_specialization(bare))
+	{
+		if (record_has_named_value_argument(bare))
+			return template_typeinfo_component(bare);
+		return typeinfo_component_for_type(bare);
+	}
 	vector<string> parts;
 	for (Scope* s = bare->scope; s != NULL; s = s->parent)
 	{
@@ -354,7 +365,6 @@ string typeinfo_name_spelling(TypePtr record)
 	out += "E";
 	return out;
 }
-
 	bool typeinfo_object_metadata_safe(const string& spelling)
 	{
 		if (spelling.empty())
@@ -366,19 +376,16 @@ string typeinfo_name_spelling(TypePtr record)
 				return false;
 		return true;
 	}
-
 	string vtable_object_symbol(TypePtr record)
 	{
 		string spelling = typeinfo_name_spelling(record);
 		return typeinfo_object_metadata_safe(spelling) ? "_ZTV" + spelling : "";
 	}
-
 	string rtti_object_symbol(TypePtr record)
 	{
 		string spelling = typeinfo_name_spelling(record);
 		return typeinfo_object_metadata_safe(spelling) ? "_ZTI" + spelling : "";
 	}
-
 	bool eligible_key_function_candidate(const Binding* fn)
 	{
 		return fn != NULL &&
@@ -389,7 +396,6 @@ string typeinfo_name_spelling(TypePtr record)
 		       !fn->is_declared_inline &&
 		       !fn->is_constexpr;
 	}
-
 	Binding* record_key_function_candidate(TypePtr record)
 	{
 		TypePtr bare = pa11::strip_cv(record);
@@ -405,7 +411,6 @@ string typeinfo_name_spelling(TypePtr record)
 		}
 		return NULL;
 	}
-
 	bool key_function_binding_matches(const Binding* key, const Binding* fn)
 	{
 		return key != NULL &&
@@ -417,7 +422,6 @@ string typeinfo_name_spelling(TypePtr record)
 		       key->type.get() != NULL &&
 		       pa11::same_type(fn->type, key->type);
 	}
-
 	bool record_key_function_defined_here(const ProgramLowerer& program,
 	                                      TypePtr record)
 	{
@@ -446,14 +450,20 @@ string typeinfo_name_spelling(TypePtr record)
 		}
 		return false;
 	}
-
 	bool record_imports_key_function_vtable(const ProgramLowerer& program,
 	                                        TypePtr record)
 	{
+		TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) :
+			TypePtr();
+		if (bare.get() != NULL && record_is_template_specialization(bare))
+			return false;
 		return record_key_function_candidate(record) != NULL &&
 		       !record_key_function_defined_here(program, record);
 	}
-
+	bool hosted_extern_template_stream_record(TypePtr record)
+	{
+		return record_uses_hosted_external_stream_vtable(record);
+	}
 	void declare_external_record_rtti(ProgramLowerer& program, TypePtr record)
 	{
 		TypePtr bare = pa11::strip_cv(record);
@@ -469,7 +479,6 @@ string typeinfo_name_spelling(TypePtr record)
 		program.global_declares.push_back("declare global @" + symbol +
 		                                  metadata_suffix(metadata));
 	}
-
 	void declare_external_record_vtable(ProgramLowerer& program, TypePtr record)
 	{
 		TypePtr bare = pa11::strip_cv(record);
@@ -486,7 +495,6 @@ string typeinfo_name_spelling(TypePtr record)
 		program.global_declares.push_back("declare global @" + symbol +
 		                                  metadata_suffix(metadata));
 	}
-
 	void append_typeinfo_name_global(vector<string>& globals, TypePtr record)
 	{
 		string name = typeinfo_name_spelling(record);
@@ -503,7 +511,6 @@ string typeinfo_name_spelling(TypePtr record)
 	out << "}";
 	globals.push_back(out.str());
 }
-
 string typeinfo_name_symbol_for_type(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -513,7 +520,6 @@ string typeinfo_name_symbol_for_type(TypePtr type)
 		return "__typeinfo_name__" + typeinfo_builtin_part(bare);
 	return "__typeinfo_name_type_" + typeinfo_component_for_type(bare);
 }
-
 void append_typeinfo_name_global_for_type(vector<string>& globals,
                                           TypePtr type)
 {
@@ -532,7 +538,6 @@ void append_typeinfo_name_global_for_type(vector<string>& globals,
 	out << "}";
 	globals.push_back(out.str());
 }
-
 void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -560,15 +565,14 @@ void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 	out << "}";
 	program.globals.push_back(out.str());
 }
-
 }  // namespace
-
 	void ProgramLowerer::emit_rtti(TypePtr record)
 	{
 		TypePtr bare = pa11::strip_cv(record);
 		if (bare->kind != TypeKind::Record)
 			return;
-		if (record_imports_key_function_vtable(*this, bare))
+		if (hosted_extern_template_stream_record(bare) ||
+		    record_imports_key_function_vtable(*this, bare))
 		{
 			declare_external_record_rtti(*this, bare);
 			return;
@@ -592,8 +596,7 @@ void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 	}
 	bool static_downcast_needs_base_offset = false;
 	for (size_t i = 0; i < record_bases.size(); ++i)
-		if (pa11::record_direct_base_offset(bare, record_bases[i]) != 0 &&
-		    is_static_downcast_source_record(record_bases[i]))
+		if (is_static_downcast_source_record(record_bases[i]))
 			static_downcast_needs_base_offset = true;
 	bool use_si = record_bases.size() == 1 &&
 	              !static_downcast_needs_base_offset &&
@@ -660,7 +663,6 @@ void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 	out << "}";
 	globals.push_back(out.str());
 }
-
 void ProgramLowerer::emit_typeinfo(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -698,6 +700,30 @@ void ProgramLowerer::emit_typeinfo(TypePtr type)
 		rtti << "  ptr addr @" << name_symbol << "\n";
 		rtti << "  i32 " << (incomplete_pointee ? 8 : 0) << "\n";
 		rtti << "  ptr addr @" << typeid_rtti_symbol(bare->base) << "\n";
+		rtti << "}";
+		globals.push_back(rtti.str());
+		return;
+	}
+	if (bare->kind == TypeKind::Function)
+	{
+		string component = typeinfo_component_for_type(bare);
+		string rtti_symbol = "__rtti_type_" + component;
+		if (!defined_globals.insert(rtti_symbol).second)
+			return;
+		if (declared_globals.insert(
+			    "__external_rtti_vtable____function_type_info").second)
+			global_declares.push_back(
+				"declare global @__external_rtti_vtable____function_type_info "
+				"[binding=strong, object=_ZTVN10__cxxabiv120__function_type_infoE]");
+		string name_symbol = typeinfo_name_symbol_for_type(bare);
+		if (defined_globals.insert(name_symbol).second)
+			append_typeinfo_name_global_for_type(globals, bare);
+		ostringstream rtti;
+		rtti << "global @" << rtti_symbol
+		     << " [storage=readonly, binding=weak, object=_ZTI"
+		     << component << "] = {\n";
+		rtti << "  ptr addr @__external_rtti_vtable____function_type_info + 16\n";
+		rtti << "  ptr addr @" << name_symbol << "\n";
 		rtti << "}";
 		globals.push_back(rtti.str());
 		return;
@@ -740,7 +766,6 @@ void ProgramLowerer::emit_typeinfo(TypePtr type)
 		globals.push_back(rtti.str());
 	}
 }
-
 string ProgramLowerer::typeid_rtti_symbol(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -748,11 +773,11 @@ string ProgramLowerer::typeid_rtti_symbol(TypePtr type)
 		return rtti_symbol_for_record(bare);
 	if (bare->kind == TypeKind::Fundamental)
 		return "__rtti_" + typeinfo_builtin_part(bare);
-	if (bare->kind == TypeKind::Pointer)
+	if (bare->kind == TypeKind::Pointer ||
+	    bare->kind == TypeKind::Function)
 		return "__rtti_type_" + typeinfo_component_for_type(bare);
 	return "";
 }
-
 string ProgramLowerer::catch_rtti_symbol(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -772,9 +797,7 @@ string ProgramLowerer::catch_rtti_symbol(TypePtr type)
 	}
 	return "";
 }
-
 namespace {
-
 bool vtable_signature_matches(const Binding* base, const Binding* derived)
 {
 	if (base == NULL || derived == NULL ||
@@ -793,7 +816,6 @@ bool vtable_signature_matches(const Binding* base, const Binding* derived)
 			return false;
 	return pa11::same_type(base->type->base, derived->type->base);
 }
-
 Binding* find_vtable_overrider(TypePtr record, Binding* fn)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -813,7 +835,6 @@ Binding* find_vtable_overrider(TypePtr record, Binding* fn)
 	}
 	return best;
 }
-
 Binding* inline_definition_for_vtable_target(ProgramLowerer& program,
                                              Binding* target)
 {
@@ -841,7 +862,6 @@ Binding* inline_definition_for_vtable_target(ProgramLowerer& program,
 	}
 	return target;
 }
-
 string pure_virtual_entry(ProgramLowerer& program, Binding* fn)
 {
 	if (program.declared_functions.insert("__cxa_pure_virtual").second)
@@ -863,7 +883,6 @@ string pure_virtual_entry(ProgramLowerer& program, Binding* fn)
 	}
 	return "__cxa_pure_virtual";
 }
-
 string emit_adjustor_thunk(ProgramLowerer& program,
                            Binding* fn,
                            int64_t delta,
@@ -925,7 +944,37 @@ string emit_adjustor_thunk(ProgramLowerer& program,
 	program.functions.push_back(out);
 	return name;
 }
-
+bool vtable_target_is_structurally_dependent(Binding* fn)
+{
+	if (fn == NULL)
+		return false;
+	TypePtr owner = class_record_for_member(fn);
+	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+	return (owner.get() != NULL &&
+	        pa12::internal::type_structurally_dependent(owner)) ||
+	       (fn->type.get() != NULL &&
+	        pa12::internal::type_structurally_dependent(fn->type));
+}
+Binding* concrete_view_destructor_for_dependent_target(TypePtr view_base,
+                                                       Binding* target)
+{
+	if (target == NULL ||
+	    target->name.empty() ||
+	    target->name[0] != '~' ||
+	    !vtable_target_is_structurally_dependent(target))
+		return target;
+	TypePtr view_bare = view_base.get() != NULL
+		? pa11::strip_cv(view_base) : TypePtr();
+	if (view_bare.get() == NULL ||
+	    view_bare->kind != TypeKind::Record ||
+	    pa12::internal::type_structurally_dependent(view_bare))
+		return target;
+	Binding* concrete = find_destructor(view_bare);
+	if (concrete == NULL ||
+	    vtable_target_is_structurally_dependent(concrete))
+		return target;
+	return concrete;
+}
 string vtable_entry_symbol(ProgramLowerer& program,
                            TypePtr record,
                            TypePtr view_base,
@@ -938,6 +987,9 @@ string vtable_entry_symbol(ProgramLowerer& program,
 		return "";
 	Binding* target = find_vtable_overrider(record, fn);
 	target = inline_definition_for_vtable_target(program, target);
+	target = concrete_view_destructor_for_dependent_target(view_base, target);
+	if (vtable_target_is_structurally_dependent(target))
+		return "";
 	if (target->is_pure_virtual)
 		return pure_virtual_entry(program, target);
 	TypePtr owner = class_record_for_member(target);
@@ -962,19 +1014,21 @@ string vtable_entry_symbol(ProgramLowerer& program,
 	program.demand_inline_function(target);
 	return program.symbol_for(target);
 }
-
 bool record_uses_virtual_base_vtable_shape(TypePtr record)
 {
 	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 	return bare.get() != NULL && bare->kind == TypeKind::Record &&
+	       !pa12::internal::type_structurally_dependent(bare) &&
 	       !pa11::record_virtual_bases(bare).empty();
 }
-
 size_t virtual_base_index(TypePtr record, TypePtr vbase)
 {
 	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 	TypePtr wanted = vbase.get() != NULL ? pa11::strip_cv(vbase) : TypePtr();
 	if (bare.get() == NULL || wanted.get() == NULL)
+		return static_cast<size_t>(-1);
+	if (pa12::internal::type_structurally_dependent(bare) ||
+	    pa12::internal::type_structurally_dependent(wanted))
 		return static_cast<size_t>(-1);
 	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
 	for (size_t i = 0; i < vbases.size(); ++i)
@@ -982,7 +1036,6 @@ size_t virtual_base_index(TypePtr record, TypePtr vbase)
 			return i;
 	return static_cast<size_t>(-1);
 }
-
 int64_t virtual_base_rtti_offset_flags(TypePtr record, TypePtr vbase)
 {
 	size_t index = virtual_base_index(record, vbase);
@@ -992,7 +1045,6 @@ int64_t virtual_base_rtti_offset_flags(TypePtr record, TypePtr vbase)
 	               static_cast<int64_t>(vtable_address_point_offset(record));
 	return slot * 256 + 3;
 }
-
 uint64_t virtual_base_complete_offset(TypePtr complete, TypePtr vbase)
 {
 	TypePtr complete_bare = complete.get() != NULL
@@ -1004,7 +1056,6 @@ uint64_t virtual_base_complete_offset(TypePtr complete, TypePtr vbase)
 		return pa11::record_virtual_base_offset(complete_bare, vbase_bare);
 	return pa11::record_virtual_base_offset(vbase_bare, vbase_bare);
 }
-
 void emit_virtual_base_offset_entries(ostringstream& out,
                                       TypePtr table_record,
                                       TypePtr complete_record,
@@ -1026,7 +1077,6 @@ void emit_virtual_base_offset_entries(ostringstream& out,
 		                    static_cast<int64_t>(view_offset)) << "\n";
 	}
 }
-
 bool entry_owner_is_virtual_base_slot(TypePtr record,
                                       const pa11::VirtualTableEntry& entry)
 {
@@ -1038,6 +1088,9 @@ bool entry_owner_is_virtual_base_slot(TypePtr record,
 	if (owner.get() == NULL || owner->kind != TypeKind::Record ||
 	    bare.get() == NULL || bare->kind != TypeKind::Record)
 		return false;
+	if (pa12::internal::type_structurally_dependent(owner) ||
+	    pa12::internal::type_structurally_dependent(bare))
+		return false;
 	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
 	for (size_t i = 0; i < vbases.size(); ++i)
 	{
@@ -1048,9 +1101,7 @@ bool entry_owner_is_virtual_base_slot(TypePtr record,
 	}
 	return false;
 }
-
 bool record_is_virtual_base_of(TypePtr record, TypePtr base);
-
 void emit_vtable_entries(ProgramLowerer& program,
                          ostringstream& out,
                          TypePtr dispatch_record,
@@ -1096,7 +1147,6 @@ void emit_vtable_entries(ProgramLowerer& program,
 		}
 	}
 }
-
 bool record_is_virtual_base_of(TypePtr record, TypePtr base)
 {
 	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
@@ -1104,13 +1154,15 @@ bool record_is_virtual_base_of(TypePtr record, TypePtr base)
 	if (bare.get() == NULL || bare->kind != TypeKind::Record ||
 	    wanted.get() == NULL || wanted->kind != TypeKind::Record)
 		return false;
+	if (pa12::internal::type_structurally_dependent(bare) ||
+	    pa12::internal::type_structurally_dependent(wanted))
+		return false;
 	vector<TypePtr> vbases = pa11::record_virtual_bases(bare);
 	for (size_t i = 0; i < vbases.size(); ++i)
 		if (pa11::same_type(pa11::strip_cv(vbases[i]), wanted))
 			return true;
 	return false;
 }
-
 uint64_t construction_view_complete_offset(TypePtr complete,
                                            TypePtr subobject,
                                            uint64_t subobject_offset,
@@ -1129,7 +1181,6 @@ uint64_t construction_view_complete_offset(TypePtr complete,
 	}
 	return subobject_offset + local_view_offset;
 }
-
 void append_address_point_reference(vector<string>& refs,
                                     TypePtr table_record,
                                     const string& symbol)
@@ -1137,7 +1188,6 @@ void append_address_point_reference(vector<string>& refs,
 	refs.push_back(symbol + " + " +
 	               to_string(vtable_address_point_offset(table_record)));
 }
-
 void emit_construction_primary_vtable(ProgramLowerer& program,
                                       TypePtr complete,
                                       TypePtr subobject,
@@ -1172,7 +1222,6 @@ void emit_construction_primary_vtable(ProgramLowerer& program,
 	out << "}";
 	program.globals.push_back(out.str());
 }
-
 void emit_construction_view_vtable(ProgramLowerer& program,
                                    TypePtr complete,
                                    TypePtr subobject,
@@ -1196,17 +1245,35 @@ void emit_construction_view_vtable(ProgramLowerer& program,
 	                                                      slice);
 	if (!program.defined_globals.insert(symbol).second)
 		return;
-	program.emit_rtti(view_bare);
+	program.emit_rtti(sub_bare);
 	ostringstream out;
 	out << "global @" << symbol
 	    << " [storage=readonly, binding=weak] = {\n";
-	emit_virtual_base_offset_entries(out,
-	                                 sub_bare,
-	                                 complete_bare,
-	                                 complete_view_offset);
-	out << "  i64 " << (complete_view_offset == 0 ? 0 :
-	                    -static_cast<int64_t>(complete_view_offset))
-	    << "\n";
+	if (record_is_virtual_base_of(sub_bare, view_bare))
+	{
+		vector<TypePtr> vbases = pa11::record_virtual_bases(sub_bare);
+		for (size_t i = 0; i < vbases.size(); ++i)
+		{
+			TypePtr vbase = pa11::strip_cv(vbases[i]);
+			int64_t offset = pa11::same_type(vbase, view_bare)
+				? 0
+				: static_cast<int64_t>(
+					  virtual_base_complete_offset(complete_bare, vbase)) -
+				  static_cast<int64_t>(complete_view_offset);
+			out << "  i64 " << offset << "\n";
+		}
+	}
+	else
+		emit_virtual_base_offset_entries(out,
+		                                 sub_bare,
+		                                 complete_bare,
+		                                 complete_view_offset);
+	bool virtual_base_view = record_is_virtual_base_of(sub_bare, view_bare);
+	int64_t offset_to_top = virtual_base_view
+		? -static_cast<int64_t>(complete_view_offset)
+		: static_cast<int64_t>(subobject_offset) -
+		  static_cast<int64_t>(complete_view_offset);
+	out << "  i64 " << offset_to_top << "\n";
 	out << "  ptr addr @" << rtti_symbol_for_record(view_bare) << "\n";
 	emit_vtable_entries(program,
 	                    out,
@@ -1218,7 +1285,6 @@ void emit_construction_view_vtable(ProgramLowerer& program,
 	out << "}";
 	program.globals.push_back(out.str());
 }
-
 void append_construction_vtable_group(ProgramLowerer& program,
                                       TypePtr complete,
                                       TypePtr subobject,
@@ -1226,6 +1292,8 @@ void append_construction_vtable_group(ProgramLowerer& program,
                                       vector<string>& refs)
 {
 	TypePtr sub_bare = pa11::strip_cv(subobject);
+	if (pa12::internal::type_structurally_dependent(sub_bare))
+		return;
 	if (!record_uses_virtual_base_vtable_shape(sub_bare) ||
 	    !sub_bare->is_polymorphic)
 		return;
@@ -1279,7 +1347,6 @@ void append_construction_vtable_group(ProgramLowerer& program,
 			                                      i + 1));
 	}
 }
-
 void emit_vtt(ProgramLowerer& program, TypePtr record)
 {
 	TypePtr bare = pa11::strip_cv(record);
@@ -1310,13 +1377,14 @@ void emit_vtt(ProgramLowerer& program, TypePtr record)
 		                                 refs);
 	}
 	vector<pair<TypePtr, uint64_t> > views = vtt_ordered_vtable_views(bare);
-	for (size_t i = 0; i < views.size(); ++i)
-		append_address_point_reference(
-			refs,
-			bare,
-			vtable_view_symbol_for_record(bare,
-			                              views[i].first,
-			                              views[i].second));
+	if (!record_uses_hosted_external_stream_vtable(bare))
+		for (size_t i = 0; i < views.size(); ++i)
+			append_address_point_reference(
+				refs,
+				bare,
+				vtable_view_symbol_for_record(bare,
+				                              views[i].first,
+				                              views[i].second));
 	ostringstream out;
 	out << "global @" << symbol << " [storage=readonly, binding=weak] = {\n";
 	for (size_t i = 0; i < refs.size(); ++i)
@@ -1324,16 +1392,22 @@ void emit_vtt(ProgramLowerer& program, TypePtr record)
 	out << "}";
 	program.globals.push_back(out.str());
 }
-
 }  // namespace
-
 void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 {
 	TypePtr bare = pa11::strip_cv(record);
 	if (bare->kind != TypeKind::Record || !bare->is_polymorphic)
 		return;
+	if (pa12::internal::type_structurally_dependent(bare))
+		return;
 	if (emitted_vtables.find(bare.get()) != emitted_vtables.end())
 		return;
+	string primary_vtable_symbol = vtable_symbol_for_record(bare);
+	if (defined_globals.find(primary_vtable_symbol) != defined_globals.end())
+	{
+		emitted_vtables.insert(bare.get());
+		return;
+	}
 	vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
 	if (include_bases)
 	{
@@ -1348,7 +1422,8 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		}
 	}
 		emitted_vtables.insert(bare.get());
-		if (record_imports_key_function_vtable(*this, bare))
+		if (hosted_extern_template_stream_record(bare) ||
+		    record_imports_key_function_vtable(*this, bare))
 		{
 			declare_external_record_vtable(*this, bare);
 			return;
@@ -1374,9 +1449,11 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		}
 	}
 	emit_rtti(bare);
+	if (!defined_globals.insert(primary_vtable_symbol).second)
+		return;
 		bool virtual_base_shape = record_uses_virtual_base_vtable_shape(bare);
 		ostringstream out;
-		out << "global @" << vtable_symbol_for_record(bare)
+		out << "global @" << primary_vtable_symbol
 		    << " [storage=readonly, binding=weak";
 		string vtable_object = vtable_object_symbol(bare);
 		if (!vtable_object.empty())
@@ -1418,6 +1495,5 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 	}
 	emit_vtt(*this, bare);
 }
-
 }  // namespace internal
 }  // namespace pa14

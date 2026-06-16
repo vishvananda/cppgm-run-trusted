@@ -13,16 +13,17 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 	{
 		Blob b; sleb(b, value); out.insert(out.end(), b.data.begin(), b.data.end());
 	}
-	int ensure_catch_type_index(map<string, int>& type_index,
-	                            vector<string>& types,
-	                            const CatchInfo& c)
+	int ensure_type_symbol_index(map<string, int>& type_index,
+	                             vector<string>& types,
+	                             const string& type,
+	                             int preferred_selector)
 	{
-		const string type = c.catch_all ? string() : c.type_symbol;
 		map<string, int>::const_iterator found = type_index.find(type);
 		if (found != type_index.end())
 			return found->second;
-		int selector = c.selector > 0 ? c.selector
-		                              : static_cast<int>(types.size() + 1);
+		int selector = preferred_selector > 0
+			? preferred_selector
+			: static_cast<int>(types.size() + 1);
 		if (selector <= 0)
 			selector = static_cast<int>(types.size() + 1);
 		if (types.size() < static_cast<size_t>(selector))
@@ -38,9 +39,46 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 		type_index[type] = selector;
 		return selector;
 	}
+	int ensure_catch_type_index(map<string, int>& type_index,
+	                            vector<string>& types,
+	                            const CatchInfo& c)
+	{
+		const string type = c.catch_all ? string() : c.type_symbol;
+		return ensure_type_symbol_index(type_index, types, type, c.selector);
+	}
+	int ensure_exception_spec_filter(map<string, int>& type_index,
+	                                 vector<string>& types,
+	                                 map<string, int>& spec_filters,
+	                                 vector<unsigned char>& spec_table,
+	                                 const CatchInfo& c)
+	{
+		string key;
+		for (size_t i = 0; i < c.exception_spec_types.size(); ++i)
+		{
+			if (i != 0)
+				key += '\n';
+			key += c.exception_spec_types[i];
+		}
+		map<string, int>::const_iterator found = spec_filters.find(key);
+		if (found != spec_filters.end())
+			return found->second;
+		const size_t start = spec_table.size();
+		for (size_t i = 0; i < c.exception_spec_types.size(); ++i)
+		{
+			int index = ensure_type_symbol_index(
+				type_index, types, c.exception_spec_types[i], 0);
+			append_uleb_to(spec_table, static_cast<uint64_t>(index));
+		}
+		append_uleb_to(spec_table, 0);
+		const int filter = -static_cast<int>(start + 1);
+		spec_filters[key] = filter;
+		return filter;
+	}
 	int append_action_chain(vector<unsigned char>& action_table,
 	                        map<string, int>& type_index,
 	                        vector<string>& types,
+	                        map<string, int>& spec_filters,
+	                        vector<unsigned char>& spec_table,
 	                        const vector<CatchInfo>& catch_list,
 	                        bool cleanup)
 	{
@@ -48,8 +86,16 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 		if (cleanup && !catch_list.empty())
 			filters.push_back(0);
 		for (size_t i = 0; i < catch_list.size(); ++i)
-			filters.push_back(
-				ensure_catch_type_index(type_index, types, catch_list[i]));
+		{
+			if (catch_list[i].exception_spec)
+				filters.push_back(ensure_exception_spec_filter(
+					type_index, types, spec_filters, spec_table,
+					catch_list[i]));
+			else
+				filters.push_back(
+					ensure_catch_type_index(type_index, types,
+					                        catch_list[i]));
+		}
 		if (filters.empty())
 			return 0;
 		int next_start = -1;
@@ -74,9 +120,11 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 	sort(ranges.begin(), ranges.end(),
 	     [](const EhRange& a, const EhRange& b) { return a.start < b.start; });
 	map<string, int> type_index;
+	map<string, int> spec_filters;
 	vector<string> types;
 	vector<unsigned char> call_table;
 	vector<unsigned char> action_table;
+	vector<unsigned char> spec_table;
 	size_t cursor = 0;
 	for (size_t i = 0; i < ranges.size(); ++i)
 	{
@@ -100,12 +148,20 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 				cleanup_action_blocks.count(ranges[i].target) != 0;
 			if (c != catches.end())
 				action = append_action_chain(action_table, type_index, types,
+				                             spec_filters, spec_table,
 				                             c->second, cleanup);
 		append_uleb_to(call_table, range_start);
 		append_uleb_to(call_table, range_end - range_start);
 		append_uleb_to(call_table, lp);
 		append_uleb_to(call_table, action);
 		cursor = max(cursor, range_end);
+	}
+	if (cursor < info.size)
+	{
+		append_uleb_to(call_table, cursor);
+		append_uleb_to(call_table, info.size - cursor);
+		append_uleb_to(call_table, 0);
+		append_uleb_to(call_table, 0);
 	}
 	vector<string> type_refs(types.size());
 	for (size_t i = 0; i < types.size(); ++i)
@@ -137,8 +193,10 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 					unit.obj.reloc(lsda, off,
 					               type_refs[types.size() - 1 - n],
 					               R_X86_64_PC32, 0);
-			}
+		}
 		const size_t base_pos = lsda.bytes.pos();
+		for (size_t i = 0; i < spec_table.size(); ++i)
+			lsda.bytes.u8(spec_table[i]);
 		const uint64_t ttype_offset = base_pos - (offset_pos + 1);
 		lsda.bytes.data[offset_pos] = static_cast<unsigned char>(ttype_offset);
 		return;

@@ -516,7 +516,9 @@ TypePtr Parser::parse_class_specifier()
 	}
 	try
 	{
-		if (!defer_dependent_base_layout)
+		if (!defer_dependent_base_layout &&
+		    !type_is_template_dependent(type) &&
+		    !type_structurally_dependent(type))
 			pa11::layout_record_type(type);
 	}
 	catch (const runtime_error& err)
@@ -601,10 +603,13 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 		if (class_type.get() != NULL)
 		{
 			complete_class_virtuals(class_type);
-			bool layout_ok = true;
+			bool layout_ok =
+				!type_is_template_dependent(class_type) &&
+				!type_structurally_dependent(class_type);
 			try
 			{
-				pa11::layout_record_type(class_type);
+				if (layout_ok)
+					pa11::layout_record_type(class_type);
 			}
 			catch (const runtime_error& err)
 			{
@@ -709,8 +714,32 @@ TypePtr Parser::parse_enum_specifier()
 				value = explicit_value.constant_value;
 			skip_attributes();
 		}
-		Binding* binding =
-			pa11::add_binding(enum_scope, BindingKind::Enumerator, enumerator, type);
+		Binding* binding = NULL;
+		map<string, vector<Binding*> >::iterator existing =
+			enum_scope->members.find(enumerator);
+		if (existing != enum_scope->members.end())
+		{
+			for (size_t i = 0; i < existing->second.size(); ++i)
+			{
+				Binding* candidate = existing->second[i];
+				if (candidate->kind != BindingKind::Enumerator)
+					continue;
+				if (pa11::same_type(candidate->type, type))
+				{
+					binding = candidate;
+					break;
+				}
+				if (!active_class_instantiations_.empty() &&
+				    candidate->has_constant &&
+				    candidate->constant_value == value)
+					binding = candidate;
+			}
+		}
+		if (binding == NULL)
+			binding = pa11::add_binding(enum_scope,
+			                            BindingKind::Enumerator,
+			                            enumerator,
+			                            type);
 		binding->has_constant = true;
 		binding->constant_value = value;
 		next_value = value + 1;

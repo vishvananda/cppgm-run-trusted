@@ -1,6 +1,26 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 namespace pa14 {
 namespace internal {
+
+TypePtr concrete_conversion_type(TypePtr type, TypePtr fallback)
+{
+	if (pa12::internal::substituted_type_is_valid(type))
+		return type;
+	if (fallback.get() != NULL &&
+	    pa12::internal::substituted_type_is_valid(fallback))
+		return fallback;
+	return type;
+}
+
+string scalar_lowir_type_or_value(TypePtr type, const Value& value)
+{
+	if (pa12::internal::substituted_type_is_valid(type))
+		return scalar_lowir_type(type);
+	if (!value.type.empty())
+		return value.type;
+	return scalar_lowir_type(type);
+}
 
 void FunctionLowerer::emit_builtin_va_start(const Node& expr)
 {
@@ -624,6 +644,91 @@ Value FunctionLowerer::emit_builtin_fpclassify(const Node& expr)
 	return Value(scalar_lowir_type(expr.type), result);
 }
 
+Value FunctionLowerer::emit_builtin_fp_test(const Node& expr)
+{
+	if (expr.direct_call == NULL || expr.children.size() != 2)
+		throw runtime_error("invalid floating-point builtin");
+	const string& name = expr.direct_call->name;
+	Value value = emit_rvalue(expr.children[1]);
+	string value_type = scalar_lowir_type(expr.children[1].type);
+	if (value_type != "f32" && value_type != "f64" && value_type != "f80")
+		throw runtime_error("invalid floating-point builtin argument");
+	string cond;
+	if (name == "__builtin_isnan")
+	{
+		cond = fresh_temp();
+		instr(cond + " = cmp ne " + value_type + " " + value.text +
+		      ", " + value.text);
+	}
+	else if (name == "__builtin_isinf")
+	{
+		string pos = fresh_temp();
+		string neg_inf = fresh_temp();
+		string neg = fresh_temp();
+		cond = fresh_temp();
+		instr(pos + " = cmp eq " + value_type + " " + value.text +
+		      ", inf");
+		instr(neg_inf + " = unary neg " + value_type + " inf");
+		instr(neg + " = cmp eq " + value_type + " " + value.text +
+		      ", " + neg_inf);
+		instr(cond + " = binary or u8 " + pos + ", " + neg);
+	}
+	else if (name == "__builtin_isfinite" ||
+	         name == "__builtin_isnormal")
+	{
+		string ordered = fresh_temp();
+		instr(ordered + " = cmp eq " + value_type + " " + value.text +
+		      ", " + value.text);
+		string pos = fresh_temp();
+		string neg_inf = fresh_temp();
+		string neg = fresh_temp();
+		string inf = fresh_temp();
+		string not_inf = fresh_temp();
+		instr(pos + " = cmp eq " + value_type + " " + value.text +
+		      ", inf");
+		instr(neg_inf + " = unary neg " + value_type + " inf");
+		instr(neg + " = cmp eq " + value_type + " " + value.text +
+		      ", " + neg_inf);
+		instr(inf + " = binary or u8 " + pos + ", " + neg);
+		instr(not_inf + " = cmp eq u8 " + inf + ", 0");
+		cond = fresh_temp();
+		instr(cond + " = binary and u8 " + ordered + ", " + not_inf);
+		if (name == "__builtin_isnormal")
+		{
+			string nonzero = fresh_temp();
+			string normal = fresh_temp();
+			instr(nonzero + " = cmp ne " + value_type + " " +
+			      value.text + ", 0.0");
+			instr(normal + " = binary and u8 " + cond + ", " +
+			      nonzero);
+			cond = normal;
+		}
+	}
+	else if (name == "__builtin_signbit")
+	{
+		string slot = fresh_aux_slot("signbit", value_type);
+		instr("store " + value_type + " " + value.text + ", $" + slot);
+		string base = fresh_temp();
+		instr(base + " = addr $" + slot);
+		unsigned sign_offset = value_type == "f32" ? 3 :
+		                       value_type == "f64" ? 7 : 9;
+		string byte_addr = fresh_temp();
+		instr(byte_addr + " = index i8 " + base + ", " +
+		      to_string(sign_offset));
+		string byte = fresh_temp();
+		string masked = fresh_temp();
+		cond = fresh_temp();
+		instr(byte + " = load u8 " + byte_addr);
+		instr(masked + " = binary and u8 " + byte + ", 128");
+		instr(cond + " = cmp ne u8 " + masked + ", 0");
+	}
+	else
+		throw runtime_error("unsupported floating-point builtin");
+	string result = fresh_temp();
+	instr(result + " = convert zext i32 u8 " + cond);
+	return Value("i32", result);
+}
+
 Value FunctionLowerer::emit_builtin_float_constant(const Node& expr)
 {
 	if (expr.direct_call == NULL)
@@ -633,7 +738,8 @@ Value FunctionLowerer::emit_builtin_float_constant(const Node& expr)
 	string type = scalar_lowir_type(expr.type);
 	string name = expr.direct_call->name;
 	bool nan = name.find("nan") != string::npos;
-	return Value(type, nan ? "nan" : "inf");
+	bool signaling = name.find("nans") != string::npos;
+	return Value(type, signaling ? "snan" : (nan ? "nan" : "inf"));
 }
 
 Value FunctionLowerer::convert_member_pointer_value(Value value,
@@ -723,6 +829,26 @@ Value FunctionLowerer::convert_same_lowir_value(Value value,
 	return Value(dst, value.text); }
 
 Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to, bool fold_literals) {
+from = concrete_conversion_type(from, to);
+to = concrete_conversion_type(to, from);
+TypePtr preliminary_from = pa11::strip_cv(strip_for_value(from));
+TypePtr preliminary_to = pa11::strip_cv(strip_for_value(to));
+if ((!pa12::internal::substituted_type_is_valid(from) ||
+     !pa12::internal::substituted_type_is_valid(to)) &&
+    preliminary_from->kind == TypeKind::Pointer &&
+    preliminary_to->kind == TypeKind::Pointer)
+	return value.type == "ptr" ? value : Value("ptr", value.text);
+if ((!pa12::internal::substituted_type_is_valid(from) ||
+     !pa12::internal::substituted_type_is_valid(to)) &&
+    value.type == "ptr" &&
+    preliminary_to->kind == TypeKind::Pointer)
+	return value;
+if ((!pa12::internal::substituted_type_is_valid(from) ||
+     !pa12::internal::substituted_type_is_valid(to)) &&
+    value.type == "ptr" &&
+    preliminary_from->kind == TypeKind::Pointer) {
+	return value;
+}
 	string dst = scalar_lowir_type(to);
 	string src = scalar_lowir_type(strip_for_value(from));
 	TypePtr from_bare = pa11::strip_cv(strip_for_value(from));
@@ -799,6 +925,21 @@ Value FunctionLowerer::convert_value(Value value, TypePtr from, TypePtr to, bool
 		instr(tmp + " = convert " + op + " " + dst + " " + src + " " + value.text);
 	return Value(dst, tmp); }
 Value FunctionLowerer::convert_binary_value(Value value, TypePtr from, TypePtr to) {
+from = concrete_conversion_type(from, to);
+to = concrete_conversion_type(to, from);
+TypePtr preliminary_from = pa11::strip_cv(strip_for_value(from));
+TypePtr preliminary_to = pa11::strip_cv(strip_for_value(to));
+if ((!pa12::internal::substituted_type_is_valid(from) ||
+     !pa12::internal::substituted_type_is_valid(to)) &&
+    value.type == "ptr" &&
+    (preliminary_from->kind == TypeKind::Pointer ||
+     preliminary_to->kind == TypeKind::Pointer))
+	return value;
+bool from_valid = pa12::internal::substituted_type_is_valid(from);
+bool to_valid = pa12::internal::substituted_type_is_valid(to);
+if ((!from_valid || !to_valid) && value.type == "ptr") {
+	return value;
+}
 	string dst = scalar_lowir_type(to);
 	string src = scalar_lowir_type(strip_for_value(from));
 	if (dst == "i64" && src != dst && is_unsigned_type(to) && value.text != "" && value.text[0] != '%' && value.text[0] != '$' && value.text[0] != '@' && !is_float_type(from) && !is_float_type(to)) {
@@ -853,126 +994,6 @@ void FunctionLowerer::branch_with_unwind_cleanups(const Node& expr, const string
 		terminate("resume");
 		start_block(end); }
 	terminate_with_pending_temp_cleanups(cond.text, yes, no); }
-Value FunctionLowerer::emit_binary(const Node& expr) {
-	if (expr.has_op && expr.op == OP_COMMA) {
-		emit_rvalue(expr.children[0]);
-		return emit_rvalue(expr.children[1]); }
-	if (expr.has_op && (expr.op == OP_EQ || expr.op == OP_NE) && expr.children.size() == 2 && expr.children[0].is_typeid_expression && expr.children[1].is_typeid_expression) {
-		Value lhs = emit_lvalue_addr(expr.children[0]);
-		Value rhs = emit_lvalue_addr(expr.children[1]);
-		string tmp = fresh_temp();
-		instr(tmp + " = cmp " + string(expr.op == OP_EQ ? "eq" : "ne") + " ptr " + lhs.text + ", " + rhs.text);
-		return Value("u8", tmp); }
-	if (expr.has_op && (expr.op == OP_LAND || expr.op == OP_LOR))
-		return emit_logical_binary(expr);
-	bool wrap_lhs_materialized_member = eh_try_depth_ == 0 && has_active_cleanups() && starts_with(expr.children[0].line, "member-expression") && node_contains_call_expression(expr.children[0]) && expr.children[0].category == ValueCategory::LValue && scalar_lowir_type(expr.children[0].type).compare(0, 4, "obj<") != 0;
-	string dispatch;
-	bool define_dispatch = false;
-	Value lhs;
-	if (wrap_lhs_materialized_member) {
-		Value lhs_addr;
-		if (!expr.children[0].children.empty() && starts_with(expr.children[0].children[0].line, "call-expression") && expr.children[0].binding != NULL) {
-			const Node& member_expr = expr.children[0];
-			TypePtr object_record = pa11::strip_cv(object_type(member_expr.children[0].type));
-			string slot = fresh_aux_slot("tmpobj", scalar_lowir_type(object_record));
-			string object_addr_name = fresh_temp();
-			instr(object_addr_name + " = addr $" + slot);
-			Value object_addr("ptr", object_addr_name);
-			function<Value()> object_addr_for = [object_addr]() {
-				return object_addr;
-			};
-			lower_object_init(object_addr_for, object_record, member_expr.children[0]);
-			dispatch = active_unwind_dispatch_.empty()
-				? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
-			define_dispatch = active_unwind_dispatch_.empty();
-			instr("eh_try ^" + dispatch);
-			++eh_try_depth_;
-			Binding* member = member_expr.binding;
-			TypePtr owner_record = pa11::record_type_for_scope(member->owner);
-			Value projected_base = object_addr;
-			if (owner_record.get() != NULL && object_record.get() != NULL && object_record->kind == TypeKind::Record && owner_record->kind == TypeKind::Record && !pa11::same_type(object_record, owner_record))
-				projected_base = emit_base_subobject_addr(object_addr, object_record, owner_record);
-			string field_addr = fresh_temp();
-			instr(field_addr + " = index i8 [projection=field] " + projected_base.text + ", " + to_string(member->member_offset));
-			lhs_addr = Value("ptr", field_addr); }
-		else {
-			lhs_addr = ensure_pointer(emit_lvalue_addr(expr.children[0]));
-			dispatch = active_unwind_dispatch_.empty()
-				? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
-			define_dispatch = active_unwind_dispatch_.empty();
-			instr("eh_try ^" + dispatch);
-			++eh_try_depth_; }
-		string loaded = fresh_temp();
-		instr(loaded + " = load " + scalar_lowir_type(expr.children[0].type) + " " + lhs_addr.text);
-		lhs = Value(scalar_lowir_type(expr.children[0].type), loaded); }
-	else
-		lhs = emit_rvalue(expr.children[0]);
-	Value rhs = emit_rvalue(expr.children[1]);
-	TypePtr lhs_type = strip_for_value(expr.children[0].type);
-	TypePtr rhs_type = strip_for_value(expr.children[1].type);
-	if ((expr.op == OP_PLUS || expr.op == OP_MINUS) && scalar_lowir_type(expr.type) == "ptr")
-		return emit_pointer_index_binary(expr, lhs, rhs, lhs_type, rhs_type);
-	if (expr.op == OP_MINUS && pa11::strip_cv(lhs_type)->kind == TypeKind::Pointer && pa11::strip_cv(rhs_type)->kind == TypeKind::Pointer)
-		return emit_pointer_difference(expr, lhs, rhs, lhs_type);
-	string op;
-	bool cmp = false;
-	switch (expr.op) {
-	case OP_PLUS: op = "add"; break;
-	case OP_MINUS: op = "sub"; break;
-	case OP_STAR: op = "mul"; break;
-	case OP_DIV: op = is_unsigned_type(expr.children[0].type) ? "udiv" : "div"; break;
-	case OP_MOD: op = is_unsigned_type(expr.children[0].type) ? "umod" : "mod"; break;
-	case OP_AMP: op = "and"; break;
-	case OP_BOR: op = "or"; break;
-	case OP_XOR: op = "xor"; break;
-	case OP_LSHIFT: op = "shl"; break;
-	case OP_RSHIFT: op = is_unsigned_type(expr.children[0].type) ? "ushr" : "shr"; break;
-	case OP_EQ: op = "eq"; cmp = true; break;
-	case OP_NE: op = "ne"; cmp = true; break;
-	case OP_LT: op = is_unsigned_type(expr.children[0].type) ? "ult" : "lt"; cmp = true; break;
-	case OP_LE: op = is_unsigned_type(expr.children[0].type) ? "ule" : "le"; cmp = true; break;
-	case OP_GT: op = is_unsigned_type(expr.children[0].type) ? "ugt" : "gt"; cmp = true; break;
-	case OP_GE: op = is_unsigned_type(expr.children[0].type) ? "uge" : "ge"; cmp = true; break;
-	default: throw runtime_error("unsupported binary operator"); }
-	TypePtr op_type = cmp ? lowir_common_type(expr.children[0].type, expr.children[1].type)
-	                     : expr.type;
-	if (expr.op == OP_DIV)
-		op = is_unsigned_type(op_type) ? "udiv" : "div";
-	else if (expr.op == OP_MOD)
-		op = is_unsigned_type(op_type) ? "umod" : "mod";
-	else if (expr.op == OP_RSHIFT)
-		op = is_unsigned_type(op_type) ? "ushr" : "shr";
-	else if (expr.op == OP_LT)
-		op = is_unsigned_type(op_type) ? "ult" : "lt";
-	else if (expr.op == OP_LE)
-		op = is_unsigned_type(op_type) ? "ule" : "le";
-	else if (expr.op == OP_GT)
-		op = is_unsigned_type(op_type) ? "ugt" : "gt";
-	else if (expr.op == OP_GE)
-		op = is_unsigned_type(op_type) ? "uge" : "ge";
-	if (cmp && scalar_lowir_type(op_type) == "ptr") {
-		if (scalar_lowir_type(strip_for_value(expr.children[0].type)) != "ptr")
-			lhs = convert_binary_value(lhs, expr.children[0].type, op_type);
-		if (scalar_lowir_type(strip_for_value(expr.children[1].type)) != "ptr")
-			rhs = convert_binary_value(rhs, expr.children[1].type, op_type); }
-	else {
-		lhs = convert_binary_value(lhs, expr.children[0].type, op_type);
-		rhs = convert_binary_value(rhs, expr.children[1].type, op_type); }
-	string type = scalar_lowir_type(op_type);
-	string tmp = fresh_temp();
-	instr(tmp + " = " + string(cmp ? "cmp " : "binary ") + op + " " + type + " " + lhs.text + ", " + rhs.text);
-	if (wrap_lhs_materialized_member) {
-		--eh_try_depth_;
-		instr("eh_end");
-		if (define_dispatch) {
-			string end = fresh_block("call_unwind_end");
-			terminate("jump ^" + end);
-			active_unwind_dispatch_ = dispatch;
-			start_block(dispatch);
-			emit_unwind_cleanups();
-			terminate("resume");
-			start_block(end); } }
-	return Value(cmp ? "u8" : scalar_lowir_type(expr.type), tmp); }
 Value FunctionLowerer::emit_record_assignment(const Node& expr) {
 	TypePtr lhs_type = object_type(expr.children[0].type);
 	bool move_assign = expr.children[1].category != ValueCategory::LValue;
@@ -1064,7 +1085,7 @@ Value FunctionLowerer::emit_member_assignment(const Node& expr) {
 		instr("store " + low_type + " " + merged + ", " + addr.text);
 		finish_assignment_protection(wrap, define_dispatch, dispatch);
 		return rhs; }
-	instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text +
+	instr("store " + scalar_lowir_type_or_value(lhs_type, rhs) + " " + rhs.text +
 	      ", " + addr.text);
 	finish_assignment_protection(wrap, define_dispatch, dispatch);
 	return rhs; }
@@ -1103,7 +1124,7 @@ Value FunctionLowerer::emit_compound_assignment(const Node& expr, TypePtr lhs_ty
 	                    arithmetic_type,
 	                    lhs_type);
 	Value addr = emit_lvalue_addr(expr.children[0]);
-	instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text +
+	instr("store " + scalar_lowir_type_or_value(lhs_type, rhs) + " " + rhs.text +
 	      ", " + addr.text);
 	return rhs; }
 
@@ -1119,7 +1140,8 @@ Value FunctionLowerer::emit_plain_assignment(const Node& expr, TypePtr lhs_type)
 	if (!call_result_store_consumed_) {
 		rhs = convert_binary_value(rhs, expr.children[1].type, lhs_type);
 		Value addr = emit_lvalue_addr(expr.children[0]);
-		instr("store " + scalar_lowir_type(lhs_type) + " " + rhs.text +
+		instr("store " + scalar_lowir_type_or_value(lhs_type, rhs) + " " +
+		      rhs.text +
 		      ", " + addr.text); }
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();

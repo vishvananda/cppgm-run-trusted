@@ -14,6 +14,11 @@ bool call_object_arg_is_this(const Node* object_arg)
 	        starts_with(object_arg->line, "id-expression"));
 }
 
+bool hosted_external_stream_member(const Binding* binding)
+{
+	return hosted_external_stream_function_binding(binding);
+}
+
 }  // namespace
 
 bool FunctionLowerer::lower_variadic_record_call_argument(
@@ -230,7 +235,9 @@ void FunctionLowerer::maybe_open_call_temp_cleanup_region(
 		return;
 	call.temp_cleanup_dispatch = fresh_block("call_unwind_dispatch");
 	call.temp_cleanup_end = fresh_block("call_unwind_end");
-	instr("eh_try ^" + call.temp_cleanup_dispatch);
+	instr((temp_cleanups_are_generated_noop_destructors(call.temp_cleanups)
+	       ? "eh_cleanup ^" : "eh_try ^") +
+	      call.temp_cleanup_dispatch);
 	++eh_try_depth_;
 	call.temp_cleanup_region_open = true;
 }
@@ -259,7 +266,8 @@ void FunctionLowerer::lower_call_arguments(const Node& expr,
 		    call.direct != NULL &&
 		    call.direct->owner != NULL &&
 		    call.direct->owner->kind == ScopeKind::Class &&
-		    !call.direct->is_static_member)
+		    !call.direct->is_static_member &&
+		    !hosted_external_stream_member(call.direct))
 		{
 			TypePtr owner_record = class_record_for_member(call.direct);
 			if (append_hidden_member_object_argument(expr.children[i],
@@ -376,6 +384,8 @@ void FunctionLowerer::append_hidden_parameter_call_arguments(
 	CallEmissionState& call,
 	bool member_this_param)
 {
+	if (hosted_external_stream_member(call.direct))
+		return;
 	for (size_t p = member_this_param ? 1 : 0;
 	     p < call.callee_type->parameters.size();
 	     ++p)
@@ -481,6 +491,7 @@ void FunctionLowerer::append_hidden_this_call_arguments(
 {
 	if (!member_this_param ||
 	    call.direct == NULL ||
+	    hosted_external_stream_member(call.direct) ||
 	    is_class_constructor_binding(call.direct) ||
 	    is_class_destructor_binding(call.direct))
 		return;

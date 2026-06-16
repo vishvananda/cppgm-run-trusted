@@ -48,6 +48,114 @@ Binding* function_pointer_initializer(const Node& node)
 	return NULL;
 }
 
+string unqualified_template_primary(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	size_t scope = primary.rfind("::");
+	if (scope != string::npos)
+		primary = primary.substr(scope + 2);
+	return primary;
+}
+
+bool hosted_basic_string_record(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return bare.get() != NULL &&
+	       bare->kind == TypeKind::Record &&
+	       bare->is_template_specialization &&
+	       unqualified_template_primary(bare) == "basic_string";
+}
+
+int64_t hosted_hash_node_value_offset(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(object_type(type))
+	                                  : TypePtr();
+	if (bare.get() != NULL && bare->kind == TypeKind::Pointer)
+		bare = bare->base.get() != NULL ? pa11::strip_cv(bare->base)
+		                                 : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+	{
+		if (bare.get() != NULL &&
+		    bare->is_dependent_typename &&
+		    bare->name.find("rebind") != string::npos &&
+		    bare->name.find("other") != string::npos &&
+		    bare->name.find("value_type") != string::npos)
+			return 8;
+		return -1;
+	}
+	string primary = unqualified_template_primary(bare);
+	if (primary == "_Hash_node")
+		return 8;
+	if (primary == "_Hash_node_value" ||
+	    primary == "_Hash_node_value_base")
+		return 0;
+	return -1;
+}
+
+uint64_t hosted_basic_string_member_offset(TypePtr object_record,
+                                           Binding* member,
+                                           uint64_t fallback)
+{
+	TypePtr object = object_record.get() != NULL
+		? pa11::strip_cv(object_record) : TypePtr();
+	if (!hosted_basic_string_record(object) || member == NULL)
+		return fallback;
+	if (member->name == "_M_dataplus")
+		return 0;
+	if (member->name == "_M_string_length")
+		return 8;
+	if (member->name == "_M_local_buf" ||
+	    member->name == "_M_allocated_capacity" ||
+	    member->name.find("__anonymous_union_storage__") == 0)
+		return 16;
+	return fallback;
+}
+
+uint64_t anonymous_union_containing_offset(TypePtr object_record,
+                                           Binding* member)
+{
+	TypePtr object = object_record.get() != NULL
+		? pa11::strip_cv(object_record) : TypePtr();
+	if (hosted_basic_string_record(object) &&
+	    member != NULL &&
+	    (member->name == "_M_local_buf" ||
+	     member->name == "_M_allocated_capacity"))
+		return 0;
+	TypePtr owner = member != NULL && member->owner != NULL
+		? pa11::record_type_for_scope(member->owner) : TypePtr();
+	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+	if (object.get() == NULL ||
+	    owner.get() == NULL ||
+	    object->kind != TypeKind::Record ||
+	    owner->kind != TypeKind::Record ||
+	    owner->tag != "union" ||
+	    object->scope == NULL ||
+	    pa11::same_type(object, owner))
+		return 0;
+	for (size_t i = 0; i < object->scope->binding_order.size(); ++i)
+	{
+		Binding* field = object->scope->binding_order[i];
+		if (field == NULL ||
+		    field->kind != BindingKind::Variable ||
+		    field->is_static_member)
+			continue;
+		TypePtr field_type = field->type.get() != NULL
+			? pa11::strip_cv(field->type) : TypePtr();
+		if (field_type.get() != NULL &&
+		    field_type->kind == TypeKind::Record &&
+		    field_type->scope == owner->scope)
+			return field->member_offset;
+	}
+	return 0;
+}
+
 string declare_static_member_function_pointer_symbol(ProgramLowerer& program,
                                                      const Binding* binding,
                                                      TypePtr pointer_type)
@@ -86,6 +194,44 @@ string declare_static_member_function_pointer_symbol(ProgramLowerer& program,
 }
 
 }  // namespace
+
+Value FunctionLowerer::hosted_hash_node_object_addr(const Node& object,
+                                                    TypePtr object_expr_type)
+{
+	TypePtr bare = object_expr_type.get() != NULL
+		? pa11::strip_cv(object_type(object_expr_type)) : TypePtr();
+	if (bare.get() != NULL && bare->kind == TypeKind::Pointer)
+		return ensure_pointer(emit_rvalue(object));
+	return ensure_pointer(emit_lvalue_addr(object));
+}
+
+Value FunctionLowerer::emit_hosted_hash_node_next_call(const Node& expr,
+                                                       bool& handled)
+{
+	handled = false;
+	if (!starts_with(expr.line, "call-expression") ||
+	    expr.children.empty() ||
+	    !starts_with(expr.children[0].line, "member-expression") ||
+	    expr.children[0].token_text != "_M_next" ||
+	    expr.children[0].children.empty())
+		return Value();
+	const Node& object = expr.children[0].children[0];
+	TypePtr object_expr_type = substituted_expression_type(object);
+	int64_t offset = hosted_hash_node_value_offset(object_expr_type);
+	if (offset < 0)
+	{
+		offset = hosted_hash_node_value_offset(object.type);
+		if (offset >= 0)
+			object_expr_type = object.type;
+	}
+	if (offset != 8)
+		return Value();
+	Value base = hosted_hash_node_object_addr(object, object_expr_type);
+	string next = fresh_temp();
+	instr(next + " = load ptr " + base.text);
+	handled = true;
+	return Value("ptr", next);
+}
 
 Value FunctionLowerer::emit_typeid_lvalue_addr(const Node& expr)
 {
@@ -143,6 +289,27 @@ Value FunctionLowerer::emit_typeid_lvalue_addr(const Node& expr)
 
 Value FunctionLowerer::emit_literal(const Node& expr)
 {
+	if (expr.binding != NULL &&
+	    expr.binding->kind == BindingKind::Variable &&
+	    expr.binding->has_constant &&
+	    expr.binding->is_static_member &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Record &&
+	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
+		    TypeKind::Array)
+	{
+		bool specialized_body =
+			fn_.binding != NULL &&
+			(binding_has_template_specialization_context(fn_.binding) ||
+			 !fn_.binding->function_specialization_symbol.empty() ||
+			 (fn_.binding->aliased_binding != NULL &&
+			  !fn_.binding->aliased_binding
+				   ->function_specialization_symbol.empty()));
+		if (!program_.template_static_member_constant_load_required(
+			    expr.binding) ||
+		    specialized_body)
+			program_.demand_deferred_global_definition(expr.binding);
+	}
 	if (expr.token_text.size() > 0 &&
 	    expr.token_text[expr.token_text.size() - 1] == '"')
 	{
@@ -192,16 +359,31 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 	}
 	if (expr.binding->kind == BindingKind::Function)
 	{
-		if (expr.binding->is_inline_definition)
+		bool function_template_specialization =
+			!expr.binding->function_specialization_symbol.empty() ||
+			(expr.binding->aliased_binding != NULL &&
+			 !expr.binding->aliased_binding
+				  ->function_specialization_symbol.empty());
+		if (expr.binding->is_inline_definition ||
+		    function_template_specialization ||
+		    binding_has_template_specialization_context(expr.binding))
 			program_.demand_inline_function(expr.binding);
 		program_.demand_function_declaration(expr.binding);
 		string addr = fresh_temp();
 		instr(addr + " = addr @" + program_.symbol_for(expr.binding));
+		TypePtr expr_bare = expr.type.get() != NULL
+			? pa11::strip_cv(expr.type) : TypePtr();
+		if (expr_bare.get() != NULL &&
+		    expr_bare->kind == TypeKind::Pointer &&
+		    expr_bare->base.get() != NULL &&
+		    pa11::strip_cv(expr_bare->base)->kind == TypeKind::Function)
+			return Value("ptr", addr);
 		string decay = fresh_temp();
 		instr(decay + " = unary decay ptr " + addr);
 		return Value("ptr", decay);
 	}
-	TypePtr object = object_type(expr.type);
+	TypePtr expr_type = substituted_expression_type(expr);
+	TypePtr object = object_type(expr_type);
 	if ((expr.binding->is_static_member ||
 	     expr.binding->is_local_static ||
 	     (expr.binding->owner != NULL &&
@@ -259,21 +441,22 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		return Value("ptr", decay);
 	}
 	Value addr = emit_lvalue_addr(expr);
-	TypePtr value_type = strip_for_value(expr.type);
-	if (pa11::strip_cv(object_type(expr.type))->kind == TypeKind::Array)
+	TypePtr value_type = strip_for_value(expr_type);
+	if (pa11::strip_cv(object_type(expr_type))->kind == TypeKind::Array)
 	{
 		addr = ensure_pointer(addr);
 		string tmp = fresh_temp();
 		instr(tmp + " = unary decay ptr " + addr.text);
 		return Value("ptr", tmp);
 	}
-	if (pa11::strip_cv(object_type(expr.type))->kind == TypeKind::Function)
+	if (pa11::strip_cv(object_type(expr_type))->kind == TypeKind::Function)
 	{
 		string tmp = fresh_temp();
 		instr(tmp + " = unary decay ptr " + addr.text);
 		return Value("ptr", tmp);
 	}
-	string value_low_type = scalar_lowir_type(value_type);
+	string result_low_type = scalar_lowir_type(value_type);
+	string value_low_type = result_low_type;
 	if (expr.binding != NULL && expr.binding->is_bit_field)
 		value_low_type = "i" + to_string(pa11::type_size(value_type) * 8);
 	string tmp = fresh_temp();
@@ -295,13 +478,52 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 		      " " + value + ", " + to_string(mask));
 		tmp = masked;
 	}
-	return Value(scalar_lowir_type(value_type), tmp);
+	return Value(result_low_type, tmp);
 }
 
 Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 {
 	if (expr.is_typeid_expression)
 		return emit_typeid_lvalue_addr(expr);
+	if (starts_with(expr.line, "call-expression") &&
+	    !expr.children.empty() &&
+	    starts_with(expr.children[0].line, "member-expression") &&
+	    expr.children[0].token_text == "_M_v" &&
+	    !expr.children[0].children.empty())
+	{
+		const Node& object = expr.children[0].children[0];
+		TypePtr object_expr_type = substituted_expression_type(object);
+		int64_t offset = hosted_hash_node_value_offset(object_expr_type);
+		if (offset < 0)
+			offset = hosted_hash_node_value_offset(object.type);
+		if (offset >= 0)
+		{
+			Value base =
+				hosted_hash_node_object_addr(object, object_expr_type);
+			if (offset == 0)
+				return base;
+			string addr = fresh_temp();
+			instr(addr + " = index i8 " + base.text + ", " +
+			      to_string(offset));
+			return Value("ptr", addr);
+		}
+	}
+	if (starts_with(expr.line, "member-expression") &&
+	    expr.token_text == "_M_nxt" &&
+	    !expr.children.empty())
+	{
+		const Node& object = expr.children[0];
+		TypePtr object_expr_type = substituted_expression_type(object);
+		int64_t offset = hosted_hash_node_value_offset(object_expr_type);
+		if (offset < 0)
+		{
+			offset = hosted_hash_node_value_offset(object.type);
+			if (offset >= 0)
+				object_expr_type = object.type;
+		}
+		if (offset == 8)
+			return hosted_hash_node_object_addr(object, object_expr_type);
+	}
 	if (starts_with(expr.line, "id-expression") && expr.binding != NULL)
 	{
 		if (expr.binding->kind == BindingKind::Function)
@@ -351,8 +573,13 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 				 expr_bare->kind != TypeKind::Pointer);
 			string projection = reference_member
 				? "reference_field" : "field";
+			uint64_t member_offset =
+				hosted_basic_string_member_offset(object_record,
+				                                  member,
+				                                  member->member_offset) +
+				anonymous_union_containing_offset(object_record, member);
 			instr(tmp + " = index i8 [projection=" + projection + "] " + base.text +
-			      ", " + to_string(member->member_offset));
+			      ", " + to_string(member_offset));
 			if (reference_member)
 			{
 				string ref = fresh_temp();
@@ -495,11 +722,38 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		return emit_subscript_addr(expr);
 	if (starts_with(expr.line, "conditional-expression"))
 		return emit_conditional(expr);
+	if (starts_with(expr.line, "call-expression") &&
+	    expr.category == ValueCategory::PRValue)
+	{
+		TypePtr object = pa11::strip_cv(object_type(expr.type));
+		if (object.get() != NULL && object->kind == TypeKind::Record)
+		{
+			string slot = fresh_aux_slot("tmpobj", slot_lowir_type(object));
+			string addr_name = fresh_temp();
+			instr(addr_name + " = addr $" + slot);
+			Value temp_addr("ptr", addr_name);
+			function<Value()> addr_for = [temp_addr]() {
+				return temp_addr;
+			};
+			lower_object_init(addr_for, object, expr);
+			if (type_needs_cleanup(object) ||
+			    (program_.native_lowering &&
+			     type_has_generated_noop_destructor(object)))
+				add_pending_temp_cleanup(temp_addr, object);
+			return temp_addr;
+		}
+	}
 	if (starts_with(expr.line, "call-expression") && is_reference(expr.type))
 		return emit_call(expr);
 	if (starts_with(expr.line, "assignment-expression") &&
 	    expr.has_op && (expr.op == OP_INC || expr.op == OP_DEC))
 		return emit_lvalue_addr(expr.children[0]);
+	if (starts_with(expr.line, "assignment-expression") &&
+	    expr.has_op && expr.children.size() == 2)
+	{
+		emit_assignment(expr);
+		return emit_lvalue_addr(expr.children[0]);
+	}
 	if (starts_with(expr.line, "literal lvalue"))
 		return emit_literal(expr);
 	if (starts_with(expr.line, "cast-expression") &&
@@ -711,7 +965,12 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 		member_offset += alias_member->member_offset;
 		member = alias_member;
 	}
-	TypePtr member_bare = pa11::strip_cv(member->type);
+		member_offset =
+			hosted_basic_string_member_offset(object_record, member, member_offset);
+		if (alias_member == NULL)
+			member_offset +=
+				anonymous_union_containing_offset(object_record, member);
+		TypePtr member_bare = pa11::strip_cv(member->type);
 	TypePtr expr_bare = pa11::strip_cv(expr.type);
 	bool reference_member =
 		member->is_reference_member ||

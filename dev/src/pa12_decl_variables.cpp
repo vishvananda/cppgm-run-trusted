@@ -1,10 +1,30 @@
 #include "pa12_internal.h"
+#include "pa12_templates_instance_support.h"
 
 using namespace std;
 
 namespace pa12 {
 namespace internal {
 namespace {
+
+bool template_record_owner_name_match(TypePtr left, TypePtr right)
+{
+	left = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	right = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	if (left.get() == NULL ||
+	    right.get() == NULL ||
+	    left->kind != pa11::TypeKind::Record ||
+	    right->kind != pa11::TypeKind::Record ||
+	    left->name != right->name)
+		return false;
+	string left_primary = !left->template_primary_name.empty()
+		? left->template_primary_name : left->name;
+	string right_primary = !right->template_primary_name.empty()
+		? right->template_primary_name : right->name;
+	return left_primary == right_primary &&
+	       (left->is_template_specialization ||
+	        right->is_template_specialization);
+}
 
 map<Binding*, Node>::const_iterator find_static_member_initializer(
 	const map<Binding*, Node>& initializers,
@@ -24,14 +44,90 @@ map<Binding*, Node>::const_iterator find_static_member_initializer(
 	     ++it)
 	{
 		Binding* candidate = it->first;
-		if (candidate != NULL &&
-		    binding != NULL &&
-		    candidate->name == binding->name &&
-		    candidate->owner == binding->owner &&
-		    pa11::same_type(candidate->type, binding->type))
+		if (candidate == NULL ||
+		    binding == NULL ||
+		    candidate->name != binding->name)
+			continue;
+		bool same_owner = false;
+		bool template_owner_match = false;
+		same_owner = candidate->owner == binding->owner;
+		if (!same_owner &&
+		    candidate->owner != NULL &&
+		    binding->owner != NULL &&
+		    candidate->owner->kind == ScopeKind::Class &&
+		    binding->owner->kind == ScopeKind::Class)
+		{
+			TypePtr candidate_record =
+				pa11::record_type_for_scope(candidate->owner);
+			TypePtr binding_record =
+				pa11::record_type_for_scope(binding->owner);
+			template_owner_match =
+				candidate_record.get() != NULL &&
+				binding_record.get() != NULL &&
+				(same_template_record_type(candidate_record,
+				                           binding_record) ||
+				 template_record_owner_name_match(candidate_record,
+				                                  binding_record));
+			same_owner = template_owner_match;
+		}
+		TypePtr candidate_type =
+			candidate->type.get() != NULL
+			? pa11::strip_cv(candidate->type) : TypePtr();
+		TypePtr binding_type =
+			binding->type.get() != NULL
+			? pa11::strip_cv(binding->type) : TypePtr();
+		bool compatible_array_redeclaration =
+			candidate_type.get() != NULL &&
+			binding_type.get() != NULL &&
+			candidate_type->kind == pa11::TypeKind::Array &&
+			binding_type->kind == pa11::TypeKind::Array &&
+			(candidate_type->unknown_bound ||
+			 binding_type->unknown_bound ||
+			 candidate_type->bound == binding_type->bound) &&
+			pa11::same_type(candidate_type->base, binding_type->base);
+		bool same_declared_type =
+			candidate->type.get() != NULL &&
+			binding->type.get() != NULL &&
+			(pa11::same_type(candidate->type, binding->type) ||
+			 compatible_array_redeclaration);
+		if (!same_owner)
+			continue;
+		if (template_owner_match || same_declared_type)
 			return it;
 	}
 	return initializers.end();
+}
+
+bool static_member_constant_usable(Binding* binding)
+{
+	return binding != NULL &&
+	       binding->is_static_member &&
+	       !binding->is_thread_local &&
+	       (binding->is_constexpr || pa11::type_has_const(binding->type));
+}
+
+void complete_static_member_array_type_from_initializer(Binding* variable,
+                                                        Node& node,
+                                                        Binding* source)
+{
+	TypePtr source_type =
+		source != NULL && source->type.get() != NULL
+		? pa11::strip_cv(source->type) : TypePtr();
+	TypePtr variable_type =
+		variable != NULL && variable->type.get() != NULL
+		? pa11::strip_cv(variable->type) : TypePtr();
+	if (source_type.get() == NULL ||
+	    variable_type.get() == NULL ||
+	    source_type->kind != pa11::TypeKind::Array ||
+	    variable_type->kind != pa11::TypeKind::Array ||
+	    !variable_type->unknown_bound ||
+	    source_type->unknown_bound ||
+	    !pa11::same_type(source_type->base, variable_type->base))
+		return;
+	variable->type = source->type;
+	node.type = variable->type;
+	node.line = "variable " + variable->name + " " +
+	            pa11::describe_type(variable->type);
 }
 
 }  // namespace
@@ -58,6 +154,9 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 	variable->is_namespace_static =
 		variable->is_namespace_static ||
 		(specs.static_decl && target->kind == ScopeKind::Namespace);
+	if (target->kind == ScopeKind::Namespace)
+		variable->is_extern_declaration =
+			variable->is_extern_declaration || specs.extern_decl;
 	if (variable->is_local_static && !active_functions_.empty())
 		variable->local_static_function_owner = active_functions_.back();
 	variable->is_thread_local =
@@ -96,8 +195,8 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		if (!type_is_template_dependent(object_type))
 			complete_template_record(object_type);
 	}
-	ensure_default_destructor(type);
-	Node var("variable " + qname.name + " " + pa11::describe_type(type));
+		ensure_default_destructor(type);
+		Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
 	var.type = type;
 	if ((specs.extern_decl || single_linkage_specification_declaration_) &&
@@ -105,11 +204,23 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 	    init == NULL)
 		return variable;
 	apply_variable_initializer(specs, target, variable, type, init, var);
-	if (target->kind == ScopeKind::Class && variable->is_static_member)
+	if (variable->is_static_member)
 	{
 		if (init != NULL && !var.children.empty())
 		{
 			static_member_initializers_[variable] = var.children[0];
+			ConstexprValue value;
+			bool eval_ok =
+				try_evaluate_constexpr_expr(var.children[0], value);
+			if (static_member_constant_usable(variable) &&
+			    !variable->has_constant &&
+			    eval_ok &&
+			    !value.is_object &&
+			    !value.is_pointer)
+			{
+				variable->has_constant = true;
+				variable->constant_value = value.int_value;
+			}
 			if (!active_class_instantiations_.empty() &&
 			    !active_class_instantiation_dependent() &&
 			    pa11::strip_cv(variable->type)->kind == pa11::TypeKind::Array)
@@ -117,17 +228,69 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		}
 		else if (init == NULL && var.children.empty())
 		{
-			map<Binding*, Node>::const_iterator found =
-				find_static_member_initializer(static_member_initializers_,
-				                               variable);
-			if (found != static_member_initializers_.end())
-				add_child(var, found->second);
+				map<Binding*, Node>::const_iterator found =
+					find_static_member_initializer(static_member_initializers_,
+					                               variable);
+				if (found != static_member_initializers_.end())
+				{
+					complete_static_member_array_type_from_initializer(
+						variable,
+						var,
+						found->first);
+					add_child(var, found->second);
+				}
 		}
 	}
 	else if (variable->is_constexpr && !var.children.empty())
 		static_member_initializers_[variable] = var.children[0];
 	add_child(out, var);
 	return variable;
+}
+
+void Parser::complete_static_member_initializer_replays(Node& node)
+{
+	if (node.binding != NULL &&
+	    node.binding->is_static_member &&
+	    node.children.empty() &&
+	    node.line.compare(0, 9, "variable ") == 0)
+	{
+			map<Binding*, Node>::const_iterator found =
+				find_static_member_initializer(static_member_initializers_,
+				                               node.binding);
+			if (found != static_member_initializers_.end())
+			{
+				complete_static_member_array_type_from_initializer(
+					node.binding,
+					node,
+					found->first);
+				add_child(node, found->second);
+			}
+		}
+	if (node.binding != NULL &&
+	    node.binding->is_static_member &&
+	    static_member_constant_usable(node.binding) &&
+	    !node.binding->has_constant &&
+	    !node.children.empty() &&
+	    node.line.compare(0, 9, "variable ") == 0)
+	{
+		ConstexprValue value;
+		if (try_evaluate_constexpr_expr(node.children[0], value) &&
+		    !value.is_object &&
+		    !value.is_pointer)
+		{
+			node.binding->has_constant = true;
+			node.binding->constant_value = value.int_value;
+		}
+	}
+	for (size_t i = 0; i < node.children.size(); ++i)
+		complete_static_member_initializer_replays(node.children[i]);
+}
+
+void Parser::complete_static_member_initializer_replays()
+{
+	complete_static_member_initializer_replays(root_);
+	for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+		complete_static_member_initializer_replays(extra_lowir_nodes_[i]);
 }
 
 }  // namespace internal

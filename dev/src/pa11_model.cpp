@@ -5,54 +5,21 @@
 #include <utility>
 using namespace std;
 namespace pa11 {
+
+bool complete_hosted_record_layout(TypePtr type);
+bool layout_hosted_basic_string_record(TypePtr type);
+void adjust_hosted_basic_string_layout(TypePtr type);
+void adjust_hosted_stream_layout(TypePtr type);
+void propagate_anonymous_alias_member_offsets(TypePtr type);
+bool type_uses_object_storage(TypePtr type);
+
 namespace {
+
 const char kGnuVectorTypeTag[] = "__gnu_vector";
+
 TypePtr new_type(TypeKind kind)
 {
 	return TypePtr(new Type(kind));
-}
-bool scope_has_namespace_named(Scope* scope, const string& name)
-{
-	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
-		if (cur->kind == ScopeKind::Namespace && cur->name == name)
-			return true;
-	return false;
-}
-string unqualified_template_primary_name(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
-		return "";
-	string primary = bare->template_primary_name.empty()
-		? bare->name : bare->template_primary_name;
-	size_t pos = primary.rfind("::");
-	return pos == string::npos ? primary : primary.substr(pos + 2);
-}
-bool complete_hosted_shared_ptr_layout(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
-	if (bare.get() == NULL ||
-	    bare->kind != TypeKind::Record ||
-	    !bare->is_template_specialization ||
-	    !scope_has_namespace_named(bare->scope, "std"))
-		return false;
-	string primary = unqualified_template_primary_name(bare);
-	if (primary != "shared_ptr" && primary != "__shared_ptr")
-		return false;
-	bare->complete = true;
-	bare->fields.clear();
-	bare->direct_bases.clear();
-	bare->direct_base_offsets.clear();
-	bare->direct_base_virtuals.clear();
-	bare->virtual_bases.clear();
-	bare->virtual_base_offsets.clear();
-	bare->direct_base_offset = 0;
-	bare->record_size = 16;
-	bare->record_align = 8;
-	bare->nonvirtual_size = 16;
-	bare->nonvirtual_align = 8;
-	bare->layout_valid = true;
-	return true;
 }
 uint64_t fundamental_size(EFundamentalType type)
 {
@@ -178,6 +145,7 @@ Type::Type(TypeKind k)
 	  scoped_enum(false),
 	  complete(true),
 	  is_template_specialization(false),
+	  is_extern_template_instantiation(false),
 	  is_dependent_typename(false),
 	  dependent_typename_qualified(false),
 	  dependent_typename_template_id(false),
@@ -192,6 +160,7 @@ Type::Type(TypeKind k)
 	  direct_base_offset(0),
 	  direct_base_virtuals(),
 	  layout_valid(false),
+	  hosted_layout_synthesized(false),
 	  is_polymorphic(false),
 	  introduces_vptr(false),
 	  is_final_record(false)
@@ -209,8 +178,10 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_constexpr(false),
 	  is_static_member(false),
 	  is_local_static(false),
-		  is_namespace_static(false),
+	  is_namespace_static(false),
+	  is_extern_declaration(false),
 			  local_static_function_owner(NULL),
+	  asm_label(),
 		  abi_tags(),
 			  is_inline_definition(false),
 		  is_declared_inline(false),
@@ -220,6 +191,7 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_generated_copy_move_assignment(false),
 		  is_generated_default_destructor(false),
 		  is_defaulted(false),
+		  is_explicit_defaulted_definition(false),
 		  is_explicit(false),
 		  has_default_arguments(false),
 	  is_private(false),
@@ -227,10 +199,12 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  is_mutable_member(false),
 	  is_no_unique_address(false),
 	  is_reference_member(false),
-	  is_hidden_friend(false),
-	  is_thread_local(false),
-	  is_object_root(false),
-	  is_dependent_template_artifact(false),
+		  is_hidden_friend(false),
+		  is_thread_local(false),
+		  is_object_root(false),
+		  is_extern_template_instantiation(false),
+		  is_dependent_template_artifact(false),
+	  is_explicit_specialization_member(false),
 	  is_template_static_member_definition(false),
 	  is_template_static_member_explicit_definition(false),
 	  reserve_primary_function_symbol(false),
@@ -242,6 +216,8 @@ Binding::Binding(BindingKind k, const string& n, Scope* o)
 	  virtual_slot_index(-1),
 	  virtual_slot_width(0),
 	  unwind_no(false),
+	  dynamic_exception_spec(false),
+	  dynamic_exception_types(),
 	  ref_qualifier(0),
 	  is_noop_constructor(false),
 	  is_noop_destructor(false),
@@ -668,17 +644,19 @@ uint64_t type_size(const TypePtr& type)
 	}
 	if (bare->kind == TypeKind::Enum)
 		return fundamental_size(bare->enum_underlying);
-	if (bare->kind == TypeKind::Record)
-	{
-		if (!bare->complete)
+		if (bare->kind == TypeKind::Record)
 		{
-			if (!complete_hosted_shared_ptr_layout(bare))
-				throw runtime_error("incomplete class type");
-		}
+				if (!bare->complete)
+				{
+					if (!complete_hosted_record_layout(bare))
+					{
+						throw runtime_error("incomplete class type");
+					}
+				}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_size;
-		}
+	}
 	throw runtime_error("incomplete object type");
 }
 uint64_t type_align(const TypePtr& type)
@@ -686,23 +664,24 @@ uint64_t type_align(const TypePtr& type)
 	TypePtr bare = strip_cv(type);
 	if (bare->kind == TypeKind::Array)
 		return type_align(bare->base);
-	if (bare->kind == TypeKind::Record)
-	{
-		if (!bare->complete)
+		if (bare->kind == TypeKind::Record)
 		{
-			if (!complete_hosted_shared_ptr_layout(bare))
-				throw runtime_error("incomplete class type");
-		}
+				if (!bare->complete)
+				{
+					if (!complete_hosted_record_layout(bare))
+					{
+						throw runtime_error("incomplete class type");
+					}
+				}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_align;
-		}
+	}
 	if (bare->kind == TypeKind::MemberPointer)
 		return 8;
 	return type_size(bare);
 }
 namespace {
-bool type_uses_object_storage(TypePtr type);
 bool record_uses_object_storage(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -725,9 +704,11 @@ bool record_uses_object_storage(TypePtr type)
 		bases.push_back(bare->base);
 	for (size_t i = 0; i < bases.size(); ++i)
 		if (bases[i].get() != NULL && record_uses_object_storage(bases[i]))
-			return true;
+		return true;
 	return false;
 }
+}  // namespace
+
 bool type_uses_object_storage(TypePtr type)
 {
 	TypePtr bare = strip_cv(type);
@@ -746,6 +727,8 @@ bool type_uses_object_storage(TypePtr type)
 	}
 	return true;
 }
+
+namespace {
 bool no_unique_member_uses_no_storage(Binding* member)
 {
 	return member != NULL &&
@@ -1134,15 +1117,21 @@ void layout_record_type(TypePtr type)
 		throw runtime_error("layout target is not a record");
 	if (!bare->complete)
 	{
-		if (!complete_hosted_shared_ptr_layout(bare))
+		if (!complete_hosted_record_layout(bare))
+		{
 			throw runtime_error("incomplete class type");
+		}
 	}
 	if (bare->layout_valid)
+		return;
+	if (complete_hosted_record_layout(bare))
 		return;
 	bare->fields.clear();
 	bare->direct_base_offset = 0;
 	bare->virtual_bases.clear();
 	bare->virtual_base_offsets.clear();
+	if (layout_hosted_basic_string_record(bare))
+		return;
 	vector<TypePtr> direct_bases = bare->direct_bases;
 	if (direct_bases.empty() && bare->base.get() != NULL)
 		direct_bases.push_back(bare->base);
@@ -1180,6 +1169,9 @@ void layout_record_type(TypePtr type)
 	cursor.offset = align_up(cursor.offset, cursor.align);
 	bare->record_size = cursor.offset;
 	bare->record_align = cursor.align;
+	propagate_anonymous_alias_member_offsets(bare);
+	adjust_hosted_basic_string_layout(bare);
+	adjust_hosted_stream_layout(bare);
 	bare->layout_valid = true;
 }
 vector<TypePtr> record_direct_bases(TypePtr type)
@@ -1369,6 +1361,7 @@ Binding* add_using_declaration(Scope* scope,
 	binding->local_static_discriminator = target->local_static_discriminator;
 	binding->local_static_function_owner =
 		target->local_static_function_owner;
+	binding->asm_label = target->asm_label;
 			binding->function_specialization_symbol =
 				target->function_specialization_symbol;
 			binding->abi_tags = target->abi_tags;
@@ -1381,14 +1374,18 @@ Binding* add_using_declaration(Scope* scope,
 		target->is_generated_copy_move_constructor;
 	binding->is_generated_copy_move_assignment =
 		target->is_generated_copy_move_assignment;
-	binding->is_generated_default_destructor =
-		target->is_generated_default_destructor;
-	binding->is_defaulted = target->is_defaulted;
-	binding->is_mutable_member = target->is_mutable_member;
+		binding->is_generated_default_destructor =
+			target->is_generated_default_destructor;
+		binding->is_defaulted = target->is_defaulted;
+		binding->is_explicit_defaulted_definition =
+			target->is_explicit_defaulted_definition;
+		binding->is_mutable_member = target->is_mutable_member;
 	binding->is_reference_member = target->is_reference_member;
 	binding->is_thread_local = target->is_thread_local;
 	binding->is_dependent_template_artifact =
 		target->is_dependent_template_artifact;
+	binding->is_explicit_specialization_member =
+		target->is_explicit_specialization_member;
 	binding->ref_qualifier = target->ref_qualifier;
 	binding->is_noop_constructor = target->is_noop_constructor;
 	binding->is_noop_destructor = target->is_noop_destructor;

@@ -43,17 +43,81 @@ Conversion conv = convert_to(scalar_init, type); if (!conv.viable) throw runtime
 default_member_initializers_[variable] = conv.expr.node; add_child(var, conv.expr.node); if (pa11::type_has_const(type) && conv.expr.has_constant_value) {
 variable->has_constant = true; variable->constant_value = conv.expr.constant_value; } return;
 } if (record->kind == pa11::TypeKind::Record && record_has_aggregate_blocking_constructor(record)) {
-	vector<Expr> args; for (size_t i = 0; i < init.node.children.size(); ++i) { Expr arg;
+	bool list_constructed = false; if (!init.node.children.empty()) { try { Expr constructed = make_constructor_list_init_expr(type, init, init.copy_initialization); list = constructed.node; list_constructed = true; } catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor") throw; } }
+	if (!list_constructed) { vector<Expr> args; for (size_t i = 0; i < init.node.children.size(); ++i) { Expr arg;
 	arg.valid = true; arg.node = init.node.children[i]; arg.type = arg.node.type; arg.category = arg.node.category;
 	arg.binding = arg.node.binding; arg.overloads = arg.node.overloads; arg.explicit_template_arguments = arg.node.explicit_template_arguments; if (arg.category == ValueCategory::PRValue &&
 	arg.type.get() != NULL && pa11::strip_cv(expression_object_type(arg.type))->kind == pa11::TypeKind::Record) { TypePtr arg_record = pa11::strip_cv(expression_object_type(arg.type));
 	ensure_default_destructor(arg_record, !pa11::record_direct_bases(arg_record).empty()); } args.push_back(arg); } try
 { Expr constructed = make_constructor_init_expr(type, args, init.copy_initialization); list = constructed.node;
 } catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor")
-throw; } } if (record->kind == pa11::TypeKind::Record &&
+throw; } } } if (record->kind == pa11::TypeKind::Record &&
 init.node.children.empty() && record->base.get() != NULL) { Binding* ctor = ensure_default_constructor(record, true);
 if (ctor != NULL) { add_child(var, default_constructor_action(variable, true)); return;
-} } if (record->kind == pa11::TypeKind::Record && init.node.children.empty() &&
+} } if (record->kind == pa11::TypeKind::Array)
+{
+	function<Expr(const Node&)> expr_from_node = [&](const Node& node) {
+		Expr out;
+		out.valid = true;
+		out.node = node;
+		out.type = node.type;
+		out.category = node.category;
+		out.binding = node.binding;
+		out.overloads = node.overloads;
+		out.explicit_template_arguments = node.explicit_template_arguments;
+		out.has_constant_value = node.has_constant_value;
+		out.constant_value = node.constant_value;
+		out.dependent_value_name = node.dependent_value_name;
+		out.dependent_value_owner_template_name =
+			node.dependent_value_owner_template_name;
+		out.dependent_value_member_name = node.dependent_value_member_name;
+		out.dependent_value_negated = node.dependent_value_negated;
+		out.dependent_value_owner_template_arguments =
+			node.dependent_value_owner_template_arguments;
+		out.braced_init_list =
+			node.line.compare(0, 16, "braced-init-list") == 0;
+		return out;
+	};
+		function<void(Node&, TypePtr)> convert_array_initializer =
+			[&](Node& array_node, TypePtr array_type) {
+				TypePtr bare_array = pa11::strip_cv(array_type);
+				if (bare_array->kind != pa11::TypeKind::Array)
+					return;
+			if (!bare_array->unknown_bound &&
+			    array_node.children.size() > bare_array->bound)
+				throw runtime_error("too many array initializers");
+			TypePtr elem = bare_array->base;
+			for (size_t i = 0; i < array_node.children.size(); ++i)
+			{
+				Node& child = array_node.children[i];
+				TypePtr bare_elem = pa11::strip_cv(elem);
+				if (child.line.compare(0, 16, "braced-init-list") == 0 &&
+				    bare_elem->kind == pa11::TypeKind::Array)
+				{
+					convert_array_initializer(child, elem);
+					continue;
+				}
+				if (child.line.compare(0, 16, "braced-init-list") == 0 &&
+				    bare_elem->kind == pa11::TypeKind::Record)
+					continue;
+				Conversion conv = convert_to(expr_from_node(child), elem);
+				if (!conv.viable)
+					throw runtime_error("invalid initializer conversion");
+					child = conv.expr.node;
+				}
+			};
+		bool braced_string_array_initializer = false;
+		if (list.children.size() == 1)
+		{
+			Expr string_child = expr_from_node(list.children[0]);
+			braced_string_array_initializer =
+				string_literal_initializes_array(type,
+				                                 string_child,
+				                                 NULL);
+		}
+		if (!braced_string_array_initializer)
+			convert_array_initializer(list, type);
+	} if (record->kind == pa11::TypeKind::Record && init.node.children.empty() &&
 record->fields.empty() && record->base.get() == NULL && init.node.token_text != "lambda-closure") {
 add_child(var, Node("no-op-initializer")); return; } if (record->kind == pa11::TypeKind::Record && !record_has_aggregate_blocking_constructor(record)) {
 pa11::layout_record_type(record); size_t child_index = 0; for (size_t i = 0; i < record->fields.size() && child_index < list.children.size(); ++i) {
@@ -160,10 +224,13 @@ throw runtime_error("constexpr initializer is not constant"); } } void Parser::a
 	} if (target_record->kind == pa11::TypeKind::Record) { apply_record_variable_initializer(target, variable, type, *init, var);
 	return; } if (string_literal_initializes_array(type, *init, NULL)) {
 add_child(var, init->node); return; } apply_scalar_variable_initializer(specs, target, variable, type, *init, var);
-} else if (target->kind == ScopeKind::Class && !variable->is_static_member) { return;
-} else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record) { TypePtr record = pa11::strip_cv(type);
-if (record_has_aggregate_blocking_constructor(record)) { vector<Expr> args; Expr constructed = make_constructor_init_expr(type, args, false);
-add_child(var, constructed.node); return; } if (ensure_default_constructor(type) != NULL)
-add_child(var, default_constructor_action(variable)); } }
+	} else if (target->kind == ScopeKind::Class && !variable->is_static_member) { return;
+	} else if (pa11::strip_cv(type)->kind == pa11::TypeKind::Record) { TypePtr record = pa11::strip_cv(type);
+	if (record_has_aggregate_blocking_constructor(record)) { vector<Expr> args; Expr constructed = make_constructor_init_expr(type, args, false);
+	if (constructed.node.direct_call != NULL && constructed.node.direct_call->is_defaulted &&
+	    constructed.node.direct_call->type.get() != NULL && constructed.node.direct_call->type->kind == pa11::TypeKind::Function &&
+	    constructed.node.direct_call->type->parameters.size() == 1) ensure_default_constructor(type);
+	add_child(var, constructed.node); return; } if (ensure_default_constructor(type) != NULL)
+	{ add_child(var, default_constructor_action(variable)); } } }
 }  // namespace internal
 }  // namespace pa12

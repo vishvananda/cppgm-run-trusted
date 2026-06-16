@@ -134,6 +134,51 @@ bool function_parameter_pack_name(TemplateDeclaration* declaration,
 	return declaration_parameter_is_pack(declaration, name);
 }
 
+bool Parser::function_parameter_type_pack_expansion_name(TypePtr pattern,
+                                                         string& name) const
+{
+	if (pattern.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(pattern);
+	if (bare->kind == pa11::TypeKind::Pointer ||
+	    bare->kind == pa11::TypeKind::LValueReference ||
+	    bare->kind == pa11::TypeKind::RValueReference ||
+	    bare->kind == pa11::TypeKind::Array)
+	{
+		TypePtr base = bare->base.get() != NULL
+			? pa11::strip_cv(bare->base) : TypePtr();
+		if (base.get() != NULL && base->kind == pa11::TypeKind::Function)
+			return false;
+		return function_parameter_type_pack_expansion_name(bare->base,
+		                                                   name);
+	}
+	if (bare->kind == pa11::TypeKind::Function)
+		return false;
+	if (bare->kind == pa11::TypeKind::MemberPointer)
+	{
+		TypePtr base = bare->base.get() != NULL
+			? pa11::strip_cv(bare->base) : TypePtr();
+		if (base.get() != NULL && base->kind == pa11::TypeKind::Function)
+			return false;
+		return function_parameter_type_pack_expansion_name(bare->member_class,
+		                                                   name) ||
+		       function_parameter_type_pack_expansion_name(bare->base,
+		                                                   name);
+	}
+	if (bare->kind == pa11::TypeKind::TemplateParameter &&
+	    pa11::is_deducible_template_parameter_type(bare) &&
+	    active_type_parameter_pack(bare->name))
+	{
+		name = bare->name;
+		return true;
+	}
+	if (type_has_explicit_template_argument_pack(pattern))
+		return false;
+	if (!template_type_has_template_parameter_name(pattern, name))
+		return false;
+	return active_type_parameter_pack(name);
+}
+
 bool bind_deduced_value_argument(map<string, TemplateArgument>& deduced,
                                  const string& name,
                                  const TemplateArgument& value)

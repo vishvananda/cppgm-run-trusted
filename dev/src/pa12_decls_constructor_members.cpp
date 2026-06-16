@@ -79,10 +79,12 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		}
 	if (have_ctor_defaults)
 		default_arguments_[ctor] = ctor_defaults;
-	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) || at(KW_TRY) ||
+	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) || at_try_keyword() ||
 	                             constexpr_ctor;
 		ctor->is_explicit = explicit_ctor;
-		ctor->unwind_no = suffix.noexcept_decl;
+			ctor->unwind_no = suffix.noexcept_decl;
+			ctor->dynamic_exception_spec = suffix.dynamic_exception_spec;
+			ctor->dynamic_exception_types = suffix.dynamic_exception_types;
 		if (!suffix.abi_tags.empty())
 			ctor->abi_tags = suffix.abi_tags;
 		ctor->is_private = !class_private_access_.empty() &&
@@ -98,23 +100,6 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 			ctor->is_defaulted = true;
 			ctor->is_inline_definition = true;
 			ctor->unwind_no = true;
-			if (signature_parameter_indices.empty())
-			{
-				Node fn("function-definition " + qualified_decl_name(ctor) +
-				        " " + pa11::describe_type(fn_type));
-				fn.binding = ctor;
-				fn.type = fn_type;
-				Node this_node("parameter this " +
-				               pa11::describe_type(fn_params[0]));
-				this_node.type = fn_params[0];
-				add_child(fn, this_node);
-				add_child(fn, Node("compound-statement"));
-				PendingFunctionBody pending;
-				pending.function = ctor;
-				pending.node = fn;
-				pending.prebuilt_node = true;
-				enqueue_pending_member_body(class_scope, pending);
-			}
 			if (signature_parameter_indices.size() == 1)
 			{
 				ParameterInfo& parameter =
@@ -160,8 +145,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	}
 	if (consume(OP_SEMICOLON))
 	{
-		if (force_new_function_binding_ &&
-		    active_class_instantiations_.empty())
+		if (force_new_function_binding_)
 		{
 			Node fn("function-declaration " + qualified_decl_name(ctor) +
 			        " " + pa11::describe_type(fn_type));
@@ -197,7 +181,7 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		pending.body_pos = pos_;
 		pending.constructor_body = true;
 		pending.class_type = class_type;
-		consume(KW_TRY);
+		consume_try_keyword();
 		if (consume(OP_COLON))
 		{
 			for (;;)
@@ -213,13 +197,18 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 			}
 		}
 		skip_balanced(OP_LBRACE, OP_RBRACE);
-		while (at(KW_CATCH))
+		while (at_catch_keyword())
 		{
-			consume(KW_CATCH);
+			consume_catch_keyword();
 			skip_balanced(OP_LPAREN, OP_RPAREN);
 			skip_balanced(OP_LBRACE, OP_RBRACE);
 		}
 		enqueue_pending_member_body(class_scope, pending);
+		if (force_new_function_binding_)
+		{
+			extra_lowir_nodes_.push_back(fn);
+			return true;
+		}
 		return true;
 	}
 	Node holder("constructor-definition-holder");

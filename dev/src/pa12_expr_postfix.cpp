@@ -10,7 +10,10 @@ namespace internal {
 
 Expr Parser::parse_postfix_expression()
 {
-	if (at_identifier() && (lookahead(OP_LPAREN, 1) || lookahead(OP_LT, 1)))
+	if (at_identifier() &&
+	    (lookahead(OP_LPAREN, 1) ||
+	     lookahead(OP_LT, 1) ||
+	     lookahead(OP_COLON2, 1)))
 		return parse_direct_call_postfix_expression();
 	return parse_postfix_suffixes(parse_primary_expression());
 }

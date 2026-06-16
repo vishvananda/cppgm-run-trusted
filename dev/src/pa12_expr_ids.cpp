@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_templates_instance_support.h"
 #include <algorithm>
 #include <stdexcept>
 using namespace std; namespace pa12 { namespace internal { namespace {
@@ -11,8 +12,18 @@ out.has_constant_value = true; out.constant_value = binding->constant_value; out
 " " + to_string(binding->constant_value)); out.node.binding = binding; out.node.token_text = to_string(binding->constant_value); annotate_expr_node(out);
 return out; } bool equivalent_nonfunction_binding(Binding* a, Binding* b) {
 if (a == b) return true; if (a == NULL || b == NULL) return false;
-if (a->kind == BindingKind::Function || b->kind == BindingKind::Function) return false; return a->kind == b->kind && a->owner == b->owner &&
-a->name == b->name && a->target_scope == b->target_scope && a->aliased_binding == b->aliased_binding && pa11::same_type(a->type, b->type);
+if (a->kind == BindingKind::Function || b->kind == BindingKind::Function) return false; if (a->kind != b->kind || a->name != b->name)
+return false; bool same_declared_type = a->type.get() != NULL && b->type.get() != NULL && pa11::same_type(a->type, b->type);
+if (!same_declared_type && a->type.get() != NULL && b->type.get() != NULL) { TypePtr at = pa11::strip_cv(a->type); TypePtr bt = pa11::strip_cv(b->type);
+if (at->kind == pa11::TypeKind::Array && bt->kind == pa11::TypeKind::Array && (at->unknown_bound || bt->unknown_bound || at->bound == bt->bound))
+same_declared_type = pa11::same_type(pa11::strip_cv(at->base), pa11::strip_cv(bt->base)); }
+bool template_owner_match = false; bool same_owner = a->owner == b->owner; if (!same_owner && a->owner != NULL &&
+b->owner != NULL && a->owner->kind == ScopeKind::Class && b->owner->kind == ScopeKind::Class) { TypePtr a_record =
+pa11::record_type_for_scope(a->owner); TypePtr b_record = pa11::record_type_for_scope(b->owner); template_owner_match =
+a_record.get() != NULL && b_record.get() != NULL && same_template_record_type(a_record, b_record); same_owner = template_owner_match; }
+if (!same_owner) return false; if (!same_declared_type && !(template_owner_match && a->is_static_member && b->is_static_member)) return false;
+bool same_alias = a->aliased_binding == b->aliased_binding || a->aliased_binding == b || b->aliased_binding == a;
+return a->target_scope == b->target_scope || same_alias || template_owner_match;
 }
 bool type_has_dependent_template_value(TypePtr type);
 bool instance_argument_has_dependent_template_value(
@@ -158,8 +169,30 @@ string unqualified_template_primary(TypePtr record)
 	size_t qpos = primary.rfind("::");
 	return qpos == string::npos ? primary : primary.substr(qpos + 2);
 }
-	Expr make_literal_value_expr(TypePtr type, uint64_t value)
+bool hosted_enable_shared_from_this_record(TypePtr record)
+{
+	return unqualified_template_primary(record) == "enable_shared_from_this";
+}
+bool hosted_record_has_esft_base(TypePtr record, set<const void*>& seen)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL ||
+	    record->kind != pa11::TypeKind::Record ||
+	    !seen.insert(record.get()).second)
+		return false;
+	vector<TypePtr> bases = pa11::record_direct_bases(record);
+	for (size_t i = 0; i < bases.size(); ++i)
 	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (hosted_enable_shared_from_this_record(base) ||
+		    hosted_record_has_esft_base(base, seen))
+			return true;
+	}
+	return false;
+}
+		Expr make_literal_value_expr(TypePtr type, uint64_t value)
+		{
 		Expr out;
 		out.type = type.get() != NULL ? type : pa11::make_fundamental(FT_INT);
 	out.category = ValueCategory::PRValue;
@@ -278,18 +311,30 @@ string unqualified_template_primary(TypePtr record)
 			value = pa11::same_type(args[0].type, args[1].type);
 			return true;
 		}
-		if (primary == "is_class" &&
-		    !args.empty() &&
-		    args[0].kind == TemplateArgumentKind::Type)
+			if (primary == "is_class" &&
+			    !args.empty() &&
+			    args[0].kind == TemplateArgumentKind::Type)
 		{
 			TypePtr bare = args[0].type.get() != NULL
 				? pa11::strip_cv(args[0].type) : TypePtr();
 			value = bare.get() != NULL &&
 			        bare->kind == pa11::TypeKind::Record;
-			return true;
-		}
-		if (primary == "__not_" &&
-		    args.size() == 1 &&
+				return true;
+			}
+			if (primary == "__has_esft_base" &&
+			    !args.empty() &&
+			    args[0].kind == TemplateArgumentKind::Type)
+			{
+				TypePtr bare = args[0].type.get() != NULL
+					? pa11::strip_cv(args[0].type) : TypePtr();
+				set<const void*> seen;
+				value = bare.get() != NULL &&
+				        bare->kind == pa11::TypeKind::Record &&
+				        hosted_record_has_esft_base(bare, seen);
+				return true;
+			}
+			if (primary == "__not_" &&
+			    args.size() == 1 &&
 		    args[0].kind == TemplateArgumentKind::Type)
 		{
 			bool inner = false;
@@ -418,6 +463,18 @@ map<string, vector<Binding*> >::iterator it = scope->members.find("this"); if (i
 for (size_t i = 0; i < it->second.size(); ++i) { TypePtr record = this_binding_record_type(it->second[i]); if (record.get() != NULL &&
 record->scope != NULL && !scope_is_lambda_closure(record->scope)) return it->second[i]; }
 } return NULL;
+}
+bool is_std_namespace_scope(Scope* scope)
+{
+	return scope != NULL &&
+	       scope->kind == ScopeKind::Namespace &&
+	       scope->name == "std";
+}
+bool hosted_deprecated_exception_name(const string& name)
+{
+	return name == "set_unexpected" ||
+	       name == "get_unexpected" ||
+	       name == "unexpected";
 }
 }  // namespace
 Expr Parser::make_implicit_member_id_expr(const QualifiedName& name, const vector<Binding*>& found, Binding* binding, Binding* this_binding,
@@ -738,6 +795,9 @@ Expr Parser::make_template_substitution_id_expr(const QualifiedName& name)
 			out.category = ValueCategory::LValue;
 			out.constant_value = 0;
 			out.null_pointer_constant = false;
+			if (value_arg.value_binding->kind == BindingKind::Function)
+				out.dependent_value_name = value_arg.value_name.empty()
+					? name.name : value_arg.value_name;
 			out.node = Node("id-expression lvalue " +
 			                pa11::describe_type(out.type) + " " +
 			                qualified_decl_name(value_arg.value_binding));
@@ -838,7 +898,7 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 		     i < templates[0]->parameters.size(); ++i)
 			if (templates[0]->parameters[i].is_pack)
 				defer_deduced_pack = true;
-		bool immediate_call = direct_template_call_depth_ != 0 || at(OP_LPAREN);
+		bool immediate_call = at(OP_LPAREN);
 		try {
 			if (!defer_deduced_pack && !immediate_call)
 			{
@@ -890,7 +950,9 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 		}
 	}
 	if (variables.empty())
+	{
 		throw runtime_error("function template not found");
+	}
 	Binding* variable =
 		instantiate_variable_template(variables[0],
 		                              lookup_name.template_arguments);
@@ -969,6 +1031,60 @@ Expr Parser::make_id_expr(const QualifiedName& name)
 					FT_INT,
 					pa11::same_type(stored_args->second[0].type,
 					                stored_args->second[1].type) ? 1 : 0);
+		}
+	}
+	if (hosted_compatibility_ &&
+	    name.qualified &&
+	    is_std_namespace_scope(name.qualifier) &&
+	    hosted_deprecated_exception_name(name.name) &&
+	    pa11::lookup_qualified(name.qualifier,
+	                          name.name,
+	                          pa11::LOOKUP_FUNCTION) == NULL)
+	{
+		TypePtr void_type = pa11::make_fundamental(FT_VOID);
+		TypePtr handler_type = pa11::make_pointer(
+			pa11::make_function(void_type, vector<TypePtr>(), false));
+		if (pa11::lookup_qualified(name.qualifier,
+		                          "unexpected_handler",
+		                          pa11::LOOKUP_TYPE) == NULL)
+			add_alias(name.qualifier, "unexpected_handler", handler_type);
+		if (pa11::lookup_qualified(name.qualifier,
+		                          "set_unexpected",
+		                          pa11::LOOKUP_FUNCTION) == NULL)
+		{
+			vector<TypePtr> params(1, handler_type);
+			Binding* binding = add_value(
+				name.qualifier,
+				BindingKind::Function,
+				"set_unexpected",
+				pa11::make_function(handler_type, params, false));
+			binding->unwind_no = true;
+		}
+		if (pa11::lookup_qualified(name.qualifier,
+		                          "get_unexpected",
+		                          pa11::LOOKUP_FUNCTION) == NULL)
+		{
+			Binding* binding = add_value(
+				name.qualifier,
+				BindingKind::Function,
+				"get_unexpected",
+				pa11::make_function(handler_type,
+				                    vector<TypePtr>(),
+				                    false));
+			binding->unwind_no = true;
+		}
+		if (pa11::lookup_qualified(name.qualifier,
+		                          "unexpected",
+		                          pa11::LOOKUP_FUNCTION) == NULL)
+		{
+			Binding* binding = add_value(
+				name.qualifier,
+				BindingKind::Function,
+				"unexpected",
+				pa11::make_function(void_type,
+				                    vector<TypePtr>(),
+				                    false));
+			binding->unwind_no = true;
 		}
 	}
 	map<Binding*, vector<TemplateArgument> > explicit_template_arguments;

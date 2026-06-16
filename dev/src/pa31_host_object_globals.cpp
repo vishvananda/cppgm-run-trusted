@@ -28,6 +28,18 @@ void emit_global_item(Unit& unit, Section& sec, const GlobalDataItem& item)
 	else
 		write_integer(sec.bytes, item.type, parse_int(item.literal));
 }
+string tls_compat_alias(const Global& g)
+{
+	if (metadata(g.metadata, "storage") != "thread_local")
+		return "";
+	const string raw = lowir2cy86::lowir_symbol_body(g.name);
+	const string object = metadata(g.metadata, "object");
+	if (raw.empty() || object.empty() || raw == object)
+		return "";
+	if (object == "_Z" + to_string(raw.size()) + raw)
+		return raw;
+	return "";
+}
 void Unit::emit_globals()
 {
 	for (size_t i = 0; i < program.globals.size(); ++i)
@@ -65,17 +77,29 @@ void Unit::emit_globals()
 		           metadata(g.metadata, "storage") == "thread_local" ? 6 : 1,
 		           sec.name, off,
 		           sec.bytes.pos() - off);
+		const string alias = tls_compat_alias(g);
+		if (!alias.empty())
+			obj.symbol(alias, symbol_bind(g.metadata), 6, sec.name, off,
+			           sec.bytes.pos() - off);
 	}
 }
-bool Unit::is_thread_local_global(const string& name) const
-{
-	map<string, size_t>::const_iterator git = program.global_by_name.find(name);
-	return git != program.global_by_name.end() &&
-	       metadata(program.globals[git->second].metadata, "storage") ==
+	bool Unit::is_thread_local_global(const string& name) const
+	{
+		map<string, size_t>::const_iterator git = program.global_by_name.find(name);
+		return git != program.global_by_name.end() &&
+		       metadata(program.globals[git->second].metadata, "storage") ==
 		       "thread_local";
-}
-string Unit::tls_wrapper_for_global(const string& name) const
-{
+	}
+	bool Unit::is_imported_global(const string& name) const
+	{
+		map<string, size_t>::const_iterator git = program.global_by_name.find(name);
+		return git != program.global_by_name.end() &&
+		       program.globals[git->second].declaration &&
+		       metadata(program.globals[git->second].metadata, "storage") !=
+		       "thread_local";
+	}
+	string Unit::tls_wrapper_for_global(const string& name) const
+	{
 	map<string, string>::const_iterator it = globals.find(name);
 	if (it != globals.end())
 		return tls_wrapper_symbol(it->second);
@@ -83,13 +107,16 @@ string Unit::tls_wrapper_for_global(const string& name) const
 }
 void Unit::emit_tls_wrapper_for_global(const Global& g)
 {
-	const string variable = globals[g.name];
-	const string wrapper = tls_wrapper_symbol(variable);
+	const string canonical = globals[g.name];
+	const string alias = tls_compat_alias(g);
+	const string variable = !alias.empty() ? alias : canonical;
+	const string wrapper = tls_wrapper_symbol(canonical);
 	if (!emitted_tls_wrappers.insert(wrapper).second)
 		return;
 	if (g.declaration)
 		obj.symbol(variable, symbol_bind(g.metadata), 6, "", 0, 0);
-	Section& sec = obj.comdat_text(wrapper);
+	const bool internal = symbol_bind(g.metadata) == 0;
+	Section& sec = internal ? obj.text() : obj.comdat_text(wrapper);
 	sec.bytes.align(16);
 	X86 x(sec);
 	const size_t base = x.pos();

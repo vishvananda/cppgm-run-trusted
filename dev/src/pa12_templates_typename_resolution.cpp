@@ -1,20 +1,15 @@
 #include "pa12_templates_instance_support.h"
 #include "pa12_types_support.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
-
 #include "posttoken_pipeline.h"
 #include "pp_token.h"
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
-
 TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 {
 	if (type.get() == NULL ||
@@ -79,7 +74,8 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 			return TypePtr();
 		}
 	};
-	auto allocator_value_type = [&](TypePtr allocator_type) -> TypePtr {
+	auto allocator_member_type =
+		[&](TypePtr allocator_type, const string& member_name) -> TypePtr {
 		try
 		{
 			allocator_type = substitute_template_type(allocator_type);
@@ -100,7 +96,10 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 		catch (const runtime_error&)
 		{
 		}
-		return lookup_type_member(bare->scope, "value_type");
+		return lookup_type_member(bare->scope, member_name);
+	};
+	auto allocator_value_type = [&](TypePtr allocator_type) -> TypePtr {
+		return allocator_member_type(allocator_type, "value_type");
 	};
 	auto hosted_get_value_type_from_context = [&]() -> TypePtr {
 		if (!hosted_compatibility_)
@@ -161,6 +160,25 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 	auto hosted_allocator_rebind_value_type = [&]() -> TypePtr {
 		if (!hosted_compatibility_)
 			return TypePtr();
+		const char* allocator_names[] = {"_Alloc", "_NodeAlloc"};
+		for (size_t ni = 0;
+		     ni < sizeof(allocator_names) / sizeof(allocator_names[0]);
+		     ++ni)
+		{
+			for (size_t si = template_type_substitutions_.size();
+			     si > 0;
+			     --si)
+			{
+				map<string, TypePtr>::const_iterator it =
+					template_type_substitutions_[si - 1].find(
+						allocator_names[ni]);
+				if (it == template_type_substitutions_[si - 1].end())
+					continue;
+				TypePtr value_type = allocator_value_type(it->second);
+				if (value_type.get() != NULL)
+					return value_type;
+			}
+		}
 		const char* names[] = {"_Tp", "_Up", "_Val", "T"};
 		for (size_t ni = 0; ni < sizeof(names) / sizeof(names[0]); ++ni)
 		{
@@ -182,134 +200,6 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 		}
 		return TypePtr();
 	};
-	auto hosted_bool_constant_type = [&](bool value) -> TypePtr {
-		TemplateDeclaration* integral =
-			const_cast<Parser*>(this)->find_class_template(
-				NULL,
-				"integral_constant");
-		if (integral == NULL)
-			return TypePtr();
-		vector<TemplateArgument> args;
-		args.push_back(
-			TemplateArgument::type_arg(pa11::make_fundamental(FT_BOOL)));
-		args.push_back(
-			TemplateArgument::value_arg(pa11::make_fundamental(FT_BOOL),
-			                            value ? 1 : 0));
-		return const_cast<Parser*>(this)->instantiate_class_template(
-			integral,
-			args);
-	};
-	auto hosted_invoke_result_call_types =
-		[&](TypePtr invoke_result, vector<TypePtr>& call_types) -> bool {
-			auto resolve_call_type = [&](TypePtr call_type) -> TypePtr {
-				try
-				{
-					call_type = substitute_template_type(call_type);
-				}
-				catch (const runtime_error&)
-				{
-				}
-				if (call_type.get() == NULL)
-					return call_type;
-				if (call_type->kind == pa11::TypeKind::LValueReference ||
-				    call_type->kind == pa11::TypeKind::RValueReference)
-				{
-					TypePtr base = call_type->base;
-					try
-					{
-						base = substitute_template_type(base);
-					}
-					catch (const runtime_error&)
-					{
-					}
-					if (base.get() != NULL &&
-					    base->is_dependent_typename)
-					{
-						TypePtr resolved =
-							resolve_dependent_typename_type(base);
-						if (resolved.get() != NULL)
-						{
-							try
-							{
-								base = substitute_template_type(resolved);
-							}
-							catch (const runtime_error&)
-							{
-								base = resolved;
-							}
-						}
-					}
-					if (base != call_type->base)
-						return call_type->kind ==
-							       pa11::TypeKind::LValueReference
-							? pa11::make_lvalue_reference(base)
-							: pa11::make_rvalue_reference(base);
-					return call_type;
-				}
-				if (call_type->is_dependent_typename)
-				{
-					TypePtr resolved =
-						resolve_dependent_typename_type(call_type);
-					if (resolved.get() != NULL)
-					{
-						try
-						{
-							return substitute_template_type(resolved);
-						}
-						catch (const runtime_error&)
-						{
-							return resolved;
-						}
-					}
-				}
-				return call_type;
-			};
-			TypePtr bare = invoke_result.get() != NULL
-				? pa11::strip_cv(invoke_result) : TypePtr();
-			if (bare.get() == NULL ||
-			    bare->kind != pa11::TypeKind::Record)
-				return false;
-			string primary = bare->template_primary_name.empty()
-				? bare->name : bare->template_primary_name;
-			size_t sep = primary.rfind("::");
-			if (sep != string::npos)
-				primary = primary.substr(sep + 2);
-			size_t arg_pos = primary.find('<');
-			if (arg_pos != string::npos)
-				primary = primary.substr(0, arg_pos);
-			if (primary != "__invoke_result")
-				return false;
-			vector<TemplateArgument> args;
-			map<const void*, vector<TemplateArgument> >::const_iterator stored =
-				record_template_arguments_.find(bare.get());
-			if (stored != record_template_arguments_.end())
-				args = stored->second;
-			else
-				for (size_t ai = 0; ai < bare->template_arguments.size(); ++ai)
-					args.push_back(template_argument_from_instance_argument(
-						bare->template_arguments[ai]));
-			args = flatten_template_argument_packs(args);
-			for (size_t ai = 0; ai < args.size(); ++ai)
-			{
-				TemplateArgument arg = substitute_template_argument(args[ai]);
-				if (arg.kind == TemplateArgumentKind::Pack)
-				{
-					for (size_t pi = 0; pi < arg.pack.size(); ++pi)
-					{
-						TemplateArgument elem =
-							substitute_template_argument(arg.pack[pi]);
-						if (elem.kind != TemplateArgumentKind::Type)
-							return false;
-						call_types.push_back(resolve_call_type(elem.type));
-					}
-					continue;
-				}
-				if (arg.kind != TemplateArgumentKind::Type)
-					return false;
-				call_types.push_back(resolve_call_type(arg.type));
-			}
-			return !call_types.empty();
-		};
 	if (!type->dependent_typename_qualified)
 	{
 		if (!type->dependent_typename_template_id)
@@ -766,6 +656,115 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 		if (root_template != string::npos)
 			root_name = root_name.substr(0, root_template);
 		size_t template_argument_list_index = 0;
+		if (hosted_compatibility_)
+		{
+			TypePtr active_allocator =
+				hosted_active_template_parameter_type(root_name);
+			if (active_allocator.get() != NULL)
+			{
+				size_t rebind_list_index = 0;
+				size_t part_index = first_type_part + 1;
+				bool consumed_rebind = false;
+				TypePtr current_allocator = active_allocator;
+				while (part_index + 1 < parts.size())
+				{
+					string member_name = parts[part_index];
+					size_t member_template = member_name.find('<');
+					if (member_template != string::npos)
+						member_name = member_name.substr(0,
+						                                  member_template);
+					if (member_name != "rebind" ||
+					    parts[part_index + 1] != "other")
+						break;
+					vector<TemplateArgument> stored_arguments;
+					if (!dependent_typename_template_argument_list(
+						    type,
+						    rebind_list_index,
+						    stored_arguments) ||
+					    stored_arguments.empty())
+					{
+						size_t skip = part_index;
+						while (skip + 1 < parts.size())
+						{
+							string skipped = parts[skip];
+							size_t skipped_template =
+								skipped.find('<');
+							if (skipped_template != string::npos)
+								skipped = skipped.substr(
+									0,
+									skipped_template);
+							if (skipped != "rebind" ||
+							    parts[skip + 1] != "other")
+								break;
+							skip += 2;
+						}
+						if (consumed_rebind && skip == parts.size())
+							return current_allocator;
+						break;
+					}
+					TemplateArgument rebound =
+						substitute_template_argument(stored_arguments[0]);
+					if (rebound.kind != TemplateArgumentKind::Type)
+						break;
+					TypePtr rebound_allocator =
+						hosted_rebind_allocator_type(current_allocator,
+						                            rebound.type);
+					if (rebound_allocator.get() == NULL)
+						break;
+					current_allocator = rebound_allocator;
+					consumed_rebind = true;
+					part_index += 2;
+				}
+				if (consumed_rebind)
+				{
+					TypePtr current = current_allocator;
+					for (size_t pi = part_index; pi < parts.size(); ++pi)
+					{
+						TypePtr owner = current.get() != NULL
+							? pa11::strip_cv(current) : TypePtr();
+						if (owner.get() == NULL ||
+						    owner->kind != pa11::TypeKind::Record ||
+						    owner->scope == NULL)
+							return TypePtr();
+						try
+						{
+							const_cast<Parser*>(this)->
+								complete_template_record(owner);
+						}
+						catch (const runtime_error&)
+						{
+						}
+						string member_name = parts[pi];
+						size_t member_template = member_name.find('<');
+						if (member_template != string::npos)
+							member_name = member_name.substr(0,
+							                                  member_template);
+						current = lookup_type_member(owner->scope,
+						                             member_name);
+						if (current.get() == NULL)
+							return TypePtr();
+					}
+					return current;
+				}
+			}
+			for (size_t i = first_type_part + 1; i + 2 < parts.size(); ++i)
+			{
+				string member_name = parts[i];
+				size_t member_template = member_name.find('<');
+				if (member_template != string::npos)
+					member_name = member_name.substr(0, member_template);
+				if (member_name != "rebind" || parts[i + 1] != "other")
+					continue;
+				string final_member = parts.back();
+				size_t final_template = final_member.find('<');
+				if (final_template != string::npos)
+					final_member = final_member.substr(0, final_template);
+				TypePtr resolved_member =
+					hosted_allocator_rebind_member_type(final_member);
+				if (resolved_member.get() != NULL)
+					return resolved_member;
+			}
+		}
 		if (hosted_compatibility_ &&
 		    root_name == "_Policy" &&
 		    parts.size() == first_type_part + 2 &&
@@ -1088,12 +1087,9 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				}
 				if (type_args)
 				{
-					Expr call;
-					if (const_cast<Parser*>(this)->
-						    try_make_invocable_type_trait_call(
-							    call_types,
-							    call))
-						return call.type;
+					TypePtr result = hosted_call_result_type(call_types);
+					if (result.get() != NULL)
+						return result;
 					return TypePtr();
 				}
 			}
@@ -1243,6 +1239,14 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 			const_cast<Parser*>(this)->
 				complete_member_class_template_record(roots[0]);
 		}
+		if (hosted_compatibility_ &&
+		    parts.size() > first_type_part + 1 &&
+		    parts[first_type_part + 1] == "type")
+		{
+			TypePtr result = hosted_invoke_result_type(resolved);
+			if (result.get() != NULL)
+				return result;
+		}
 		for (size_t i = first_type_part + 1; i < parts.size(); ++i)
 	{
 			TypePtr owner = resolved.get() != NULL
@@ -1278,7 +1282,41 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				    parts[i + 1] == "other" &&
 				    parts[i + 2] == "value_type")
 					return hosted_allocator_rebind_value_type();
+				if (hosted_compatibility_ &&
+				    member_name == "rebind" &&
+				    i + 2 < parts.size() &&
+				    parts[i + 1] == "other")
+				{
+					TypePtr resolved_member =
+						hosted_allocator_rebind_member_type(parts[i + 2]);
+					if (resolved_member.get() != NULL)
+						return resolved_member;
+				}
 				return TypePtr();
+			}
+			if (hosted_compatibility_ &&
+			    member_name == "rebind" &&
+			    i + 1 < parts.size() &&
+			    parts[i + 1] == "other" &&
+			    !stored_arguments.empty())
+			{
+				TemplateArgument rebound =
+					substitute_template_argument(stored_arguments[0]);
+				if (rebound.kind == TemplateArgumentKind::Type)
+				{
+					TypePtr rebound_allocator =
+						hosted_rebind_allocator_type(owner,
+						                            rebound.type);
+					if (rebound_allocator.get() != NULL)
+					{
+						if (i + 2 >= parts.size())
+							return rebound_allocator;
+						resolved = rebound_allocator;
+						resolved_type_scope = NULL;
+						++i;
+						continue;
+					}
+				}
 			}
 			if (hosted_compatibility_ &&
 			    member_name == "rebind" &&
@@ -1291,6 +1329,16 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 					substitute_template_argument(stored_arguments[0]);
 				if (rebound.kind == TemplateArgumentKind::Type)
 					return rebound.type;
+			}
+			if (hosted_compatibility_ &&
+			    member_name == "rebind" &&
+			    i + 2 < parts.size() &&
+			    parts[i + 1] == "other")
+			{
+				TypePtr resolved_member =
+					hosted_allocator_rebind_member_type(parts[i + 2]);
+				if (resolved_member.get() != NULL)
+					return resolved_member;
 			}
 			vector<TemplateArgument> arguments;
 			for (size_t j = 0; j < stored_arguments.size(); ++j)
@@ -1369,125 +1417,5 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 		                                         resolved_type_scope);
 	return resolved;
 }
-
-TypePtr Parser::substitute_template_type_in_scope(TypePtr type,
-                                                  Scope* scope) const
-{
-	if (scope == NULL)
-		return substitute_template_type(type);
-	Parser* self = const_cast<Parser*>(this);
-	vector<Scope*> save_scopes = self->scopes_;
-	vector<map<string, TypePtr> > save_subst =
-		self->template_type_substitutions_;
-	vector<map<string, TemplateArgument> > save_value_subst =
-		self->template_value_substitutions_;
-	vector<set<string> > save_pack_subst =
-		self->template_type_parameter_packs_;
-	self->scopes_.clear();
-	self->scopes_.push_back(scope);
-	TypePtr record = pa11::record_type_for_scope(scope);
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	map<const void*, TemplateDeclaration*>::const_iterator decl =
-		record.get() != NULL
-		? record_template_declarations_.find(record.get())
-		: record_template_declarations_.end();
-	map<const void*, vector<TemplateArgument> >::const_iterator args =
-		record.get() != NULL
-		? record_template_arguments_.find(record.get())
-		: record_template_arguments_.end();
-	auto push_record_template_substitutions =
-		[&](TemplateDeclaration* declaration,
-		    const vector<TemplateArgument>& arguments) {
-			map<string, TypePtr> subst;
-			map<string, TemplateArgument> value_subst;
-			set<string> pack_subst;
-			for (size_t i = 0;
-			     i < arguments.size() && i < declaration->parameters.size();
-			     ++i)
-				if (!declaration->parameters[i].name.empty())
-				{
-					const TemplateParameterInfo& parameter =
-						declaration->parameters[i];
-					if (parameter.kind == TemplateParameterKind::Type)
-					{
-						if (parameter.is_pack)
-						{
-							subst[parameter.name] =
-								pa11::make_template_parameter_type(
-									parameter.name);
-							value_subst[parameter.name] = arguments[i];
-							if (arguments[i].kind ==
-							        TemplateArgumentKind::Pack &&
-							    arguments[i].pack.size() == 1 &&
-							    arguments[i].pack[0].kind ==
-								    TemplateArgumentKind::Type)
-								subst[parameter.name] =
-									arguments[i].pack[0].type;
-							else if (arguments[i].kind ==
-							         TemplateArgumentKind::Type)
-								subst[parameter.name] =
-									arguments[i].type;
-							pack_subst.insert(parameter.name);
-						}
-						else
-							subst[parameter.name] = arguments[i].type;
-					}
-					else
-						value_subst[parameter.name] = arguments[i];
-				}
-			self->template_type_substitutions_.insert(
-				self->template_type_substitutions_.end(),
-				declaration->outer_type_substitutions.begin(),
-				declaration->outer_type_substitutions.end());
-			self->template_value_substitutions_.insert(
-				self->template_value_substitutions_.end(),
-				declaration->outer_value_substitutions.begin(),
-				declaration->outer_value_substitutions.end());
-			self->template_type_substitutions_.push_back(subst);
-			self->template_value_substitutions_.push_back(value_subst);
-			self->template_type_parameter_packs_.push_back(pack_subst);
-		};
-	vector<TypePtr> enclosing_records;
-	for (Scope* cur = scope->parent; cur != NULL; cur = cur->parent)
-	{
-		TypePtr cur_record = pa11::record_type_for_scope(cur);
-		cur_record = cur_record.get() != NULL
-			? pa11::strip_cv(cur_record) : TypePtr();
-		if (cur_record.get() != NULL &&
-		    record_template_declarations_.find(cur_record.get()) !=
-			    record_template_declarations_.end() &&
-		    record_template_arguments_.find(cur_record.get()) !=
-			    record_template_arguments_.end())
-			enclosing_records.push_back(cur_record);
-	}
-	for (size_t i = enclosing_records.size(); i > 0; --i)
-	{
-		TypePtr enclosing = enclosing_records[i - 1];
-		push_record_template_substitutions(
-			record_template_declarations_.find(enclosing.get())->second,
-			record_template_arguments_.find(enclosing.get())->second);
-	}
-	if (decl != record_template_declarations_.end() &&
-	    args != record_template_arguments_.end())
-		push_record_template_substitutions(decl->second, args->second);
-	try
-	{
-		TypePtr out = substitute_template_type(type);
-		self->scopes_ = save_scopes;
-		self->template_type_substitutions_ = save_subst;
-		self->template_value_substitutions_ = save_value_subst;
-		self->template_type_parameter_packs_ = save_pack_subst;
-		return out;
-	}
-	catch (...)
-	{
-		self->scopes_ = save_scopes;
-		self->template_type_substitutions_ = save_subst;
-		self->template_value_substitutions_ = save_value_subst;
-		self->template_type_parameter_packs_ = save_pack_subst;
-		throw;
-	}
-}
-
 }  // namespace internal
 }  // namespace pa12

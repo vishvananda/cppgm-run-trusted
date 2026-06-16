@@ -157,6 +157,22 @@ bool scope_is_namespace_named(Scope* scope, const string& name)
 	return false;
 }
 
+bool hosted_std_forwarding_cast(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Namespace ||
+	    binding->owner->name != "std" ||
+	    (binding->name != "move" && binding->name != "forward") ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != pa11::TypeKind::Function ||
+	    binding->type->base.get() == NULL)
+		return false;
+	TypePtr result = binding->type->base;
+	return result->kind == pa11::TypeKind::LValueReference ||
+	       result->kind == pa11::TypeKind::RValueReference;
+}
+
 bool hosted_std_tuple_record(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -246,6 +262,15 @@ bool float_constant_builtin_name(const string& name)
 	       name == "__builtin_nansl";
 }
 
+bool fp_test_builtin_name(const string& name)
+{
+	return name == "__builtin_isfinite" ||
+	       name == "__builtin_isinf" ||
+	       name == "__builtin_isnan" ||
+	       name == "__builtin_isnormal" ||
+	       name == "__builtin_signbit";
+}
+
 Expr make_direct_builtin_call(Binding* binding,
                               TypePtr result,
                               const vector<Expr>& args,
@@ -324,11 +349,11 @@ bool Parser::make_member_pointer_call_expr(const Expr& callee,
 		for (size_t i = 0; i < converted.size(); ++i)
 			add_child(out.node, converted[i].node);
 		out.valid = true;
-		if (unevaluated_expression_depth_ == 0 &&
+	if (unevaluated_expression_depth_ == 0 &&
 		    out.category == ValueCategory::PRValue &&
 		    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
 		    !type_is_template_dependent(out.type))
-			ensure_default_destructor(out.type);
+			ensure_default_destructor(out.type, true);
 	annotate_expr_node(out);
 	return true;
 }
@@ -342,6 +367,11 @@ bool Parser::make_record_callable_call_expr(const Expr& callee,
 	    callee_object->kind != pa11::TypeKind::Record ||
 	    callee_object->scope == NULL)
 		return false;
+	if (callee_object->is_template_specialization &&
+	    !type_is_template_dependent(callee_object))
+		complete_template_record(callee_object);
+	if (!type_is_template_dependent(callee_object))
+		instantiate_member_function_templates(callee_object);
 	vector<Binding*> members =
 		lookup_qualified_set(callee_object->scope,
 		                     "operator()",
@@ -468,25 +498,6 @@ bool Parser::make_simple_builtin_call_expr(const Expr& callee,
 			                               ? "" : active_functions_.back()->name);
 		return true;
 	}
-	if (name == "__builtin_nanl")
-	{
-		if (args.size() != 1)
-			throw runtime_error("wrong argument count");
-		out.valid = true;
-		out.type = pa11::make_fundamental(FT_LONG_DOUBLE);
-		out.category = ValueCategory::PRValue;
-		out.node = Node("builtin-nanl-expression prvalue " +
-		                pa11::describe_type(out.type));
-		add_child(out.node, args[0].node);
-		return true;
-	}
-	if (name == "__builtin_isnan" &&
-	    args.size() == 1 &&
-	    args[0].node.line.compare(0, 23, "builtin-nanl-expression") == 0)
-	{
-		out = make_integer_literal_expr(FT_INT, 1);
-		return true;
-	}
 	return false;
 }
 
@@ -520,6 +531,7 @@ bool Parser::make_direct_hosted_builtin_call_expr(const Expr& callee,
 	    overflow_builtin_name(name) ||
 	    name == "__builtin_flt_rounds" ||
 	    name == "__builtin_fpclassify" ||
+	    fp_test_builtin_name(name) ||
 	    float_constant_builtin_name(name))
 	{
 		TypePtr result = callee.binding->type->base;
@@ -532,6 +544,8 @@ bool Parser::make_direct_hosted_builtin_call_expr(const Expr& callee,
 		else if (name == "__builtin_flt_rounds" ||
 		         name == "__builtin_fpclassify")
 			result = pa11::make_fundamental(FT_INT);
+		else if (fp_test_builtin_name(name))
+			result = pa11::make_fundamental(FT_INT);
 		bool needs_string = name == "__builtin_nan" ||
 		                    name == "__builtin_nanf" ||
 		                    name == "__builtin_nanl" ||
@@ -539,6 +553,7 @@ bool Parser::make_direct_hosted_builtin_call_expr(const Expr& callee,
 		                    name == "__builtin_nansf" ||
 		                    name == "__builtin_nansl";
 		size_t wanted = name == "__builtin_fpclassify" ? 6 :
+		                fp_test_builtin_name(name) ? 1 :
 		                overflow_builtin_name(name) ? 3 :
 		                (name == "__builtin_operator_new" ||
 		                 name == "__builtin_operator_delete") ? 1 :
@@ -797,10 +812,14 @@ Binding* Parser::resolve_call_direct_binding(const Expr& callee,
 Expr Parser::finish_bound_call_expr(const Expr& callee,
                                     Binding* direct,
                                     const vector<Expr>& converted)
-	{
-		if (deleted_functions_.find(direct) != deleted_functions_.end())
-			throw runtime_error("call to deleted function");
-		bool defer_hosted_body = defer_hosted_function_body(direct);
+		{
+			if (deleted_functions_.find(direct) != deleted_functions_.end())
+				throw runtime_error("call to deleted function");
+			if (hosted_compatibility_ &&
+		    converted.size() == 1 &&
+		    hosted_std_forwarding_cast(direct))
+			return make_cast_expr(direct->type->base, "", converted[0]);
+			bool defer_hosted_body = defer_hosted_function_body(direct);
 	if (unevaluated_expression_depth_ == 0 && !defer_hosted_body)
 	{
 		parse_pending_function_body(direct);
@@ -885,7 +904,7 @@ Expr Parser::finish_bound_call_expr(const Expr& callee,
 	    out.category == ValueCategory::PRValue &&
 	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
 	    !type_is_template_dependent(out.type))
-		ensure_default_destructor(out.type);
+		ensure_default_destructor(out.type, true);
 	out.valid = true;
 	vector<Node> constexpr_args;
 	for (size_t i = 0; i < converted.size(); ++i)
@@ -935,7 +954,7 @@ Expr Parser::finish_indirect_call_expr(const Expr& callee,
 	    out.category == ValueCategory::PRValue &&
 	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
 	    !type_is_template_dependent(out.type))
-		ensure_default_destructor(out.type);
+		ensure_default_destructor(out.type, true);
 	out.valid = true;
 	annotate_expr_node(out);
 	return out;

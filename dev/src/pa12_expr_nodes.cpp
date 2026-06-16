@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_types_support.h"
 #include <algorithm>
 #include <stdexcept>
 using namespace std; namespace pa12 { namespace internal { namespace {
@@ -333,11 +334,49 @@ return out; } if (!name.qualified && name.name == "__builtin_constant_p") {
 Expr out; out.type = pa11::make_function(pa11::make_fundamental(FT_INT), vector<TypePtr>(1, pa11::make_fundamental(FT_INT)), false);
 out.category = ValueCategory::LValue; out.valid = true; out.builtin_constant_p = true; out.node = Node("id-expression lvalue " + pa11::describe_type(out.type) +
 " __builtin_constant_p"); annotate_expr_node(out); return out; }
-if (!name.qualified && name.name == "__CHAR_BIT__") { Expr out; out.type = pa11::make_fundamental(FT_INT);
-out.category = ValueCategory::PRValue; out.valid = true; out.constant_expression = true; out.has_constant_value = true;
-out.constant_value = 8; out.node = Node("literal prvalue int 8"); out.node.token_text = "8"; annotate_expr_node(out);
-	return out; } if (!name.qualified && hosted_builtin_function_name(name.name)) {
-	Binding* binding = pa11::lookup_unqualified(global_scope(), name.name, pa11::LOOKUP_FUNCTION); if (binding == NULL) {
+	if (!name.qualified && name.name == "__CHAR_BIT__") { Expr out; out.type = pa11::make_fundamental(FT_INT);
+	out.category = ValueCategory::PRValue; out.valid = true; out.constant_expression = true; out.has_constant_value = true;
+	out.constant_value = 8; out.node = Node("literal prvalue int 8"); out.node.token_text = "8"; annotate_expr_node(out);
+		return out; }
+	if (!name.qualified && hosted_compatibility_ &&
+	    (name.name == "uncaught_exception" ||
+	     name.name == "uncaught_exceptions"))
+	{
+		Scope* owner = current_scope();
+		while (owner != NULL &&
+		       !(owner->kind == ScopeKind::Namespace && owner->name == "std"))
+			owner = owner->parent;
+		if (owner == NULL)
+			owner = global_scope();
+		Binding* binding =
+			pa11::lookup_qualified(owner, name.name, pa11::LOOKUP_FUNCTION);
+		if (binding == NULL)
+		{
+			TypePtr result =
+				name.name == "uncaught_exception"
+				? pa11::make_fundamental(FT_BOOL)
+				: pa11::make_fundamental(FT_INT);
+			binding = add_value(owner,
+			                    BindingKind::Function,
+			                    name.name,
+			                    pa11::make_function(result,
+			                                        vector<TypePtr>(),
+			                                        false));
+			binding->unwind_no = true;
+		}
+		Expr out;
+		out.valid = true;
+		out.binding = binding;
+		out.type = binding->type;
+		out.category = ValueCategory::LValue;
+		out.overloads.push_back(binding);
+		out.node = Node("id-expression lvalue " +
+		                pa11::describe_type(out.type) + " " + binding->name);
+		annotate_expr_node(out);
+		return out;
+	}
+	if (!name.qualified && hosted_builtin_function_name(name.name)) {
+		Binding* binding = pa11::lookup_unqualified(global_scope(), name.name, pa11::LOOKUP_FUNCTION); if (binding == NULL) {
 	vector<TypePtr> params; TypePtr result = pa11::make_fundamental(FT_VOID); TypePtr void_ptr = pa11::make_pointer(pa11::make_fundamental(FT_VOID));
 	TypePtr const_void_ptr = pa11::make_pointer(pa11::make_cv(pa11::make_fundamental(FT_VOID), pa11::CV_CONST)); TypePtr chr = pa11::make_fundamental(FT_CHAR); TypePtr const_chr = pa11::make_cv(chr, pa11::CV_CONST); TypePtr const_char_ptr = pa11::make_pointer(const_chr); TypePtr char_ptr = pa11::make_pointer(chr); if (name.name == "__builtin_strlen")
 	{ TypePtr chr = pa11::make_cv(pa11::make_fundamental(FT_CHAR), pa11::CV_CONST); params.push_back(pa11::make_pointer(chr));
@@ -529,6 +568,73 @@ if (op == OP_EQ || op == OP_NE) {
 		return out;
 	}
 }
+	TypePtr dependent_left = pa11::strip_cv(expression_object_type(lhs.type));
+	TypePtr dependent_right = pa11::strip_cv(expression_object_type(rhs.type));
+	bool function_template_operator_operand =
+		((dependent_left->kind == pa11::TypeKind::Record ||
+		  dependent_left->kind == pa11::TypeKind::Enum ||
+		  dependent_right->kind == pa11::TypeKind::Record ||
+		  dependent_right->kind == pa11::TypeKind::Enum) &&
+		 (binding_is_function_template_candidate(
+			  lhs.binding,
+			  function_template_placeholders_,
+			  function_template_specialization_arguments_) ||
+		  binding_is_function_template_candidate(
+			  rhs.binding,
+			  function_template_placeholders_,
+			  function_template_specialization_arguments_)));
+		if ((type_is_template_dependent(lhs.type) ||
+		     type_is_template_dependent(rhs.type) ||
+		     type_structurally_dependent(lhs.type) ||
+		     type_structurally_dependent(rhs.type)) &&
+		    !function_template_operator_operand)
+	{
+		TypePtr type =
+			(op == OP_LAND || op == OP_LOR)
+			? pa11::make_fundamental(FT_BOOL)
+			: pa11::make_dependent_typename_type(
+				"__dependent_binary", false, false, false);
+		if (op == OP_COMMA)
+			type = rhs.type;
+		Expr out;
+		out.type = type;
+		out.category = op == OP_COMMA ? rhs.category : ValueCategory::PRValue;
+		out.valid = true;
+		const Expr* dependent_operand = NULL;
+		if (!lhs.dependent_value_name.empty() &&
+		    parameter_pack_expansion_name(lhs.dependent_value_name))
+			dependent_operand = &lhs;
+		else if (!rhs.dependent_value_name.empty() &&
+		         parameter_pack_expansion_name(rhs.dependent_value_name))
+			dependent_operand = &rhs;
+		else if (!lhs.dependent_value_name.empty())
+			dependent_operand = &lhs;
+		else if (!rhs.dependent_value_name.empty())
+			dependent_operand = &rhs;
+		if (dependent_operand != NULL)
+		{
+			out.dependent_value_name =
+				dependent_operand->dependent_value_name;
+			out.dependent_value_owner_template_name =
+				dependent_operand->dependent_value_owner_template_name;
+			out.dependent_value_member_name =
+				dependent_operand->dependent_value_member_name;
+			out.dependent_value_owner_template_arguments =
+				dependent_operand->dependent_value_owner_template_arguments;
+			out.dependent_value_negated =
+				dependent_operand->dependent_value_negated;
+		}
+		out.node = Node("binary-expression prvalue " +
+		                pa11::describe_type(type) + " " +
+		                op_leaf(op, text));
+		add_child(out.node, lhs.node);
+		add_child(out.node, rhs.node);
+		out.node.has_op = true;
+		out.node.op = op;
+		out.node.token_text = text;
+		annotate_expr_node(out);
+		return out;
+	}
 	vector<Binding*> candidates = binary_operator_candidates(op, text, lhs, rhs);
 	Expr builtin_converted;
 	bool have_builtin_converted =
@@ -560,9 +666,9 @@ if (op == OP_EQ || op == OP_NE) {
 			candidate_accepts_operands = true;
 	if (have_builtin_converted && !candidate_accepts_operands)
 		return builtin_converted;
-	if (!candidates.empty())
-	{
-		Expr callee;
+		if (!candidates.empty())
+		{
+			Expr callee;
 		callee.valid = true;
 		callee.binding = candidates[0];
 		callee.type = candidates[0]->type;
@@ -592,9 +698,9 @@ if (op == OP_EQ || op == OP_NE) {
 			lookup_qualified_set(left_record->scope,
 			                     opname,
 			                     pa11::LOOKUP_FUNCTION);
-		if (!members.empty())
-		{
-			Expr callee = make_member_expr(lhs, opname, ".");
+			if (!members.empty())
+			{
+				Expr callee = make_member_expr(lhs, opname, ".");
 			vector<Expr> args;
 			args.push_back(rhs);
 			return make_call_expr(callee, args);
@@ -830,18 +936,21 @@ if (string(err.what()).compare(0, 28, "cannot resolve call overload") != 0) thro
 } if (lhs_bare->kind != pa11::TypeKind::Record || lhs_bare->scope == NULL) return Expr(); string opname = operator_function_name(op, text);
 vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, opname, pa11::LOOKUP_FUNCTION); if (members.empty()) return Expr();
 Expr callee = make_member_expr(lhs, opname, "."); vector<Expr> args; args.push_back(rhs); return make_call_expr(callee, args);
-} Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare) { bool move_assign = rhs.category != ValueCategory::LValue;
-if (rhs.braced_init_list && rhs.type.get() == NULL) { if (!type_is_template_dependent(lhs_bare)) instantiate_member_function_templates(lhs_bare);
-vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION); vector<Binding*> declared_members; for (size_t i = 0; i < members.size(); ++i)
-if (!members[i]->is_generated_copy_move_assignment) declared_members.push_back(members[i]); if (!declared_members.empty()) {
-Expr callee = make_member_expr(lhs, "operator=", "."); callee.binding = declared_members[0]; callee.type = declared_members[0]->type; callee.overloads = declared_members;
-callee.node.binding = declared_members[0]; callee.node.type = declared_members[0]->type; vector<Expr> args; args.push_back(rhs);
+	} Expr Parser::make_record_assignment_expr(Expr lhs, Expr rhs, TypePtr lhs_bare) {
+	if (rhs.braced_init_list && rhs.type.get() == NULL) { if (!type_is_template_dependent(lhs_bare)) instantiate_member_function_templates(lhs_bare);
+	vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION); vector<Binding*> declared_members; for (size_t i = 0; i < members.size(); ++i)
+	if (!members[i]->is_generated_copy_move_assignment) declared_members.push_back(members[i]); if (!declared_members.empty()) {
+	Expr callee = make_member_expr(lhs, "operator=", "."); callee.binding = declared_members[0]; callee.type = declared_members[0]->type; callee.overloads = declared_members;
+	callee.node.binding = declared_members[0]; callee.node.type = declared_members[0]->type; vector<Expr> args; args.push_back(rhs);
 try { return make_call_expr(callee, args); }
 catch (const runtime_error& err) { if (string(err.what()).compare(0, 28, "cannot resolve call overload") != 0)
-throw; } } rhs.type = lhs_bare; rhs.category = ValueCategory::PRValue; rhs.node.type = lhs_bare;
-rhs.node.category = rhs.category; if (rhs.node.children.empty()) rhs.node.direct_call = ensure_default_constructor(lhs_bare, true); ensure_default_destructor(lhs_bare);
-annotate_expr_node(rhs); }
-TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type)); if (rhs_bare->kind == pa11::TypeKind::Record && pa11::same_type(rhs_bare, lhs_bare)) {
+	throw; } } rhs.type = lhs_bare; rhs.category = ValueCategory::PRValue; rhs.node.type = lhs_bare;
+	rhs.node.category = rhs.category; if (rhs.node.children.empty()) rhs.node.direct_call = ensure_default_constructor(lhs_bare, true); ensure_default_destructor(lhs_bare);
+	annotate_expr_node(rhs); }
+	TypePtr rhs_object_type = expression_object_type(rhs.type);
+	bool move_assign =
+		rhs.category != ValueCategory::LValue && !top_level_const(rhs_object_type);
+	TypePtr rhs_bare = pa11::strip_cv(expression_object_type(rhs.type)); if (rhs_bare->kind == pa11::TypeKind::Record && pa11::same_type(rhs_bare, lhs_bare)) {
 if (!type_is_template_dependent(lhs_bare)) instantiate_member_function_templates(lhs_bare);
 vector<Binding*> members = lookup_qualified_set(lhs_bare->scope, "operator=", pa11::LOOKUP_FUNCTION); vector<Binding*> declared_members; bool has_declared_copy_move_assignment = false;
 for (size_t i = 0; i < members.size(); ++i) if (!members[i]->is_generated_copy_move_assignment) { declared_members.push_back(members[i]);
@@ -874,7 +983,7 @@ Expr rhs) { TypePtr lhs_type = expression_object_type(lhs.type); TypePtr lhs_bar
 	} if (op == OP_ASS && lhs_bare->kind == pa11::TypeKind::Record && lhs_bare->scope != NULL)
 	return make_record_assignment_expr(lhs, rhs, lhs_bare); if (lhs.category != ValueCategory::LValue || top_level_const(lhs_type) || (lhs_bare->kind == pa11::TypeKind::Array && !pa11::is_gnu_vector_type(lhs_bare)) ||
 	lhs_bare->kind == pa11::TypeKind::Function) throw runtime_error("assignment lhs is not lvalue"); Conversion conv; if (op == OP_ASS)
-{ conv = convert_to(rhs, lhs_type); if (!conv.viable) throw runtime_error("invalid assignment conversion");
+	{ conv = convert_to(rhs, lhs_type); if (!conv.viable) throw runtime_error("invalid assignment conversion");
 } else { TypePtr rhs_type = lvalue_to_rvalue_type(rhs.type);
 if (!compound_assignment_rhs_viable(op, lvalue_to_rvalue_type(lhs.type), rhs_type)) {
 conv = convert_to(rhs, lvalue_to_rvalue_type(lhs.type)); if (!conv.viable || !compound_assignment_rhs_viable( op,
@@ -944,9 +1053,9 @@ callee.node.token_text = op->name; annotate_expr_node(callee); Expr ptr = make_c
 	} } } throw runtime_error("invalid subscript operands");
 } Expr Parser::make_subscript_expr(Expr lhs, Expr rhs) { TypePtr base = pa11::strip_cv(expression_object_type(lhs.type));
 if (base->kind == pa11::TypeKind::Array) base = base->base; else if (base->kind == pa11::TypeKind::Pointer) base = base->base;
-else { TypePtr rbase = pa11::strip_cv(expression_object_type(rhs.type)); if (rbase->kind == pa11::TypeKind::Array)
-base = rbase->base; else if (rbase->kind == pa11::TypeKind::Pointer) base = rbase->base; else if (base->kind == pa11::TypeKind::Record && base->scope != NULL)
-	return make_record_subscript_expr(base, lhs, rhs); else if (type_is_template_dependent(lhs.type) || type_is_template_dependent(rhs.type))
+else { if (base->kind == pa11::TypeKind::Record && base->scope != NULL)
+	return make_record_subscript_expr(base, lhs, rhs); TypePtr rbase = pa11::strip_cv(expression_object_type(rhs.type)); if (rbase->kind == pa11::TypeKind::Array)
+base = rbase->base; else if (rbase->kind == pa11::TypeKind::Pointer) base = rbase->base; else if (type_is_template_dependent(lhs.type) || type_is_template_dependent(rhs.type))
 	base = pa11::make_dependent_typename_type("__dependent_subscript", false, false, false); else throw runtime_error("invalid subscript operands"); }
 Expr out; out.type = base; out.category = ValueCategory::LValue; out.valid = true;
 out.node = Node("subscript-expression lvalue " + pa11::describe_type(base)); TypePtr rhs_base = pa11::strip_cv(expression_object_type(rhs.type)); if (rhs_base->kind == pa11::TypeKind::Array || rhs_base->kind == pa11::TypeKind::Pointer)
@@ -967,7 +1076,8 @@ vector<Binding*> ops = lookup_qualified_set(arrow_type->scope, "operator->", pa1
 if (ops.empty()) throw runtime_error("arrow on non-pointer");
 Expr callee = make_member_expr(object, "operator->", "."); vector<Expr> args; object = make_call_expr(callee, args);
 if (arrow_depth == 15) throw runtime_error("recursive operator->"); } } TypePtr bare = pa11::strip_cv(type); if ((bare->kind != pa11::TypeKind::Record || bare->scope == NULL) && type_is_template_dependent(type))
-return make_dependent_member_expr(object, name, op); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) throw runtime_error("member access on non-record"); if (bare->is_template_specialization && !type_is_template_dependent(bare))
+return make_dependent_member_expr(object, name, op); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) {
+throw runtime_error("member access on non-record"); } if (bare->is_template_specialization && !type_is_template_dependent(bare))
 complete_template_record(bare); if (!type_is_template_dependent(bare)) instantiate_member_function_templates(bare); vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
 if (found.empty() && (type_is_template_dependent(type) || record_dependent_base_lookup_skips_.count(bare.get()) != 0)) return make_dependent_member_expr(object, name, op);
 if (found.empty()) throw runtime_error("member not found: " + name + " in " + pa11::describe_type(bare)); if (!member_access_allowed(found[0], bare))
@@ -985,7 +1095,17 @@ Expr out; out.valid = true; out.binding = first; out.type = first->type;
 out.category = ValueCategory::LValue; out.overloads = overloads; out.node = Node("member-expression lvalue " + pa11::describe_type(out.type) + " OP_DOT:" + name);
 add_child(out.node, object.node); out.node.binding = first; out.node.has_op = true; out.node.op = op == "->" ? OP_ARROW : OP_DOT;
 out.node.token_text = name; annotate_expr_node(out); return out; }
-if (found[0]->is_static_member && found[0]->has_constant) { Expr out; out.type = expression_object_type(found[0]->type);
+if (found[0]->is_static_member && found[0]->has_constant) {
+	if (found[0]->owner != NULL &&
+	    found[0]->owner->kind == ScopeKind::Class &&
+	    !validating_template_definition_ &&
+	    function_template_candidate_instantiation_depth_ == 0 &&
+	    short_circuit_static_member_demand_depth_ == 0)
+	{
+		TypePtr owner_type = pa11::record_type_for_scope(found[0]->owner);
+		mark_template_specialization_demanded(owner_type);
+	}
+	Expr out; out.type = expression_object_type(found[0]->type);
 out.category = ValueCategory::PRValue; out.binding = found[0]; out.valid = true; out.constant_expression = true;
 out.has_constant_value = true; out.constant_value = found[0]->constant_value; out.null_pointer_constant = found[0]->constant_value == 0; out.node = Node("literal prvalue " + pa11::describe_type(out.type) +
 " " + to_string(found[0]->constant_value)); out.node.binding = found[0]; out.node.token_text = to_string(found[0]->constant_value); annotate_expr_node(out);

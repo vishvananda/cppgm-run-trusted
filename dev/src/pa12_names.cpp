@@ -321,9 +321,14 @@ QualifiedName Parser::parse_id_expression_name()
 				!name.qualified &&
 				direct_template_call_depth_ != 0 &&
 				at(OP_LPAREN);
+			bool qualified_direct_template_call =
+				name.qualified &&
+				direct_template_call_depth_ != 0 &&
+				at(OP_LPAREN);
 			if ((template_argument_expression_depth_ > 0 ||
 			     template_argument_list_has_value(name.template_arguments)) &&
 			    !adl_template_call &&
+			    !qualified_direct_template_call &&
 			    !template_disambiguator &&
 			    !visible_function_template_name(name) &&
 			    !visible_variable_template_name(name))
@@ -423,6 +428,9 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 		dependent_type->is_template_specialization =
 			bare_source.get() != NULL &&
 			bare_source->is_template_specialization;
+		dependent_type->is_extern_template_instantiation =
+			bare_source.get() != NULL &&
+			bare_source->is_extern_template_instantiation;
 		dependent_type->is_dependent_typename = true;
 		dependent_type->dependent_typename_qualified = true;
 		dependent_type->dependent_typename_template_id =

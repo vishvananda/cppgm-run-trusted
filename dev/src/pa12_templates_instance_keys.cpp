@@ -1,24 +1,18 @@
 #include "pa12_templates_instance_support.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
-
 #include "posttoken_pipeline.h"
 #include "pp_token.h"
 #include "pa12_types_support.h"
-
 using namespace std;
-
 namespace pa12 {
 namespace internal {
-
 Parser* active_template_match_parser = NULL;
 const vector<TemplateParameterInfo>* active_template_match_parameters = NULL;
-
 bool same_template_record_type(TypePtr left, TypePtr right)
 {
 	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
@@ -34,17 +28,31 @@ bool same_template_record_type(TypePtr left, TypePtr right)
 	       l->template_primary_name == r->template_primary_name &&
 	       l->name == r->name;
 }
-
+bool template_record_owner_name_match(TypePtr left, TypePtr right)
+{
+	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	if (l.get() == NULL ||
+	    r.get() == NULL ||
+	    l->kind != pa11::TypeKind::Record ||
+	    r->kind != pa11::TypeKind::Record ||
+	    l->name != r->name)
+		return false;
+	string l_primary = !l->template_primary_name.empty()
+		? l->template_primary_name : l->name;
+	string r_primary = !r->template_primary_name.empty()
+		? r->template_primary_name : r->name;
+	return l_primary == r_primary &&
+	       (l->is_template_specialization || r->is_template_specialization);
+}
 bool template_instance_argument_contains_parameter_name(
 	const pa11::TemplateInstanceArgument& argument,
 	const string& name,
 	const map<const void*, vector<TemplateArgument> >& record_arguments);
-
 bool template_argument_contains_parameter_name(
 	const TemplateArgument& argument,
 	const string& name,
 	const map<const void*, vector<TemplateArgument> >& record_arguments);
-
 bool type_contains_parameter_name(
 	TypePtr type,
 	const string& name,
@@ -136,7 +144,6 @@ bool type_contains_parameter_name(
 	}
 	return false;
 }
-
 bool template_instance_argument_contains_parameter_name(
 	const pa11::TemplateInstanceArgument& argument,
 	const string& name,
@@ -171,7 +178,6 @@ bool template_instance_argument_contains_parameter_name(
 				return true;
 	return false;
 }
-
 bool template_argument_contains_parameter_name(
 	const TemplateArgument& argument,
 	const string& name,
@@ -209,7 +215,6 @@ bool template_argument_contains_parameter_name(
 		       argument.value_name == name;
 	return false;
 }
-
 bool declaration_starts_class_key(const vector<Token>& tokens,
                                   const TemplateDeclaration* declaration)
 {
@@ -221,7 +226,93 @@ bool declaration_starts_class_key(const vector<Token>& tokens,
 	        token.type == KW_STRUCT ||
 	        token.type == KW_UNION);
 }
-
+static bool same_signature_template_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right);
+static bool same_signature_type(TypePtr left, TypePtr right)
+{
+	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	if (l.get() == NULL || r.get() == NULL)
+		return l.get() == r.get();
+	if (pa11::same_type(l, r))
+		return true;
+	if (l->kind != r->kind)
+		return false;
+	if (l->kind == pa11::TypeKind::Pointer ||
+	    l->kind == pa11::TypeKind::LValueReference ||
+	    l->kind == pa11::TypeKind::RValueReference)
+		return same_signature_type(l->base, r->base);
+	if (l->kind == pa11::TypeKind::Array)
+		return l->unknown_bound == r->unknown_bound &&
+		       (l->unknown_bound || l->bound == r->bound) &&
+		       same_signature_type(l->base, r->base);
+	if (l->kind == pa11::TypeKind::Function)
+	{
+		if (l->parameters.size() != r->parameters.size() ||
+		    l->variadic != r->variadic ||
+		    l->ref_qualifier != r->ref_qualifier ||
+		    !same_signature_type(l->base, r->base))
+			return false;
+		for (size_t i = 0; i < l->parameters.size(); ++i)
+			if (!same_signature_type(l->parameters[i],
+			                         r->parameters[i]))
+				return false;
+		return true;
+	}
+	if (l->kind == pa11::TypeKind::MemberPointer)
+		return same_signature_type(l->member_class, r->member_class) &&
+		       same_signature_type(l->base, r->base);
+	if (l->kind == pa11::TypeKind::Record)
+	{
+		if (!same_template_record_type(l, r) ||
+		    l->template_arguments.size() != r->template_arguments.size())
+			return false;
+		for (size_t i = 0; i < l->template_arguments.size(); ++i)
+			if (!same_signature_template_argument(
+				    l->template_arguments[i],
+				    r->template_arguments[i]))
+				return false;
+		return true;
+	}
+	if (l->kind == pa11::TypeKind::Fundamental)
+		return l->fundamental == r->fundamental;
+	if (l->kind == pa11::TypeKind::Enum)
+		return l->name == r->name &&
+		       l->enum_underlying == r->enum_underlying;
+	if (l->kind == pa11::TypeKind::TemplateParameter ||
+	    l->kind == pa11::TypeKind::TemplateTemplateParameter)
+		return l->name == r->name;
+	return false;
+}
+static bool same_signature_template_argument(
+	const pa11::TemplateInstanceArgument& left,
+	const pa11::TemplateInstanceArgument& right)
+{
+	if (left.kind != right.kind)
+		return false;
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Type)
+		return same_signature_type(left.type, right.type);
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		if (left.dependent != right.dependent)
+			return same_signature_type(left.type, right.type);
+		return left.value_negated == right.value_negated &&
+		       left.value == right.value &&
+		       left.value_name == right.value_name &&
+		       same_signature_type(left.type, right.type);
+	}
+	if (left.kind == pa11::TemplateInstanceArgumentKind::Template)
+		return left.template_name == right.template_name &&
+		       left.dependent == right.dependent;
+	if (left.pack.size() != right.pack.size())
+		return false;
+	for (size_t i = 0; i < left.pack.size(); ++i)
+		if (!same_signature_template_argument(left.pack[i],
+		                                      right.pack[i]))
+			return false;
+	return true;
+}
 bool same_constructor_type_for_owner(TypePtr candidate,
                                      TypePtr wanted,
                                      TypePtr owner)
@@ -242,12 +333,11 @@ bool same_constructor_type_for_owner(TypePtr candidate,
 	    !same_template_record_type(wanted_this->base, owner))
 		return false;
 	for (size_t i = 1; i < candidate->parameters.size(); ++i)
-		if (!pa11::same_type(candidate->parameters[i],
-		                     wanted->parameters[i]))
+		if (!same_signature_type(candidate->parameters[i],
+		                         wanted->parameters[i]))
 			return false;
 	return true;
 }
-
 bool same_static_member_type_with_owner_parameter(TypePtr candidate,
                                                   TypePtr wanted,
                                                   TypePtr owner)
@@ -265,12 +355,11 @@ bool same_static_member_type_with_owner_parameter(TypePtr candidate,
 	    !same_template_record_type(wanted_this->base, owner))
 		return false;
 	for (size_t i = 0; i < candidate->parameters.size(); ++i)
-		if (!pa11::same_type(candidate->parameters[i],
-		                     wanted->parameters[i + 1]))
+		if (!same_signature_type(candidate->parameters[i],
+		                         wanted->parameters[i + 1]))
 			return false;
 	return true;
 }
-
 map<Binding*, Node>::const_iterator find_static_member_initializer_for_binding(
 	const map<Binding*, Node>& initializers,
 	Binding* binding)
@@ -289,46 +378,66 @@ map<Binding*, Node>::const_iterator find_static_member_initializer_for_binding(
 	     ++it)
 	{
 		Binding* candidate = it->first;
+		bool same_owner = false;
+		bool template_owner_match = false;
+		if (candidate != NULL && binding != NULL)
+		{
+			same_owner = candidate->owner == binding->owner;
+			if (!same_owner &&
+			    candidate->owner != NULL &&
+			    binding->owner != NULL &&
+			    candidate->owner->kind == ScopeKind::Class &&
+			    binding->owner->kind == ScopeKind::Class)
+			{
+				TypePtr candidate_record =
+					pa11::record_type_for_scope(candidate->owner);
+				TypePtr binding_record =
+					pa11::record_type_for_scope(binding->owner);
+				template_owner_match =
+					candidate_record.get() != NULL &&
+					binding_record.get() != NULL &&
+					(same_template_record_type(candidate_record,
+					                           binding_record) ||
+					 template_record_owner_name_match(candidate_record,
+					                                  binding_record));
+				same_owner = template_owner_match;
+			}
+		}
 		if (candidate != NULL &&
 		    binding != NULL &&
 		    candidate->name == binding->name &&
-		    candidate->owner == binding->owner &&
-		    pa11::same_type(candidate->type, binding->type))
+		    same_owner &&
+		    (template_owner_match ||
+		     pa11::same_type(candidate->type, binding->type)))
 			return it;
 	}
 	return initializers.end();
 }
-
 TemplateMatchParserScope::TemplateMatchParserScope(Parser* parser)
 	: saved(active_template_match_parser)
 {
 	active_template_match_parser = parser;
 }
-
 TemplateMatchParserScope::~TemplateMatchParserScope()
 {
 	active_template_match_parser = saved;
 }
-
 TemplateMatchParameterScope::TemplateMatchParameterScope(
 	const vector<TemplateParameterInfo>* parameters)
 	: saved(active_template_match_parameters)
 {
 	active_template_match_parameters = parameters;
 }
-
 TemplateMatchParameterScope::~TemplateMatchParameterScope()
 {
 	active_template_match_parameters = saved;
 }
-
 bool collect_replay_tokens(const string& source, vector<Token>& out)
 {
 	vector<PPToken> pp_tokens = TokenizePPString(source);
 	vector<posttoken::Token> post_tokens;
 	if (!posttoken::collect_posttokens_checked(pp_tokens, post_tokens))
 		return false;
-
 	out.clear();
 	int rshift_group = 1;
 	for (size_t i = 0; i < post_tokens.size(); ++i)
@@ -348,12 +457,10 @@ bool collect_replay_tokens(const string& source, vector<Token>& out)
 			out.push_back(second);
 			continue;
 		}
-
 		out.push_back(Token(in.kind, in.source, in.token_type));
 	}
 	return true;
 }
-
 bool node_calls_function_template(
 	const Node& node,
 	const map<Binding*, TemplateDeclaration*>& function_template_placeholders)
@@ -375,7 +482,6 @@ bool node_calls_function_template(
 			return true;
 	return false;
 }
-
 string template_type_spelling(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -438,40 +544,32 @@ string template_type_spelling(TypePtr type)
 	}
 	throw logic_error("unknown type kind");
 }
-
 string template_type_key(TypePtr type);
-
 string template_instance_argument_key(
 	const pa11::TemplateInstanceArgument& argument);
-
 map<const void*, string>& template_type_key_cache()
 {
 	static map<const void*, string> cache;
 	return cache;
 }
-
 void clear_template_type_key_cache()
 {
 	template_type_key_cache().clear();
 }
-
 void discard_template_type_key_cache(TypePtr type)
 {
 	if (type.get() != NULL)
 		template_type_key_cache().erase(type.get());
 }
-
 string template_type_cache_fingerprint(TypePtr type, int depth);
 string instance_argument_cache_fingerprint(
 	const pa11::TemplateInstanceArgument& argument,
 	int depth);
-
 string instance_argument_cache_fingerprint(
 	const pa11::TemplateInstanceArgument& argument)
 {
 	return instance_argument_cache_fingerprint(argument, 0);
 }
-
 string instance_argument_cache_fingerprint(
 	const pa11::TemplateInstanceArgument& argument,
 	int depth)
@@ -501,13 +599,11 @@ string instance_argument_cache_fingerprint(
 		    << "}";
 	return out.str();
 }
-
 string shallow_instance_argument_fingerprint(
 	const pa11::TemplateInstanceArgument& argument)
 {
 	return instance_argument_cache_fingerprint(argument);
 }
-
 string record_specialization_fingerprint(TypePtr type)
 {
 	ostringstream out;
@@ -518,7 +614,6 @@ string record_specialization_fingerprint(TypePtr type)
 			type->template_arguments[i]);
 	return out.str();
 }
-
 string template_type_cache_fingerprint(TypePtr type, int depth)
 {
 	if (type.get() == NULL)
@@ -530,6 +625,7 @@ string template_type_cache_fingerprint(TypePtr type, int depth)
 	    << "|" << type->bound << "|" << type->name << "|"
 	    << type->template_primary_name << "|" << type->scope << "|"
 	    << type->is_template_specialization << "|"
+	    << type->is_extern_template_instantiation << "|"
 	    << type->is_dependent_typename << "|"
 	    << type->parameters.size() << "|" << type->template_arguments.size();
 	if (depth > 8)
@@ -562,12 +658,10 @@ string template_type_cache_fingerprint(TypePtr type, int depth)
 			    depth + 1);
 	return out.str();
 }
-
 string template_type_cache_fingerprint(TypePtr type)
 {
 	return template_type_cache_fingerprint(type, 0);
 }
-
 string template_instance_argument_pack_key(
 	const vector<pa11::TemplateInstanceArgument>& arguments)
 {
@@ -580,7 +674,6 @@ string template_instance_argument_pack_key(
 	}
 	return out.str();
 }
-
 string template_instance_argument_key(
 	const pa11::TemplateInstanceArgument& argument)
 {
@@ -600,7 +693,6 @@ string template_instance_argument_key(
 		return "M(" + argument.template_name + ")";
 	return "P(" + template_instance_argument_pack_key(argument.pack) + ")";
 }
-
 string dependent_value_member_key(const TemplateArgument& arg)
 {
 	ostringstream out;
@@ -610,7 +702,6 @@ string dependent_value_member_key(const TemplateArgument& arg)
 		    arg.value_owner_template_arguments);
 	return out.str();
 }
-
 string template_type_key(TypePtr type)
 {
 	if (type.get() == NULL)
@@ -694,7 +785,6 @@ string template_type_key(TypePtr type)
 	cache[type.get()] = result;
 	return result;
 }
-
 string template_argument_spelling(const TemplateArgument& argument)
 {
 	if (argument.kind == TemplateArgumentKind::Type)
@@ -732,23 +822,19 @@ string template_argument_spelling(const TemplateArgument& argument)
 	}
 	return out.str();
 }
-
 size_t template_argument_hash_combine(size_t seed, size_t value)
 {
 	return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) +
 	               (seed >> 2));
 }
-
 size_t template_argument_string_hash(const string& value)
 {
 	return template_argument_hash_combine(value.size(),
 	                                      hash<string>()(value));
 }
-
 size_t template_argument_instance_fingerprint(
 	const pa11::TemplateInstanceArgument& argument,
 	int depth);
-
 size_t template_type_cache_hash(TypePtr type, int depth)
 {
 	if (type.get() == NULL)
@@ -818,7 +904,6 @@ size_t template_type_cache_hash(TypePtr type, int depth)
 				depth + 1));
 	return out;
 }
-
 size_t template_argument_instance_fingerprint(
 	const pa11::TemplateInstanceArgument& argument,
 	int depth)
@@ -868,13 +953,11 @@ size_t template_argument_instance_fingerprint(
 				depth + 1));
 	return out;
 }
-
 size_t template_argument_instance_fingerprint(
 	const pa11::TemplateInstanceArgument& argument)
 {
 	return template_argument_instance_fingerprint(argument, 0);
 }
-
 size_t template_argument_cache_fingerprint(const TemplateArgument& argument,
                                            int depth)
 {
@@ -927,12 +1010,10 @@ size_t template_argument_cache_fingerprint(const TemplateArgument& argument,
 				depth + 1));
 	return out;
 }
-
 size_t template_argument_cache_fingerprint(const TemplateArgument& argument)
 {
 	return template_argument_cache_fingerprint(argument, 0);
 }
-
 bool same_instance_argument_identity(
 	const pa11::TemplateInstanceArgument& left,
 	const pa11::TemplateInstanceArgument& right)
@@ -962,7 +1043,6 @@ bool same_instance_argument_identity(
 			return false;
 	return true;
 }
-
 bool same_template_argument_identity(const TemplateArgument& left,
                                      const TemplateArgument& right)
 {
@@ -993,7 +1073,6 @@ bool same_template_argument_identity(const TemplateArgument& left,
 			return false;
 	return true;
 }
-
 string template_argument_key_part(const TemplateArgument& argument)
 {
 	static map<const TemplateArgument*, pair<size_t, string> > cache;
@@ -1087,7 +1166,6 @@ string template_argument_key_part(const TemplateArgument& argument)
 	structural_cache[fingerprint].push_back(make_pair(argument, result));
 	return result;
 }
-
 string template_argument_spelling(const vector<TemplateArgument>& arguments)
 {
 	ostringstream out;
@@ -1099,7 +1177,6 @@ string template_argument_spelling(const vector<TemplateArgument>& arguments)
 	}
 	return out.str();
 }
-
 bool type_mentions_active_record(
 	TypePtr type,
 	const vector<ActiveClassInstantiation>& active)
@@ -1132,7 +1209,6 @@ bool type_mentions_active_record(
 		       type_mentions_active_record(type->base, active);
 	return false;
 }
-
 bool instance_pack_needs_dependency_name(
 	const vector<pa11::TemplateInstanceArgument>& pack)
 {
@@ -1141,7 +1217,6 @@ bool instance_pack_needs_dependency_name(
 			return true;
 	return false;
 }
-
 pa11::TemplateInstanceArgument template_instance_argument(
 	const TemplateArgument& argument)
 {
@@ -1240,7 +1315,6 @@ pa11::TemplateInstanceArgument template_instance_argument(
 	}
 	return out;
 }
-
 	vector<pa11::TemplateInstanceArgument> template_instance_arguments(
 		const vector<TemplateArgument>& arguments)
 	{
@@ -1249,7 +1323,6 @@ pa11::TemplateInstanceArgument template_instance_argument(
 			out.push_back(template_instance_argument(arguments[i]));
 		return out;
 	}
-
 	bool single_instance_pack_element_is_expansion(
 		const TemplateArgument& argument)
 	{
@@ -1270,7 +1343,6 @@ pa11::TemplateInstanceArgument template_instance_argument(
 			       argument.template_declaration == NULL;
 		return false;
 	}
-
 	TemplateArgument template_argument_from_instance_argument(
 		const pa11::TemplateInstanceArgument& argument)
 {
@@ -1317,7 +1389,6 @@ pa11::TemplateInstanceArgument template_instance_argument(
 			? argument.template_name : argument.value_name;
 		return out;
 	}
-
 TemplateArgument match_template_argument_from_instance_argument(
 	const pa11::TemplateInstanceArgument& argument)
 {
@@ -1332,7 +1403,6 @@ TemplateArgument match_template_argument_from_instance_argument(
 		? argument.template_name : argument.value_name;
 	return out;
 }
-
 vector<TemplateArgument> match_template_arguments_from_instance_arguments(
 	const vector<pa11::TemplateInstanceArgument>& arguments)
 {
@@ -1342,7 +1412,6 @@ vector<TemplateArgument> match_template_arguments_from_instance_arguments(
 			match_template_argument_from_instance_argument(arguments[i]));
 	return out;
 }
-
 TemplateArgument raw_template_argument_from_instance_argument(
 	const pa11::TemplateInstanceArgument& argument)
 {
@@ -1389,7 +1458,5 @@ TemplateArgument raw_template_argument_from_instance_argument(
 			? argument.template_name : argument.value_name;
 		return out;
 	}
-
-
 }  // namespace internal
 }  // namespace pa12

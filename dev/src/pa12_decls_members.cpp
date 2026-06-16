@@ -3,41 +3,6 @@
 using namespace std;
 namespace pa12 {
 namespace internal {
-namespace {
-
-bool token_is_simple(const vector<Token>& tokens, size_t pos, ETokenType type)
-{
-	return pos < tokens.size() &&
-	       tokens[pos].kind == posttoken::TokenKind::Simple &&
-	       tokens[pos].type == type;
-}
-
-bool deferred_compound_body_is_empty(const vector<Token>& tokens, size_t pos)
-{
-	return token_is_simple(tokens, pos, OP_LBRACE) &&
-	       token_is_simple(tokens, pos + 1, OP_RBRACE);
-}
-
-void mark_noop_destructor(Binding* dtor,
-                          Scope* class_scope,
-                          const string& dtor_name)
-{
-	if (dtor == NULL || dtor->is_virtual)
-		return;
-	dtor->is_noop_destructor = true;
-	if (class_scope == NULL)
-		return;
-	map<string, vector<Binding*> >::iterator found =
-		class_scope->members.find(dtor_name);
-	if (found == class_scope->members.end())
-		return;
-	for (size_t i = 0; i < found->second.size(); ++i)
-		if (found->second[i]->kind == BindingKind::Function &&
-		    pa11::same_type(found->second[i]->type, dtor->type))
-			found->second[i]->is_noop_destructor = true;
-}
-
-}  // namespace
 bool record_has_reference_field(TypePtr type) {
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record)
@@ -126,116 +91,6 @@ void stamp_template_member_function_symbol(Binding* binding) {
 		return;
 	binding->function_specialization_symbol =
 		abi_binding_symbol(binding, map<string, size_t>()); }
-bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node) {
-	if (current_scope()->kind == ScopeKind::Class ||
-	    !at_identifier() || !lookahead(OP_COLON2, 1))
-		return false;
-	size_t save = pos_;
-	string class_name = consume_identifier();
-	expect(OP_COLON2);
-	if (!consume(OP_COMPL) || !at_identifier()) {
-		pos_ = save;
-		return false; }
-	string dtor_type_name = consume_identifier();
-	if (!at(OP_LPAREN)) {
-		pos_ = save;
-		return false; }
-	Binding* class_binding =
-		pa11::lookup_unqualified(current_scope(),
-		                         class_name,
-		                         pa11::LOOKUP_QUALIFIER);
-	Scope* class_scope = resolve_qualifier(class_binding);
-	if (class_scope == NULL ||
-	    class_scope->kind != ScopeKind::Class ||
-	    dtor_type_name != class_scope->name) {
-		pos_ = save;
-		return false; }
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL) {
-		pos_ = save;
-		return false; }
-	complete_template_record(class_type);
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	scopes_.push_back(class_scope);
-	parse_parameter_clause(parameters, variadic);
-	scopes_.pop_back();
-	expect(OP_RPAREN);
-	if (!parameters.empty() || variadic)
-		throw runtime_error("destructor cannot have parameters");
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-	bool defaulted = false;
-	if (consume(OP_ASS)) {
-		if (!consume(KW_DEFAULT))
-			throw runtime_error("unsupported destructor definition");
-		expect(OP_SEMICOLON);
-		defaulted = true; }
-	if (!at(OP_LBRACE)) {
-		if (!defaulted) {
-			pos_ = save;
-			return false; } }
-	TypePtr this_type = pa11::make_pointer(class_type);
-	vector<TypePtr> fn_params(1, this_type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      false);
-	string dtor_name = "~" + class_scope->name;
-		Binding* dtor = add_value(class_scope,
-		                          BindingKind::Function,
-		                          dtor_name,
-		                          fn_type);
-		dtor->unwind_no = suffix.noexcept_decl;
-		if (!suffix.abi_tags.empty())
-			dtor->abi_tags = suffix.abi_tags;
-		function_parameter_names_[dtor] = vector<string>(1, "this");
-	if (!active_class_instantiation_dependent())
-		stamp_template_member_function_symbol(dtor);
-	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = dtor;
-	fn.type = fn_type;
-	if (dtor->is_inline_definition) {
-		PendingFunctionBody pending;
-		pending.function = dtor;
-		pending.node = fn;
-		pending.body_pos = pos_;
-		if (deferred_compound_body_is_empty(tokens_, pos_))
-			mark_noop_destructor(dtor, class_scope, dtor_name);
-		skip_balanced(OP_LBRACE, OP_RBRACE);
-		enqueue_pending_member_body(class_scope, pending);
-		return true; }
-	Scope* function_scope =
-		pa11::create_child_scope(class_scope, ScopeKind::Function, dtor->name);
-	Binding* this_binding =
-		pa11::add_binding(function_scope,
-		                  BindingKind::Parameter,
-		                  "this",
-		                  this_type);
-	Node this_node("parameter this " + pa11::describe_type(this_type));
-	this_node.binding = this_binding;
-	this_node.type = this_type;
-	add_child(fn, this_node);
-	Node body;
-	if (defaulted)
-		body = Node("compound-statement");
-	else {
-		scopes_.push_back(function_scope);
-		function_returns_.push_back(pa11::make_fundamental(FT_VOID));
-		active_functions_.push_back(dtor);
-		body = parse_compound_statement();
-		active_functions_.pop_back();
-		function_returns_.pop_back();
-		scopes_.pop_back(); }
-	if (body.children.empty())
-		mark_noop_destructor(dtor, class_scope, dtor_name);
-	add_child(fn, body);
-	if (emit_node)
-		add_child(out, fn);
-	else
-		extra_lowir_nodes_.push_back(fn);
-	return true; }
 void Parser::parse_constructor_body_from_parameters(
 	Binding* function,
 	TypePtr class_type,
@@ -266,29 +121,37 @@ void Parser::parse_constructor_body_from_parameters(
 	active_functions_.push_back(function);
 	function_parameter_pack_substitutions_.push_back(parameter_packs);
 	Node body("compound-statement");
-	bool function_try_block = consume(KW_TRY);
-	map<Binding*, Node> explicit_member_initializers;
-	vector<Node> explicit_base_actions;
-	vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
-	bool delegating =
-		parse_constructor_initializer_list(class_scope,
-		                                   class_type,
-		                                   this_binding,
-		                                   body,
-		                                   explicit_member_initializers,
-		                                   explicit_base_actions,
-		                                   direct_bases);
-	if (delegating) { }
-	else
-		append_constructor_base_init_actions(class_type,
-		                                     direct_bases,
-		                                     explicit_base_actions,
-		                                     body);
-	append_constructor_member_init_actions(class_type,
-	                                       this_binding,
-	                                       explicit_member_initializers,
-	                                       body);
-	append_constructor_compound_body(body, function_try_block);
+	try {
+		bool function_try_block = consume_try_keyword();
+		map<Binding*, Node> explicit_member_initializers;
+		vector<Node> explicit_base_actions;
+		vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
+		bool delegating =
+			parse_constructor_initializer_list(class_scope,
+			                                   class_type,
+			                                   this_binding,
+			                                   body,
+			                                   explicit_member_initializers,
+			                                   explicit_base_actions,
+			                                   direct_bases);
+		if (delegating) { }
+		else
+			append_constructor_base_init_actions(class_type,
+			                                     direct_bases,
+			                                     explicit_base_actions,
+			                                     body);
+		append_constructor_member_init_actions(class_type,
+		                                       this_binding,
+		                                       explicit_member_initializers,
+		                                       body);
+		append_constructor_compound_body(body, function_try_block);
+	} catch (...) {
+		function_parameter_pack_substitutions_.pop_back();
+		active_functions_.pop_back();
+		function_returns_.pop_back();
+		scopes_.pop_back();
+		throw;
+	}
 	function_parameter_pack_substitutions_.pop_back();
 	active_functions_.pop_back();
 	function_returns_.pop_back();
@@ -364,11 +227,13 @@ bool Parser::parse_qualified_constructor_definition(Node& out,
 		                                      inline_spec,
 		                                      constexpr_spec,
 		                                      qualified_inline_object_root);
-	Node fn("function-definition " + qualified_decl_name(ctor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = ctor;
-	if (qualified_inline_object_root)
-		fn.token_text = "inline-object-root";
+		Node fn("function-definition " + qualified_decl_name(ctor) + " " +
+		        pa11::describe_type(fn_type));
+		fn.binding = ctor;
+		if (defaulted)
+			fn.token_text = "defaulted-definition";
+		if (qualified_inline_object_root)
+			fn.token_text = "inline-object-root";
 	fn.type = fn_type;
 	bool dependent_template_member_definition =
 		!defaulted &&
@@ -464,7 +329,9 @@ bool Parser::parse_qualified_conversion_definition(Node& out, bool emit_node) {
 		                          function_name,
 		                          fn_type,
 		                          false));
-	function->unwind_no = suffix.noexcept_decl;
+		function->unwind_no = suffix.noexcept_decl;
+		function->dynamic_exception_spec = suffix.dynamic_exception_spec;
+		function->dynamic_exception_types = suffix.dynamic_exception_types;
 	function->ref_qualifier = suffix.ref_qualifier;
 	function_parameter_names_[function] = vector<string>(1, "this");
 	if (!active_class_instantiation_dependent())
@@ -508,7 +375,9 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 	function->is_constexpr = function->is_constexpr || constexpr_conv;
 	function->is_explicit = explicit_conv;
 	function->is_inline_definition = at(OP_LBRACE) || constexpr_conv;
-	function->unwind_no = suffix.noexcept_decl;
+		function->unwind_no = suffix.noexcept_decl;
+		function->dynamic_exception_spec = suffix.dynamic_exception_spec;
+		function->dynamic_exception_types = suffix.dynamic_exception_types;
 	function->ref_qualifier = suffix.ref_qualifier;
 	function->is_private = !class_private_access_.empty() &&
 	                       class_private_access_.back();
@@ -546,97 +415,6 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 	pending.body_pos = pos_;
 	skip_balanced(OP_LBRACE, OP_RBRACE);
 	enqueue_pending_member_body(class_scope, pending);
-	return true; }
-bool Parser::parse_destructor_like_member() {
-	if (current_scope()->kind != ScopeKind::Class)
-		return false;
-	size_t save = pos_;
-	bool virtual_decl = consume(KW_VIRTUAL);
-	if (!at(OP_COMPL)) {
-		pos_ = save;
-		return false; }
-	++pos_;
-	if (!at_identifier() || current().source != current_scope()->name) {
-		pos_ = save;
-		return false; }
-	Scope* class_scope = current_scope();
-	TypePtr class_type = pa11::record_type_for_scope(class_scope);
-	if (class_type.get() == NULL)
-		throw runtime_error("destructor without class type");
-	string dtor_name = "~" + consume_identifier();
-	expect(OP_LPAREN);
-	vector<ParameterInfo> parameters;
-	bool variadic = false;
-	parse_parameter_clause(parameters, variadic);
-	expect(OP_RPAREN);
-	if (!parameters.empty() || variadic)
-		throw runtime_error("destructor cannot have parameters");
-	Suffix suffix(SuffixKind::Function);
-	parse_function_suffix_tail(suffix);
-	TypePtr this_type = pa11::make_pointer(class_type);
-	vector<TypePtr> fn_params(1, this_type);
-	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
-	                                      fn_params,
-	                                      false);
-	Binding* dtor = add_value(class_scope,
-	                          BindingKind::Function,
-	                          dtor_name,
-	                          fn_type);
-	function_parameter_names_[dtor] = vector<string>(1, "this");
-		dtor->is_inline_definition = at(OP_LBRACE);
-		dtor->unwind_no = suffix.noexcept_decl;
-		if (!suffix.abi_tags.empty())
-			dtor->abi_tags = suffix.abi_tags;
-		dtor->is_virtual = dtor->is_virtual || virtual_decl;
-	dtor->is_override_specified =
-		dtor->is_override_specified || suffix.override_decl;
-	dtor->is_final_virtual = dtor->is_final_virtual || suffix.final_decl;
-	dtor->is_private = !class_private_access_.empty() &&
-	                   class_private_access_.back();
-	dtor->is_protected_member = !class_protected_access_.empty() &&
-	                            class_protected_access_.back();
-	if (!active_class_instantiation_dependent())
-		stamp_template_member_function_symbol(dtor);
-	if (consume(OP_ASS)) {
-		if (consume(KW_DEFAULT) || consume(KW_DELETE)) {
-			expect(OP_SEMICOLON);
-			return true; }
-		throw runtime_error("unsupported destructor definition"); }
-	if (consume(OP_SEMICOLON))
-		return true;
-	Node fn("function-definition " + qualified_decl_name(dtor) + " " +
-	        pa11::describe_type(fn_type));
-	fn.binding = dtor;
-	fn.type = fn_type;
-	if (dtor->is_inline_definition) {
-		PendingFunctionBody pending;
-		pending.function = dtor;
-		pending.node = fn;
-		pending.body_pos = pos_;
-		if (deferred_compound_body_is_empty(tokens_, pos_))
-			mark_noop_destructor(dtor, class_scope, dtor_name);
-		skip_balanced(OP_LBRACE, OP_RBRACE);
-		enqueue_pending_member_body(class_scope, pending);
-		return true; }
-	Scope* function_scope =
-		pa11::create_child_scope(class_scope, ScopeKind::Function, dtor->name);
-	Binding* this_binding =
-		pa11::add_binding(function_scope, BindingKind::Parameter, "this", this_type);
-	Node this_node("parameter this " + pa11::describe_type(this_type));
-	this_node.binding = this_binding;
-	this_node.type = this_type;
-	add_child(fn, this_node);
-	scopes_.push_back(function_scope);
-	function_returns_.push_back(pa11::make_fundamental(FT_VOID));
-	active_functions_.push_back(dtor);
-	Node body = parse_compound_statement();
-	active_functions_.pop_back();
-	function_returns_.pop_back();
-	scopes_.pop_back();
-	if (body.children.empty())
-		mark_noop_destructor(dtor, class_scope, dtor_name);
-	add_child(fn, body);
-	extra_lowir_nodes_.push_back(fn);
 	return true; }
 }  // namespace internal
 }  // namespace pa12

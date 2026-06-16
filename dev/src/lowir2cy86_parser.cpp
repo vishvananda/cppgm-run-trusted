@@ -546,6 +546,8 @@ private:
 			parse_eh_catch(ins);
 		else if (kw == "eh_catch_all")
 			parse_eh_catch_all(ins);
+		else if (kw == "eh_filter")
+			parse_eh_filter(ins);
 		else if (kw == "eh_end")
 			ins.kind = InstrKind::EhEnd;
 		else if (kw == "throw")
@@ -825,6 +827,25 @@ private:
 		ins.order_a = 1;
 		if (match(","))
 			ins.order_a = parse_int_literal();
+	}
+
+	void parse_eh_filter(Instruction& ins)
+	{
+		ins.kind = InstrKind::EhFilter;
+		ins.a = named_value(ValueKind::Global, parse_symbol_name());
+		ins.args.push_back(ins.a);
+		ins.order_a = 1;
+		while (match(","))
+		{
+			if (!peek().text.empty() && peek().text[0] == '@')
+				ins.args.push_back(
+					named_value(ValueKind::Global, parse_symbol_name()));
+			else
+			{
+				ins.order_a = parse_int_literal();
+				break;
+			}
+		}
 	}
 
 	void parse_throw(Instruction& ins)

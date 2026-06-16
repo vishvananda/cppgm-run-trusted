@@ -5,6 +5,7 @@ namespace pa12 {
 namespace internal {
 
 void stamp_template_member_function_symbol(Binding* binding);
+bool hosted_library_namespace_scope(Scope* scope);
 
 namespace {
 
@@ -503,7 +504,7 @@ void Parser::append_constructor_compound_body(
 	add_child(try_block, body);
 	add_child(try_node, try_block);
 	do {
-		expect(KW_CATCH);
+		expect_catch_keyword();
 		expect(OP_LPAREN);
 		Node catch_node("catch-clause");
 		string catch_name;
@@ -539,7 +540,7 @@ void Parser::append_constructor_compound_body(
 		expect(OP_RBRACE);
 		add_child(catch_node, catch_body);
 		add_child(try_node, catch_node);
-	} while (at(KW_CATCH));
+	} while (at_catch_keyword());
 	Node wrapped("compound-statement");
 	add_child(wrapped, try_node);
 	body = wrapped;
@@ -588,7 +589,7 @@ bool Parser::parse_qualified_constructor_header(
 		expect(OP_SEMICOLON);
 		defaulted = true;
 	}
-	if (!defaulted && !at(OP_LBRACE) && !at(OP_COLON) && !at(KW_TRY)) {
+	if (!defaulted && !at(OP_LBRACE) && !at(OP_COLON) && !at_try_keyword()) {
 		pos_ = save;
 		return false;
 	}
@@ -637,13 +638,26 @@ Binding* Parser::prepare_qualified_constructor_binding(
 				break;
 			}
 		}
-	bool merged_noexcept =
-		(existing_ctor != NULL && existing_ctor->unwind_no) ||
-		suffix.noexcept_decl;
-	if (existing_ctor != NULL &&
-	    existing_ctor->unwind_no != suffix.noexcept_decl &&
-	    !hosted_compatibility_)
-		throw runtime_error("function exception specification mismatch");
+		bool merged_noexcept =
+			(existing_ctor != NULL && existing_ctor->unwind_no) ||
+			suffix.noexcept_decl;
+		bool merged_dynamic_exception_spec =
+			(existing_ctor != NULL &&
+			 existing_ctor->dynamic_exception_spec) ||
+			suffix.dynamic_exception_spec;
+		vector<TypePtr> merged_dynamic_exception_types =
+			suffix.dynamic_exception_types;
+		if (merged_dynamic_exception_types.empty() &&
+		    existing_ctor != NULL)
+			merged_dynamic_exception_types =
+				existing_ctor->dynamic_exception_types;
+		bool hosted_mismatch_allowed =
+			hosted_compatibility_ &&
+			hosted_library_namespace_scope(class_scope);
+		if (existing_ctor != NULL &&
+		    existing_ctor->unwind_no != suffix.noexcept_decl &&
+		    !hosted_mismatch_allowed)
+			throw runtime_error("function exception specification mismatch");
 	bool reused_implicit_default_ctor =
 		existing_ctor != NULL &&
 		existing_ctor->is_generated_default_constructor &&
@@ -659,23 +673,45 @@ Binding* Parser::prepare_qualified_constructor_binding(
 	for (size_t i = 0; i < signature_parameter_indices.size(); ++i)
 		if (parameters[signature_parameter_indices[i]].has_default)
 			ctor->has_default_arguments = true;
-	ctor->unwind_no = merged_noexcept;
+		ctor->unwind_no = merged_noexcept;
+		ctor->dynamic_exception_spec = merged_dynamic_exception_spec;
+		ctor->dynamic_exception_types = merged_dynamic_exception_types;
 	ctor->is_constexpr = ctor->is_constexpr || constexpr_spec;
 	ctor->is_inline_definition =
 		ctor->is_inline_definition || inline_spec || constexpr_spec;
 	TypePtr bare_class_type = pa11::strip_cv(class_type);
+	map<const void*, TemplateDeclaration*>::const_iterator class_template =
+		record_template_declarations_.find(bare_class_type.get());
+	bool explicit_full_class_specialization =
+		class_template != record_template_declarations_.end() &&
+		class_template->second != NULL &&
+		class_template->second->class_specialization &&
+		class_template->second->parameters.empty();
+	if (explicit_full_class_specialization)
+	{
+		ctor->is_declared_inline = inline_spec || constexpr_spec;
+		ctor->is_inline_definition = inline_spec || constexpr_spec;
+		ctor->is_explicit_specialization_member = true;
+	}
 	qualified_inline_object_root =
 		ctor->is_inline_definition &&
 		bare_class_type->is_template_specialization &&
 		!active_class_instantiation_dependent();
-	ctor->unwind_no = suffix.noexcept_decl;
+		ctor->unwind_no = suffix.noexcept_decl;
+		ctor->dynamic_exception_spec = suffix.dynamic_exception_spec;
+		ctor->dynamic_exception_types = suffix.dynamic_exception_types;
 	if (!suffix.abi_tags.empty())
 		ctor->abi_tags = suffix.abi_tags;
-	if (defaulted) {
-		ctor->is_defaulted = true;
-		ctor->is_generated_default_constructor =
-			signature_parameter_indices.empty();
-	}
+		if (defaulted) {
+			ctor->is_defaulted = true;
+			ctor->is_explicit_defaulted_definition = true;
+			ctor->is_inline_definition = inline_spec || constexpr_spec;
+			ctor->is_generated_default_constructor = false;
+			ctor->is_generated_copy_move_constructor = false;
+			ctor->is_noop_constructor = signature_parameter_indices.empty();
+			ctor->is_object_root = !ctor->is_inline_definition;
+			ctor->unwind_no = true;
+		}
 	if (!active_class_instantiation_dependent())
 		stamp_template_member_function_symbol(ctor);
 	return ctor;
@@ -709,7 +745,7 @@ bool Parser::defer_qualified_constructor_definition(
 	pending.body_pos = pos_;
 	pending.constructor_body = true;
 	pending.class_type = class_type;
-	consume(KW_TRY);
+	consume_try_keyword();
 	if (consume(OP_COLON)) {
 		for (;;) {
 			while (!at(OP_LPAREN) && !at(OP_LBRACE) && !at_eof())
@@ -723,8 +759,8 @@ bool Parser::defer_qualified_constructor_definition(
 		}
 	}
 	skip_balanced(OP_LBRACE, OP_RBRACE);
-	while (at(KW_CATCH)) {
-		consume(KW_CATCH);
+	while (at_catch_keyword()) {
+		consume_catch_keyword();
 		skip_balanced(OP_LPAREN, OP_RPAREN);
 		skip_balanced(OP_LBRACE, OP_RBRACE);
 	}
@@ -763,29 +799,47 @@ void Parser::parse_immediate_qualified_constructor_definition(
 		active_functions_.push_back(ctor);
 	}
 	Node body("compound-statement");
-	bool function_try_block = !defaulted && consume(KW_TRY);
-	map<Binding*, Node> explicit_member_initializers;
-	vector<Node> explicit_base_actions;
-	bool delegating = false;
-	vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
-	if (!defaulted)
-		delegating = parse_constructor_initializer_list(
-			class_scope, class_type, this_binding, body,
-			explicit_member_initializers, explicit_base_actions, direct_bases);
-	if (!delegating)
+	if (!defaulted) {
+		try {
+			bool function_try_block = consume_try_keyword();
+			map<Binding*, Node> explicit_member_initializers;
+			vector<Node> explicit_base_actions;
+			bool delegating = false;
+			vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
+			delegating = parse_constructor_initializer_list(
+				class_scope, class_type, this_binding, body,
+				explicit_member_initializers, explicit_base_actions, direct_bases);
+			if (!delegating)
+				append_constructor_base_init_actions(class_type,
+				                                     direct_bases,
+				                                     explicit_base_actions,
+				                                     body);
+			append_constructor_member_init_actions(class_type,
+			                                       this_binding,
+			                                       explicit_member_initializers,
+			                                       body);
+			append_constructor_compound_body(body, function_try_block);
+		} catch (...) {
+			active_functions_.pop_back();
+			function_returns_.pop_back();
+			scopes_.pop_back();
+			throw;
+		}
+		active_functions_.pop_back();
+		function_returns_.pop_back();
+		scopes_.pop_back();
+	} else {
+		vector<Node> explicit_base_actions;
+		vector<TypePtr> direct_bases = pa11::record_direct_bases(class_type);
 		append_constructor_base_init_actions(class_type,
 		                                     direct_bases,
 		                                     explicit_base_actions,
 		                                     body);
-	append_constructor_member_init_actions(class_type,
-	                                       this_binding,
-	                                       explicit_member_initializers,
-	                                       body);
-	if (!defaulted) {
-		append_constructor_compound_body(body, function_try_block);
-		active_functions_.pop_back();
-		function_returns_.pop_back();
-		scopes_.pop_back();
+		map<Binding*, Node> explicit_member_initializers;
+		append_constructor_member_init_actions(class_type,
+		                                       this_binding,
+		                                       explicit_member_initializers,
+		                                       body);
 	}
 	ctor->is_noop_constructor = body.children.empty();
 	add_child(fn, body);

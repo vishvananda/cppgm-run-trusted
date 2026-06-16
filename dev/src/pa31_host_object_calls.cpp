@@ -36,6 +36,13 @@ void choose_arg_location(ArgLoc& loc,
 	loc.object =
 		lowir2cy86::is_obj_type(loc.type) &&
 		lowir2cy86::is_direct_object_abi(loc.type);
+	if (lowir2cy86::is_f80_type(loc.type))
+	{
+		loc.stack = true;
+		loc.stack_offset = stack_bytes;
+		stack_bytes += lowir2cy86::stack_storage_size(loc.type);
+		return;
+	}
 	if (loc.fp)
 	{
 		if (fp_index < 8)
@@ -150,6 +157,12 @@ void emit_stack_arg(FuncGen& gen,
 		}
 		return;
 	}
+	if (lowir2cy86::is_f80_type(type))
+	{
+		gen.x.lea(R11, dst);
+		gen.copy_f80_value_to_address(ins.args[index], R11);
+		return;
+	}
 	gen.load_value(ins.args[index], type, RAX);
 	gen.x.mov_mr(width_for(type), dst, RAX);
 }
@@ -245,7 +258,9 @@ void advance_sysv_argument(const Type& type,
                            size_t& fp,
                            size_t& stack)
 {
-	if (lowir2cy86::is_float_type(type) && type.bits <= 64)
+	if (lowir2cy86::is_f80_type(type))
+		stack += lowir2cy86::stack_storage_size(type);
+	else if (lowir2cy86::is_float_type(type) && type.bits <= 64)
 	{
 		if (fp < 8) ++fp;
 		else stack += lowir2cy86::stack_storage_size(type);
