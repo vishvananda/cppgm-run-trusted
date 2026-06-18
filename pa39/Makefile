@@ -38,6 +38,9 @@ TEST_RUNNER_SHARED_FLAGS = $(if $(filter 1,$(CPPGM_TEST_RUNNER)),-DTEST_RUNNER_E
 TEST_RUNNER_ENTRY_FLAGS = $(if $(filter 1,$(CPPGM_TEST_RUNNER)),-Dmain=test_runner_real_main,)
 CPPGM_STDLIB_FLAGS ?=
 CPPGM_TEXT_TEST_TIMEOUT_SEC ?= 30
+INCEPTION_SELFHOST_COMPILE_TIMEOUT_SEC ?= 900
+INCEPTION_INCEPTION_COMPILE_TIMEOUT_SEC ?= 3600
+INCEPTION_COMPILE_TIMEOUT_SEC ?= $(if $(filter inception,$(INCEPTION_COMPILER_FLAVOR)),$(INCEPTION_INCEPTION_COMPILE_TIMEOUT_SEC),$(if $(filter selfhost,$(INCEPTION_COMPILER_FLAVOR)),$(INCEPTION_SELFHOST_COMPILE_TIMEOUT_SEC),0))
 export CPPGM_TEST_JOBS
 export CPPGM_HOST_CXX
 export CPPGM_STDLIB_FLAGS
@@ -376,7 +379,7 @@ $(INCEPTION_BUILTIN_HOST_CONFIG): FORCE
 define INCEPTION_SOURCE_RULE
 $(call inception_shared_object_path,$(1)): $(1) $(INCEPTION_CXX_DEP) | compiler-ready $(INCEPTION_SHARED_OBJDIR) $(INCEPTION_SHARED_DEPDIR)
 	@mkdir -p $$(@D) $(INCEPTION_SHARED_DEPDIR)
-	$(CXX) $(INCEPTION_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(call inception_shared_depfile_path,$(1)) -c -o $$@ $$<
+	perl ../scripts/run_with_timeout.pl --timeout-sec "$(INCEPTION_COMPILE_TIMEOUT_SEC)" --label "$(INCEPTION_COMPILER_FLAVOR) compile $$<" -- $(CXX) $(INCEPTION_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(call inception_shared_depfile_path,$(1)) -c -o $$@ $$<
 endef
 
 $(INCEPTION_BIN_ROOT):
@@ -389,7 +392,7 @@ $(call inception_shared_object_path,../dev/src/preprocessor.cpp): $(INCEPTION_BU
 
 $(inception_runner_object_path): ../dev/src/test_runner.cpp $(INCEPTION_CXX_DEP) | compiler-ready $(INCEPTION_SHARED_OBJDIR) $(INCEPTION_SHARED_DEPDIR)
 	@mkdir -p $(@D) $(INCEPTION_SHARED_DEPDIR)
-	$(CXX) $(INCEPTION_CC_FLAGS) $(TEST_RUNNER_SHARED_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(inception_runner_depfile_path) -c -o $@ $<
+	perl ../scripts/run_with_timeout.pl --timeout-sec "$(INCEPTION_COMPILE_TIMEOUT_SEC)" --label "$(INCEPTION_COMPILER_FLAVOR) compile $<" -- $(CXX) $(INCEPTION_CC_FLAGS) $(TEST_RUNNER_SHARED_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(inception_runner_depfile_path) -c -o $@ $<
 
 define INCEPTION_CHECKPOINT_RULES
 $(call inception_objdir,$(1)) $(call inception_depdir,$(1)):
@@ -397,7 +400,7 @@ $(call inception_objdir,$(1)) $(call inception_depdir,$(1)):
 
 $(call inception_entry_object_path,$(1)): $(INCEPTION_ENTRY_$(1)) $(INCEPTION_CXX_DEP) | compiler-ready $(call inception_objdir,$(1)) $(call inception_depdir,$(1))
 	@mkdir -p $$(@D) $(call inception_depdir,$(1))
-	$(CXX) $(INCEPTION_ENTRY_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(call inception_entry_depfile_path,$(1)) -c -o $$@ $$<
+	perl ../scripts/run_with_timeout.pl --timeout-sec "$(INCEPTION_COMPILE_TIMEOUT_SEC)" --label "$(INCEPTION_COMPILER_FLAVOR) compile $$<" -- $(CXX) $(INCEPTION_ENTRY_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF $(call inception_entry_depfile_path,$(1)) -c -o $$@ $$<
 
 $(call inception_binary_path,$(1)): $(call inception_link_inputs,$(1)) | $(INCEPTION_BIN_ROOT)
 	@rm -f "$(call inception_link_output_path,$(1))"
