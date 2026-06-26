@@ -6,16 +6,44 @@ use Cwd qw(getcwd);
 use File::Find;
 use File::Basename qw(basename dirname);
 use Scalar::Util qw(looks_like_number);
+use Text::ParseWords qw(shellwords);
 
 sub collect_tests
 {
-	my ($root, $pattern) = @_;
 	my @tests;
-	find(sub {
-		return if !-f $_;
-		push @tests, $File::Find::name if $File::Find::name =~ $pattern;
-	}, $root);
-	return sort @tests;
+	my ($spec, $pattern) = @_;
+	my @roots = shellwords($spec);
+	die "Test path '$spec' does not exist\n" if scalar(@roots) == 0;
+
+	my %seen;
+	for my $term (@roots)
+	{
+		my @matches = $term =~ /[*?\[]/ ? glob($term) : ($term);
+		die "Test path '$term' does not exist\n" if scalar(@matches) == 0;
+		for my $root (sort @matches)
+		{
+			die "Test path '$root' does not exist\n" if !-e $root;
+			my @found;
+			if (-f $root)
+			{
+				@found = $root =~ $pattern ? ($root) : ();
+			}
+			elsif (-d $root)
+			{
+				find(sub {
+					return if !-f $_;
+					push @found, $File::Find::name if $File::Find::name =~ $pattern;
+				}, $root);
+				@found = sort @found;
+			}
+			for my $test (@found)
+			{
+				next if $seen{$test}++;
+				push @tests, $test;
+			}
+		}
+	}
+	return @tests;
 }
 
 sub getdata
@@ -2078,6 +2106,33 @@ sub assign_lowir_function_symbol_pair
 	return $$next_ref;
 }
 
+sub lowir_function_entry_map
+{
+	my ($data) = @_;
+	my %map;
+	for my $entry (split_lowir_top_level_entries($data))
+	{
+		next if $entry !~ /^function \@([A-Za-z0-9_]+)\(/;
+		$map{$1} = $entry;
+	}
+	return \%map;
+}
+
+sub lowir_function_shape_text
+{
+	my ($entry) = @_;
+	my @lines = split(/\n/, $entry, -1);
+	# Drop the function-level [..] metadata (object=, binding=, role=, ...) from
+	# the header so the shape ignores volatile mangle/linkage details. Parameter
+	# brackets (e.g. [pass=reference]) sit inside the parens and are preserved.
+	$lines[0] =~ s/((?:\s+\[[^\]]+\])+)\s*\{\s*$/ {/ if @lines;
+	my $text = join("\n", @lines);
+	# Mask every symbol reference (the function's own name, callees, globals) so
+	# two structurally identical functions match regardless of their mangled names.
+	$text =~ s/\@[^\s(),]+/\@<sym>/g;
+	return $text;
+}
+
 sub paired_lowir_function_symbol_maps
 {
 	my ($ref_data, $my_data) = @_;
@@ -2120,6 +2175,38 @@ sub paired_lowir_function_symbol_maps
 		                                          \%my_map,
 		                                          $name,
 		                                          $name,
+		                                          \$next);
+	}
+
+	# Structural pass: pair any still-unpaired *defined* functions whose
+	# normalized shape (signature + body with symbol names masked) is unique on
+	# both sides. This lets the relaxed compare line functions up by structure
+	# rather than falling back to emission order, so a function whose mangled
+	# name differs (or is absent) no longer forces an order-sensitive mispairing.
+	# Requiring the shape to be unique on both sides keeps this sound: the
+	# correspondence is forced, and a genuinely different body has a different
+	# shape and stays unpaired, so a real codegen diff is never hidden.
+	my $ref_entries = lowir_function_entry_map($ref_data);
+	my $my_entries = lowir_function_entry_map($my_data);
+	my (%ref_by_shape, %my_by_shape);
+	for my $name (@$ref_order)
+	{
+		next if exists($ref_map{$name}) || !exists($ref_entries->{$name});
+		push @{$ref_by_shape{lowir_function_shape_text($ref_entries->{$name})}}, $name;
+	}
+	for my $name (@$my_order)
+	{
+		next if exists($my_map{$name}) || !exists($my_entries->{$name});
+		push @{$my_by_shape{lowir_function_shape_text($my_entries->{$name})}}, $name;
+	}
+	for my $shape (sort keys(%ref_by_shape))
+	{
+		next if !exists($my_by_shape{$shape});
+		next if scalar(@{$ref_by_shape{$shape}}) != 1 || scalar(@{$my_by_shape{$shape}}) != 1;
+		$next = assign_lowir_function_symbol_pair(\%ref_map,
+		                                          \%my_map,
+		                                          $ref_by_shape{$shape}[0],
+		                                          $my_by_shape{$shape}[0],
 		                                          \$next);
 	}
 
@@ -2558,7 +2645,9 @@ my $ref_suffix = $ARGV[0];
 my $my_suffix = $ARGV[1];
 my $tests = $ARGV[2];
 my $verbose = $ENV{VERBOSE} || $ENV{CPGM_TEST_VERBOSE};
-my $keep_going = $ENV{KEEP_GOING};
+my $requested_keep_going = $ENV{KEEP_GOING};
+my $auto_check_keep_going = env_flag_enabled('CPPGM_CHECK_AUTO_KEEP_GOING');
+my $check_mode = env_flag_enabled('CPPGM_CHECK_MODE');
 my $cwd = getcwd();
 my $assignment = basename($cwd);
 my $repo_root = dirname($cwd);
@@ -2581,11 +2670,18 @@ die "Unsupported compare_results mode $mode" if !exists($patterns{$mode});
 
 my @tests = collect_tests($tests, $patterns{$mode});
 my $suite_total = scalar(@tests);
+my $keep_going = $requested_keep_going || ($auto_check_keep_going && $suite_total > 1);
 my $npass = 0;
 my $failed = 0;
 my $witness_compared = 0;
 my $witness_failures = 0;
 my $witness_skipped = 0;
+
+sub compare_label
+{
+	return "$assignment check" if $check_mode;
+	return "$assignment $tests";
+}
 
 sub rooted_path
 {
@@ -2595,7 +2691,7 @@ sub rooted_path
 
 sub fail_prefix
 {
-	return "$assignment $tests: FAIL after $npass/$suite_total passed\n";
+	return compare_label() . ": FAIL after $npass/$suite_total passed\n";
 }
 
 sub rerun_hint
@@ -2662,6 +2758,9 @@ for my $test (@tests)
 		if ($keep_going)
 		{
 			print "$display_test: $message\n";
+			print witness_output_hint("$testbase.$ref_suffix.witness",
+			                          "$testbase.$my_suffix.witness")
+				if $check_mode && $auto_check_keep_going;
 			$failed = 1;
 			next;
 		}
@@ -2895,6 +2994,7 @@ for my $test (@tests)
 	if ($keep_going)
 	{
 		print "$display_test: $message\n";
+		print $hint if $check_mode && $auto_check_keep_going && defined($hint);
 		$failed = 1;
 		next;
 	}
@@ -2909,11 +3009,30 @@ for my $test (@tests)
 
 if ($mode eq 'witness_t')
 {
-	print "SUMMARY compared=$witness_compared failures=$witness_failures skipped=$witness_skipped\n";
-	append_keep_going_summary($repo_root, $cwd, $npass, $witness_compared, $failed) if $keep_going;
-	exit($failed && !$keep_going ? 1 : 0);
+	if ($check_mode)
+	{
+		print compare_label() . ": " . ($failed ? "FAIL" : "PASS") .
+			" ($npass/$witness_compared compared";
+		print ", $witness_skipped skipped" if $witness_skipped != 0;
+		print ")\n";
+	}
+	else
+	{
+		print "SUMMARY compared=$witness_compared failures=$witness_failures skipped=$witness_skipped\n";
+	}
+	append_keep_going_summary($repo_root, $cwd, $npass, $witness_compared, $failed)
+		if $keep_going && !$check_mode;
+	exit($failed && (!$keep_going || $auto_check_keep_going) ? 1 : 0);
 }
 
-print "$assignment $tests: PASS ($npass/$suite_total)\n" unless $keep_going;
-append_keep_going_summary($repo_root, $cwd, $npass, $suite_total, $failed) if $keep_going;
-exit($failed && !$keep_going ? 1 : 0);
+if ($keep_going && $check_mode)
+{
+	print compare_label() . ": " . ($failed ? "FAIL" : "PASS") . " ($npass/$suite_total)\n";
+}
+elsif (!$keep_going)
+{
+	print compare_label() . ": PASS ($npass/$suite_total)\n";
+}
+append_keep_going_summary($repo_root, $cwd, $npass, $suite_total, $failed)
+	if $keep_going && !$check_mode;
+exit($failed && (!$keep_going || $auto_check_keep_going) ? 1 : 0);

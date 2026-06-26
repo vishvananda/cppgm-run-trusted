@@ -84,18 +84,26 @@ test-debuginfo: $(TEST_DEPS)
 	$(call run_native_bucket,$(COURSE_DEBUGINFO_O2_TEST_ROOT),-O2)
 
 ref-test:
+ifneq ($(strip $(TEST)),)
+	@$(REF_TEST_RUN)
+else
 	$(call run_native_bucket_ref,$(O1_TEST_ROOT),-O1)
 	$(call run_native_bucket_ref,$(O2_TEST_ROOT),-O2)
+endif
 
 ref-test-debuginfo:
 	$(call run_native_bucket_ref,$(DEBUGINFO_O1_TEST_ROOT),-O1)
 	$(call run_native_bucket_ref,$(DEBUGINFO_O2_TEST_ROOT),-O2)
 
-CHECK_RUN = case "$(TEST)" in \
-	$(O1_TEST_ROOT)/*) CPPGM_APP_ARGS='-O1' scripts/run_all_tests.pl $(LOWIR2NATIVE_APP) check "$(TEST)" ;; \
-	$(O2_TEST_ROOT)/*) CPPGM_APP_ARGS='-O2' scripts/run_all_tests.pl $(LOWIR2NATIVE_APP) check "$(TEST)" ;; \
-	*) echo "Usage: make check TEST=$(O1_TEST_ROOT)/<file>.t | $(O2_TEST_ROOT)/<file>.t"; exit 1 ;; \
+REF_TEST_RUN = case "$(TEST)" in \
+	$(O1_TEST_ROOT)/*|$(COURSE_O1_TEST_ROOT)/*) CPPGM_APP_ARGS='-O1' perl ../scripts/run_lowir_native_tests_worker.pl $(LOWIR2NATIVE_REF_APP) ref "$(TEST)" ;; \
+	$(O2_TEST_ROOT)/*|$(COURSE_O2_TEST_ROOT)/*) CPPGM_APP_ARGS='-O2' perl ../scripts/run_lowir_native_tests_worker.pl $(LOWIR2NATIVE_REF_APP) ref "$(TEST)" ;; \
+	*) echo "Usage: make ref-test TEST=$(O1_TEST_ROOT)/<file>.t | $(O2_TEST_ROOT)/<file>.t"; exit 1 ;; \
 esac
+
+CHECK_RUN = perl ../scripts/run_routed_test_spec.pl "$(TEST)" \
+	'$(O1_TEST_ROOT)/*|$(COURSE_O1_TEST_ROOT)/*|$(DEBUGINFO_O1_TEST_ROOT)/*|$(COURSE_DEBUGINFO_O1_TEST_ROOT)/*::CPPGM_APP_ARGS=-O1 scripts/run_all_tests.pl $(LOWIR2NATIVE_APP) check {tests}' \
+	'$(O2_TEST_ROOT)/*|$(COURSE_O2_TEST_ROOT)/*|$(DEBUGINFO_O2_TEST_ROOT)/*|$(COURSE_DEBUGINFO_O2_TEST_ROOT)/*::CPPGM_APP_ARGS=-O2 scripts/run_all_tests.pl $(LOWIR2NATIVE_APP) check {tests}'
 include ../scripts/pa_run_check_targets.mk
 
 .PHONY: dev-shared-target ref-test ref-test-debuginfo test-debuginfo

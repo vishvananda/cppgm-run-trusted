@@ -19,6 +19,18 @@ HOST_UNAME_S = $(shell uname -s)
 ifeq ($(findstring -j,$(MAKEFLAGS)),)
 MAKEFLAGS += -j$(DEFAULT_BUILD_JOBS)
 endif
+ifeq ($(MAKELEVEL),0)
+CPPGM_MAKE_JOB_FLAGS := $(filter -j% --jobs=%,$(MAKEFLAGS))
+CPPGM_MAKE_JOB_LIMIT := $(patsubst --jobs=%,%,$(patsubst -j%,%,$(lastword $(CPPGM_MAKE_JOB_FLAGS))))
+ifneq ($(CPPGM_MAKE_JOB_LIMIT),)
+CPPGM_MAKE_LOW_JOB_LIMIT = $(shell \
+	limit='$(CPPGM_MAKE_JOB_LIMIT)'; cpus='$(DEFAULT_BUILD_JOBS)'; \
+	if [ "$$limit" -gt 0 ] 2>/dev/null && [ "$$cpus" -gt "$$limit" ] 2>/dev/null; then echo 1; else echo 0; fi)
+ifeq ($(CPPGM_MAKE_LOW_JOB_LIMIT),1)
+$(warning make is limited to -j$(CPPGM_MAKE_JOB_LIMIT) on a $(DEFAULT_BUILD_JOBS)-core machine; large compiler builds, especially self-host and PA39/inception builds, will be very slow. Omit -j or use -j$(DEFAULT_BUILD_JOBS).)
+endif
+endif
+endif
 
 
 ifeq ($(origin CXX), default)
@@ -75,6 +87,16 @@ endif
 INCEPTION_OBJ_ROOT ?= $(INCEPTION_OBJ_ROOT_BASE)/$(INCEPTION_COMPILER_FLAVOR)
 INCEPTION_BIN_ROOT ?= $(INCEPTION_BIN_ROOT_BASE)/$(INCEPTION_COMPILER_FLAVOR)
 INCEPTION_OUTPUT_SUFFIX ?= -self
+PROBE_CXX ?= ../dev/cppgm++
+PROBE_TARGET ?= cppgm++
+PROBE_OBJ_ROOT_BASE ?= $(INCEPTION_OBJ_ROOT_BASE)/probe
+PROBE_OBJ_ROOT ?= $(PROBE_OBJ_ROOT_BASE)/selfhost
+PROBE_BIN_ROOT ?= $(PROBE_OBJ_ROOT_BASE)/bin/selfhost
+PROBE_SHARED_OBJDIR ?= $(PROBE_OBJ_ROOT)/shared/release
+PROBE_SHARED_DEPDIR ?= $(PROBE_SHARED_OBJDIR)/.d
+PROBE_CANON_OBJ_ROOT ?= $(INCEPTION_OBJ_ROOT_BASE)/selfhost
+PROBE_TIMEOUT_SEC ?= $(INCEPTION_SELFHOST_COMPILE_TIMEOUT_SEC)
+PROBE_LINK_OUTPUT ?= $(PROBE_BIN_ROOT)/$(PROBE_TARGET)-probe
 
 CHECKPOINTS = pptoken posttoken ctrlexpr macro preproc recog nsdecl nsinit cy86 cppgm++ abimangle lowiropt lowir2cy86 lowir2native
 TEST_TARGETS = $(addprefix test-,$(CHECKPOINTS))
@@ -363,6 +385,125 @@ compiler-ready:
 		fi; \
 	fi
 
+probe-compiler-ready:
+	@if [ -x "$(PROBE_CXX)" ]; then \
+		exit 0; \
+	fi; \
+	if command -v "$(PROBE_CXX)" >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	if [ "$(PROBE_CXX)" = "../dev/cppgm++" ]; then \
+		$(MAKE) -C ../dev cppgm++ \
+			CXX="$(CPPGM_HOST_CXX)" \
+			CPPGM_HOST_CXX="$(CPPGM_HOST_CXX)" \
+			CPPGM_TEST_RUNNER="$(CPPGM_TEST_RUNNER)"; \
+	else \
+		echo "missing probe compiler: $(PROBE_CXX)" >&2; \
+		exit 1; \
+	fi
+
+probe-self-object: probe-compiler-ready $(INCEPTION_BUILTIN_HOST_CONFIG)
+	@if [ -z "$(strip $(SOURCE))" ]; then \
+		echo "Usage: make probe-self-object SOURCE=../dev/src/<file>.cpp [PROBE_CXX=../dev/cppgm++]" >&2; \
+		exit 2; \
+	fi
+	@src='$(SOURCE)'; \
+	case "$$src" in \
+		dev/*) src="../$$src" ;; \
+		./dev/*) src="../$${src#./}" ;; \
+	esac; \
+	if [ ! -f "$$src" ]; then \
+		echo "missing source: $$src" >&2; \
+		exit 2; \
+	fi; \
+	stem=$$(basename "$$src" .cpp); \
+	case "$$src" in \
+		../dev/src/test_runner.cpp) \
+			kind=runner; \
+			obj="$(PROBE_SHARED_OBJDIR)/test_runner$(inception_runner_suffix).o"; \
+			dep="$(PROBE_SHARED_DEPDIR)/test_runner$(inception_runner_suffix).d" ;; \
+		../dev/src/*.cpp) \
+			kind=shared; \
+			obj="$(PROBE_SHARED_OBJDIR)/$$stem.o"; \
+			dep="$(PROBE_SHARED_DEPDIR)/$$stem.d" ;; \
+		../dev/*.cpp) \
+			kind=entry; \
+			obj="$(PROBE_OBJ_ROOT)/$$stem/release/$$stem$(inception_entry_suffix).o"; \
+			dep="$(PROBE_OBJ_ROOT)/$$stem/release/.d/$$stem$(inception_entry_suffix).d" ;; \
+		*) \
+			echo "unsupported probe source: $$src" >&2; \
+			echo "Use ../dev/src/<file>.cpp, dev/src/<file>.cpp, or ../dev/<tool>.cpp" >&2; \
+			exit 2 ;; \
+	esac; \
+	mkdir -p "$${obj%/*}" "$${dep%/*}"; \
+	echo "PROBE source: $$src"; \
+	echo "PROBE compiler: $(PROBE_CXX)"; \
+	echo "PROBE object: $$obj"; \
+	echo "PROBE depfile: $$dep"; \
+	if [ "$$kind" = runner ]; then \
+		perl ../scripts/run_with_timeout.pl --timeout-sec "$(PROBE_TIMEOUT_SEC)" --label "probe self compile $$src" -- $(PROBE_CXX) $(INCEPTION_CC_FLAGS) $(TEST_RUNNER_SHARED_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF "$$dep" -c -o "$$obj" "$$src"; \
+	elif [ "$$kind" = entry ]; then \
+		perl ../scripts/run_with_timeout.pl --timeout-sec "$(PROBE_TIMEOUT_SEC)" --label "probe self compile $$src" -- $(PROBE_CXX) $(INCEPTION_ENTRY_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF "$$dep" -c -o "$$obj" "$$src"; \
+	else \
+		perl ../scripts/run_with_timeout.pl --timeout-sec "$(PROBE_TIMEOUT_SEC)" --label "probe self compile $$src" -- $(PROBE_CXX) $(INCEPTION_CC_FLAGS) $(foreach inc,$(INCEPTION_INCLUDE_PATHS),-I$(inc)) $(foreach def,$(INCEPTION_DEFINES),-D$(def)) -MMD -MP -MF "$$dep" -c -o "$$obj" "$$src"; \
+	fi
+
+probe-self-link:
+	@if [ -z "$(filter $(PROBE_TARGET),$(CHECKPOINTS))" ]; then \
+		echo "unknown PROBE_TARGET=$(PROBE_TARGET)" >&2; \
+		echo "known targets: $(CHECKPOINTS)" >&2; \
+		exit 2; \
+	fi
+	@src='$(SOURCE)'; \
+	case "$$src" in \
+		dev/*) src="../$$src" ;; \
+		./dev/*) src="../$${src#./}" ;; \
+	esac; \
+	stem=$$(basename "$$src" .cpp); \
+	case "$$src" in \
+		../dev/src/test_runner.cpp) \
+			probe_obj="$(PROBE_SHARED_OBJDIR)/test_runner$(inception_runner_suffix).o"; \
+			canon_obj="$(PROBE_CANON_OBJ_ROOT)/shared/release/test_runner$(inception_runner_suffix).o" ;; \
+		../dev/src/*.cpp) \
+			probe_obj="$(PROBE_SHARED_OBJDIR)/$$stem.o"; \
+			canon_obj="$(PROBE_CANON_OBJ_ROOT)/shared/release/$$stem.o" ;; \
+		../dev/*.cpp) \
+			probe_obj="$(PROBE_OBJ_ROOT)/$$stem/release/$$stem$(inception_entry_suffix).o"; \
+			canon_obj="$(PROBE_CANON_OBJ_ROOT)/$$stem/release/$$stem$(inception_entry_suffix).o" ;; \
+		*) \
+			echo "unsupported probe source: $$src" >&2; \
+			exit 2 ;; \
+	esac; \
+	mkdir -p "$(PROBE_BIN_ROOT)"; \
+	inputs=; replaced=0; \
+	for input in $(subst $(INCEPTION_OBJ_ROOT),$(PROBE_CANON_OBJ_ROOT),$(call inception_link_inputs,$(PROBE_TARGET))); do \
+		use="$$input"; \
+		if [ "$$input" = "$$canon_obj" ]; then \
+			use="$$probe_obj"; \
+			replaced=1; \
+		fi; \
+		inputs="$$inputs $$use"; \
+	done; \
+	if [ "$$replaced" != 1 ]; then \
+		echo "probe object $$canon_obj is not part of PROBE_TARGET=$(PROBE_TARGET)" >&2; \
+		exit 2; \
+	fi; \
+	$(MAKE) probe-self-object SOURCE='$(SOURCE)' PROBE_CXX='$(PROBE_CXX)' PROBE_TIMEOUT_SEC='$(PROBE_TIMEOUT_SEC)' || exit $$?; \
+	missing=0; \
+	for input in $$inputs; do \
+		if [ ! -f "$$input" ]; then \
+			echo "missing link input: $$input" >&2; \
+			missing=1; \
+		fi; \
+	done; \
+	if [ "$$missing" != 0 ]; then \
+		echo "Build the canonical self checkpoint first, then rerun this scratch link." >&2; \
+		exit 2; \
+	fi; \
+	echo "PROBE link target: $(PROBE_TARGET)"; \
+	echo "PROBE binary: $(PROBE_LINK_OUTPUT)"; \
+	$(CPPGM_HOST_CXX) $(INCEPTION_LINK_FLAGS) -I../dev/src -o "$(PROBE_LINK_OUTPUT)" $$inputs
+
 $(INCEPTION_BUILTIN_HOST_CONFIG): FORCE
 	@mkdir -p $(dir $@)
 	@CPPGM_BUILD_HOST_CXX='$(CPPGM_HOST_CXX)' \
@@ -507,6 +648,7 @@ clean:
 	inception compare-inception bitcmp \
 	cppgm++-inception-from-restored-self \
 	compare-cppgm++-inception-from-restored-self \
+	probe-compiler-ready probe-self-object probe-self-link \
 	$(TARGETS) $(INCEPTION_TARGETS) $(INCEPTION_COMPARE_TARGETS) \
 	$(TEST_TARGETS) $(THROUGH_TARGETS) $(TEST_THROUGH_TARGETS) \
 	$(PA_THROUGH_TARGETS) $(PA_TEST_THROUGH_TARGETS) $(PA_TEST_TARGETS) \

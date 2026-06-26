@@ -124,6 +124,40 @@ rung runs already-completed assignment tests with the appropriate self-built
 checkpoint so failures appear closer to the stage that first needs the missing
 behavior.
 
+### Single-Object Probes
+
+During PA39, changing one `dev/src/*.cpp` file and then rerunning a canonical
+self-host target can rebuild every self-host object. That rebuild is correct:
+the object files depend on the compiler binary that produced them, and mixing
+objects from different compiler generations would make the inception result
+untrustworthy.
+
+For quick iteration, use a scratch object probe instead:
+
+```sh
+make probe-self-object SOURCE=../dev/src/semantic_output.cpp
+make probe-self-object SOURCE=dev/src/semantic_output.cpp
+make probe-self-object SOURCE=../dev/cppgm++.cpp
+```
+
+The probe uses the PA39 self-host compile flags and timeout, but writes to
+`../obj/pa39/probe/selfhost/...` instead of the canonical
+`../obj/pa39/selfhost/...` tree. It prints the compiler, source, object, and
+depfile paths. By default it uses `PROBE_CXX=../dev/cppgm++`; set `PROBE_CXX`
+if you need to test a different compiler binary.
+
+If the canonical checkpoint objects already exist, you can link one scratch
+replacement object into a scratch binary:
+
+```sh
+make probe-self-link SOURCE=../dev/src/semantic_output.cpp PROBE_TARGET=cppgm++
+```
+
+`probe-self-link` refuses to link if the probed object is not part of
+`PROBE_TARGET`, or if any required canonical object is missing. This keeps the
+probe from silently becoming a mixed or incomplete build. Probe targets are
+only for diagnosis; final validation still requires the canonical PA39 targets.
+
 ### Checkpoint Ownership
 
 The checkpoint used for each assignment stage is:

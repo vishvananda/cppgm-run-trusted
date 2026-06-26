@@ -33,10 +33,16 @@ Inside an assignment directory:
 make
 make test
 make check TEST=tests/path/to/case.t
+make check TEST='tests/path/to/100-*.t'
+make check TEST='tests/path/to/a.t tests/path/to/b.t'
 ```
 
-Use local targets for quick iteration, then return to the root through target
-before considering the assignment complete.
+`TEST=` accepts one checked-in test file, a quoted shell glob, or a quoted
+space-separated list of files and globs. Later assignments with multiple test
+kinds can route mixed entries to the right local runner, for example a
+preprocessor case plus a compile case. Use local targets for quick iteration,
+then return to the root through target before considering the assignment
+complete.
 
 ## Compiler Selection
 
@@ -69,6 +75,12 @@ oracle. Do not edit them to hide an incomplete implementation.
 Reference binaries such as `pptoken-ref` or `cppgm++-ref` are provided for
 observing expected behavior and regenerating reference fixtures. They must not
 be used by your compiler implementation.
+
+The reference binaries are not perfect. Only checked-in fixtures gate an
+assignment. Synthesizing new inputs is fine, but reference behavior outside
+the test suites is intended to be correct, not guaranteed; prefer the handout
+and the standard over exact reference parity. Error message text is never
+compared: failing tests check only the exit status.
 
 The repository does not store the large binary payloads in Git. The checked-in
 `*-ref` wrappers automatically download, verify, and unpack the pinned

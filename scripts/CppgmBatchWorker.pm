@@ -16,9 +16,11 @@ our @EXPORT_OK = qw(
   clear_progress_state
   close_worker
   collect_tests
+  ensure_test_app_available
   get_timeout_from_env
   note_progress_state
   open_worker
+  print_test_run_summary
   read_env_file
   read_word_list
   resolve_host_command
@@ -76,13 +78,41 @@ sub clear_progress_state
 
 sub collect_tests
 {
-	my ($root, $pattern) = @_;
+	my ($spec, $pattern) = @_;
+	my @roots = shellwords($spec);
+	die "Test path '$spec' does not exist\n" if scalar(@roots) == 0;
+
 	my @tests;
-	find(sub {
-		return if !-f $_;
-		push @tests, $File::Find::name if $File::Find::name =~ $pattern;
-	}, $root);
-	return sort @tests;
+	my %seen;
+	for my $term (@roots)
+	{
+		my @matches = $term =~ /[*?\[]/ ? glob($term) : ($term);
+		die "Test path '$term' does not exist\n" if scalar(@matches) == 0;
+		for my $root (sort @matches)
+		{
+			die "Test path '$root' does not exist\n" if !-e $root;
+			my @found;
+			if (-f $root)
+			{
+				@found = $root =~ $pattern ? ($root) : ();
+			}
+			elsif (-d $root)
+			{
+				find(sub {
+					return if !-f $_;
+					push @found, $File::Find::name if $File::Find::name =~ $pattern;
+				}, $root);
+				@found = sort @found;
+			}
+
+			for my $test (@found)
+			{
+				next if $seen{$test}++;
+				push @tests, $test;
+			}
+		}
+	}
+	return @tests;
 }
 
 sub get_timeout_from_env
@@ -92,6 +122,34 @@ sub get_timeout_from_env
 	return $default if !defined($value);
 	return $default if $value !~ m/^\d+$/;
 	return $value > 0 ? $value : $default;
+}
+
+sub env_flag_enabled
+{
+	my ($name) = @_;
+	return 0 if !defined($ENV{$name});
+	my $value = $ENV{$name};
+	return 0 if $value eq '';
+	return 0 if $value eq '0';
+	return 0 if $value =~ /^(?:false|no|off)$/i;
+	return 1;
+}
+
+sub print_test_run_summary
+{
+	my ($assignment, $tests_root, $tests) = @_;
+	my $ntests = scalar(@{$tests});
+	if (env_flag_enabled('CPPGM_CHECK_MODE'))
+	{
+		print "$assignment check: running $ntests test";
+	}
+	else
+	{
+		print "$assignment $tests_root: running $ntests test";
+	}
+	print "s" if $ntests != 1;
+	print " ($tests->[0])" if env_flag_enabled('CPPGM_CHECK_MODE') && $ntests == 1;
+	print "\n";
 }
 
 sub write_file
@@ -165,6 +223,27 @@ sub command_exists
 		return 1 if -x $path;
 	}
 	return 0;
+}
+
+sub ensure_test_app_available
+{
+	my ($app, $suffix, $tests_root) = @_;
+	return if command_exists($app);
+
+	my $kind = $suffix eq 'ref' ? 'reference test app' : 'test app';
+	my $message = "ERROR: $kind '$app' does not exist or is not executable.\n";
+
+	if ($suffix eq 'ref')
+	{
+		my $regular_app = $app;
+		$regular_app =~ s/-ref$//;
+		my $test_arg = defined($tests_root) && $tests_root ne '' ? " TEST=$tests_root" : "";
+		$message .= "No .ref files were written.\n";
+		$message .= "Build/export the reference binary, or intentionally regenerate with the current compiler using:\n";
+		$message .= "  make ref-test$test_arg REF_TEST_APP=$regular_app\n";
+	}
+
+	die $message;
 }
 
 sub resolve_host_command
