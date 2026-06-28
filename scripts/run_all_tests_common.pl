@@ -134,6 +134,10 @@ sub write_named_status_code
 	{
 		print $fh "EXIT_TIMEOUT\n";
 	}
+	elsif ($status == 125)
+	{
+		print $fh "EXIT_OOM\n";
+	}
 	elsif ($status == 86)
 	{
 		print $fh "EXIT_NOT_IMPLEMENTED\n";
@@ -293,6 +297,7 @@ sub submit_wrapped_request
 	chomp($status);
 	return 0 if $status eq 'EXIT_SUCCESS';
 	return 124 if $status eq 'EXIT_TIMEOUT';
+	return 125 if $status eq 'EXIT_OOM';
 	return 86 if $status eq 'EXIT_NOT_IMPLEMENTED';
 	return 1 if $status eq 'EXIT_FAILURE';
 	return $status if $status =~ m/^\d+$/;

@@ -2486,6 +2486,7 @@ sub canonical_exit_status
 	return undef if !defined($status);
 	return 'EXIT_SUCCESS' if $status eq '0' || $status eq 'EXIT_SUCCESS';
 	return 'EXIT_TIMEOUT' if $status eq '124' || $status eq 'EXIT_TIMEOUT';
+	return 'EXIT_OOM' if $status eq '125' || $status eq 'EXIT_OOM';
 	return 'EXIT_NOT_IMPLEMENTED' if $status eq '86' || $status eq 'EXIT_NOT_IMPLEMENTED';
 	return 'EXIT_FAILURE' if $status eq '1' || $status eq 'EXIT_FAILURE';
 	return $status;
@@ -2516,6 +2517,16 @@ sub status_mismatch_message
 	    (!defined($got) || $got ne 'EXIT_TIMEOUT'))
 	{
 		return "ERROR: $label did not time out as expected (expected $expected_text, got $got_text)";
+	}
+	if (defined($got) && $got eq 'EXIT_OOM' &&
+	    (!defined($expected) || $expected ne 'EXIT_OOM'))
+	{
+		return "ERROR: $label ran out of memory (expected $expected_text, got $got_text)";
+	}
+	if (defined($expected) && $expected eq 'EXIT_OOM' &&
+	    (!defined($got) || $got ne 'EXIT_OOM'))
+	{
+		return "ERROR: $label did not run out of memory as expected (expected $expected_text, got $got_text)";
 	}
 	return "ERROR: $label exit status mismatch (expected $expected_text, got $got_text)";
 }

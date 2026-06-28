@@ -103,6 +103,18 @@ make compare-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 make bitcmp CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 ```
 
+During a normal in-tree inception build, PA39 also checks each newly built
+inception object before the final target link finishes. The check byte-compares
+the new inception `.o` against the corresponding self-host `.o` and stops at
+the first mismatch. The restored-self diagnostic target disables this object
+check because it may not have a matching self-host object tree.
+
+The compile wrapper also applies a default per-command RSS cap. By default,
+commands that exceed 8 GiB RSS fail with `EXIT_OOM`; set
+`CPPGM_RUN_MAX_RSS_KB=0` to disable that guard for diagnosis. The initial
+`*-self` build uses normal make parallelism; the `*-inception` subbuild is
+capped separately by `INCEPTION_BUILD_JOBS`, which defaults to at most 8 jobs.
+
 Useful checkpoint targets are:
 
 ```sh

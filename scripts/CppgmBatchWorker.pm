@@ -184,9 +184,11 @@ sub write_named_status_code
 		? "EXIT_SUCCESS\n"
 		: $status == 124
 			? "EXIT_TIMEOUT\n"
-			: $status == 86
-				? "EXIT_NOT_IMPLEMENTED\n"
-				: "EXIT_FAILURE\n");
+			: $status == 125
+				? "EXIT_OOM\n"
+				: $status == 86
+					? "EXIT_NOT_IMPLEMENTED\n"
+					: "EXIT_FAILURE\n");
 }
 
 sub system_status_to_exit_code
@@ -380,6 +382,7 @@ sub submit_cli_request
 	chomp($status);
 	return 0 if $status eq 'EXIT_SUCCESS';
 	return 124 if $status eq 'EXIT_TIMEOUT';
+	return 125 if $status eq 'EXIT_OOM';
 	return 86 if $status eq 'EXIT_NOT_IMPLEMENTED';
 	return 1 if $status eq 'EXIT_FAILURE';
 	return $status if $status =~ m/^\d+$/;
