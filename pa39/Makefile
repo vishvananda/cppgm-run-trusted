@@ -337,10 +337,10 @@ inception_shared_object_path = $(INCEPTION_SHARED_OBJDIR)/$(call inception_stem,
 inception_shared_depfile_path = $(INCEPTION_SHARED_DEPDIR)/$(call inception_stem,$(1)).d
 inception_object_list = $(foreach src,$(INCEPTION_SOURCES_$(1)),$(call inception_shared_object_path,$(src)))
 inception_link_inputs = $(call inception_entry_object_path,$(1)) $(call inception_object_list,$(1)) $(if $(filter 1,$(CPPGM_TEST_RUNNER)),$(inception_runner_object_path))
-# Schedule never-built objects first, but keep final linking on inception_link_inputs.
+# Build never-seen objects in a separate recursive pass, but keep final linking
+# on inception_link_inputs.
 inception_missing_link_inputs = $(strip $(foreach obj,$(call inception_link_inputs,$(1)),$(if $(wildcard $(obj)),,$(obj))))
 inception_existing_link_inputs = $(filter-out $(call inception_missing_link_inputs,$(1)),$(call inception_link_inputs,$(1)))
-inception_ordered_link_inputs = $(if $(filter 1,$(INCEPTION_BUILD_MISSING_FIRST)),$(call inception_missing_link_inputs,$(1)) $(call inception_existing_link_inputs,$(1)),$(call inception_link_inputs,$(1)))
 inception_stage_binary = $(call inception_self_binary_path,$(INCEPTION_CHECKPOINT_FOR_$(1)))
 INCEPTION_INCEPTION_CXX ?= $(call inception_self_binary_path,cppgm++)
 
@@ -582,7 +582,18 @@ $(call inception_entry_object_path,$(1)): $(INCEPTION_ENTRY_$(1)) $(INCEPTION_CX
 		echo "MATCH object: $$@"; \
 	fi
 
-$(call inception_binary_path,$(1)): $(call inception_ordered_link_inputs,$(1)) | $(INCEPTION_BIN_ROOT)
+$(call inception_binary_path,$(1)): FORCE | $(INCEPTION_BIN_ROOT)
+	+@if [ "$(INCEPTION_BUILD_MISSING_FIRST)" = "1" ] && [ -n "$(call inception_missing_link_inputs,$(1))" ]; then \
+		echo "Building missing $(1) objects first"; \
+		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_missing_link_inputs,$(1)); \
+	fi
+	+@if [ "$(INCEPTION_BUILD_MISSING_FIRST)" = "1" ]; then \
+		if [ -n "$(call inception_existing_link_inputs,$(1))" ]; then \
+			env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_existing_link_inputs,$(1)); \
+		fi; \
+	else \
+		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_link_inputs,$(1)); \
+	fi
 	@rm -f "$(call inception_link_output_path,$(1))"
 	$(CPPGM_HOST_CXX) $(INCEPTION_LINK_FLAGS) -I../dev/src -o "$(call inception_link_output_path,$(1))" $(call inception_link_inputs,$(1))
 	@mv -f "$(call inception_link_output_path,$(1))" $$@
