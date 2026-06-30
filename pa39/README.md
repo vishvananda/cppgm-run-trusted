@@ -2,93 +2,102 @@
 
 ### Overview
 
-PA39 is the inception assignment. To complete it, make `cppgm++` rebuild
-itself and match the host-seeded build byte for byte:
+PA39 is the inception assignment. To complete PA39, make `cppgm++` build
+`cppgm++` and have that rebuilt compiler match the host-seeded build. In
+Makefile terms, the main target is:
 
 ```sh
 make compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 ```
 
-PA39 does not add a new language feature, command-line mode, object format,
-runtime ABI, optimizer pass, or backend surface. It checks whether the compiler
-implemented through PA38 can compile its own source reproducibly.
+This builds `cppgm++-self`, builds `cppgm++-inception` with that self-built
+compiler, and compares the two outputs byte for byte. Passing that comparison
+means the compiler can reproduce itself from its own output.
 
-### The Build Layers
+The `test-through-*` preservation ladder is not the final product. It is the
+debugging path that helps you reach inception one stage at a time. The earlier
+programming assignments build a compiler sequentially by adding one language,
+semantic, lowering, runtime, or backend surface at a time; the PA39 ladder uses
+the same idea for self-hosting. Each rung runs the already-completed assignment
+tests with a self-built checkpoint binary, so missing functionality usually
+shows up at the first stage that needs it instead of only as a full
+`cppgm++` inception failure.
 
-Keep the compiler layers separate while debugging:
+### What PA39 Tests
 
-- `../dev/cppgm++` is the host-seeded course compiler. It is built from the
-  current source with the host toolchain.
-- `*-self` checkpoint binaries are built from the same source by
-  `../dev/cppgm++`.
-- `*-inception` checkpoint binaries are built from the same source by the
-  corresponding `*-self` compiler.
+PA39 does not add a new language feature, command-line mode, object format, or
+runtime ABI. It reuses the compiler implementation and checks that the existing
+implementation can compile itself reproducibly.
 
-When a self-built compiler behaves differently from `../dev/cppgm++`, assume
-the self-built compiler may have been miscompiled. Do not patch the failing
-runtime path first. Trace the divergence back to the source file, object, or
-compiler feature that produced the bad self-built compiler.
+It also does not relax the LowIR or MIR boundaries established earlier. If a
+self-host or inception failure shows that object output behaves differently
+from output reconstructed through LowIR/MIR text, treat that as an earlier
+compiler contract bug rather than adding a PA39-only side channel.
 
-### Debugging Failures
+If the earlier assignment tests cover every language, lowering, runtime,
+linking, and optimization feature used by your implementation, PA39 should be a
+straightforward build plus a few reproducibility cleanups. In practice, the
+self-build usually finds missing coverage. A failure in PA39 is usually evidence
+that an earlier compiler surface accepts the assignment tests but still has a
+bug in code that the compiler implementation itself happens to use.
 
-Treat every PA39 failure as an earlier compiler bug until proven otherwise.
-The first question is which layer first diverges.
+### Prerequisites
 
-If `../dev/cppgm++` fails to compile a reduced source, debug it like any
-earlier assignment failure:
+Complete PA38 before starting PA39. PA39 reuses:
 
-1. Reduce the source to the smallest construct that still fails.
-2. Identify the earliest PA that owns the parser, semantic, lowering,
-   optimizer, backend, runtime, or reproducibility behavior.
-3. Add the reducer under the matching `cppgm.tests/course/paN` directory.
-4. Fix that earlier compiler surface and rerun the narrow test.
+- the PA1-PA9 frontend tools
+- the cumulative `cppgm++` compiler
+- the native, object, runtime, and hosted compile/link surfaces
+- the PA37/PA38 optimization surfaces
+- the earlier `pa1` through `pa38` tests for preservation checks
 
-If `../dev/cppgm++` compiles the source but a `*-self` compiler fails, debug
-the self compiler as a possibly miscompiled program:
+PA39 also needs a host C++ compiler and linker. The host compiler links staged
+object files and provides the hosted configuration used by the compiler build.
 
-1. Save the exact failing compile command and source file.
-2. Rerun the same compile with `../dev/cppgm++` and with the `*-self` compiler.
-3. If only `*-self` fails, find where the self compiler differs from the
-   host-seeded compiler. Narrow that to the self-built source file or object
-   whose generated code changes behavior.
-4. Reduce the construct that made `../dev/cppgm++` miscompile that compiler
-   source file.
-5. Add that reducer to the earliest owning PA and fix the underlying compiler
-   bug.
+### Build Variables
 
-Failure includes severe performance divergence. A self-built compiler is
-expected to be slower than the host-seeded compiler, but not wildly slower. If a
-`*-self` or `*-inception` compile is more than about five times slower than the
-same source under `../dev/cppgm++`, or times out while the host-seeded compiler
-completes, treat that as possible miscompilation of the compiler itself.
-Compare the layers and trace the slowdown back to the self-built object, source
-file, or compiler feature that introduced the divergent behavior.
+Use two compiler variables when running PA39:
 
-A stack trace or assertion inside the self-built compiler identifies where the
-bad program failed; it does not by itself prove that the code at that stack
-frame is the source bug. First decide whether regular `../dev/cppgm++` has the
-same failure or whether the self-built compiler diverged because one of its own
-objects was miscompiled.
+- `CXX=../dev/cppgm++` selects the course compiler as the compiler under test.
+- `CPPGM_HOST_CXX=<host-cxx>` selects the host C++ compiler used for linking
+  checkpoint programs and generating hosted compiler configuration.
 
-If both compilers build the source but the outputs differ, reduce the first
-different artifact. For a binary mismatch, compare at the earliest useful
-boundary: generated LowIR, object metadata, symbols, relocations, section
-contents, or linked output. A byte mismatch is not a PA39 feature request; it
-is usually an earlier lowering, backend, ordering, path, timestamp, or
-configuration determinism bug.
+For example:
 
-Do not:
+```sh
+make compare-cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+```
 
-- add PA39-only behavior to make a checkpoint move forward
-- rewrite tests or references around an inception failure
-- skip work by substituting a custom implementation for compiler source or
-  hosted header behavior
-- replace the fixed checkpoint source sets with a generated source scan
-- increase timeouts before reducing the performance or nontermination bug
+If `../dev/cppgm++` does not exist yet, the PA39 Makefile first builds it with
+`CPPGM_HOST_CXX`.
 
-### Useful Targets
+PA39 applies a per-file wall timeout to self-hosted compile steps so a single
+source file cannot stall the ladder indefinitely. The defaults are intentionally
+generous:
 
-The main goal is:
+- `INCEPTION_SELFHOST_COMPILE_TIMEOUT_SEC=900` for `*-self` object compiles
+- `INCEPTION_INCEPTION_COMPILE_TIMEOUT_SEC=3600` for `*-inception` object
+  compiles
+
+A timeout usually points to a performance or nontermination bug in an earlier
+compiler surface. Prefer reducing and fixing that bug over increasing the
+timeout.
+
+The compile wrapper also applies a default per-command RSS cap. By default,
+commands that exceed 8 GiB RSS fail with `EXIT_OOM`; set
+`CPPGM_RUN_MAX_RSS_KB=0` to disable that guard for diagnosis, or set it to a
+larger value if you have already reduced the memory use and need a temporary
+validation run.
+
+The initial `*-self` build uses the normal make parallelism default. The
+`*-inception` subbuild is capped separately with `INCEPTION_BUILD_JOBS`, which
+defaults to the smaller of the available CPU count and
+`INCEPTION_DEFAULT_BUILD_JOB_CAP=8`. Raise that only if the machine has enough
+memory for several simultaneous self-built compiler processes.
+
+### Inception Targets
+
+The focused PA39 goal is:
 
 ```sh
 make cppgm++-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
@@ -103,38 +112,61 @@ make compare-inception CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 make bitcmp CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 ```
 
+`inception` builds all inception checkpoint binaries. `compare-inception` and
+`bitcmp` compare all self-built checkpoint binaries against their inception
+versions.
+
 During a normal in-tree inception build, PA39 also checks each newly built
-inception object before the final target link finishes. The check byte-compares
-the new inception `.o` against the corresponding self-host `.o` and stops at
-the first mismatch. The restored-self diagnostic target disables this object
+inception object before the final target link finishes. The check does not
+wait for the final executable link: it byte-compares the new inception `.o`
+against the corresponding self-host `.o` and stops at the first mismatch. That
+catches object-level reproducibility drift as soon as the responsible source
+file finishes compiling while still leaving the final linked executable compare
+as the PA39 result. The restored-self diagnostic target disables this object
 check because it may not have a matching self-host object tree.
 
-The compile wrapper also applies a default per-command RSS cap. By default,
-commands that exceed 8 GiB RSS fail with `EXIT_OOM`; set
-`CPPGM_RUN_MAX_RSS_KB=0` to disable that guard for diagnosis. The initial
-`*-self` build uses normal make parallelism; the `*-inception` subbuild is
-capped separately by `INCEPTION_BUILD_JOBS`, which defaults to at most 8 jobs.
+For both self-host and inception checkpoint binary builds, PA39 schedules
+missing `.o` inputs before stale existing inputs by default. If an earlier run
+stopped partway through the object tree, this usually reaches the next never-seen
+compile failure faster. The final link still uses the canonical object order, so
+the scheduling change does not affect reproducibility. Set
+`INCEPTION_BUILD_MISSING_FIRST=0` to disable this behavior.
 
-Useful checkpoint targets are:
+### Intermediate Ladder
+
+To build one checkpoint:
 
 ```sh
 make pptoken-self CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 make cppgm++-self CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
-make through-cppgm++ CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 ```
 
-Useful preservation targets are:
+To build checkpoints through a point:
+
+```sh
+make through-cy86 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+make through-cppgm++ CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+make through-lowir2native CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+```
+
+To run preservation tests through an assignment stage:
 
 ```sh
 make test-through-pa9 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 make test-through-pa38 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
-make test-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
 ```
 
-The `test-through-*` ladder is a debugging aid, not the final product. Each
-rung runs already-completed assignment tests with the appropriate self-built
-checkpoint so failures appear closer to the stage that first needs the missing
-behavior.
+To test one stage:
+
+```sh
+make test-pa1 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+make test-pa10 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+make test-pa37 CXX=../dev/cppgm++ CPPGM_HOST_CXX=g++
+```
+
+The test targets reuse the earlier assignment harnesses. PA39 changes which
+binary those harnesses run; it does not change the expected PA1 through PA38
+outputs.
 
 ### Single-Object Probes
 
@@ -189,27 +221,42 @@ The checkpoint used for each assignment stage is:
 - `abimangle-self`: PA30
 - `lowiropt-self`: PA37
 
-Checkpoint source sets are fixed by `../dev/frontend_source_sets.mk`. PA39 is
-checking whether those known implementation source sets can be rebuilt
-reproducibly.
+Checkpoint source sets are fixed by `../dev/frontend_source_sets.mk`. Do not
+replace that with a generated source scan; PA39 is checking whether the known
+implementation source sets can be rebuilt reproducibly.
 
-### Build Variables And Timeouts
+### Working Through Failures
 
-Use:
+Treat PA39 failures as compiler bugs until proven otherwise.
 
-- `CXX=../dev/cppgm++` to select the course compiler under test.
-- `CPPGM_HOST_CXX=<host-cxx>` to select the host compiler used for linking
-  checkpoint programs and generating hosted compiler configuration.
+Do not rewrite tests around a failure, and do not add a self-hosting special
+case just to make the build move forward. Find the first incorrect behavior and
+fix the underlying parser, semantic, lowering, optimizer, backend, runtime, or
+reproducibility bug.
 
-PA39 applies per-file wall timeouts so one compile cannot stall indefinitely:
+When an inception compile is far slower than the corresponding host-seeded
+compile, look for divergent algorithmic behavior in the self-built compiler,
+not just less optimized machine instructions. A large slowdown often means the
+self-built compiler is following a different branch, repeatedly redoing
+semantic work, or missing a cache because an earlier stage miscompiled the
+compiler itself.
 
-- `INCEPTION_SELFHOST_COMPILE_TIMEOUT_SEC=900` for `*-self` object compiles
-- `INCEPTION_INCEPTION_COMPILE_TIMEOUT_SEC=3600` for `*-inception` object
-  compiles
+A useful workflow is:
 
-A timeout means the current compiler is too slow or stuck on that source file.
-If the timeout happens only in a self-built layer, first compare against the
-host-seeded compiler. A moderate slowdown is expected, but a severe slowdown is
-divergence to trace through the self compiler build. Then reduce the source and
-fix the owning earlier compiler surface instead of treating the timeout as a
-PA39-specific condition.
+1. Find the first failing checkpoint, source file, or preservation test.
+2. Reduce the failure to the smallest source that still fails.
+3. Identify the earliest assignment surface that owns that behavior.
+4. Add the reducer as a focused test under the matching
+   `cppgm.tests/course/paN` directory while you work on the fix.
+5. Fix the underlying compiler bug and rerun the narrow stage before returning
+   to the broader `test-through-*` or inception target.
+
+For example, if `cppgm++-self` fails because a construct in `dev/src/*.cpp` is
+miscompiled, reduce that construct and place the focused test in the earliest
+`cppgm.tests/course/paN` directory that should have covered it. If
+`compare-cppgm++-inception` builds both compilers but the bytes differ, look for
+reproducibility issues such as unstable output order, generated configuration
+drift, embedded paths, timestamps, or linker determinism.
+
+The best PA39 fixes usually improve an earlier assignment surface and leave a
+small focused test behind.

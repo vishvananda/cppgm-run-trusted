@@ -19,6 +19,7 @@ INCEPTION_DEFAULT_BUILD_JOB_CAP ?= 8
 INCEPTION_BUILD_JOBS ?= $(shell \
 	jobs='$(DEFAULT_BUILD_JOBS)'; cap='$(INCEPTION_DEFAULT_BUILD_JOB_CAP)'; \
 	if [ "$$cap" -gt 0 ] 2>/dev/null && [ "$$jobs" -gt "$$cap" ] 2>/dev/null; then echo "$$cap"; else echo "$$jobs"; fi)
+INCEPTION_BUILD_MISSING_FIRST ?= 1
 HOST_UNAME_S = $(shell uname -s)
 CPPGM_EXPLICIT_MAKE_JOB_FLAGS := $(filter -j% --jobs=%,$(MAKEFLAGS))
 ifeq ($(findstring -j,$(MAKEFLAGS)),)
@@ -336,6 +337,10 @@ inception_shared_object_path = $(INCEPTION_SHARED_OBJDIR)/$(call inception_stem,
 inception_shared_depfile_path = $(INCEPTION_SHARED_DEPDIR)/$(call inception_stem,$(1)).d
 inception_object_list = $(foreach src,$(INCEPTION_SOURCES_$(1)),$(call inception_shared_object_path,$(src)))
 inception_link_inputs = $(call inception_entry_object_path,$(1)) $(call inception_object_list,$(1)) $(if $(filter 1,$(CPPGM_TEST_RUNNER)),$(inception_runner_object_path))
+# Schedule never-built objects first, but keep final linking on inception_link_inputs.
+inception_missing_link_inputs = $(strip $(foreach obj,$(call inception_link_inputs,$(1)),$(if $(wildcard $(obj)),,$(obj))))
+inception_existing_link_inputs = $(filter-out $(call inception_missing_link_inputs,$(1)),$(call inception_link_inputs,$(1)))
+inception_ordered_link_inputs = $(if $(filter 1,$(INCEPTION_BUILD_MISSING_FIRST)),$(call inception_missing_link_inputs,$(1)) $(call inception_existing_link_inputs,$(1)),$(call inception_link_inputs,$(1)))
 inception_stage_binary = $(call inception_self_binary_path,$(INCEPTION_CHECKPOINT_FOR_$(1)))
 INCEPTION_INCEPTION_CXX ?= $(call inception_self_binary_path,cppgm++)
 
@@ -366,6 +371,7 @@ cppgm++-inception-from-restored-self:
 		INCEPTION_BIN_ROOT_BASE="$(INCEPTION_BIN_ROOT_BASE)" \
 		INCEPTION_SELFHOST_OPT_LEVEL="$(INCEPTION_SELFHOST_OPT_LEVEL)" \
 		INCEPTION_BUILD_JOBS="$(INCEPTION_BUILD_JOBS)" \
+		INCEPTION_BUILD_MISSING_FIRST="$(INCEPTION_BUILD_MISSING_FIRST)" \
 		CXX="$(INCEPTION_RESTORED_CPPGM_SELF)" \
 		CPPGM_HOST_CXX="$(CPPGM_HOST_CXX)" \
 		CPPGM_STDLIB_FLAGS="$(CPPGM_STDLIB_FLAGS)" \
@@ -548,7 +554,7 @@ $(INCEPTION_BIN_ROOT):
 $(INCEPTION_SHARED_OBJDIR) $(INCEPTION_SHARED_DEPDIR):
 	@mkdir -p $@
 
-$(call inception_shared_object_path,../dev/src/preproc_support.cpp): $(INCEPTION_BUILTIN_HOST_CONFIG)
+$(call inception_shared_object_path,../dev/src/preprocessor.cpp): $(INCEPTION_BUILTIN_HOST_CONFIG)
 
 $(inception_runner_object_path): ../dev/src/test_runner.cpp $(INCEPTION_CXX_DEP) $(if $(filter 1,$(INCEPTION_COMPARE_OBJECTS)),$(inception_selfhost_runner_object_path)) | compiler-ready $(INCEPTION_SHARED_OBJDIR) $(INCEPTION_SHARED_DEPDIR)
 	@mkdir -p $(@D) $(INCEPTION_SHARED_DEPDIR)
@@ -576,9 +582,9 @@ $(call inception_entry_object_path,$(1)): $(INCEPTION_ENTRY_$(1)) $(INCEPTION_CX
 		echo "MATCH object: $$@"; \
 	fi
 
-$(call inception_binary_path,$(1)): $(call inception_link_inputs,$(1)) | $(INCEPTION_BIN_ROOT)
+$(call inception_binary_path,$(1)): $(call inception_ordered_link_inputs,$(1)) | $(INCEPTION_BIN_ROOT)
 	@rm -f "$(call inception_link_output_path,$(1))"
-	$(CPPGM_HOST_CXX) $(INCEPTION_LINK_FLAGS) -I../dev/src -o "$(call inception_link_output_path,$(1))" $$^
+	$(CPPGM_HOST_CXX) $(INCEPTION_LINK_FLAGS) -I../dev/src -o "$(call inception_link_output_path,$(1))" $(call inception_link_inputs,$(1))
 	@mv -f "$(call inception_link_output_path,$(1))" $$@
 
 $(1)-self: $(call inception_binary_path,$(1))
@@ -654,6 +660,7 @@ $(1)-inception: cppgm++-self $(1)-self
 		INCEPTION_BIN_ROOT_BASE="$(INCEPTION_BIN_ROOT_BASE)" \
 		INCEPTION_SELFHOST_OPT_LEVEL="$(INCEPTION_SELFHOST_OPT_LEVEL)" \
 		INCEPTION_BUILD_JOBS="$(INCEPTION_BUILD_JOBS)" \
+		INCEPTION_BUILD_MISSING_FIRST="$(INCEPTION_BUILD_MISSING_FIRST)" \
 		CXX="$(INCEPTION_INCEPTION_CXX)" \
 		CPPGM_HOST_CXX="$(CPPGM_HOST_CXX)" \
 		CPPGM_STDLIB_FLAGS="$(CPPGM_STDLIB_FLAGS)" \
