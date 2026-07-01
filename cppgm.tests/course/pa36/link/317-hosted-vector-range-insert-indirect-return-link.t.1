@@ -1,0 +1,84 @@
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <stdexcept>
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <cassert>
+#include <memory>
+#include <cstring>
+#include <cstdint>
+#include <climits>
+#include <cstddef>
+#include <cerrno>
+#include <limits>
+#include <vector>
+#include <map>
+#include <utility>
+
+namespace {
+
+struct Interface {
+  virtual ~Interface() {}
+  virtual void emit_string_literal(const std::string&) = 0;
+  virtual void emit_eof() = 0;
+};
+
+struct Piece {
+  std::string source;
+  int encoding;
+  std::string suffix;
+  bool valid_suffix;
+  std::vector<uint32_t> code_points;
+};
+
+struct Output {
+  size_t n;
+  uint32_t first;
+  Output() : n(0), first(0) {}
+  void emit(size_t count, uint32_t value) { n = count; first = value; }
+};
+
+template <class Out>
+struct Stream : Interface {
+  Out output;
+  std::vector<Piece> pending;
+
+  void emit_string_literal(const std::string& data)
+  {
+    Piece piece;
+    piece.source = data;
+    piece.encoding = 0;
+    piece.valid_suffix = true;
+    piece.code_points.push_back(0x61);
+    pending.push_back(std::move(piece));
+  }
+
+  void emit_eof()
+  {
+    std::vector<uint32_t> code_points;
+    size_t total = 0;
+    for (size_t i = 0; i < pending.size(); ++i)
+      total += pending[i].code_points.size();
+    code_points.reserve(total);
+    for (size_t i = 0; i < pending.size(); ++i)
+      code_points.insert(code_points.end(),
+                         pending[i].code_points.begin(),
+                         pending[i].code_points.end());
+    output.emit(code_points.size(), code_points.empty() ? 0 : code_points[0]);
+  }
+};
+
+}  // namespace
+
+int main()
+{
+  Stream<Output> stream;
+  Interface& iface = stream;
+  iface.emit_string_literal("\"a\"");
+  iface.emit_eof();
+  if (stream.output.n != 1)
+    return 10 + stream.output.n;
+  return stream.output.first == 0x61 ? 0 : 20;
+}

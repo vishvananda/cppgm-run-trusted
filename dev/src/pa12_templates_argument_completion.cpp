@@ -1,4 +1,6 @@
 #include "pa12_internal.h"
+#include "pa12_templates_function_support.h"
+#include "pa12_templates_instance_support.h"
 
 #include <stdexcept>
 
@@ -6,254 +8,194 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
-namespace {
 
+const size_t kCompletedTemplateArgumentCacheLimit = 65536;
+
+size_t dependent_cache_string_hash(const string& value);
+size_t dependent_cache_type_identity(TypePtr type);
+size_t dependent_cache_template_argument_identity(
+	const TemplateArgument& argument,
+	int depth);
 pa11::TemplateInstanceArgument completed_instance_argument(
-	const TemplateArgument& argument)
-{
-	if (argument.pack_expansion && argument.kind != TemplateArgumentKind::Pack)
-	{
-		TemplateArgument element = argument;
-		element.pack_expansion = false;
-		vector<pa11::TemplateInstanceArgument> pack;
-		pack.push_back(completed_instance_argument(element));
-		return pa11::TemplateInstanceArgument::pack_arg(pack);
-	}
-	if (argument.kind == TemplateArgumentKind::Type)
-		return pa11::TemplateInstanceArgument::type_arg(argument.type);
-	if (argument.kind == TemplateArgumentKind::Value)
-	{
-		pa11::TemplateInstanceArgument out = argument.dependent
-			? pa11::TemplateInstanceArgument::dependent_value_arg(argument.type)
-			: pa11::TemplateInstanceArgument::value_arg(argument.type,
-			                                            argument.value);
-		out.value_name = argument.value_name;
-		out.value_negated = argument.value_negated;
-		out.value_owner_template_name =
-			argument.value_owner_template_name;
-		out.value_member_name = argument.value_member_name;
-		out.value_owner_template_arguments =
-			argument.value_owner_template_arguments;
-		out.value_expr_begin = argument.value_expr_begin;
-		out.value_expr_end = argument.value_expr_end;
-		return out;
-	}
-	if (argument.kind == TemplateArgumentKind::Template)
-	{
-		pa11::TemplateInstanceArgument out =
-			pa11::TemplateInstanceArgument::template_arg(
-				argument.template_declaration != NULL
-				? qualified_template_declaration_name(
-					argument.template_declaration)
-				: argument.value_name);
-		out.dependent = argument.template_declaration == NULL;
-		return out;
-	}
-	vector<pa11::TemplateInstanceArgument> pack;
-	for (size_t i = 0; i < argument.pack.size(); ++i)
-	{
-		TemplateArgument element = argument.pack[i];
-		if (element.kind == TemplateArgumentKind::Value &&
-		    !element.dependent)
-			element.pack_expansion = false;
-		pack.push_back(completed_instance_argument(element));
-	}
-	pa11::TemplateInstanceArgument out =
-		pa11::TemplateInstanceArgument::pack_arg(pack);
-	out.value_name = argument.value_name;
-	out.template_name = argument.value_name;
-	return out;
-}
-
+	const TemplateArgument& argument);
 bool template_argument_kind_matches_parameter(
 	const TemplateArgument& argument,
-	const TemplateParameterInfo& parameter)
-{
-	if (parameter.kind == TemplateParameterKind::Type)
-		return argument.kind == TemplateArgumentKind::Type;
-	if (parameter.kind == TemplateParameterKind::NonType)
-		return argument.kind == TemplateArgumentKind::Value;
-	if (argument.kind != TemplateArgumentKind::Template)
-		return false;
-	if (argument.template_declaration == NULL)
-		return true;
-	if (argument.template_declaration->kind == TemplateDeclarationKind::Alias)
-		return true;
-	const vector<TemplateParameterInfo>& params =
-		argument.template_declaration->parameters;
-	if (parameter.template_parameters.size() == 1 &&
-	    parameter.template_parameters[0].kind == TemplateParameterKind::Type)
-	{
-		size_t required = 0;
-		for (size_t i = 0; i < params.size(); ++i)
-		{
-			if (params[i].kind != TemplateParameterKind::Type)
-				return false;
-			if (!params[i].has_default && !params[i].is_pack)
-				++required;
-		}
-		return required <= 1;
-	}
-	size_t actual = 0;
-	for (size_t expected = 0;
-	     expected < parameter.template_parameters.size();
-	     ++expected)
-	{
-		const TemplateParameterInfo& expected_param =
-			parameter.template_parameters[expected];
-		if (expected_param.is_pack)
-		{
-			for (; actual < params.size(); ++actual)
-				if (params[actual].kind != expected_param.kind)
-					return false;
-			return true;
-		}
-		if (actual >= params.size())
-			return false;
-		if (params[actual].kind != expected_param.kind ||
-		    params[actual].is_pack != expected_param.is_pack)
-			return false;
-		++actual;
-	}
-	return actual == params.size();
-}
-
-bool unsigned_integral_template_parameter(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
-		return false;
-	if (bare->kind == pa11::TypeKind::Enum)
-	{
-		switch (bare->enum_underlying)
-		{
-		case FT_UNSIGNED_CHAR:
-		case FT_UNSIGNED_SHORT_INT:
-		case FT_UNSIGNED_INT:
-		case FT_UNSIGNED_LONG_INT:
-		case FT_UNSIGNED_LONG_LONG_INT:
-			return true;
-		default:
-			return false;
-		}
-	}
-	if (bare->kind != pa11::TypeKind::Fundamental)
-		return false;
-	switch (bare->fundamental)
-	{
-	case FT_BOOL:
-	case FT_UNSIGNED_CHAR:
-	case FT_UNSIGNED_SHORT_INT:
-	case FT_UNSIGNED_INT:
-	case FT_UNSIGNED_LONG_INT:
-	case FT_UNSIGNED_LONG_LONG_INT:
-	case FT_CHAR16_T:
-	case FT_CHAR32_T:
-		return true;
-	default:
-		return false;
-	}
-}
-
+	const TemplateParameterInfo& parameter);
+bool unsigned_integral_template_parameter(TypePtr type);
 TemplateArgument convert_non_type_template_argument(
 	TemplateArgument argument,
-	TypePtr parameter_type)
-{
-	if (argument.kind != TemplateArgumentKind::Value ||
-	    parameter_type.get() == NULL)
-		return argument;
-	if (argument.value_binding != NULL)
+	TypePtr parameter_type);
+bool dependent_typename_condition_false(TypePtr type);
+bool hosted_library_namespace_scope(Scope* scope);
+namespace {
+
+
+	bool dependent_typename_is_enable_if(TypePtr type)
 	{
-		TypePtr parameter_bare = pa11::strip_cv(parameter_type);
-		TypePtr argument_bare = argument.type.get() != NULL
-			? pa11::strip_cv(argument.type) : TypePtr();
-		if (parameter_bare->kind == pa11::TypeKind::LValueReference ||
-		    parameter_bare->kind == pa11::TypeKind::RValueReference)
-		{
-			TypePtr target = pa11::strip_cv(parameter_bare->base);
-			TypePtr source = argument.value_binding->type.get() != NULL
-				? pa11::strip_cv(argument.value_binding->type)
-				: TypePtr();
-			if (source.get() == NULL || !pa11::same_type(target, source))
-				throw runtime_error("invalid non-type template argument");
-			argument.type = parameter_type;
-			return argument;
-		}
-		if (argument.value_binding->kind == BindingKind::Function &&
-		    (pa11::same_type(argument.type, parameter_type) ||
-		     (parameter_bare->kind == pa11::TypeKind::Function &&
-		      argument_bare.get() != NULL &&
-		      argument_bare->kind == pa11::TypeKind::Pointer &&
-		      pa11::same_type(argument_bare->base, parameter_bare))))
-		{
-			argument.type = parameter_type;
-			return argument;
-		}
-		if (parameter_bare->kind == pa11::TypeKind::MemberPointer &&
-		    argument_bare.get() != NULL &&
-		    argument_bare->kind == pa11::TypeKind::MemberPointer &&
-		    pa11::same_type(argument_bare, parameter_bare))
-		{
-			argument.type = parameter_type;
-			return argument;
-		}
-		throw runtime_error("invalid non-type template argument");
+		if (type.get() == NULL)
+			return false;
+		string root_name = type->name;
+		size_t type_suffix = root_name.find("::type");
+		if (type_suffix != string::npos)
+			root_name = root_name.substr(0, type_suffix);
+		size_t template_suffix = root_name.find('<');
+		if (template_suffix != string::npos)
+			root_name = root_name.substr(0, template_suffix);
+		size_t qualifier = root_name.rfind("::");
+		if (qualifier != string::npos)
+			root_name = root_name.substr(qualifier + 2);
+		return root_name == "enable_if" ||
+		       root_name == "enable_if_t" ||
+		       root_name == "__enable_if_t";
 	}
-	TypePtr bare = pa11::strip_cv(parameter_type);
-	if (bare->kind == pa11::TypeKind::Fundamental &&
-	    bare->fundamental == FT_BOOL)
-		argument.value = argument.value != 0 ? 1 : 0;
-	else
+
+	bool dependent_typename_disabled_enable_if_argument(
+		TypePtr type,
+		const vector<TemplateArgument>& arguments)
 	{
-		size_t size = 0;
-		try
+		return dependent_typename_is_enable_if(type) &&
+		       !arguments.empty() &&
+		       arguments[0].kind == TemplateArgumentKind::Value &&
+		       !arguments[0].dependent &&
+		       arguments[0].value == 0;
+	}
+
+	string unqualified_template_owner(string name)
+	{
+		size_t args = name.find('<');
+		if (args != string::npos)
+			name = name.substr(0, args);
+		size_t scope = name.rfind("::");
+		if (scope != string::npos)
+			name = name.substr(scope + 2);
+		return name;
+	}
+
+	bool cheap_hosted_enable_if_condition(const TemplateArgument& arg)
+	{
+		if (arg.value_member_name != "value" &&
+		    arg.value_member_name != "__value")
+			return false;
+		string owner = unqualified_template_owner(
+			arg.value_owner_template_name);
+		return owner == "__and_" ||
+		       owner == "__or_" ||
+		       owner == "__not_" ||
+		       owner == "is_same" ||
+		       owner == "__are_same" ||
+		       owner == "__same_value_type" ||
+		       owner == "is_pointer" ||
+		       owner == "__is_pointer" ||
+		       owner == "is_reference" ||
+		       owner == "__is_reference" ||
+		       owner == "is_lvalue_reference" ||
+		       owner == "is_rvalue_reference" ||
+		       owner == "is_constructible" ||
+		       owner == "__is_constructible" ||
+		       owner == "is_nothrow_constructible" ||
+		       owner == "__is_nothrow_constructible" ||
+		       owner == "is_trivially_constructible" ||
+		       owner == "__is_trivially_constructible" ||
+		       owner == "is_copy_constructible" ||
+		       owner == "is_nothrow_copy_constructible" ||
+		       owner == "is_trivially_copy_constructible" ||
+		       owner == "is_move_constructible" ||
+		       owner == "is_nothrow_move_constructible" ||
+		       owner == "is_trivially_move_constructible" ||
+		       owner == "is_assignable" ||
+		       owner == "__is_assignable" ||
+		       owner == "is_nothrow_assignable" ||
+		       owner == "__is_nothrow_assignable" ||
+		       owner == "is_trivially_assignable" ||
+		       owner == "__is_trivially_assignable" ||
+		       owner == "is_copy_assignable" ||
+		       owner == "is_nothrow_copy_assignable" ||
+		       owner == "is_trivially_copy_assignable" ||
+		       owner == "is_move_assignable" ||
+		       owner == "is_nothrow_move_assignable" ||
+		       owner == "is_trivially_move_assignable" ||
+		       owner == "is_convertible" ||
+		       owner == "__is_convertible";
+	}
+
+	bool hosted_trait_record(TypePtr type)
+	{
+		TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+		return bare.get() != NULL &&
+		       bare->kind == pa11::TypeKind::Record &&
+		       bare->scope != NULL &&
+		       hosted_library_namespace_scope(bare->scope);
+	}
+
+	Binding* hosted_trait_declared_copy_move_constructor(TypePtr record,
+	                                                     bool move)
+	{
+		TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (bare.get() == NULL ||
+		    bare->kind != pa11::TypeKind::Record ||
+		    bare->scope == NULL)
+			return NULL;
+		map<string, vector<Binding*> >::const_iterator found =
+			bare->scope->members.find(bare->scope->name);
+		if (found == bare->scope->members.end())
+			return NULL;
+		for (size_t i = 0; i < found->second.size(); ++i)
 		{
-			size = pa11::type_size(parameter_type);
+			Binding* binding = found->second[i];
+			if (binding == NULL ||
+			    binding->kind != BindingKind::Function ||
+			    binding->type.get() == NULL ||
+			    binding->type->kind != pa11::TypeKind::Function ||
+			    binding->type->parameters.size() < 2 ||
+			    !pa11::is_reference_type(binding->type->parameters[1]))
+				continue;
+			TypePtr param = binding->type->parameters[1];
+			if (move != (param->kind == pa11::TypeKind::RValueReference))
+				continue;
+			if (pa11::same_type(pa11::strip_cv(param->base), bare))
+				return binding;
 		}
-		catch (const runtime_error&)
+		return NULL;
+	}
+
+	bool evaluate_hosted_constructible_trait(TypePtr target,
+	                                         const vector<TypePtr>& types,
+	                                         const set<Binding*>& deleted,
+	                                         bool& value)
+	{
+		TypePtr bare = target.get() != NULL ? pa11::strip_cv(target) : TypePtr();
+		if (!hosted_trait_record(bare))
+			return false;
+		if (types.size() == 2)
 		{
-			size = 0;
-		}
-		if (size > 0 && size < 8)
-		{
-			uint64_t mask = (uint64_t(1) << (size * 8)) - 1;
-			argument.value &= mask;
-			if (!unsigned_integral_template_parameter(parameter_type))
+			TypePtr arg = pa11::strip_cv(types[1]);
+			if (pa11::is_reference_type(arg) &&
+			    pa11::same_type(pa11::strip_cv(arg->base), bare))
 			{
-				uint64_t sign = uint64_t(1) << (size * 8 - 1);
-				if ((argument.value & sign) != 0)
-					argument.value |= ~mask;
+				bool move = arg->kind == pa11::TypeKind::RValueReference;
+				Binding* ctor =
+					hosted_trait_declared_copy_move_constructor(bare, move);
+				if (ctor == NULL && move)
+					ctor =
+						hosted_trait_declared_copy_move_constructor(bare, false);
+				if (ctor == NULL && !move &&
+				    unqualified_template_owner(
+					    bare->template_primary_name.empty()
+					    ? bare->name : bare->template_primary_name) ==
+					    "unique_ptr")
+				{
+					value = false;
+					return true;
+				}
+				value = ctor == NULL || deleted.find(ctor) == deleted.end();
+				return true;
 			}
 		}
+		value = true;
+		return true;
 	}
-	argument.type = parameter_type;
-	return argument;
-}
 
-bool dependent_typename_disabled_enable_if_argument(
-	TypePtr type,
-	const vector<TemplateArgument>& arguments)
-{
-	if (type.get() == NULL || arguments.empty() ||
-	    arguments[0].kind != TemplateArgumentKind::Value ||
-	    arguments[0].dependent || arguments[0].value != 0)
-		return false;
-	string root_name = type->name;
-	size_t type_suffix = root_name.find("::type");
-	if (type_suffix != string::npos)
-		root_name = root_name.substr(0, type_suffix);
-	size_t template_suffix = root_name.find('<');
-	if (template_suffix != string::npos)
-		root_name = root_name.substr(0, template_suffix);
-	size_t qualifier = root_name.rfind("::");
-	if (qualifier != string::npos)
-		root_name = root_name.substr(qualifier + 2);
-	return root_name == "enable_if" ||
-	       root_name == "enable_if_t" ||
-	       root_name == "__enable_if_t";
-}
-
-}  // namespace
+			}  // namespace
 
 struct TemplateArgumentCompleter
 {
@@ -333,6 +275,13 @@ struct TemplateArgumentCompleter
 				i < declaration->parameters.size() &&
 				declaration->parameters[i].is_pack &&
 				explicit_arguments[i].kind == TemplateArgumentKind::Pack;
+			bool keep_single_non_type_argument =
+				explicit_arguments.size() == declaration->parameters.size() &&
+				i < declaration->parameters.size() &&
+				!declaration->parameters[i].is_pack &&
+				declaration->parameters[i].kind ==
+					TemplateParameterKind::NonType &&
+				explicit_arguments[i].kind == TemplateArgumentKind::Value;
 			bool keep_single_type_pattern =
 				i < declaration->parameters.size() &&
 				!declaration->parameters[i].is_pack &&
@@ -340,7 +289,9 @@ struct TemplateArgumentCompleter
 			if (keep_single_type_pattern)
 				keep_single_type_pattern =
 					kept_single_type_pattern(explicit_arguments[i]);
-			if (keep_explicit_pack || keep_single_type_pattern)
+			if (keep_explicit_pack ||
+			    keep_single_non_type_argument ||
+			    keep_single_type_pattern)
 				expansion.push_back(explicit_arguments[i]);
 			else
 				expansion =
@@ -401,7 +352,8 @@ struct TemplateArgumentCompleter
 			                        subst,
 			                        value_subst,
 			                        pack_subst);
-			return parser.substitute_template_type(parameter_type);
+			return substitute_parameter_type_in_declaration_scope(
+				parameter_type);
 		}
 		catch (const runtime_error& err)
 		{
@@ -409,42 +361,481 @@ struct TemplateArgumentCompleter
 				throw;
 			return parameter_type;
 		}
+		}
+
+	TypePtr substitute_parameter_type_in_declaration_scope(TypePtr type)
+	{
+		Scope* scope = declaration != NULL ? declaration->owner : NULL;
+		if (scope == NULL &&
+		    declaration != NULL &&
+		    declaration->placeholder != NULL)
+			scope = declaration->placeholder->owner;
+		if (scope == NULL && declaration != NULL)
+			scope = declaration->lexical_scope;
+		if (scope == NULL)
+			return parser.substitute_template_type(type);
+		vector<Scope*> saved_scopes = parser.scopes_;
+		parser.scopes_.clear();
+		parser.scopes_.push_back(scope);
+		try
+		{
+			TypePtr out = parser.substitute_template_type(type);
+			parser.scopes_ = saved_scopes;
+			return out;
+		}
+		catch (...)
+		{
+			parser.scopes_ = saved_scopes;
+			throw;
+		}
 	}
 
-	bool can_leave_parameter_type_dependent(TypePtr parameter_type,
-	                                        const runtime_error& err)
-	{
+		bool trait_instance_arguments(
+			TypePtr type,
+			const vector<pa11::TemplateInstanceArgument>*& args)
+		{
+			TypePtr record = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+			if (record.get() == NULL || record->kind != pa11::TypeKind::Record)
+				return false;
+			args = &record->template_arguments;
+			if (args->empty() &&
+			    !record->dependent_typename_template_argument_lists.empty())
+				args = &record->dependent_typename_template_argument_lists[0];
+			return true;
+		}
+
+		bool raw_trait_type_argument(
+			const pa11::TemplateInstanceArgument& instance,
+			TypePtr& out_type)
+		{
+			TemplateArgument arg =
+				raw_template_argument_from_instance_argument(instance);
+			if (arg.kind != TemplateArgumentKind::Type)
+				return false;
+			out_type = arg.type;
+			return true;
+		}
+
+		bool resolve_trait_subject_type(TypePtr raw_type,
+		                                TypePtr& out_type)
+		{
+			TypePtr bare = raw_type.get() != NULL
+				? pa11::strip_cv(raw_type) : TypePtr();
+			if (bare.get() == NULL)
+				return false;
+			if (bare->kind == pa11::TypeKind::TemplateParameter &&
+			    !bare->is_dependent_typename)
+			{
+				TypePtr subst;
+				if (!parser.find_template_type_substitution(bare->name,
+				                                            subst))
+					return false;
+				out_type = subst;
+				return true;
+			}
+			if (bare->is_dependent_typename ||
+			    template_type_has_template_parameter(
+				    raw_type,
+				    parser.record_template_arguments_))
+				return false;
+			out_type = raw_type;
+			return true;
+		}
+
+		bool trait_type_operand(
+			const pa11::TemplateInstanceArgument& instance,
+			TypePtr& out_type)
+		{
+			TemplateArgument arg =
+				raw_template_argument_from_instance_argument(instance);
+			if (arg.kind != TemplateArgumentKind::Type)
+				return false;
+			TypePtr record = arg.type.get() != NULL
+				? pa11::strip_cv(arg.type) : TypePtr();
+			if (record.get() != NULL &&
+			    record->kind == pa11::TypeKind::Record)
+			{
+				string primary = record->template_primary_name.empty()
+					? record->name : record->template_primary_name;
+				primary = unqualified_template_owner(primary);
+				if (primary == "__and_" ||
+				    primary == "__or_" ||
+				    primary == "__not_" ||
+				    primary == "is_same" ||
+				    primary == "__are_same" ||
+				    primary == "__same_value_type" ||
+				    primary == "is_pointer" ||
+				    primary == "__is_pointer" ||
+				    primary == "is_reference" ||
+				    primary == "__is_reference" ||
+				    primary == "is_lvalue_reference" ||
+				    primary == "is_rvalue_reference" ||
+				    primary == "is_constructible" ||
+				    primary == "__is_constructible" ||
+				    primary == "is_nothrow_constructible" ||
+				    primary == "__is_nothrow_constructible" ||
+				    primary == "is_trivially_constructible" ||
+				    primary == "__is_trivially_constructible" ||
+				    primary == "is_copy_constructible" ||
+				    primary == "is_nothrow_copy_constructible" ||
+				    primary == "is_trivially_copy_constructible" ||
+				    primary == "is_move_constructible" ||
+				    primary == "is_nothrow_move_constructible" ||
+				    primary == "is_trivially_move_constructible" ||
+				    primary == "is_assignable" ||
+				    primary == "__is_assignable" ||
+				    primary == "is_nothrow_assignable" ||
+				    primary == "__is_nothrow_assignable" ||
+				    primary == "is_trivially_assignable" ||
+				    primary == "__is_trivially_assignable" ||
+				    primary == "is_copy_assignable" ||
+				    primary == "is_nothrow_copy_assignable" ||
+				    primary == "is_trivially_copy_assignable" ||
+				    primary == "is_move_assignable" ||
+				    primary == "is_nothrow_move_assignable" ||
+				    primary == "is_trivially_move_assignable" ||
+				    primary == "is_convertible" ||
+				    primary == "__is_convertible")
+				{
+					out_type = arg.type;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		bool evaluate_cheap_trait_arguments(
+			const string& owner,
+			const vector<pa11::TemplateInstanceArgument>& args,
+			bool& value)
+		{
+			if ((owner == "is_same" || owner == "__are_same") &&
+			    args.size() >= 2)
+			{
+				TypePtr left;
+				TypePtr right;
+				if (!raw_trait_type_argument(args[0], left) ||
+				    !raw_trait_type_argument(args[1], right))
+					return false;
+				if (!resolve_trait_subject_type(left, left) ||
+				    !resolve_trait_subject_type(right, right))
+					return false;
+				value = pa11::same_type(left, right);
+				return true;
+			}
+			if ((owner == "is_pointer" || owner == "__is_pointer") &&
+			    !args.empty())
+			{
+				TypePtr type;
+				if (!raw_trait_type_argument(args[0], type))
+					return false;
+				TypePtr bare = type.get() != NULL
+					? pa11::strip_cv(type) : TypePtr();
+				if (bare.get() != NULL &&
+				    bare->kind == pa11::TypeKind::Pointer)
+				{
+					value = true;
+					return true;
+				}
+				if (bare.get() != NULL &&
+				    (bare->kind == pa11::TypeKind::LValueReference ||
+				     bare->kind == pa11::TypeKind::RValueReference))
+				{
+					value = false;
+					return true;
+				}
+				if (!resolve_trait_subject_type(type, type))
+					return false;
+				bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+				value = bare.get() != NULL &&
+				        bare->kind == pa11::TypeKind::Pointer;
+				return true;
+			}
+			if ((owner == "is_reference" ||
+			     owner == "__is_reference" ||
+			     owner == "is_lvalue_reference" ||
+			     owner == "is_rvalue_reference") &&
+			    !args.empty())
+			{
+				TypePtr type;
+				if (!raw_trait_type_argument(args[0], type))
+					return false;
+				TypePtr bare = type.get() != NULL
+					? pa11::strip_cv(type) : TypePtr();
+				if (bare.get() != NULL &&
+				    (bare->kind == pa11::TypeKind::LValueReference ||
+				     bare->kind == pa11::TypeKind::RValueReference ||
+				     bare->kind == pa11::TypeKind::Pointer ||
+				     bare->kind == pa11::TypeKind::Function ||
+				     bare->kind == pa11::TypeKind::Record ||
+				     bare->kind == pa11::TypeKind::Enum ||
+				     bare->kind == pa11::TypeKind::Fundamental))
+				{
+					bool lvalue = bare->kind ==
+					              pa11::TypeKind::LValueReference;
+					bool rvalue = bare->kind ==
+					              pa11::TypeKind::RValueReference;
+					if (owner == "is_lvalue_reference")
+						value = lvalue;
+					else if (owner == "is_rvalue_reference")
+						value = rvalue;
+					else
+						value = lvalue || rvalue;
+					return true;
+				}
+				if (!resolve_trait_subject_type(type, type))
+					return false;
+				bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+				bool lvalue = bare.get() != NULL &&
+				              bare->kind == pa11::TypeKind::LValueReference;
+				bool rvalue = bare.get() != NULL &&
+				              bare->kind == pa11::TypeKind::RValueReference;
+				if (owner == "is_lvalue_reference")
+					value = lvalue;
+				else if (owner == "is_rvalue_reference")
+					value = rvalue;
+				else
+					value = lvalue || rvalue;
+				return true;
+			}
+			if ((owner == "is_constructible" ||
+			     owner == "__is_constructible" ||
+			     owner == "is_nothrow_constructible" ||
+			     owner == "__is_nothrow_constructible" ||
+			     owner == "is_trivially_constructible" ||
+			     owner == "__is_trivially_constructible" ||
+			     owner == "is_copy_constructible" ||
+			     owner == "is_nothrow_copy_constructible" ||
+			     owner == "is_trivially_copy_constructible" ||
+			     owner == "is_move_constructible" ||
+			     owner == "is_nothrow_move_constructible" ||
+			     owner == "is_trivially_move_constructible" ||
+			     owner == "is_assignable" ||
+			     owner == "__is_assignable" ||
+			     owner == "is_nothrow_assignable" ||
+			     owner == "__is_nothrow_assignable" ||
+			     owner == "is_trivially_assignable" ||
+			     owner == "__is_trivially_assignable" ||
+			     owner == "is_copy_assignable" ||
+			     owner == "is_nothrow_copy_assignable" ||
+			     owner == "is_trivially_copy_assignable" ||
+			     owner == "is_move_assignable" ||
+			     owner == "is_nothrow_move_assignable" ||
+			     owner == "is_trivially_move_assignable") &&
+			    !args.empty())
+			{
+				vector<TypePtr> types;
+				for (size_t i = 0; i < args.size(); ++i)
+				{
+					TypePtr type;
+					if (!raw_trait_type_argument(args[i], type))
+						return false;
+					if (!resolve_trait_subject_type(type, type))
+						return false;
+					types.push_back(type);
+				}
+				if (parser.hosted_compatibility_ &&
+				    evaluate_hosted_constructible_trait(
+					    types[0],
+					    types,
+					    parser.deleted_functions_,
+					    value))
+					return true;
+				return parser.evaluate_standard_constructible_trait(
+					owner, types, value);
+			}
+			if ((owner == "is_convertible" ||
+			     owner == "__is_convertible") &&
+			    args.size() >= 2)
+			{
+				TypePtr from;
+				TypePtr to;
+				if (!raw_trait_type_argument(args[0], from) ||
+				    !raw_trait_type_argument(args[1], to))
+					return false;
+				if (!resolve_trait_subject_type(from, from) ||
+				    !resolve_trait_subject_type(to, to))
+					return false;
+				Expr probe;
+				probe.valid = true;
+				probe.type = from;
+				probe.category = parser.call_category(from);
+				probe.node = Node("type-trait-probe " +
+				                  pa11::describe_type(from));
+				try
+				{
+					value = parser.convert_to(probe, to).viable;
+				}
+				catch (const runtime_error&)
+				{
+					value = false;
+				}
+				return true;
+			}
+			if (owner == "__not_" && args.size() == 1)
+			{
+				TypePtr type;
+				bool inner = false;
+				if (!trait_type_operand(args[0], type) ||
+				    !evaluate_cheap_trait_type(type, inner))
+					return false;
+				value = !inner;
+				return true;
+			}
+			if (owner == "__and_")
+			{
+				bool all_known = true;
+				value = true;
+				for (size_t i = 0; i < args.size(); ++i)
+				{
+					TypePtr type;
+					bool elem = false;
+					if (!trait_type_operand(args[i], type) ||
+					    !evaluate_cheap_trait_type(type, elem))
+					{
+						all_known = false;
+						continue;
+					}
+					if (!elem)
+					{
+						value = false;
+						return true;
+					}
+				}
+				return all_known;
+			}
+			if (owner == "__or_")
+			{
+				bool all_known = true;
+				value = false;
+				for (size_t i = 0; i < args.size(); ++i)
+				{
+					TypePtr type;
+					bool elem = false;
+					if (!trait_type_operand(args[i], type) ||
+					    !evaluate_cheap_trait_type(type, elem))
+					{
+						all_known = false;
+						continue;
+					}
+					if (elem)
+					{
+						value = true;
+						return true;
+					}
+				}
+				return all_known;
+			}
+			return false;
+		}
+
+		bool evaluate_cheap_trait_type(TypePtr type, bool& value)
+		{
+			TypePtr record = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+			if (record.get() == NULL || record->kind != pa11::TypeKind::Record)
+				return false;
+			string primary = record->template_primary_name.empty()
+				? record->name : record->template_primary_name;
+			primary = unqualified_template_owner(primary);
+			const vector<pa11::TemplateInstanceArgument>* args = NULL;
+			if (!trait_instance_arguments(record, args))
+				return false;
+			return evaluate_cheap_trait_arguments(primary, *args, value);
+		}
+
+		bool cheap_hosted_enable_if_condition_false(
+			const TemplateArgument& arg)
+		{
+			if (!cheap_hosted_enable_if_condition(arg))
+				return false;
+			string owner = unqualified_template_owner(
+				arg.value_owner_template_name);
+			bool value = false;
+			return evaluate_cheap_trait_arguments(
+				       owner,
+				       arg.value_owner_template_arguments,
+				       value) &&
+			       !value;
+		}
+
+			bool can_leave_parameter_type_dependent(TypePtr parameter_type,
+			                                        const runtime_error& err)
+			{
 		if (parser.function_template_candidate_instantiation_depth_ == 0 ||
 		    string(err.what()) != "dependent typename not resolved")
 			return false;
 		TypePtr bare_parameter_type = parameter_type.get() != NULL
 			? pa11::strip_cv(parameter_type) : TypePtr();
-		if (bare_parameter_type.get() == NULL ||
-		    !bare_parameter_type->is_dependent_typename ||
-		    bare_parameter_type->template_arguments.empty())
-			return true;
-		vector<TemplateArgument> candidate_args;
-		try
+			if (bare_parameter_type.get() == NULL ||
+			    !bare_parameter_type->is_dependent_typename ||
+			    bare_parameter_type->template_arguments.empty())
+				return true;
+			if (!dependent_typename_is_enable_if(bare_parameter_type))
+				return true;
+			if (!parser.hosted_compatibility_)
+				return !substituted_condition_false(bare_parameter_type);
+			if (dependent_typename_condition_false(bare_parameter_type))
+				return false;
+			return !dependent_value_condition_false(bare_parameter_type);
+		}
+
+		bool substituted_condition_false(TypePtr type)
 		{
-			for (size_t ai = 0;
-			     ai < bare_parameter_type->template_arguments.size();
-			     ++ai)
+			vector<TemplateArgument> candidate_args;
+			try
 			{
-				TemplateArgument candidate_arg =
-					parser.template_argument_from_instance_argument(
-						bare_parameter_type->template_arguments[ai]);
-				candidate_args.push_back(
-					parser.substitute_template_argument(candidate_arg));
+				for (size_t ai = 0; ai < type->template_arguments.size(); ++ai)
+				{
+					TemplateArgument candidate_arg =
+						parser.template_argument_from_instance_argument(
+							type->template_arguments[ai]);
+					candidate_args.push_back(
+						parser.substitute_template_argument(candidate_arg));
+				}
 			}
+			catch (const runtime_error&)
+			{
+				return false;
+			}
+			return dependent_typename_disabled_enable_if_argument(
+				type,
+				candidate_args);
 		}
-		catch (const runtime_error&)
+
+		bool dependent_value_condition_false(TypePtr type)
 		{
-			return true;
+			if (type.get() == NULL || type->template_arguments.empty())
+				return false;
+			const pa11::TemplateInstanceArgument& condition =
+				type->template_arguments[0];
+			if (condition.kind != pa11::TemplateInstanceArgumentKind::Value ||
+			    !condition.dependent)
+				return false;
+			try
+			{
+				TemplateArgument arg =
+					raw_template_argument_from_instance_argument(condition);
+				if (!arg.value_owner_template_name.empty() &&
+				    !arg.value_member_name.empty())
+				{
+					if (cheap_hosted_enable_if_condition_false(arg))
+						return true;
+					TemplateArgument resolved;
+					if (parser.resolve_dependent_value_member_argument(
+						    arg,
+						    resolved))
+						arg = resolved;
+				}
+				arg = parser.substitute_template_argument(arg);
+				if (arg.kind == TemplateArgumentKind::Value &&
+				    !arg.dependent)
+					return arg.value == 0;
+			}
+			catch (const runtime_error&)
+			{
+			}
+			return false;
 		}
-		return !dependent_typename_disabled_enable_if_argument(
-			bare_parameter_type,
-			candidate_args);
-	}
 
 	void collect_current_substitutions(
 		map<string, TypePtr>& subst,
@@ -465,7 +856,7 @@ struct TemplateArgumentCompleter
 				if (parameter.is_pack)
 				{
 					subst[parameter.name] =
-						pa11::make_template_parameter_type(parameter.name);
+						template_parameter_placeholder_type(parameter);
 					value_subst[parameter.name] = out[i];
 					pack_subst.insert(parameter.name);
 				}
@@ -724,7 +1115,8 @@ struct TemplateArgumentCompleter
 		TypePtr parameter_type = declaration->parameters[parameter_index].type;
 		try
 		{
-			parameter_type = parser.substitute_template_type(parameter_type);
+			parameter_type =
+				substitute_parameter_type_in_declaration_scope(parameter_type);
 		}
 			catch (const runtime_error& err)
 			{
@@ -1009,10 +1401,66 @@ vector<TemplateArgument> Parser::complete_template_arguments(
 	TemplateDeclaration* declaration,
 	const vector<TemplateArgument>& explicit_arguments)
 {
+	vector<size_t> cache_key;
+	cache_key.reserve(16 + explicit_arguments.size() * 2);
+	cache_key.push_back(reinterpret_cast<uintptr_t>(declaration));
+	cache_key.push_back(declaration != NULL ? declaration->parameters.size() : 0);
+	cache_key.push_back(explicit_arguments.size());
+	for (size_t i = 0; i < explicit_arguments.size(); ++i)
+		cache_key.push_back(dependent_cache_template_argument_identity(
+			explicit_arguments[i],
+			0));
+	cache_key.push_back(template_type_substitutions_.size());
+	for (size_t i = 0; i < template_type_substitutions_.size(); ++i)
+	{
+		cache_key.push_back(template_type_substitutions_[i].size());
+		for (map<string, TypePtr>::const_iterator it =
+			     template_type_substitutions_[i].begin();
+		     it != template_type_substitutions_[i].end();
+		     ++it)
+		{
+			cache_key.push_back(dependent_cache_string_hash(it->first));
+			cache_key.push_back(dependent_cache_type_identity(it->second));
+		}
+	}
+	cache_key.push_back(template_value_substitutions_.size());
+	for (size_t i = 0; i < template_value_substitutions_.size(); ++i)
+	{
+		cache_key.push_back(template_value_substitutions_[i].size());
+		for (map<string, TemplateArgument>::const_iterator it =
+			     template_value_substitutions_[i].begin();
+		     it != template_value_substitutions_[i].end();
+		     ++it)
+		{
+			cache_key.push_back(dependent_cache_string_hash(it->first));
+			cache_key.push_back(dependent_cache_template_argument_identity(
+				it->second,
+				0));
+		}
+	}
+	cache_key.push_back(template_type_parameter_packs_.size());
+	for (size_t i = 0; i < template_type_parameter_packs_.size(); ++i)
+	{
+		cache_key.push_back(template_type_parameter_packs_[i].size());
+		for (set<string>::const_iterator it =
+			     template_type_parameter_packs_[i].begin();
+		     it != template_type_parameter_packs_[i].end();
+		     ++it)
+			cache_key.push_back(dependent_cache_string_hash(*it));
+	}
+	map<vector<size_t>, vector<TemplateArgument> >::const_iterator cached =
+		completed_template_argument_cache_.find(cache_key);
+	if (cached != completed_template_argument_cache_.end())
+		return cached->second;
 	TemplateArgumentCompleter completer(*this,
 	                                    declaration,
 	                                    explicit_arguments);
-	return completer.run();
+	vector<TemplateArgument> out = completer.run();
+	completed_template_argument_cache_[cache_key] = out;
+	if (completed_template_argument_cache_.size() >
+	    kCompletedTemplateArgumentCacheLimit)
+		completed_template_argument_cache_.clear();
+	return out;
 }
 
 }  // namespace internal

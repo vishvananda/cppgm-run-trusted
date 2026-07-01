@@ -22,16 +22,44 @@ bool is_member_function_pointer_pattern(TypePtr type)
 bool pattern_mentions_function_template_parameter(
 	TemplateDeclaration* declaration,
 	TypePtr pattern,
-	const map<const void*, vector<TemplateArgument> >& record_arguments)
+	const map<const void*, vector<TemplateArgument> >& record_arguments,
+	map<pair<const void*, string>, bool>& cache)
 {
+	TypePtr bare = pattern.get() != NULL ? pa11::strip_cv(pattern) : TypePtr();
+	pair<const void*, string> any_key(bare.get(), string());
+	map<pair<const void*, string>, bool>::iterator any_cached =
+		cache.find(any_key);
+	bool any_parameter = any_cached != cache.end()
+		? any_cached->second
+		: template_type_has_template_parameter(pattern, record_arguments);
+	if (any_cached == cache.end())
+		cache[any_key] = any_parameter;
+	if (!any_parameter)
+	{
+		string direct_name;
+		if (!template_type_has_template_parameter_name(pattern, direct_name))
+			return false;
+		for (size_t i = 0; i < declaration->parameters.size(); ++i)
+			if (declaration->parameters[i].name == direct_name)
+				return true;
+		return false;
+	}
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
 		const TemplateParameterInfo& parameter = declaration->parameters[i];
 		if (parameter.name.empty())
 			continue;
-		if (type_contains_parameter_name(pattern,
-		                                 parameter.name,
-		                                 record_arguments))
+		pair<const void*, string> key(bare.get(), parameter.name);
+		map<pair<const void*, string>, bool>::iterator cached =
+			cache.find(key);
+		bool contains = cached != cache.end()
+			? cached->second
+			: type_contains_parameter_name(pattern,
+			                               parameter.name,
+			                               record_arguments);
+		if (cached == cache.end())
+			cache[key] = contains;
+		if (contains)
 			return true;
 	}
 	return false;
@@ -114,7 +142,8 @@ TemplateArgument dependent_default_template_argument(
 
 bool call_parameter_pack_name(TemplateDeclaration* declaration,
                               TypePtr pattern,
-                              string& name)
+                              string& name,
+                              map<const void*, pair<bool, string> >& cache)
 {
 	if (pattern.get() == NULL)
 		return false;
@@ -128,7 +157,7 @@ bool call_parameter_pack_name(TemplateDeclaration* declaration,
 			? pa11::strip_cv(bare->base) : TypePtr();
 		if (base.get() != NULL && base->kind == pa11::TypeKind::Function)
 			return false;
-		return call_parameter_pack_name(declaration, bare->base, name);
+		return call_parameter_pack_name(declaration, bare->base, name, cache);
 	}
 	if (bare->kind == pa11::TypeKind::Function)
 		return false;
@@ -139,7 +168,10 @@ bool call_parameter_pack_name(TemplateDeclaration* declaration,
 		if (base.get() != NULL && base->kind == pa11::TypeKind::Function)
 			return false;
 	}
-	return function_parameter_pack_name(declaration, pattern, name);
+	return function_parameter_pack_name(declaration,
+	                                    pattern,
+	                                    name,
+	                                    &cache);
 }
 
 }  // namespace
@@ -225,13 +257,17 @@ bool Parser::deduce_explicit_function_template_arguments(
 		const TemplateParameterInfo& parameter = declaration->parameters[i];
 		if (parameter.name.empty())
 		{
+			const TemplateArgument& explicit_arg =
+				explicit_arguments[explicit_index];
 			if (!deduce_explicit_single_template_argument(
 				    parameter,
-				    explicit_arguments[explicit_index++],
+				    explicit_arg,
 				    deduced,
 				    fixed,
 				    fixed_arguments))
 				return false;
+			fixed_arguments["#" + to_string(i)] = explicit_arg;
+			++explicit_index;
 			continue;
 		}
 		if (parameter.is_pack)
@@ -254,17 +290,6 @@ bool Parser::deduce_explicit_function_template_arguments(
 	}
 	if (explicit_index != explicit_arguments.size())
 		return false;
-	if (explicit_arguments.size() != declaration->parameters.size())
-		return true;
-	try
-	{
-		out = complete_template_arguments(declaration, explicit_arguments);
-	}
-	catch (const runtime_error&)
-	{
-		return false;
-	}
-	complete = true;
 	return true;
 }
 
@@ -581,6 +606,8 @@ bool Parser::deduce_regular_template_call_argument(
 	map<string, TypePtr>& fixed,
 	map<string, TemplateArgument>& fixed_arguments) const
 {
+	if (actual.type.get() == NULL)
+		return false;
 	TypePtr argument = expression_object_type(actual.type);
 	TypePtr bare_pattern = pa11::strip_cv(pattern);
 	if (bare_pattern->kind == pa11::TypeKind::RValueReference &&
@@ -619,11 +646,13 @@ bool Parser::deduce_function_template_call_parameters(
 	TypePtr fn,
 	const vector<Expr>& args,
 	map<string, TypePtr>& deduced,
-	map<string, TypePtr>& fixed,
-	map<string, vector<TemplateArgument> >& deduced_packs,
-	map<string, TemplateArgument>& fixed_arguments,
-	size_t& arg_index) const
-{
+		map<string, TypePtr>& fixed,
+		map<string, vector<TemplateArgument> >& deduced_packs,
+		map<string, TemplateArgument>& fixed_arguments,
+		size_t& arg_index) const
+	{
+		map<pair<const void*, string>, bool> pattern_parameter_cache;
+		map<const void*, pair<bool, string> > pack_name_cache;
 	for (size_t i = 0; i < fn->parameters.size(); ++i)
 	{
 		TypePtr pattern = fn->parameters[i];
@@ -633,12 +662,26 @@ bool Parser::deduce_function_template_call_parameters(
 			pattern = substitute_template_type_parameter(pattern,
 			                                             fit->first,
 			                                             fit->second);
-			string pack_name;
-			bool parameter_pack =
-				call_parameter_pack_name(declaration, pattern, pack_name);
+				string pack_name;
+				bool have_pack_metadata =
+					!declaration->function_parameter_pack_expansions.empty();
+				bool parameter_pack =
+					have_pack_metadata
+					? i < declaration->function_parameter_pack_expansions.size() &&
+					  declaration->function_parameter_pack_expansions[i]
+					: call_parameter_pack_name(declaration,
+					                          pattern,
+					                          pack_name,
+					                          pack_name_cache);
 			size_t remaining = fn->parameters.size() - i - 1;
 		if (parameter_pack)
 		{
+			if (pack_name.empty() &&
+			    !call_parameter_pack_name(declaration,
+			                              pattern,
+			                              pack_name,
+			                              pack_name_cache))
+				return false;
 			if (!deduce_function_template_parameter_pack(declaration,
 			                                            pattern,
 			                                            pack_name,
@@ -658,7 +701,8 @@ bool Parser::deduce_function_template_call_parameters(
 			pattern_mentions_function_template_parameter(
 			    declaration,
 			    pattern,
-			    record_template_arguments_);
+			    record_template_arguments_,
+			    pattern_parameter_cache);
 		if (!pattern_mentions_parameter)
 		{
 			++arg_index;
@@ -709,8 +753,22 @@ bool Parser::append_deduced_function_template_argument(
 	vector<TemplateArgument>& explicit_args)
 {
 	const string& pname = parameter.name;
+	if (pname.empty())
+	{
+		map<string, TemplateArgument>::iterator fixed_unnamed =
+			fixed_arguments.find("#" + to_string(parameter_index));
+		if (fixed_unnamed != fixed_arguments.end())
+		{
+			explicit_args.push_back(fixed_unnamed->second);
+			return true;
+		}
+		if (!parameter.has_default)
+			return false;
+	}
 	if (parameter.is_pack)
 	{
+		if (pname.empty())
+			return false;
 		map<string, TemplateArgument>::iterator fixed_pack =
 			fixed_arguments.find(pname);
 		if (fixed_pack != fixed_arguments.end())
@@ -746,8 +804,6 @@ bool Parser::append_deduced_function_template_argument(
 				TemplateArgument::type_arg(found->second));
 		else if (parameter.has_default)
 		{
-			if (saw_template_parameter_pack)
-				return false;
 			if (hosted_compatibility_ &&
 			    validating_template_definition_ &&
 			    hosted_library_template_declaration(declaration))
@@ -766,11 +822,21 @@ bool Parser::append_deduced_function_template_argument(
 					                                parameter_index,
 					                                explicit_args));
 			}
-			catch (const runtime_error& err)
-			{
+					catch (const runtime_error& err)
+					{
+						string message = err.what();
+						bool sfinae_default_failure =
+						message == "dependent typename not resolved" ||
+						message == "missing template argument" ||
+					message == "too many template arguments" ||
+					message == "template argument arity mismatch" ||
+					message == "template argument kind mismatch" ||
+					message == "template pack argument kind mismatch";
 				if (function_template_candidate_instantiation_depth_ == 0 ||
-				    string(err.what()) != "dependent typename not resolved")
+				    !sfinae_default_failure)
 					throw;
+				if (message != "dependent typename not resolved")
+					return false;
 				bool dependent_context = false;
 				for (size_t ai = 0; ai < explicit_args.size(); ++ai)
 					if (template_argument_has_template_parameter(
@@ -797,11 +863,16 @@ bool Parser::append_deduced_function_template_argument(
 	map<string, TemplateArgument>::iterator found =
 		fixed_arguments.find(pname);
 	if (found != fixed_arguments.end())
-		explicit_args.push_back(found->second);
+	{
+		TemplateArgument arg = found->second;
+		if (parameter.kind == TemplateParameterKind::NonType)
+			arg = convert_completed_non_type_template_argument(
+				arg,
+				parameter.type);
+		explicit_args.push_back(arg);
+	}
 	else if (parameter.has_default)
 	{
-		if (saw_template_parameter_pack)
-			return false;
 		if (hosted_compatibility_ &&
 		    validating_template_definition_ &&
 		    hosted_library_template_declaration(declaration))
@@ -844,7 +915,7 @@ bool Parser::finish_deduced_function_template_arguments(
 			    fixed_arguments,
 			    saw_template_parameter_pack,
 			    explicit_args))
-			break;
+			return false;
 	}
 	try
 	{
@@ -869,13 +940,15 @@ bool Parser::deduce_function_template_arguments(
 		return false;
 	bool has_template_parameter_pack = false;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+	{
 		if (declaration->parameters[i].is_pack)
 			has_template_parameter_pack = true;
-		if (explicit_arguments.size() > declaration->parameters.size() &&
-		    !has_template_parameter_pack)
-			return false;
-		TypePtr fn = declaration->generic_function_type;
-		map<string, TypePtr> deduced;
+	}
+	if (explicit_arguments.size() > declaration->parameters.size() &&
+	    !has_template_parameter_pack)
+		return false;
+	TypePtr fn = declaration->generic_function_type;
+	map<string, TypePtr> deduced;
 	map<string, TypePtr> fixed;
 	map<string, vector<TemplateArgument> > deduced_packs;
 	map<string, TemplateArgument> fixed_arguments;
@@ -888,9 +961,7 @@ bool Parser::deduce_function_template_arguments(
 	                                                fixed_arguments,
 	                                                out,
 	                                                complete))
-	{
 		return false;
-	}
 	if (complete)
 		return true;
 	size_t arg_index = 0;
@@ -926,20 +997,14 @@ bool Parser::deduce_function_template_arguments(
 		                                         arg_index);
 	template_type_parameter_packs_ = save_pack_subst;
 	if (!call_parameters_deduced)
-	{
 		return false;
-	}
 	if (arg_index != args.size() && !fn->variadic)
-	{
 		return false;
-	}
-	bool finished =
-		finish_deduced_function_template_arguments(declaration,
-		                                           deduced,
-	                                           deduced_packs,
-	                                           fixed_arguments,
-	                                           out);
-	return finished;
+	return finish_deduced_function_template_arguments(declaration,
+	                                                  deduced,
+	                                                  deduced_packs,
+	                                                  fixed_arguments,
+	                                                  out);
 }
 
 }  // namespace internal

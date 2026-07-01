@@ -27,6 +27,19 @@ bool hosted_std_template_declaration(const TemplateDeclaration* declaration,
 	return scope_has_namespace_named(scope, "std");
 }
 
+bool hosted_library_template_declaration(const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return false;
+	Scope* scope = declaration->placeholder != NULL
+		? declaration->placeholder->owner : declaration->owner;
+	for (; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace &&
+		    (scope->name == "std" || scope->name == "__gnu_cxx"))
+			return true;
+	return false;
+}
+
 string unqualified_template_primary_name(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -36,6 +49,17 @@ string unqualified_template_primary_name(TypePtr type)
 		? bare->name : bare->template_primary_name;
 	size_t pos = primary.rfind("::");
 	return pos == string::npos ? primary : primary.substr(pos + 2);
+}
+
+bool dependent_enable_if_typename(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || !bare->is_dependent_typename)
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	return primary == "enable_if" ||
+	       primary == "enable_if_t" ||
+	       primary == "__enable_if_t";
 }
 
 bool hosted_std_template_record(TypePtr type, const string& primary)
@@ -80,7 +104,12 @@ Binding* FunctionTemplateInstantiationEngine::instantiate_with_substitutions(
 {
 	(void)full_args_dependent;
 	bool argument_dependent = instantiated_arguments_are_dependent();
-	if (argument_dependent)
+	bool replay_body_with_dependent_defaults =
+		argument_dependent &&
+		declaration->constructor_template &&
+		declaration->has_definition &&
+		p.function_template_candidate_instantiation_depth_ == 0;
+	if (argument_dependent && !replay_body_with_dependent_defaults)
 		return instantiate_dependent_signature();
 	if (!declaration->constructor_template &&
 	    should_create_candidate_signature(has_template_parameter_default()))
@@ -108,6 +137,9 @@ TypePtr FunctionTemplateInstantiationEngine::substitute_dependent_signature_type
 		    string(err.what()) != "dependent typename not resolved" ||
 		    declaration->generic_function_type.get() == NULL ||
 		    declaration->generic_function_type->kind != pa11::TypeKind::Function)
+			throw;
+		if (dependent_enable_if_typename(
+			    declaration->generic_function_type->base))
 			throw;
 		vector<TypePtr> params;
 		for (size_t i = 0;
@@ -166,6 +198,10 @@ bool FunctionTemplateInstantiationEngine::should_create_candidate_signature(
 		declaration->has_definition &&
 		declaration->decl_begin < declaration->decl_end &&
 		has_template_default;
+	if (replay_candidate_signature &&
+	    p.hosted_compatibility_ &&
+	    hosted_library_template_declaration(declaration))
+		return true;
 	if (replay_candidate_signature)
 		return false;
 	if (!declaration->has_definition &&
@@ -262,10 +298,21 @@ Binding* FunctionTemplateInstantiationEngine::instantiate_candidate_signature(
 	TypePtr type = substitute_candidate_signature_type(
 		generic_return_is_decltype(),
 		deferred_candidate_return);
-	(void)argument_dependent;
-	model_hosted_candidate_type(type);
-	if (invalid_candidate_signature(type, deferred_candidate_return))
-		throw runtime_error("invalid substituted function type");
+	if (!deferred_candidate_return &&
+	    (p.function_template_candidate_instantiation_depth_ != 0 ||
+	     p.replaying_dependent_decltype_) &&
+	    generic_return_is_decltype() &&
+	    type.get() != NULL &&
+	    type->kind == pa11::TypeKind::Function &&
+	    type->base.get() != NULL &&
+	    type->base->is_dependent_typename &&
+	    type->base->dependent_typename_decltype)
+		deferred_candidate_return = true;
+		(void)argument_dependent;
+		model_hosted_candidate_type(type);
+		resolve_dependent_enable_if_return_type(type);
+		if (invalid_candidate_signature(type, deferred_candidate_return))
+			throw runtime_error("invalid substituted function type");
 	Binding* binding = create_specialization_binding(type, false);
 	copy_placeholder_properties(binding, true);
 	if (replaced_specialization != NULL && replaced_specialization != binding)
@@ -300,6 +347,7 @@ void FunctionTemplateInstantiationEngine::model_hosted_candidate_type(
 	model_hosted_write_type(type);
 	model_hosted_function_assignment_type(type);
 	model_hosted_vector_insert_type(type);
+	model_hosted_make_pair_type(type);
 }
 
 void FunctionTemplateInstantiationEngine::model_hosted_write_type(TypePtr& type)
@@ -410,6 +458,93 @@ void FunctionTemplateInstantiationEngine::model_hosted_vector_insert_type(
 		type = modeled;
 }
 
+void FunctionTemplateInstantiationEngine::model_hosted_make_pair_type(
+	TypePtr& type)
+{
+	if (!p.hosted_compatibility_ ||
+	    p.function_template_candidate_instantiation_depth_ == 0 ||
+	    type.get() == NULL || type->kind != pa11::TypeKind::Function ||
+	    (!type_structurally_dependent(type) && substituted_type_is_valid(type)) ||
+	    !hosted_std_template_declaration(declaration, "make_pair") ||
+	    full_args.size() < 2 ||
+	    full_args[0].kind != TemplateArgumentKind::Type ||
+	    full_args[1].kind != TemplateArgumentKind::Type ||
+	    full_args[0].type.get() == NULL ||
+	    full_args[1].type.get() == NULL ||
+	    type_structurally_dependent(full_args[0].type) ||
+	    type_structurally_dependent(full_args[1].type))
+		return;
+	TypePtr first = decay_type(full_args[0].type);
+	TypePtr second = decay_type(full_args[1].type);
+	if (first.get() == NULL || second.get() == NULL ||
+	    type_structurally_dependent(first) ||
+	    type_structurally_dependent(second))
+		return;
+	TemplateDeclaration* pair_template =
+		p.find_class_template(declaration->owner, "pair");
+	if (pair_template == NULL)
+		pair_template = p.find_class_template(NULL, "pair");
+	if (pair_template == NULL)
+		return;
+	vector<TemplateArgument> pair_args;
+	pair_args.push_back(TemplateArgument::type_arg(first));
+	pair_args.push_back(TemplateArgument::type_arg(second));
+	TypePtr pair_type;
+	try
+	{
+		pair_type = p.instantiate_class_template(pair_template, pair_args);
+	}
+	catch (const exception&)
+	{
+		return;
+	}
+	if (pair_type.get() == NULL || type_structurally_dependent(pair_type))
+		return;
+	vector<TypePtr> params;
+	params.push_back(hosted_forwarding_argument_parameter(full_args[0].type));
+	params.push_back(hosted_forwarding_argument_parameter(full_args[1].type));
+	TypePtr modeled = pa11::make_function(pair_type, params, false);
+	modeled->cv = type->cv;
+	modeled->ref_qualifier = type->ref_qualifier;
+	if (!type_structurally_dependent(modeled))
+		type = modeled;
+}
+
+bool FunctionTemplateInstantiationEngine::resolve_dependent_enable_if_return_type(
+	TypePtr& type)
+{
+	if (type.get() == NULL ||
+	    type->kind != pa11::TypeKind::Function ||
+	    type->base.get() == NULL ||
+	    !dependent_enable_if_typename(type->base))
+		return false;
+	TypePtr result = pa11::strip_cv(type->base);
+	vector<TemplateArgument> args;
+	for (size_t i = 0; i < result->template_arguments.size(); ++i)
+	{
+		TemplateArgument arg =
+			p.template_argument_from_instance_argument(
+				result->template_arguments[i]);
+		args.push_back(p.substitute_template_argument(arg));
+	}
+	if (args.empty() ||
+	    args[0].kind != TemplateArgumentKind::Value ||
+	    args[0].dependent ||
+	    args[0].value == 0)
+		return false;
+	TypePtr enabled = args.size() >= 2 &&
+	                  args[1].kind == TemplateArgumentKind::Type
+		? args[1].type
+		: pa11::make_fundamental(FT_VOID);
+	TypePtr modeled = pa11::make_function(enabled,
+	                                      type->parameters,
+	                                      type->variadic);
+	modeled->cv = type->cv;
+	modeled->ref_qualifier = type->ref_qualifier;
+	type = modeled;
+	return true;
+}
+
 TypePtr FunctionTemplateInstantiationEngine::substitute_constructor_candidate_type()
 {
 	return p.substitute_function_template_type(
@@ -461,6 +596,8 @@ void FunctionTemplateInstantiationEngine::copy_placeholder_properties(
 	if (declaration->placeholder == NULL)
 		return;
 	binding->is_static_member = declaration->placeholder->is_static_member;
+	binding->is_inline_definition =
+		declaration->placeholder->is_inline_definition;
 	binding->is_constexpr = declaration->placeholder->is_constexpr;
 	binding->is_explicit = declaration->placeholder->is_explicit;
 	binding->is_defaulted = declaration->placeholder->is_defaulted;
@@ -488,15 +625,33 @@ void FunctionTemplateInstantiationEngine::copy_placeholder_properties(
 	map<Binding*, vector<Expr> >::const_iterator defaults =
 		p.default_arguments_.find(declaration->placeholder);
 	if (defaults != p.default_arguments_.end())
-		p.default_arguments_[binding] = defaults->second;
+		p.default_arguments_[binding] =
+			default_arguments_for_binding(binding, defaults->second);
 }
 
 void FunctionTemplateInstantiationEngine::assign_specialization_symbol(
 	Binding* binding,
 	bool include_non_member)
 {
+	if (binding == NULL)
+		return;
+	if (!binding->function_specialization_symbol.empty())
+		return;
+	const void* owner_key = binding->owner;
+	pair<pair<TemplateDeclaration*, string>, pair<const void*, bool> >
+		cache_key = make_pair(make_pair(declaration, key),
+		                      make_pair(owner_key, include_non_member));
+	map<pair<pair<TemplateDeclaration*, string>, pair<const void*, bool> >,
+	    string>::iterator cached =
+		p.function_template_specialization_symbol_cache_.find(cache_key);
+	if (cached != p.function_template_specialization_symbol_cache_.end())
+	{
+		binding->function_specialization_symbol = cached->second;
+		return;
+	}
+	string symbol;
 	if (declaration->class_template_member)
-		binding->function_specialization_symbol =
+		symbol =
 			constructor_template_function_template_symbol(declaration) ||
 			class_template_member_function_template_symbol(declaration)
 			? abi_function_template_specialization_symbol(
@@ -506,12 +661,17 @@ void FunctionTemplateInstantiationEngine::assign_specialization_symbol(
 				&p.declaration_tokens_)
 			: abi_binding_symbol(binding, map<string, size_t>());
 	else if (include_non_member)
-		binding->function_specialization_symbol =
+		symbol =
 			abi_function_template_specialization_symbol(
 				declaration,
 				full_args,
 				binding,
 				&p.declaration_tokens_);
+	if (!symbol.empty())
+	{
+		p.function_template_specialization_symbol_cache_[cache_key] = symbol;
+		binding->function_specialization_symbol = symbol;
+	}
 }
 
 void FunctionTemplateInstantiationEngine::assign_aliased_class_member_symbol(

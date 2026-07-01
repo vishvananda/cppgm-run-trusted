@@ -1,0 +1,26 @@
+#include <map>
+#include <string>
+
+int main()
+{
+  std::map<std::string, int> values;
+  values["TABSIZE"] = 100;
+
+  if (values.size() != 1)
+    return 1;
+  if (values.begin() == values.end())
+    return 2;
+  if (!(values.begin()->first == "TABSIZE"))
+    return 3;
+  if (values.begin()->second != 100)
+    return 4;
+
+  std::map<std::string, int>::iterator it = values.find("TABSIZE");
+  if (it == values.end())
+    return 5;
+  if (!(it->first == "TABSIZE"))
+    return 6;
+  if (it->second != 100)
+    return 7;
+  return 0;
+}

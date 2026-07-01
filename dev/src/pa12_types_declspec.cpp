@@ -307,7 +307,9 @@ DeclSpecs Parser::parse_decl_specifier_seq(bool type_id_context)
 		break;
 	}
 	if (!saw_any || !saw_non_cv_type)
+	{
 		throw runtime_error("expected declaration specifiers");
+	}
 	return specs;
 }
 
@@ -457,45 +459,73 @@ bool Parser::decltype_concrete_substitution_context() const
 	return concrete;
 }
 
-TypePtr Parser::parse_dependent_decltype_fallback(size_t save)
+size_t Parser::dependent_decltype_operand_end(size_t save) const
 {
-	pos_ = save;
 	int paren = 0;
 	int angle = 0;
 	int square = 0;
 	int brace = 0;
-	while (!at_eof())
+	size_t end = save;
+	while (end < tokens_.size())
 	{
-		if (paren == 0 && angle == 0 && square == 0 &&
-		    brace == 0 && at(OP_RPAREN))
+		ETokenType type = tokens_[end].type;
+		if (paren == 0 && angle == 0 && square == 0 && brace == 0 &&
+		    type == OP_RPAREN)
 			break;
-		if (at(OP_LPAREN))
+		if (type == OP_LPAREN)
 			++paren;
-		else if (at(OP_RPAREN))
+		else if (type == OP_RPAREN)
 		{
 			if (paren == 0)
 				break;
 			--paren;
 		}
-		else if (at(OP_LT))
+		else if (type == OP_LT)
 			++angle;
-		else if (at(OP_GT) && angle > 0)
+		else if (type == OP_GT && angle > 0)
 			--angle;
-		else if (at(OP_LSQUARE))
+		else if (type == OP_LSQUARE)
 			++square;
-		else if (at(OP_RSQUARE) && square > 0)
+		else if (type == OP_RSQUARE && square > 0)
 			--square;
-		else if (at(OP_LBRACE))
+		else if (type == OP_LBRACE)
 			++brace;
-		else if (at(OP_RBRACE) && brace > 0)
+		else if (type == OP_RBRACE && brace > 0)
 			--brace;
-		++pos_;
+		++end;
 	}
+	return end;
+}
+
+bool Parser::try_parse_dependent_decltype_operand(size_t save, TypePtr& out)
+{
+	bool concrete = decltype_concrete_substitution_context();
+	if (function_template_candidate_instantiation_depth_ != 0 ||
+	    (concrete && !active_class_instantiation_dependent()))
+		return false;
+	if (template_type_substitutions_.empty() &&
+	    template_value_substitutions_.empty() &&
+	    active_class_instantiations_.empty() &&
+	    !validating_template_definition_)
+		return false;
+	size_t end = dependent_decltype_operand_end(save);
+	if (end >= tokens_.size() || tokens_[end].type != OP_RPAREN)
+		return false;
+	if (!decltype_mentions_active_template_parameter(save, end))
+		return false;
+	out = parse_dependent_decltype_fallback(save);
+	return true;
+}
+
+TypePtr Parser::parse_dependent_decltype_fallback(size_t save)
+{
+	pos_ = dependent_decltype_operand_end(save);
 	TypePtr dependent = pa11::make_dependent_typename_type(
 		"decltype(" + dependent_token_spelling(tokens_, save, pos_) + ")",
 		false,
 		false,
 		true);
+	dependent->scope = current_scope();
 	expect(OP_RPAREN);
 	return dependent;
 }
@@ -524,8 +554,6 @@ void Parser::replay_decltype_substitution(Expr& expr)
 bool Parser::decltype_mentions_active_template_parameter(size_t begin,
                                                          size_t end) const
 {
-	if (replaying_dependent_decltype_)
-		return false;
 	for (size_t i = begin; i < end; ++i)
 	{
 		if (tokens_[i].kind != posttoken::TokenKind::Identifier)
@@ -542,21 +570,31 @@ bool Parser::decltype_mentions_active_template_parameter(size_t begin,
 
 TypePtr Parser::finish_decltype_expression_type(size_t save, Expr& expr)
 {
+	string spelling = dependent_token_spelling(tokens_, save, pos_);
 	replay_decltype_substitution(expr);
 	bool parenthesized_operand =
 		decltype_operand_is_parenthesized(tokens_, save, pos_);
+	TypePtr replay_record = expr.type.get() != NULL
+		? pa11::strip_cv(expression_object_type(expr.type)) : TypePtr();
+	bool replay_known_record =
+		replaying_dependent_decltype_ &&
+		replay_record.get() != NULL &&
+		replay_record->kind == pa11::TypeKind::Record &&
+		replay_record->scope != NULL &&
+		!replay_record->is_dependent_typename;
 	bool defer_decltype =
-		type_is_template_dependent(expr.type) ||
+		(!replay_known_record && type_is_template_dependent(expr.type)) ||
 		(!replaying_dependent_decltype_ &&
 		 (expr_node_structurally_dependent(expr.node) ||
 		  decltype_mentions_active_template_parameter(save, pos_)));
 	if (defer_decltype)
 	{
 		TypePtr dependent = pa11::make_dependent_typename_type(
-			"decltype(" + dependent_token_spelling(tokens_, save, pos_) + ")",
+			"decltype(" + spelling + ")",
 			false,
 			false,
 			true);
+		dependent->scope = current_scope();
 		expect(OP_RPAREN);
 		return dependent;
 	}
@@ -582,6 +620,8 @@ TypePtr Parser::parse_decltype_specifier()
 	size_t save = pos_;
 	TypePtr named;
 	if (try_parse_decltype_named_operand(save, named))
+		return named;
+	if (try_parse_dependent_decltype_operand(save, named))
 		return named;
 	++unevaluated_expression_depth_;
 	Expr expr;

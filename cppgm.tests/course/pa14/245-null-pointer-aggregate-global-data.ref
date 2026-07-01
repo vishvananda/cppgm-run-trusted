@@ -1,0 +1,55 @@
+global @__strlit__1 [binding=internal] = {
+  i8 111
+  i8 107
+  i8 0
+}
+global @paths [binding=internal, object=_Z5paths] = {
+  zero 8
+  ptr addr @__strlit__1
+}
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $cond__1 : i32
+  slot $land__2 : i64
+
+  block ^entry:
+    %t1 = addr @paths
+    %t2 = unary decay ptr %t1
+    %t3 = index ptr [projection=array_element] %t2, 0
+    %t4 = load ptr %t3
+    %t5 = cmp eq ptr %t4, 0
+    branch %t5, ^land_rhs_4, ^land_short_5
+
+  block ^land_rhs_4:
+    %t6 = addr @paths
+    %t7 = unary decay ptr %t6
+    %t8 = index ptr [projection=array_element] %t7, 1
+    %t9 = load ptr %t8
+    %t10 = index i8 [projection=array_element] %t9, 0
+    %t11 = load i8 %t10
+    %t12 = convert sext i32 i8 %t11
+    %t13 = cmp eq i32 %t12, 111
+    %t14 = cmp ne i64 %t13, 0
+    store i64 %t14, $land__2
+    jump ^land_end_6
+
+  block ^land_short_5:
+    store i64 0, $land__2
+    jump ^land_end_6
+
+  block ^land_end_6:
+    %t15 = load i64 $land__2
+    branch %t15, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t16 = load i32 $cond__1
+    return i32 %t16
+}

@@ -70,6 +70,7 @@ struct TemplateParameterInfo
 	TemplateParameterKind kind;
 	string name;
 	TypePtr type;
+	TypePtr placeholder_type;
 	vector<TemplateParameterInfo> template_parameters;
 	bool is_pack;
 	bool has_default;
@@ -77,6 +78,8 @@ struct TemplateParameterInfo
 	size_t default_end;
 	TemplateParameterInfo();
 };
+TypePtr template_parameter_placeholder_type(
+	const TemplateParameterInfo& parameter);
 enum class TemplateDeclarationKind
 {
 	Unknown,
@@ -105,8 +108,10 @@ struct TemplateDeclaration
 	Scope* friend_class_scope;
 	TypePtr generic_function_type;
 	vector<string> function_parameter_names;
+	vector<bool> function_parameter_pack_expansions;
 	Binding* placeholder;
 	Binding* inherited_constructor_base;
+	TemplateDeclaration* inherited_constructor_base_template;
 	TypePtr inherited_constructor_base_type;
 	vector<map<string, TypePtr> > outer_type_substitutions;
 	vector<map<string, TemplateArgument> > outer_value_substitutions;

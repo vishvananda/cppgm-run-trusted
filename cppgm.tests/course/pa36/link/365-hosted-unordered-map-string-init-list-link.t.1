@@ -1,0 +1,30 @@
+#include <string>
+#include <unordered_map>
+
+const std::unordered_map<std::string, int> global_table = {
+  {"int", 1},
+  {";", 2}
+};
+
+int check_table(const std::unordered_map<std::string, int>& table) {
+  if (table.size() != 2) return 10;
+  std::unordered_map<std::string, int>::const_iterator a = table.find("int");
+  std::unordered_map<std::string, int>::const_iterator b = table.find(";");
+  if (a == table.end()) return 1;
+  if (b == table.end()) return 2;
+  if (a->second != 1) return 3;
+  if (b->second != 2) return 4;
+  return 0;
+}
+
+int main() {
+  int global_result = check_table(global_table);
+  if (global_result != 0) return global_result;
+  const std::unordered_map<std::string, int> local_table = {
+    {"int", 1},
+    {";", 2}
+  };
+  int local_result = check_table(local_table);
+  if (local_result != 0) return 20 + local_result;
+  return 0;
+}

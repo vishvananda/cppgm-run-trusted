@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 #include "pa12_templates_function_support.h"
 
 namespace pa14 {
@@ -24,7 +25,7 @@ void demand_record_return_calls(ProgramLowerer& program, const Node& node)
 bool call_binding_has_template_cleanup_context(const Binding* binding)
 {
 	return binding != NULL &&
-	       (!binding->function_specialization_symbol.empty() ||
+	       (binding_has_function_template_specialization_symbol(binding) ||
 	        binding_has_template_specialization_context(binding));
 }
 
@@ -44,223 +45,6 @@ bool function_template_specialization_call(const Binding* binding)
 	return !function_template_specialization_symbol(binding).empty();
 }
 
-bool hosted_std_namespace_scope(const Scope* scope)
-{
-	for (const Scope* cur = scope; cur != NULL; cur = cur->parent)
-		if (cur->kind == ScopeKind::Namespace && cur->name == "std")
-			return true;
-	return false;
-}
-
-bool hosted_make_shared_binding(const Binding* binding)
-{
-	return binding != NULL &&
-	       binding->name == "make_shared" &&
-	       binding->owner != NULL &&
-	       hosted_std_namespace_scope(binding->owner);
-}
-
-bool hosted_shared_ptr_element(TypePtr type, TypePtr& element)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (!hosted_shared_ptr_record(bare) ||
-	    bare->template_arguments.empty() ||
-	    bare->template_arguments[0].kind !=
-		    pa11::TemplateInstanceArgumentKind::Type)
-		return false;
-	element = bare->template_arguments[0].type;
-	return element.get() != NULL;
-}
-
-TypePtr normalized_value_type(TypePtr type)
-{
-	return type.get() != NULL ? pa11::strip_cv(strip_for_value(type)) :
-		TypePtr();
-}
-
-bool same_unqualified_type(TypePtr left, TypePtr right)
-{
-	return left.get() != NULL &&
-	       right.get() != NULL &&
-	       pa11::same_type(pa11::strip_cv(left), pa11::strip_cv(right));
-}
-
-string unqualified_template_primary_name(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
-		return "";
-	string primary = bare->template_primary_name.empty()
-		? bare->name : bare->template_primary_name;
-	size_t pos = primary.rfind("::");
-	return pos == string::npos ? primary : primary.substr(pos + 2);
-}
-
-bool hosted_basic_string_record(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL ||
-	    bare->kind != TypeKind::Record ||
-	    !bare->is_template_specialization ||
-	    bare->scope == NULL ||
-	    unqualified_template_primary_name(bare) != "basic_string")
-		return false;
-	return hosted_std_namespace_scope(bare->scope);
-}
-
-bool hosted_vector_bool_record(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL ||
-	    bare->kind != TypeKind::Record ||
-	    !bare->is_template_specialization ||
-	    bare->scope == NULL ||
-	    unqualified_template_primary_name(bare) != "vector" ||
-	    bare->template_arguments.empty() ||
-	    bare->template_arguments[0].kind !=
-		    pa11::TemplateInstanceArgumentKind::Type)
-		return false;
-	TypePtr element = pa11::strip_cv(bare->template_arguments[0].type);
-	return element.get() != NULL &&
-	       element->kind == TypeKind::Fundamental &&
-	       element->fundamental == FT_BOOL &&
-	       hosted_std_namespace_scope(bare->scope);
-}
-
-bool hosted_vector_bool_insert_aux_binding(const Binding* binding)
-{
-	return binding != NULL &&
-	       binding->name == "_M_insert_aux" &&
-	       hosted_vector_bool_record(class_record_for_member(binding));
-}
-
-bool literal_char_pointer_argument(const Node& arg)
-{
-	return !arg.token_text.empty() &&
-	       arg.token_text[arg.token_text.size() - 1] == '"';
-}
-
-bool char_pointer_value_type(TypePtr type)
-{
-	TypePtr value = normalized_value_type(type);
-	TypePtr pointee = value.get() != NULL &&
-	                  value->kind == TypeKind::Pointer
-		? pa11::strip_cv(value->base) : TypePtr();
-	return pointee.get() != NULL &&
-	       pointee->kind == TypeKind::Fundamental &&
-	       pointee->fundamental == FT_CHAR;
-}
-
-Binding* find_basic_string_cstr_constructor(TypePtr type,
-                                            TypePtr& allocator)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (!hosted_basic_string_record(bare) ||
-	    bare->scope == NULL ||
-	    bare->template_arguments.size() < 3 ||
-	    bare->template_arguments[2].kind !=
-		    pa11::TemplateInstanceArgumentKind::Type)
-		return NULL;
-	TypePtr alloc_arg = bare->template_arguments[2].type;
-	map<string, vector<Binding*> >::const_iterator found =
-		bare->scope->members.find(bare->scope->name);
-	if (found == bare->scope->members.end())
-		return NULL;
-	for (size_t i = 0; i < found->second.size(); ++i)
-	{
-		Binding* binding = found->second[i];
-		if (binding == NULL ||
-		    binding->kind != BindingKind::Function ||
-		    binding->type.get() == NULL ||
-		    binding->type->kind != TypeKind::Function ||
-		    binding->type->parameters.size() != 3 ||
-		    !char_pointer_value_type(binding->type->parameters[1]) ||
-		    !is_reference(binding->type->parameters[2]))
-			continue;
-		TypePtr param_alloc =
-			pa11::strip_cv(binding->type->parameters[2]->base);
-		if (!same_unqualified_type(param_alloc, alloc_arg))
-			continue;
-		allocator = param_alloc;
-		return canonical_constructor_binding(binding);
-	}
-	return NULL;
-}
-
-int constructor_parameter_score(TypePtr param, const Node& arg)
-{
-	TypePtr arg_type = substituted_expression_type(arg);
-	TypePtr param_value =
-		normalized_value_type(is_reference(param) ? param->base : param);
-	TypePtr arg_value = normalized_value_type(arg_type);
-	if (param_value.get() == NULL || arg_value.get() == NULL)
-		return -1;
-	if (same_unqualified_type(param_value, arg_value))
-		return 100;
-	if (param_value->kind == TypeKind::Pointer &&
-	    arg_value->kind == TypeKind::Pointer &&
-	    same_unqualified_type(param_value->base, arg_value->base))
-		return 90;
-	if (is_reference(param))
-	{
-		TypePtr param_object = pa11::strip_cv(param->base);
-		TypePtr arg_object = pa11::strip_cv(object_type(arg_type));
-		if (param_object.get() != NULL &&
-		    arg_object.get() != NULL &&
-		    param_object->kind == TypeKind::Record &&
-		    arg_object->kind == TypeKind::Record &&
-		    same_unqualified_type(param_object, arg_object))
-			return 80;
-		return -1;
-	}
-	return -1;
-}
-
-Binding* find_constructor_for_arguments(TypePtr type,
-                                        const vector<const Node*>& args)
-{
-	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL ||
-	    bare->kind != TypeKind::Record ||
-	    bare->scope == NULL)
-		return NULL;
-	map<string, vector<Binding*> >::const_iterator found =
-		bare->scope->members.find(bare->scope->name);
-	if (found == bare->scope->members.end())
-		return NULL;
-	Binding* best = NULL;
-	int best_score = -1;
-	for (size_t i = 0; i < found->second.size(); ++i)
-	{
-		Binding* binding = found->second[i];
-		if (binding == NULL ||
-		    binding->kind != BindingKind::Function ||
-		    binding->type.get() == NULL ||
-		    binding->type->kind != TypeKind::Function ||
-		    binding->type->parameters.size() != args.size() + 1)
-			continue;
-		int score = 0;
-		bool viable = true;
-		for (size_t j = 0; j < args.size(); ++j)
-		{
-			int part = constructor_parameter_score(
-				binding->type->parameters[j + 1], *args[j]);
-			if (part < 0)
-			{
-				viable = false;
-				break;
-			}
-			score += part;
-		}
-		if (viable && score > best_score)
-		{
-			best = binding;
-			best_score = score;
-		}
-	}
-	return best != NULL ? canonical_constructor_binding(best) : NULL;
-}
-
 bool same_function_parameter_signature(TypePtr left, TypePtr right)
 {
 	if (left.get() == NULL || right.get() == NULL ||
@@ -273,6 +57,34 @@ bool same_function_parameter_signature(TypePtr left, TypePtr right)
 		if (!pa11::same_type(left->parameters[i], right->parameters[i]))
 			return false;
 	return true;
+}
+
+bool member_function_this_const(const Binding* binding, bool& is_const)
+{
+	if (binding == NULL ||
+	    binding->is_static_member ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.empty())
+		return false;
+	TypePtr this_param = pa11::strip_cv(binding->type->parameters[0]);
+	if (this_param.get() == NULL ||
+	    this_param->kind != TypeKind::Pointer)
+		return false;
+	is_const = pa11::type_has_const(this_param->base);
+	return true;
+}
+
+bool same_member_function_this_cv(const Binding* wanted,
+                                  const Binding* candidate)
+{
+	bool wanted_const = false;
+	bool candidate_const = false;
+	return member_function_this_const(wanted, wanted_const) &&
+	       member_function_this_const(candidate, candidate_const) &&
+	       wanted_const == candidate_const;
 }
 
 bool active_template_specialization_body_call(const ProgramLowerer& program,
@@ -314,10 +126,49 @@ Binding* retarget_template_self_call_to_ordinary_overload(
 		    function_template_specialization_call(candidate) ||
 		    candidate->type.get() == NULL ||
 		    candidate->type->kind != TypeKind::Function ||
+		    !same_member_function_this_cv(direct, candidate) ||
 		    !same_function_parameter_signature(candidate->type,
 		                                       direct->type))
 			continue;
 		return candidate;
+	}
+	return direct;
+}
+
+Binding* retarget_template_call_to_concrete_alias(Binding* direct)
+{
+	if (direct == NULL ||
+	    direct->kind != BindingKind::Function ||
+	    direct->type.get() == NULL ||
+	    direct->type->kind != TypeKind::Function ||
+	    pa12::internal::substituted_type_is_valid(direct->type))
+		return direct;
+	Binding* seen[32];
+	size_t seen_count = 0;
+	for (Binding* current = direct;
+	     current != NULL &&
+	     current->kind == BindingKind::Function &&
+	     current->aliased_binding != NULL;)
+	{
+		bool repeated = false;
+		for (size_t i = 0; i < seen_count; ++i)
+			if (seen[i] == current)
+			{
+				repeated = true;
+				break;
+			}
+		if (repeated || seen_count == 32)
+			break;
+		seen[seen_count++] = current;
+		Binding* alias = current->aliased_binding;
+		if (alias == NULL ||
+		    alias->kind != BindingKind::Function ||
+		    alias->type.get() == NULL ||
+		    alias->type->kind != TypeKind::Function)
+			break;
+		if (pa12::internal::substituted_type_is_valid(alias->type))
+			return alias;
+		current = alias;
 	}
 	return direct;
 }
@@ -531,6 +382,8 @@ TypePtr member_this_record_from_argument(const Node& arg)
 			score += 100;
 		if (!candidate->function_specialization_symbol.empty())
 			score += 50;
+		if (same_member_function_this_cv(direct, candidate))
+			score += 25;
 		if (candidate->is_inline_definition)
 			score += 10;
 		if (candidate == direct)
@@ -622,6 +475,38 @@ Value contextual_scalar_literal_value(TypePtr target_type, const Node& arg)
 
 }  // namespace
 
+void FunctionLowerer::lower_record_reference_temp_argument(
+	const Node& init,
+	TypePtr object,
+	TypePtr target,
+	const string& prefix,
+	vector<string>& args,
+	vector<pair<Value, TypePtr> >* temp_cleanups)
+{
+	string slot = fresh_aux_slot(prefix, scalar_lowir_type(object));
+	string addr_name = fresh_temp();
+	Value temp_addr("ptr", addr_name);
+	shared_ptr<bool> emitted(new bool(false));
+	function<Value()> addr_for = [this, slot, temp_addr, emitted]() {
+		if (!*emitted)
+		{
+			*emitted = true;
+			instr(temp_addr.text + " = addr $" + slot);
+		}
+		return temp_addr;
+	};
+	lower_temporary_init_with_unwind(addr_for, object, init);
+	addr_for();
+	if (temp_cleanups != NULL &&
+	    (type_needs_cleanup(object) ||
+	     (program_.native_lowering &&
+	      type_has_generated_noop_destructor(object))))
+		temp_cleanups->push_back(make_pair(temp_addr, object));
+	args.push_back(convert_value(temp_addr,
+	                             pa11::make_pointer(object),
+	                             pa11::make_pointer(target)).text);
+}
+
 void FunctionLowerer::lower_reference_call_argument(const Node& arg,
                                                     TypePtr param,
                                                     vector<string>& args,
@@ -641,29 +526,42 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 			record_return_by_address(materialized_type);
 		string prefix = indirect_call_result ? "refcall" :
 		                (pa11::same_type(object, target) ? "arg" : "tmpobj");
-		string slot = fresh_aux_slot(prefix, scalar_lowir_type(object));
-		string addr_name = fresh_temp();
-		Value temp_addr("ptr", addr_name);
-		shared_ptr<bool> emitted(new bool(false));
-		function<Value()> addr_for = [this, slot, temp_addr, emitted]() {
-			if (!*emitted)
-			{
-				*emitted = true;
-				instr(temp_addr.text + " = addr $" + slot);
-			}
-			return temp_addr;
-		};
-		lower_temporary_init_with_unwind(addr_for, object, *materialized);
-		addr_for();
-		if (temp_cleanups != NULL &&
-		    (type_needs_cleanup(object) ||
-		     (program_.native_lowering &&
-		      type_has_generated_noop_destructor(object))))
-			temp_cleanups->push_back(make_pair(temp_addr, object));
-		args.push_back(convert_value(temp_addr,
-		                             pa11::make_pointer(object),
-		                             pa11::make_pointer(param->base)).text);
+		lower_record_reference_temp_argument(*materialized,
+		                                     object,
+		                                     param->base,
+		                                     prefix,
+		                                     args,
+		                                     temp_cleanups);
 		return;
+	}
+	if (pa11::strip_cv(param->base)->kind == TypeKind::Record)
+	{
+		TypePtr object = pa11::strip_cv(param->base);
+		shared_ptr<string> slot(new string());
+		shared_ptr<string> addr_name(new string());
+		function<Value()> addr_for = [this, object, slot, addr_name]() {
+			if (slot->empty())
+				*slot = fresh_aux_slot("arg", scalar_lowir_type(object));
+			if (addr_name->empty())
+			{
+				*addr_name = fresh_temp();
+				instr(*addr_name + " = addr $" + *slot);
+			}
+			return Value("ptr", *addr_name);
+		};
+		if (lower_hosted_basic_string_cstr_init(addr_for, object, arg))
+		{
+			Value temp_addr = addr_for();
+			if (temp_cleanups != NULL &&
+			    (type_needs_cleanup(object) ||
+			     (program_.native_lowering &&
+			      type_has_generated_noop_destructor(object))))
+				temp_cleanups->push_back(make_pair(temp_addr, object));
+			args.push_back(convert_value(temp_addr,
+			                             pa11::make_pointer(object),
+			                             pa11::make_pointer(param->base)).text);
+			return;
+		}
 	}
 	if (arg.category == ValueCategory::PRValue &&
 	    starts_with(arg.line, "braced-init-list") &&
@@ -694,28 +592,12 @@ void FunctionLowerer::lower_reference_call_argument(const Node& arg,
 		TypePtr object = pa11::strip_cv(object_type(arg_type));
 		TypePtr target = pa11::strip_cv(param->base);
 		string prefix = pa11::same_type(object, target) ? "arg" : "tmpobj";
-		string slot = fresh_aux_slot(prefix, scalar_lowir_type(object));
-		string addr_name = fresh_temp();
-		Value temp_addr("ptr", addr_name);
-		shared_ptr<bool> emitted(new bool(false));
-		function<Value()> addr_for = [this, slot, temp_addr, emitted]() {
-			if (!*emitted)
-			{
-				*emitted = true;
-				instr(temp_addr.text + " = addr $" + slot);
-			}
-			return temp_addr;
-		};
-		lower_temporary_init_with_unwind(addr_for, object, arg);
-		addr_for();
-		if (temp_cleanups != NULL &&
-		    (type_needs_cleanup(object) ||
-		     (program_.native_lowering &&
-		      type_has_generated_noop_destructor(object))))
-			temp_cleanups->push_back(make_pair(temp_addr, object));
-		args.push_back(convert_value(temp_addr,
-		                             pa11::make_pointer(object),
-		                             pa11::make_pointer(param->base)).text);
+		lower_record_reference_temp_argument(arg,
+		                                     object,
+		                                     param->base,
+		                                     prefix,
+		                                     args,
+		                                     temp_cleanups);
 		return;
 	}
 	string slot = fresh_aux_slot("refarg", scalar_lowir_type(param->base));
@@ -895,19 +777,82 @@ void FunctionLowerer::lower_record_value_argument(const Node& arg,
 	function<Value()> addr_for = [target_addr]() {
 		return target_addr;
 	};
-	if (preserve_no_storage_lvalue &&
-	    !record_has_storage_copy(param) &&
-	    (arg.category == ValueCategory::LValue ||
-	     arg.category == ValueCategory::XValue))
-		ensure_pointer(emit_lvalue_addr(arg));
-	if (arg.direct_call != NULL &&
-	    arg.children.empty() &&
-	    (arg.direct_call->is_generated_default_constructor ||
-	     arg.direct_call->is_defaulted) &&
-	    no_op_generated_default_constructor(arg.direct_call, param) &&
-	    zero_init_has_store(param))
-		lower_storage_zero(target_addr, pa11::type_size(param));
-	lower_object_init(addr_for, param, arg);
+	TypePtr param_record = pa11::strip_cv(param);
+	TypePtr arg_record = pa11::strip_cv(object_type(substituted_expression_type(arg)));
+	Binding* arg_copy_move = NULL;
+	if (arg.category == ValueCategory::LValue ||
+	    arg.category == ValueCategory::XValue)
+	{
+		arg_copy_move = find_copy_move_constructor(
+			param, arg.category == ValueCategory::XValue);
+		if (arg_copy_move == NULL && arg.category == ValueCategory::XValue)
+			arg_copy_move = find_copy_move_constructor(param, false);
+	}
+	bool trivial_storage_copy_move =
+		arg_copy_move != NULL &&
+		(arg_copy_move->is_defaulted ||
+		 arg_copy_move->is_generated_copy_move_constructor ||
+		 arg_copy_move->is_noop_constructor);
+	bool direct_lvalue_storage_copy =
+		(arg.category == ValueCategory::LValue ||
+		 arg.category == ValueCategory::XValue) &&
+		(arg_copy_move == NULL || trivial_storage_copy_move) &&
+		record_has_storage_copy(param) &&
+		!record_has_nontrivial_value_transfer(param);
+	bool direct_storage_copy =
+		arg_record.get() != NULL &&
+		arg_record->kind == TypeKind::Record &&
+		param_record.get() != NULL &&
+		param_record->kind == TypeKind::Record &&
+		pa11::same_type(arg_record, param_record) &&
+		(direct_lvalue_storage_copy ||
+		 (arg.category == ValueCategory::PRValue &&
+		  record_has_storage_copy(param) &&
+		  !record_has_nontrivial_value_transfer(param) &&
+		  starts_with(arg.line, "call-expression")));
+	if (direct_storage_copy)
+	{
+		bool saved_call_result_store_consumed = call_result_store_consumed_;
+		string source = (arg.category == ValueCategory::LValue ||
+		                 arg.category == ValueCategory::XValue)
+			? ensure_pointer(emit_lvalue_addr(arg)).text
+			: emit_rvalue(arg).text;
+		call_result_store_consumed_ = saved_call_result_store_consumed;
+		instr("copyobj " + to_string(pa11::type_size(param)) +
+		      "x" + to_string(pa11::type_align(param)) + " " +
+		      source + ", " + target_addr.text);
+		args.push_back(by_address ? target_addr.text : "$" + slot);
+		return;
+	}
+		if (preserve_no_storage_lvalue &&
+		    !record_has_storage_copy(param) &&
+		    (arg.category == ValueCategory::LValue ||
+		     arg.category == ValueCategory::XValue) &&
+		    !starts_with(arg.line, "id-expression"))
+			ensure_pointer(emit_lvalue_addr(arg));
+	bool noop_default_init =
+		arg.direct_call != NULL &&
+		arg.children.empty() &&
+		(arg.direct_call->is_generated_default_constructor ||
+		 arg.direct_call->is_defaulted) &&
+		no_op_generated_default_constructor(arg.direct_call, param);
+	bool lambda_closure_init =
+		arg.token_text == "lambda-closure" ||
+		(param_record.get() != NULL &&
+		 param_record->kind == TypeKind::Record &&
+		 param_record->scope != NULL &&
+		 param_record->scope->name.compare(0, 8, "__lambda") == 0);
+		if (noop_default_init && lambda_closure_init && zero_init_has_store(param))
+			lower_storage_zero(target_addr, pa11::type_size(param));
+	if (noop_default_init && lambda_closure_init)
+	{
+		args.push_back(by_address ? target_addr.text : "$" + slot);
+		return;
+	}
+	if (arg.token_text == "lambda-closure")
+		lower_aggregate_init(addr_for, param, arg);
+	else
+		lower_object_init(addr_for, param, arg);
 	args.push_back(by_address ? target_addr.text : "$" + slot);
 }
 
@@ -1031,121 +976,6 @@ void FunctionLowerer::lower_call_argument(const Node& arg,
 		                          preserve_no_storage_lvalue);
 }
 
-bool FunctionLowerer::lower_hosted_basic_string_cstr_init(
-	const function<Value()>& addr_for,
-	TypePtr type,
-	const Node& arg)
-{
-	const Node* source = &arg;
-	if (starts_with(arg.line, "cast-expression") &&
-	    arg.children.size() == 1 &&
-	    literal_char_pointer_argument(arg.children[0]))
-		source = &arg.children[0];
-	if (!literal_char_pointer_argument(*source))
-		return false;
-	TypePtr allocator;
-	Binding* ctor = find_basic_string_cstr_constructor(type, allocator);
-	if (ctor == NULL)
-		return false;
-	Value target = addr_for();
-	string allocator_slot = fresh_aux_slot("stralloc",
-	                                      slot_lowir_type(allocator));
-	string allocator_addr_name = fresh_temp();
-	instr(allocator_addr_name + " = addr $" + allocator_slot);
-	Value allocator_addr("ptr", allocator_addr_name);
-	function<Value()> allocator_addr_for = [allocator_addr]() {
-		return allocator_addr;
-	};
-	lower_default_init(allocator_addr_for, allocator);
-	vector<string> lowered;
-	lowered.push_back(target.text);
-	lower_call_argument(*source, ctor->type->parameters[1], lowered);
-	lowered.push_back(allocator_addr.text);
-	program_.demand_function_declaration(ctor);
-	string callee = program_.symbol_for(ctor);
-	ostringstream call;
-	call << "call void @" << callee << "(";
-	for (size_t i = 0; i < lowered.size(); ++i)
-	{
-		if (i != 0)
-			call << ", ";
-		call << lowered[i];
-	}
-	call << ")";
-	instr(call.str());
-	return true;
-}
-
-bool FunctionLowerer::lower_hosted_make_shared_call(
-	const function<Value()>& addr_for,
-	const Node& expr)
-{
-	TypePtr object;
-	if (!starts_with(expr.line, "call-expression") ||
-	    !hosted_make_shared_binding(expr.direct_call) ||
-	    !hosted_shared_ptr_element(expr.type, object))
-		return false;
-	object = pa11::strip_cv(object);
-	if (object.get() == NULL)
-		return false;
-	if (program_.declared_functions.insert("operator_new").second)
-		program_.declares.push_back(
-			"declare function @operator_new(%arg0 : i64) -> ptr "
-			"[binding=strong, object=" +
-			string(program_.native_lowering
-			       ? "_Znwm" : "cppgm_builtin_operator_new") + "]");
-	string size_tmp = fresh_temp();
-	instr(size_tmp + " = convert sext i64 i32 " +
-	      to_string(pa11::type_size(object)));
-	string object_tmp = fresh_temp();
-	instr(object_tmp + " = call ptr @operator_new(" + size_tmp + ")");
-	Value object_addr("ptr", object_tmp);
-	function<Value()> object_addr_for = [object_addr]() {
-		return object_addr;
-	};
-	size_t argc = expr.children.empty() ? 0 : expr.children.size() - 1;
-	if (object->kind == TypeKind::Record)
-	{
-		if (argc == 0)
-			lower_default_init(object_addr_for, object);
-		else if (argc == 1 &&
-		         lower_hosted_basic_string_cstr_init(
-			         object_addr_for, object, expr.children[1]))
-		{
-		}
-		else
-		{
-			vector<const Node*> args;
-			for (size_t i = 1; i < expr.children.size(); ++i)
-				args.push_back(&expr.children[i]);
-			Binding* ctor = find_constructor_for_arguments(object, args);
-			if (ctor != NULL)
-				lower_constructor_call(object_addr_for, ctor, args);
-			else if (argc == 1)
-				lower_object_init(object_addr_for, object,
-				                  expr.children[1]);
-			else
-				throw runtime_error("no matching make_shared constructor");
-		}
-	}
-	else
-	{
-		if (argc == 0)
-			lower_zero_init(object_addr_for, object);
-		else if (argc == 1)
-			lower_scalar_object_init(object_addr_for, object,
-			                         expr.children[1]);
-		else
-			throw runtime_error("too many make_shared scalar arguments");
-	}
-	Value target = addr_for();
-	instr("store ptr " + object_addr.text + ", " + target.text);
-	string control = fresh_temp();
-	instr(control + " = index i8 [projection=field] " +
-	      target.text + ", 8");
-	instr("store ptr 0, " + control);
-	return true;
-}
 
 bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_for,
                                                  const Node& expr)
@@ -1153,7 +983,7 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 	if (!starts_with(expr.line, "call-expression") ||
 	    pa11::strip_cv(expr.type)->kind != TypeKind::Record)
 		return false;
-	if (lower_hosted_make_shared_call(addr_for, expr))
+	if (lower_known_heap_factory_call(addr_for, expr))
 		return true;
 	if (!record_return_by_address(expr.type))
 		return false;
@@ -1172,6 +1002,15 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 	}
 	append_hidden_call_arguments(expr, call_state);
 	resolve_call_callee(expr, call_state);
+	Value hosted_insert_result;
+	if (emit_hosted_vector_range_insert(call_state, hosted_insert_result))
+	{
+		TypePtr result_type = pa11::strip_cv(expr.type);
+		instr("copyobj " + to_string(pa11::type_size(result_type)) +
+		      "x" + to_string(pa11::type_align(result_type)) + " " +
+		      hosted_insert_result.text + ", " + result_addr);
+		return true;
+	}
 	vector<string> args;
 	args.push_back(result_addr);
 	args.insert(args.end(), call_state.args.begin(), call_state.args.end());
@@ -1184,17 +1023,48 @@ bool FunctionLowerer::lower_indirect_record_call(const function<Value()>& addr_f
 		call << args[i];
 	}
 	call << ")";
-	if (call_state.direct == NULL || call_state.virtual_call)
-	{
-		call << " as (%ret : ptr [pass=indirect_result]";
-		for (size_t i = 0; i < call_state.callee_type->parameters.size(); ++i)
-			call << ", %arg" << i << " : " <<
-				lowir_parameter(call_state.callee_type->parameters[i]);
-		call << ") -> void";
+		if (call_state.direct == NULL || call_state.virtual_call)
+		{
+			call << " as (%ret : ptr [pass=indirect_result]";
+			for (size_t i = 0; i < call_state.callee_type->parameters.size(); ++i)
+				call << ", %arg" << i << " : " <<
+					lowir_parameter(call_state.callee_type->parameters[i]);
+			call << ") -> void";
+		}
+		bool protect_call =
+			eh_try_depth_ == 0 &&
+			has_active_call_protection_cleanups();
+		string protected_dispatch;
+		bool protected_define_dispatch = false;
+		if (protect_call)
+		{
+			protected_dispatch = active_unwind_dispatch_.empty()
+				? fresh_block("call_unwind_dispatch")
+				: active_unwind_dispatch_;
+			protected_define_dispatch = active_unwind_dispatch_.empty();
+			instr("eh_try ^" + protected_dispatch);
+			++eh_try_depth_;
+		}
+		instr(call.str());
+		if (protect_call &&
+		    current_ != NULL &&
+		    !current_->terminated)
+		{
+			--eh_try_depth_;
+			instr("eh_end");
+			if (protected_define_dispatch)
+			{
+				string protected_end = fresh_block("call_unwind_end");
+				terminate("jump ^" + protected_end);
+				active_unwind_dispatch_ = protected_dispatch;
+				active_unwind_cleanup_depth_ = cleanups_.size();
+				start_block(protected_dispatch);
+				emit_shared_unwind_dispatch_body();
+				start_block(protected_end);
+			}
+		}
+		return true;
 	}
-	instr(call.str());
-	return true;
-}
 
 void FunctionLowerer::init_call_target(const Node& expr,
                                        CallEmissionState& call)
@@ -1237,18 +1107,45 @@ void FunctionLowerer::init_call_target(const Node& expr,
 		init_direct_call_target(expr, call);
 	else
 		init_indirect_call_target(expr, call);
+	if (call.callee_type.get() != NULL &&
+	    call.callee_type->kind == TypeKind::Function &&
+	    !pa12::internal::substituted_type_is_valid(call.callee_type->base) &&
+	    pa12::internal::substituted_type_is_valid(expr.type))
+	{
+		TypePtr fixed = pa11::make_function(expr.type,
+		                                    call.callee_type->parameters,
+		                                    call.callee_type->variadic);
+		fixed->cv = call.callee_type->cv;
+		fixed->ref_qualifier = call.callee_type->ref_qualifier;
+		call.callee_type = fixed;
+	}
 	validate_call_target(expr, call);
 	call.ret = scalar_lowir_type(call.callee_type->base);
 }
 
-void FunctionLowerer::init_direct_call_target(const Node& expr,
-                                              CallEmissionState& call)
-{
+	void FunctionLowerer::init_direct_call_target(const Node& expr,
+	                                              CallEmissionState& call)
+	{
 	call.direct = retarget_concrete_member_call(expr, call.direct);
 	call.direct =
 		retarget_template_self_call_to_ordinary_overload(program_,
 		                                                 call.direct);
-	call.callee_type = call.direct->type;
+	call.direct = retarget_template_call_to_concrete_alias(call.direct);
+	if (const Binding* map_base_alias =
+		    hosted_map_base_lvalue_operator_index_alias(call.direct))
+	{
+		call.direct = const_cast<Binding*>(map_base_alias);
+		call.direct->is_object_root = true;
+		if (call.direct->aliased_binding != NULL)
+			call.direct->aliased_binding->is_object_root = true;
+	}
+		if (hosted_unordered_map_body_root(call.direct))
+		{
+			call.direct->is_object_root = true;
+			if (call.direct->aliased_binding != NULL)
+				call.direct->aliased_binding->is_object_root = true;
+		}
+		call.callee_type = call.direct->type;
 	if ((call.callee_type.get() == NULL ||
 	     call.callee_type->kind != TypeKind::Function) &&
 	    !expr.children.empty())
@@ -1342,7 +1239,7 @@ void FunctionLowerer::preallocate_call_result_slot(
 {
 	if (call.ret == "void" || call.ret.compare(0, 4, "obj<") == 0)
 		return;
-	if (eh_try_depth_ == 0 && has_active_cleanups())
+	if (eh_try_depth_ == 0 && has_active_call_protection_cleanups())
 		call.preallocated_call_slot = fresh_aux_slot("call", call.ret);
 	for (size_t i = call.arg_start; i < expr.children.size(); ++i)
 	{
@@ -1390,6 +1287,7 @@ void FunctionLowerer::prepare_call_setup_protection(
 {
 	if (call_binding_has_template_cleanup_context(call.direct) ||
 	    (call.direct != NULL && call.direct->name == "operator="))
+	{
 		for (size_t i = call.arg_start; i < expr.children.size(); ++i)
 		{
 			bool variadic_extra =
@@ -1409,24 +1307,57 @@ void FunctionLowerer::prepare_call_setup_protection(
 				break;
 			}
 		}
-		call.protect_setup_only =
-			eh_try_depth_ == 0 && has_active_cleanups() &&
-			call.setup_may_create_temp_cleanup &&
-			!call_setup_can_use_outer_eh(expr, call.callee_type,
-			                             call.arg_start);
+	}
+				bool active_cleanups = has_active_call_protection_cleanups();
+			bool active_lifetime = false;
+			for (size_t ci = 0; ci < cleanups_.size(); ++ci)
+				for (size_t cj = 0; cj < cleanups_[ci].size(); ++cj)
+					if (cleanups_[ci][cj].instruction.empty())
+						active_lifetime = true;
+			bool member_object_arg =
+				call.direct != NULL &&
+				call.direct->owner != NULL &&
+				call.direct->owner->kind == ScopeKind::Class &&
+				!call.direct->is_static_member &&
+				call.arg_start < expr.children.size();
+			bool argument_setup_contains_call = false;
+			for (size_t i = call.arg_start; i < expr.children.size(); ++i)
+			{
+				if (member_object_arg && i == call.arg_start)
+					continue;
+				if (node_contains_call_expression(expr.children[i]))
+					argument_setup_contains_call = true;
+			}
+			bool object_setup_contains_call =
+				member_object_arg &&
+				node_contains_call_expression(expr.children[call.arg_start]);
+			bool setup_contains_call =
+				argument_setup_contains_call || object_setup_contains_call;
+			call.setup_contains_call = setup_contains_call;
+			call.setup_object_contains_call = object_setup_contains_call;
+			bool setup_can_use_outer_eh =
+				call_setup_can_use_outer_eh(expr, call.callee_type,
+				                            call.arg_start);
+				call.protect_setup_only = false;
 		bool protect_virtual_record_result =
-			eh_try_depth_ == 0 && has_active_cleanups() &&
+			eh_try_depth_ == 0 && active_cleanups &&
 			call.virtual_call &&
 			call.ret.compare(0, 4, "obj<") == 0 &&
-			!call_result_store_addr_.empty();
-		call.protected_setup =
-			eh_try_depth_ == 0 && !call.protect_setup_only &&
-			(protect_virtual_record_result ||
-			 (has_active_cleanups() &&
-			  call_setup_can_use_outer_eh(expr, call.callee_type,
-			                              call.arg_start)) ||
-			 (!has_active_cleanups() && call.setup_may_create_temp_cleanup));
-	if (call.protected_setup || call.protect_setup_only)
+			!call_result_store_addr_.empty() &&
+			call_result_store_expr_ == call.expr;
+				call.protected_setup =
+					eh_try_depth_ == 0 && !call.protect_setup_only &&
+					(protect_virtual_record_result ||
+						 ((active_cleanups ||
+						   (active_lifetime &&
+						    call.setup_may_create_temp_cleanup)) &&
+						  (active_cleanups ||
+						   call.setup_may_create_temp_cleanup ||
+						   setup_contains_call) &&
+					  (setup_can_use_outer_eh ||
+					   call.setup_may_create_temp_cleanup ||
+					   setup_contains_call)));
+		if (call.protected_setup || call.protect_setup_only)
 	{
 		call.protected_dispatch = active_unwind_dispatch_.empty()
 			? fresh_block("call_unwind_dispatch")
@@ -1439,15 +1370,26 @@ void FunctionLowerer::prepare_call_setup_protection(
 
 void FunctionLowerer::finish_setup_only_protection(CallEmissionState& call)
 {
-	if (!call.protect_setup_only)
+	bool split_protected_setup =
+		!call.protect_setup_only &&
+		call.protected_setup &&
+		(call.setup_object_contains_call ||
+		 (call.setup_may_create_temp_cleanup &&
+		  !call.temp_cleanups.empty()));
+	if (!call.protect_setup_only && !split_protected_setup)
 		return;
 	--eh_try_depth_;
 	instr("eh_end");
+	if (split_protected_setup)
+		call.protected_setup = false;
+	else
+		call.protect_setup_only = false;
 	if (!call.protected_define_dispatch)
 		return;
-	string end = fresh_block("call_unwind_end");
-	terminate("jump ^" + end);
+		string end = fresh_block("call_unwind_end");
+		terminate("jump ^" + end);
 		active_unwind_dispatch_ = call.protected_dispatch;
+		active_unwind_cleanup_depth_ = cleanups_.size();
 		start_block(call.protected_dispatch);
 		emit_active_catch_clauses();
 		if (program_.native_lowering || !active_catches_.empty())

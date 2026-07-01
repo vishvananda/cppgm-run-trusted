@@ -1,0 +1,37 @@
+struct Guard {
+  int *p;
+  Guard(int *p_) : p(p_) {}
+  ~Guard() { ++*p; }
+};
+
+bool helper()
+{
+  try {
+    throw;
+  } catch(...) {
+    return false;
+  }
+}
+
+int main()
+{
+  int cleaned = 0;
+  try {
+    try {
+      throw 7;
+    } catch(...) {
+      Guard g(&cleaned);
+      if(!helper()) {
+        throw;
+      }
+    }
+  } catch(int value) {
+    if(value != 7) {
+      return 3;
+    }
+    return cleaned == 1 ? 0 : 2;
+  } catch(...) {
+    return 4;
+  }
+  return 1;
+}

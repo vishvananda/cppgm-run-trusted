@@ -1,0 +1,15 @@
+#include <string>
+#include <vector>
+
+int main()
+{
+  std::vector<unsigned char> bytes;
+  bytes.push_back('o');
+  bytes.push_back('k');
+  std::string text(bytes.begin(), bytes.end());
+  if (text.size() != 2)
+    return 1;
+  if (text[0] != 'o')
+    return 2;
+  return text[1] == 'k' ? 0 : 3;
+}

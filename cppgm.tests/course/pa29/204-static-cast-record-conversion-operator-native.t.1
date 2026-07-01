@@ -1,0 +1,39 @@
+struct Base {
+  Base * next;
+};
+
+struct Node : Base {
+  int value;
+};
+
+struct Iter {
+  Node * p;
+  explicit Iter(Node * q) : p(q) {
+  }
+};
+
+struct Loc {
+  Base * before;
+
+  explicit operator Iter() const {
+    return Iter(node());
+  }
+
+  Node * node() const {
+    if (before) {
+      return static_cast<Node *>(before->next);
+    }
+    return 0;
+  }
+};
+
+int main() {
+  Base sentinel;
+  Node n;
+  sentinel.next = &n;
+  n.next = 0;
+  Loc loc;
+  loc.before = &sentinel;
+  Iter it = static_cast<Iter>(loc);
+  return it.p == &n ? 0 : 1;
+}

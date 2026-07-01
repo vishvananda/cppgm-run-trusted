@@ -1,0 +1,31 @@
+#include <map>
+#include <vector>
+
+struct Node {
+  std::vector<int> xs;
+
+  Node() {}
+  explicit Node(int v) : xs(1, v) {}
+};
+
+struct Expr {
+  Node node;
+  std::vector<Expr> pack;
+
+  Expr() {}
+  explicit Expr(int v) : node(v) {}
+};
+
+int main() {
+  int key = 0;
+  std::map<void*, std::vector<Expr> > src;
+  src[&key].push_back(Expr(7));
+
+  std::map<void*, std::vector<Expr> > dst;
+  dst = src;
+
+  if (dst[&key].size() != 1) return 1;
+  if (dst[&key][0].node.xs.size() != 1) return 2;
+  if (dst[&key][0].node.xs[0] != 7) return 3;
+  return 0;
+}

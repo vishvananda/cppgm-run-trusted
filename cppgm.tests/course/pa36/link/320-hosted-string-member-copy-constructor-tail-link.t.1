@@ -1,0 +1,46 @@
+#include <string>
+#include <vector>
+
+struct ExprValue {
+  bool is_unsigned;
+  unsigned long long bits;
+  bool active;
+};
+
+struct Token {
+  int kind;
+  std::string source;
+  bool from_identifier;
+  ExprValue literal;
+};
+
+Token make_token()
+{
+  Token token;
+  token.kind = 3;
+  token.source = "97";
+  token.from_identifier = false;
+  token.literal.is_unsigned = true;
+  token.literal.bits = 97;
+  token.literal.active = true;
+  return token;
+}
+
+int main()
+{
+  std::vector<Token> tokens;
+  tokens.push_back(make_token());
+  if (tokens[0].kind != 3)
+    return 1;
+  if (!(tokens[0].source == "97"))
+    return 2;
+  if (tokens[0].from_identifier)
+    return 3;
+  if (!tokens[0].literal.is_unsigned)
+    return 4;
+  if (tokens[0].literal.bits != 97)
+    return 5;
+  if (!tokens[0].literal.active)
+    return 6;
+  return 0;
+}

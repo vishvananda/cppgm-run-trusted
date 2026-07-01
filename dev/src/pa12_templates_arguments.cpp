@@ -1,13 +1,22 @@
 #include "pa12_internal.h"
 #include "pa12_templates_instance_support.h"
 
+#include <cstdint>
 #include <stdexcept>
 
 using namespace std;
 
 namespace pa12 {
 namespace internal {
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_cache_string_hash(const string& value);
+size_t dependent_cache_type_identity(TypePtr type);
+size_t dependent_cache_template_argument_identity(
+	const TemplateArgument& argument,
+	int depth);
+
 namespace {
+
 
 pa11::TemplateInstanceArgument completed_instance_argument(
 	const TemplateArgument& argument)
@@ -803,10 +812,12 @@ vector<TemplateArgument> Parser::expand_template_argument_pack(
 								stored_record_decl->second;
 							if (stored_record_decl->second->kind ==
 							    TemplateDeclarationKind::Alias)
+							{
 								expanded =
 									self->instantiate_alias_template(
 										stored_record_decl->second,
 										selected_record_args);
+							}
 							else if (stored_record_decl->second->kind ==
 							         TemplateDeclarationKind::Class)
 								expanded =
@@ -1233,193 +1244,6 @@ void Parser::append_completed_template_pack_argument(
 	out.push_back(completed_pack);
 }
 
-TemplateArgument Parser::parse_non_type_default_template_argument(
-	const TemplateParameterInfo& parameter,
-	const vector<TemplateArgument>& completed_args)
-{
-	bool default_dependent = type_is_template_dependent(parameter.type);
-	for (size_t i = 0; i < completed_args.size(); ++i)
-		if (template_argument_has_template_parameter(completed_args[i],
-		                                             record_template_arguments_))
-			default_dependent = true;
-
-	int save_expression_depth = template_argument_expression_depth_;
-	++template_argument_expression_depth_;
-	Expr expr;
-	try
-	{
-		expr = parse_assignment_expression();
-	}
-	catch (...)
-	{
-		template_argument_expression_depth_ = save_expression_depth;
-		if (!default_dependent)
-			throw;
-		expr = Expr();
-	}
-	template_argument_expression_depth_ = save_expression_depth;
-
-	if (expr.valid && !expr.has_constant_value)
-	{
-		ConstexprValue value;
-		if (try_evaluate_constexpr_expr(expr.node, value) && !value.is_object)
-		{
-			expr.has_constant_value = true;
-			expr.constant_value = value.int_value;
-			expr.node.has_constant_value = true;
-			expr.node.constant_value = value.int_value;
-		}
-	}
-	if (expr.valid && !expr.has_constant_value)
-	{
-		try
-		{
-			Conversion conv = convert_to(expr, pa11::make_fundamental(FT_BOOL));
-			if (conv.viable && !conv.expr.has_constant_value)
-			{
-				ConstexprValue value;
-				if (try_evaluate_constexpr_expr(conv.expr.node, value))
-					apply_constexpr_value(conv.expr, value);
-			}
-			if (conv.viable && conv.expr.has_constant_value)
-				expr = conv.expr;
-		}
-		catch (const runtime_error&)
-		{
-		}
-	}
-	if (!expr.has_constant_value &&
-	    !default_dependent &&
-	    expr.dependent_value_name.empty())
-		throw runtime_error("invalid default template argument");
-
-	if (expr.has_constant_value)
-		return TemplateArgument::value_arg(expression_object_type(expr.type),
-		                                   expr.constant_value);
-
-	TemplateArgument arg = TemplateArgument::dependent_value_arg(parameter.type);
-	if (expr.valid)
-	{
-		arg.value_name = expr.dependent_value_name;
-		arg.value_owner_template_name =
-			expr.dependent_value_owner_template_name;
-		arg.value_member_name = expr.dependent_value_member_name;
-		arg.value_negated = expr.dependent_value_negated;
-		arg.value_owner_template_arguments =
-			expr.dependent_value_owner_template_arguments;
-	}
-	return arg;
-}
-
-TemplateArgument Parser::parse_default_template_argument(
-	TemplateDeclaration* declaration,
-	size_t parameter_index,
-	const vector<TemplateArgument>& completed_args)
-{
-	const TemplateParameterInfo& parameter =
-		declaration->parameters[parameter_index];
-	bool tokens_are_declaration_tokens =
-		tokens_.size() == declaration_tokens_.size() &&
-		(tokens_.empty() ||
-		 (tokens_.front().source == declaration_tokens_.front().source &&
-		  tokens_.back().source == declaration_tokens_.back().source));
-	vector<Token> save_tokens;
-	if (!tokens_are_declaration_tokens)
-		save_tokens = tokens_;
-	size_t save_pos = pos_;
-	vector<Scope*> save_scopes = scopes_;
-	size_t save_type_subst_size = template_type_substitutions_.size();
-	size_t save_value_subst_size = template_value_substitutions_.size();
-	size_t save_pack_subst_size = template_type_parameter_packs_.size();
-	bool save_default_argument = parsing_default_template_argument_;
-
-	map<string, TypePtr> subst;
-	map<string, TemplateArgument> value_subst;
-	set<string> pack_subst;
-	for (size_t i = 0; i < completed_args.size(); ++i)
-	{
-		if (declaration->parameters[i].name.empty())
-			continue;
-		const TemplateParameterInfo& completed_parameter =
-			declaration->parameters[i];
-		if (completed_parameter.is_pack)
-		{
-			subst[completed_parameter.name] =
-				pa11::make_template_parameter_type(
-					completed_parameter.name);
-			value_subst[completed_parameter.name] = completed_args[i];
-			pack_subst.insert(completed_parameter.name);
-		}
-		else if (completed_parameter.kind == TemplateParameterKind::Type)
-			subst[completed_parameter.name] = completed_args[i].type;
-		else
-			value_subst[completed_parameter.name] = completed_args[i];
-	}
-
-	template_type_substitutions_.insert(
-		template_type_substitutions_.end(),
-		declaration->outer_type_substitutions.begin(),
-		declaration->outer_type_substitutions.end());
-	template_value_substitutions_.insert(
-		template_value_substitutions_.end(),
-		declaration->outer_value_substitutions.begin(),
-		declaration->outer_value_substitutions.end());
-	template_type_substitutions_.push_back(subst);
-	template_value_substitutions_.push_back(value_subst);
-	template_type_parameter_packs_.push_back(pack_subst);
-	scopes_.clear();
-	scopes_.push_back(declaration->lexical_scope != NULL
-	                  ? declaration->lexical_scope
-	                  : declaration->owner);
-	if (!tokens_are_declaration_tokens)
-		tokens_ = declaration_tokens_;
-	pos_ = parameter.default_begin;
-	parsing_default_template_argument_ = true;
-
-	TemplateArgument arg;
-	try
-	{
-		if (parameter.kind == TemplateParameterKind::Type)
-		{
-			arg = TemplateArgument::type_arg(parse_type_id());
-			arg = substitute_template_argument(arg);
-		}
-		else if (parameter.kind == TemplateParameterKind::TemplateTemplate)
-		{
-			if (!try_parse_template_template_argument(arg))
-				throw runtime_error("invalid default template argument");
-		}
-		else
-		{
-			arg = parse_non_type_default_template_argument(parameter,
-			                                              completed_args);
-		}
-		if (pos_ != parameter.default_end)
-			throw runtime_error("invalid default template argument");
-	}
-	catch (...)
-	{
-		if (!tokens_are_declaration_tokens)
-			tokens_ = save_tokens;
-		scopes_ = save_scopes;
-		template_type_substitutions_.resize(save_type_subst_size);
-		template_value_substitutions_.resize(save_value_subst_size);
-		template_type_parameter_packs_.resize(save_pack_subst_size);
-		parsing_default_template_argument_ = save_default_argument;
-		pos_ = save_pos;
-		throw;
-	}
-
-	if (!tokens_are_declaration_tokens)
-		tokens_ = save_tokens;
-	scopes_ = save_scopes;
-	template_type_substitutions_.resize(save_type_subst_size);
-	template_value_substitutions_.resize(save_value_subst_size);
-	template_type_parameter_packs_.resize(save_pack_subst_size);
-	parsing_default_template_argument_ = save_default_argument;
-	pos_ = save_pos;
-	return arg;
-}
 
 }  // namespace internal
 }  // namespace pa12

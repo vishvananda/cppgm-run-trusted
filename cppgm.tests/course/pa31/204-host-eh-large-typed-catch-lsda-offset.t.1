@@ -1,0 +1,41 @@
+struct Mark
+{
+  int value;
+};
+
+int side(int value)
+{
+  return value & 1;
+}
+
+#define STEP(n) total += side(n)
+
+int main()
+{
+  int total = 0;
+  try
+  {
+    STEP(0);  STEP(1);  STEP(2);  STEP(3);  STEP(4);  STEP(5);
+    STEP(6);  STEP(7);  STEP(8);  STEP(9);  STEP(10); STEP(11);
+    STEP(12); STEP(13); STEP(14); STEP(15); STEP(16); STEP(17);
+    STEP(18); STEP(19); STEP(20); STEP(21); STEP(22); STEP(23);
+    STEP(24); STEP(25); STEP(26); STEP(27); STEP(28); STEP(29);
+    STEP(30); STEP(31); STEP(32); STEP(33); STEP(34); STEP(35);
+    STEP(36); STEP(37); STEP(38); STEP(39); STEP(40); STEP(41);
+    STEP(42); STEP(43); STEP(44); STEP(45); STEP(46); STEP(47);
+    STEP(48); STEP(49); STEP(50); STEP(51); STEP(52); STEP(53);
+    STEP(54); STEP(55); STEP(56); STEP(57); STEP(58); STEP(59);
+    STEP(60); STEP(61); STEP(62); STEP(63); STEP(64); STEP(65);
+    STEP(66); STEP(67); STEP(68); STEP(69); STEP(70); STEP(71);
+    STEP(72); STEP(73); STEP(74); STEP(75); STEP(76); STEP(77);
+    STEP(78); STEP(79); STEP(80); STEP(81); STEP(82); STEP(83);
+    STEP(84); STEP(85); STEP(86); STEP(87); STEP(88); STEP(89);
+    Mark mark;
+    mark.value = 5 + total - total;
+    throw mark;
+  }
+  catch (Mark &mark)
+  {
+    return mark.value - 5;
+  }
+}

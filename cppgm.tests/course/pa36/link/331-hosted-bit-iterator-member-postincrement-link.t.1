@@ -1,0 +1,19 @@
+#include <bits/stl_bvector.h>
+
+struct Holder
+{
+  std::_Bit_iterator it;
+};
+
+int main()
+{
+  std::_Bit_type word = 0;
+  Holder holder;
+  holder.it = std::_Bit_iterator(&word, 1);
+  *holder.it++ = true;
+  *holder.it = true;
+
+  if (word != 6)
+    return 1;
+  return 0;
+}

@@ -4,6 +4,11 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_cache_template_argument_identity(
+	const TemplateArgument& argument,
+	int depth);
+size_t dependent_cache_string_hash(const string& value);
 namespace {
 
 bool template_type_has_template_parameter_impl(
@@ -20,6 +25,14 @@ bool template_argument_has_template_parameter_impl(
 	const TemplateArgument& arg,
 	const map<const void*, vector<TemplateArgument> >& record_template_arguments,
 	map<const void*, int>& type_memo);
+
+size_t cheap_template_instance_dependency_key(
+	const pa11::TemplateInstanceArgument& argument,
+	int depth);
+
+size_t cheap_template_argument_dependency_key(
+	const TemplateArgument& argument,
+	int depth);
 
 }  // namespace
 
@@ -39,6 +52,141 @@ bool template_argument_has_template_parameter(
 		arg,
 		record_template_arguments,
 		type_memo);
+}
+
+namespace {
+
+size_t cheap_type_dependency_key(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	return reinterpret_cast<uintptr_t>(bare.get());
+}
+
+size_t cheap_template_instance_dependency_key(
+	const pa11::TemplateInstanceArgument& argument,
+	int depth)
+{
+	size_t key = dependent_cache_hash_combine(
+		0x9a71,
+		static_cast<size_t>(argument.kind));
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type ||
+	    argument.kind == pa11::TemplateInstanceArgumentKind::Value)
+		key = dependent_cache_hash_combine(
+			key,
+			cheap_type_dependency_key(argument.type));
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Value)
+	{
+		key = dependent_cache_hash_combine(key, argument.dependent);
+		key = dependent_cache_hash_combine(key, argument.value);
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_name));
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_owner_template_name));
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_member_name));
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Template)
+	{
+		key = dependent_cache_hash_combine(key, argument.dependent);
+		key = dependent_cache_hash_combine(
+			key,
+			dependent_cache_string_hash(argument.template_name));
+	}
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack &&
+	    depth < 2)
+	{
+		key = dependent_cache_hash_combine(key, argument.pack.size());
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			key = dependent_cache_hash_combine(
+				key,
+				cheap_template_instance_dependency_key(
+					argument.pack[i],
+					depth + 1));
+	}
+	return key;
+}
+
+size_t cheap_template_argument_dependency_key(
+	const TemplateArgument& argument,
+	int depth)
+{
+	size_t key = dependent_cache_hash_combine(
+		0x4d33,
+		static_cast<size_t>(argument.kind));
+	if (argument.kind == TemplateArgumentKind::Type ||
+	    argument.kind == TemplateArgumentKind::Value)
+		key = dependent_cache_hash_combine(
+			key,
+			cheap_type_dependency_key(argument.type));
+	if (argument.kind == TemplateArgumentKind::Value)
+	{
+		key = dependent_cache_hash_combine(key, argument.dependent);
+		key = dependent_cache_hash_combine(key, argument.value);
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_name));
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_owner_template_name));
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_member_name));
+		if (depth < 2)
+		{
+			key = dependent_cache_hash_combine(
+				key,
+				argument.value_owner_template_arguments.size());
+			for (size_t i = 0;
+			     i < argument.value_owner_template_arguments.size();
+			     ++i)
+				key = dependent_cache_hash_combine(
+					key,
+					cheap_template_instance_dependency_key(
+						argument.value_owner_template_arguments[i],
+						depth + 1));
+		}
+	}
+	if (argument.kind == TemplateArgumentKind::Template)
+	{
+		key = dependent_cache_hash_combine(
+			key,
+			reinterpret_cast<uintptr_t>(argument.template_declaration));
+		key = dependent_cache_hash_combine(key,
+			dependent_cache_string_hash(argument.value_name));
+	}
+	if (argument.kind == TemplateArgumentKind::Pack && depth < 2)
+	{
+		key = dependent_cache_hash_combine(key, argument.pack.size());
+		for (size_t i = 0; i < argument.pack.size(); ++i)
+			key = dependent_cache_hash_combine(
+				key,
+				cheap_template_argument_dependency_key(
+					argument.pack[i],
+					depth + 1));
+	}
+	return key;
+}
+
+}  // namespace
+
+bool Parser::template_argument_dependent_cached(
+	const TemplateArgument& argument) const
+{
+	size_t key = dependent_cache_hash_combine(
+		0xa9d3f17u,
+		cheap_template_argument_dependency_key(argument, 0));
+	key = dependent_cache_hash_combine(key,
+	                                   record_template_arguments_.size());
+	key = dependent_cache_hash_combine(key,
+	                                   active_class_instantiations_.size());
+	key = dependent_cache_hash_combine(key,
+	                                   validating_template_definition_);
+	map<size_t, bool>::const_iterator cached =
+		template_dependent_type_cache_.find(key);
+	if (cached != template_dependent_type_cache_.end())
+		return cached->second;
+	bool dependent =
+		template_argument_has_template_parameter(argument,
+		                                         record_template_arguments_);
+	template_dependent_type_cache_[key] = dependent;
+	return dependent;
 }
 
 namespace {
@@ -290,10 +438,11 @@ bool template_type_has_template_parameter_impl(
 	if (type.get() == NULL)
 		return false;
 	type = pa11::strip_cv(type);
-	map<const void*, int>::const_iterator cached = type_memo.find(type.get());
-	if (cached != type_memo.end())
-		return cached->second > 0;
-	type_memo[type.get()] = -1;
+	const void* type_key = type.get();
+	map<const void*, int>::const_iterator memo = type_memo.find(type_key);
+	if (memo != type_memo.end())
+		return memo->second > 0;
+	type_memo[type_key] = -1;
 	bool result = false;
 	if (type->is_dependent_typename &&
 	    (!type->template_arguments.empty() ||
@@ -324,9 +473,9 @@ bool template_type_has_template_parameter_impl(
 					    record_template_arguments,
 					    type_memo))
 					result = true;
-		type_memo[type.get()] = 1;
-		return true;
-	}
+			type_memo[type_key] = 1;
+			return true;
+		}
 	if (type->is_dependent_typename)
 		result = true;
 	if (type->kind == pa11::TypeKind::TemplateParameter)
@@ -334,12 +483,21 @@ bool template_type_has_template_parameter_impl(
 	if (!result &&
 	    (type->kind == pa11::TypeKind::Pointer ||
 	     type->kind == pa11::TypeKind::LValueReference ||
-	     type->kind == pa11::TypeKind::RValueReference ||
-	     type->kind == pa11::TypeKind::Array))
+	     type->kind == pa11::TypeKind::RValueReference))
 		result = template_type_has_template_parameter_impl(
 			type->base,
 			record_template_arguments,
 			type_memo);
+	if (!result && type->kind == pa11::TypeKind::Array)
+	{
+		if (type->unknown_bound && !type->name.empty())
+			result = true;
+		else
+			result = template_type_has_template_parameter_impl(
+				type->base,
+				record_template_arguments,
+				type_memo);
+	}
 	if (!result && type->kind == pa11::TypeKind::Function)
 	{
 		if (template_type_has_template_parameter_impl(
@@ -393,7 +551,7 @@ bool template_type_has_template_parameter_impl(
 					    type_memo))
 					result = true;
 	}
-	type_memo[type.get()] = result ? 1 : 0;
+	type_memo[type_key] = result ? 1 : 0;
 	return result;
 }
 
@@ -408,9 +566,7 @@ bool Parser::template_arguments_dependent(
 	for (size_t i = 0; i < arguments.size(); ++i)
 	{
 		bool dependent =
-			template_argument_has_template_parameter(
-				arguments[i],
-				record_template_arguments_);
+			template_argument_dependent_cached(arguments[i]);
 		if (dependent &&
 		    arguments[i].kind == TemplateArgumentKind::Pack)
 		{
@@ -418,9 +574,8 @@ bool Parser::template_arguments_dependent(
 			for (size_t p = 0; p < arguments[i].pack.size(); ++p)
 			{
 				bool element_dependent =
-					template_argument_has_template_parameter(
-						arguments[i].pack[p],
-						record_template_arguments_);
+					template_argument_dependent_cached(
+						arguments[i].pack[p]);
 				if (element_dependent &&
 				    allow_complete_record &&
 				    arguments[i].pack[p].kind ==

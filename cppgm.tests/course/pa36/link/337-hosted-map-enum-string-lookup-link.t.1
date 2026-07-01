@@ -1,0 +1,18 @@
+#include <map>
+#include <string>
+
+enum E { A, B, C, D };
+
+const std::map<E, std::string> names{
+  {A, "a"},
+  {B, "b"},
+  {C, "c"},
+  {D, "d"}
+};
+
+int main()
+{
+  if (names.size() != 4)
+    return 1;
+  return names.at(C) == "c" ? 0 : 2;
+}

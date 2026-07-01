@@ -1,0 +1,17 @@
+struct Box {
+  long value;
+  ~Box();
+};
+
+long seen;
+Box global = { 42 };
+
+Box::~Box()
+{
+  seen = value;
+}
+
+int main()
+{
+  return global.value == 42 ? 0 : 1;
+}

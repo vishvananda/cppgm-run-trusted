@@ -1,0 +1,11 @@
+1 translation units
+start translation unit 1
+translation-unit
+  function-definition main function of () returning int
+    compound-statement
+      simple-declaration
+        variable value int
+          literal prvalue int 0
+      return-statement
+        id-expression lvalue int value
+end translation unit

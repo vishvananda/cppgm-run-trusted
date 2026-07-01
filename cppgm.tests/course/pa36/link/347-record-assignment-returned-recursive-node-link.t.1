@@ -1,0 +1,64 @@
+#include <string>
+#include <vector>
+
+struct Node
+{
+  std::string line;
+  std::vector<Node> children;
+
+  Node() {}
+  explicit Node(const std::string& text) : line(text) {}
+};
+
+struct Expr
+{
+  Node node;
+  bool valid;
+
+  Expr() : valid(false) {}
+};
+
+static Expr make_expr()
+{
+  Expr out;
+  out.valid = true;
+  out.node = Node("root");
+  out.node.children.push_back(Node("child"));
+  out.node.children[0].children.push_back(Node("leaf"));
+  return out;
+}
+
+static int check_expr(const Expr& expr)
+{
+  if (!expr.valid)
+    return 1;
+  if (!(expr.node.line == "root"))
+    return 2;
+  if (expr.node.children.size() != 1)
+    return 3;
+  if (!(expr.node.children[0].line == "child"))
+    return 4;
+  if (expr.node.children[0].children.size() != 1)
+    return 5;
+  if (!(expr.node.children[0].children[0].line == "leaf"))
+    return 6;
+  return 0;
+}
+
+int main()
+{
+  Expr inner;
+  inner = make_expr();
+  int check = check_expr(inner);
+  if (check != 0)
+    return check;
+
+  Expr other;
+  other = inner;
+  inner.node.line = "changed";
+  inner.node.children[0].line = "changed child";
+  check = check_expr(other);
+  if (check != 0)
+    return 10 + check;
+  return 0;
+}

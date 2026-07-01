@@ -1,0 +1,14 @@
+int imported_fn(int);
+
+typedef int (*ImportedFnPtr)(int);
+
+ImportedFnPtr get_imported_ptr()
+{
+	return imported_fn;
+}
+
+int main()
+{
+	ImportedFnPtr fn = get_imported_ptr();
+	return fn(41) == 42 ? 0 : 1;
+}

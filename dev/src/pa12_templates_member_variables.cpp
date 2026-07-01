@@ -30,6 +30,8 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 		record_template_arguments_.find(bare.get());
 	if (args_it == record_template_arguments_.end())
 		return;
+	if (template_arguments_dependent(args_it->second))
+		return;
 	for (int template_variable_pass = 0;
 	     template_variable_pass < 2;
 	     ++template_variable_pass)
@@ -73,9 +75,11 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 						{
 							if (declaration->parameters[j].is_pack)
 							{
+								const TemplateParameterInfo& parameter =
+									declaration->parameters[j];
 								subst[declaration->parameters[j].name] =
-									pa11::make_template_parameter_type(
-										declaration->parameters[j].name);
+									template_parameter_placeholder_type(
+										parameter);
 								value_subst[declaration->parameters[j].name] =
 									args_it->second[j];
 							}
@@ -227,6 +231,10 @@ void Parser::instantiate_member_variable_templates(TypePtr type)
 				catch (const exception&)
 				{
 					declaration->emitted_variable_specializations.erase(key);
+					template_type_substitutions_ = save_subst;
+					template_value_substitutions_ = save_value_subst;
+					scopes_ = save_scopes;
+					pos_ = save_pos;
 					throw;
 				}
 				vector<Node*> replay_nodes;

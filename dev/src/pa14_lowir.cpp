@@ -1,4 +1,6 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
+#include "pa14_lowir_hosted_inline_internal.h"
 #include "pa12_templates_function_support.h"
 #include <algorithm>
 #include <utility>
@@ -7,6 +9,45 @@ if (starts_with(node.line, "call-expression")) return true; for (size_t i = 0; i
 return true; return false; } bool node_contains_return_statement(const Node& node)
 { if (starts_with(node.line, "return-statement")) return true; for (size_t i = 0; i < node.children.size(); ++i)
 if (node_contains_return_statement(node.children[i])) return true; return false; }
+FunctionOut::FunctionOut(const FunctionOut& other)
+	: binding(NULL),
+	  has_range_for_state(false),
+	  strong_binding(false),
+	  returns_pointer_result(false),
+	  returns_record_result(false),
+	  reference_symbols_collected(false),
+	  reference_positions_collected(false),
+	  lambda_related_collected(false),
+	  lambda_related_cached(false)
+{
+	*this = other;
+}
+FunctionOut& FunctionOut::operator=(const FunctionOut& other)
+{
+	if (this == &other)
+		return *this;
+	binding = other.binding;
+	name = other.name;
+	header = other.header;
+	parameter_names = other.parameter_names;
+	has_range_for_state = other.has_range_for_state;
+	strong_binding = other.strong_binding;
+	returns_pointer_result = other.returns_pointer_result;
+	returns_record_result = other.returns_record_result;
+	slots = other.slots;
+	blocks = other.blocks;
+	vector<pair<string, string> > rewrites(
+		other.constructor_base_entry_arg_rewrites.begin(),
+		other.constructor_base_entry_arg_rewrites.end());
+	constructor_base_entry_arg_rewrites.swap(rewrites);
+	reference_symbols_collected = false;
+	reference_positions_collected = false;
+	lambda_related_collected = false;
+	lambda_related_cached = false;
+	referenced_symbols.clear();
+	referenced_symbol_positions.clear();
+	return *this;
+}
 bool lowir_function_definition_body_empty(const Node& node)
 {
 	return !node.children.empty() &&
@@ -41,6 +82,10 @@ bool node_may_throw_for_noexcept_wrapper(const Node& node)
 			return true;
 	return false;
 }
+bool hosted_synthetic_body_known_nothrow(const Binding* binding)
+{
+	return hosted_forward_as_tuple_binding(binding);
+}
 void demand_host_eh_declarations(ProgramLowerer& program, bool catch_runtime) { if (program.declared_functions.insert( "__external_runtime___Unwind_Resume").second)
 program.declares.push_back( "declare function @__external_runtime___Unwind_Resume() -> void " "[return=noreturn, role=eh_resume, linkage=c, " "binding=strong, object=_Unwind_Resume]");
 if (catch_runtime && program.declared_functions.insert( "__external_runtime____cxa_begin_catch").second) program.declares.push_back(
@@ -48,7 +93,28 @@ if (catch_runtime && program.declared_functions.insert( "__external_runtime____c
 program.declared_functions.insert( "__external_runtime____cxa_end_catch").second) program.declares.push_back( "declare function @__external_runtime____cxa_end_catch() -> void "
 "[role=eh_end_catch, linkage=c, binding=strong, " "object=__cxa_end_catch]"); if (program.declared_functions.insert( "__external_runtime____gxx_personality_v0").second)
 program.declares.push_back( "declare function @__external_runtime____gxx_personality_v0() " "-> void [role=eh_personality, linkage=c, binding=strong, " "object=__gxx_personality_v0]");
-} void FunctionLowerer::ensure_noexcept_terminate_helper() {
+}
+
+void ensure_builtin_memset_declaration(ProgramLowerer& program)
+{
+	const string declaration =
+		"declare function @__builtin_memset(%arg0 : ptr "
+		"[capture=nocapture, access=write], %arg1 : i32, "
+		"%arg2 : i64) -> ptr [effects=readwrite, unwind=no, "
+		"linkage=c, binding=strong, object=memset]";
+	if (program.declared_functions.insert("__builtin_memset").second)
+	{
+		program.declares.push_back(declaration);
+		return;
+	}
+	for (size_t i = 0; i < program.declares.size(); ++i)
+		if (starts_with(program.declares[i],
+		                "declare function @__builtin_memset("))
+			return;
+	program.declares.push_back(declaration);
+}
+
+void FunctionLowerer::ensure_noexcept_terminate_helper() {
 demand_host_eh_declarations(program_, true);
 if (program_.declared_functions.insert("std__terminate").second)
 program_.declares.push_back(
@@ -160,9 +226,9 @@ bare->scope->members.find(name); if (found == bare->scope->members.end()) return
 if (found->second[i]->kind == BindingKind::Function) return found->second[i]; return NULL; }
 bool parameter_type_needs_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type); if (bare->kind == TypeKind::Array)
 return parameter_type_needs_destructor(bare->base); if (bare->kind != TypeKind::Record) return false; Binding* dtor = find_record_destructor(bare);
-if (dtor != NULL && (!dtor->is_noop_destructor || !dtor->is_generated_default_destructor)) return true; pa11::layout_record_type(bare);
-if (bare->base.get() != NULL && parameter_type_needs_destructor(bare->base)) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
-if (parameter_type_needs_destructor(bare->fields[i]->type)) return true; return false; }
+if (dtor != NULL && (!dtor->is_noop_destructor || !dtor->is_generated_default_destructor)) return true; vector<Binding*> members; append_assignment_dependency_members(bare, members);
+if (bare->base.get() != NULL && parameter_type_needs_destructor(bare->base)) return true; for (size_t i = 0; i < members.size(); ++i)
+if (parameter_type_needs_destructor(members[i]->type)) return true; return false; }
 bool record_has_base_subobject(TypePtr source, TypePtr target)
 {
 	if (source.get() == NULL || target.get() == NULL)
@@ -333,16 +399,22 @@ if (found == label_cleanup_depths_.end() || found->second >= cleanups_.size())
 return;
 for (size_t i = cleanups_.size(); i > found->second; --i)
 emit_scope_cleanups(cleanups_[i - 1]);
+} void FunctionLowerer::emit_control_transfer_cleanups(size_t target_depth) {
+if (target_depth >= cleanups_.size())
+return;
+for (size_t i = cleanups_.size(); i > target_depth; --i)
+emit_scope_cleanups(cleanups_[i - 1]);
 } FunctionLowerer::FunctionLowerer(ProgramLowerer& program, const Node& fn, bool destructor_base_entry) : program_(program),
 fn_(fn), destructor_base_entry_(destructor_base_entry), current_(NULL), temp_counter_(0), block_counter_(0),
-aux_slot_counter_(0), eh_try_depth_(0), call_temp_cleanup_defer_depth_(0), logical_call_result_consumed_(false),
-call_result_store_addr_(), call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
-constructor_destination_before_protected_try_(false) { collect_label_cleanup_depths(fn_, 1); } void FunctionLowerer::add_slot(const string& name, const string& type)
+aux_slot_counter_(0), eh_try_depth_(0), call_temp_cleanup_defer_depth_(0), logical_call_result_expr_(NULL), logical_call_result_consumed_(false),
+call_result_store_addr_(), call_result_store_expr_(NULL), call_result_store_consumed_(false), record_return_slot_(), lowering_record_return_object_(false), lowering_array_subobject_init_(false),
+constructor_destination_before_protected_try_(false), active_unwind_cleanup_depth_(0) { collect_label_cleanup_depths(fn_, 1); } void FunctionLowerer::add_slot(const string& name, const string& type)
 { if (starts_with(name, "__begin") || starts_with(name, "__end")) out_.has_range_for_state = true; out_.slots.push_back("  slot $" + name + " : " + type); } string FunctionLowerer::slot_for(const Binding* binding)
 { map<const Binding*, string>::const_iterator found = slots_.find(binding); if (found != slots_.end()) return found->second;
 string base = binding != NULL && !binding->name.empty() ? binding->name : "__param" + to_string(slots_.size()); int& count = slot_names_[base]; ++count;
 string name = base; if (count > 1) name += "__shadow" + to_string(count); slots_[binding] = name;
-add_slot(name, slot_lowir_type(binding->type)); return name; } string FunctionLowerer::fresh_temp()
+add_slot(name, slot_lowir_type(binding->type)); return name; } string FunctionLowerer::this_slot_name()
+{ size_t param_index = 0; for (size_t i = 0; i < fn_.children.size(); ++i) { if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10); size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space); if (pname.empty()) pname = "__param" + to_string(param_index); if (param_index < out_.parameter_names.size()) pname = out_.parameter_names[param_index]; Binding* binding = fn_.children[i].binding; if (binding != NULL) return slot_for(binding); return pname; } return out_.parameter_names.empty() ? "this" : out_.parameter_names[0]; } string FunctionLowerer::fresh_temp()
 { ++temp_counter_; return "%t" + to_string(temp_counter_); }
 string FunctionLowerer::fresh_block(const string& prefix) { ++block_counter_; return prefix + "_" + to_string(block_counter_);
 } string FunctionLowerer::fresh_aux_slot(const string& prefix, const string& type) { ++aux_slot_counter_;
@@ -564,163 +636,37 @@ for (size_t i = 0; i < views.size(); ++i) { if (!stored_view_offsets.insert(view
 } void FunctionLowerer::maybe_lower_constructor_vptr(size_t index, size_t total) { Binding* binding = fn_.binding;
 if (!is_class_constructor_binding(binding)) return; TypePtr record = class_record_for_member(binding); if (record.get() == NULL ||
 !pa11::strip_cv(record)->is_polymorphic) return; const Node* current = index < total ? &fn_.children[index] : NULL; if (current != NULL && starts_with(current->line, "base-init-action"))
-return; lower_vptr_store(record); } void FunctionLowerer::maybe_lower_destructor_epilogue(bool& emitted)
-{ Binding* binding = fn_.binding; if (!is_class_destructor_binding(binding) || !binding->is_virtual) return;
+return; lower_vptr_store(record); }
+void FunctionLowerer::maybe_lower_destructor_epilogue(bool& emitted)
+{ Binding* binding = fn_.binding; if (!is_class_destructor_binding(binding)) return;
+if (binding->is_cleanup_only_destructor) return;
+if (hosted_vector_temporary_value_destructor(binding)) return;
 TypePtr record = class_record_for_member(binding); TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (bare.get() == NULL || bare->kind != TypeKind::Record) return;
-pa11::layout_record_type(bare); for (size_t n = 0; n < bare->fields.size(); ++n) { size_t i = bare->fields.size() - 1 - n;
-Binding* field = bare->fields[i]; function<Value()> field_addr = [this, field]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $this");
+vector<Binding*> members; append_assignment_dependency_members(bare, members); string self_slot = this_slot_name(); for (size_t n = 0; n < members.size(); ++n) { size_t i = members.size() - 1 - n;
+Binding* field = members[i]; function<Value()> field_addr = [this, field, self_slot]() { string this_ptr = fresh_temp(); instr(this_ptr + " = load ptr $" + self_slot);
 string addr = fresh_temp(); instr(addr + " = index i8 [projection=field] " + this_ptr + ", " + to_string(field->member_offset)); return Value("ptr", addr);
 }; lower_destructor_for_object(field_addr, field->type); emitted = true; }
 vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t n = 0; n < bases.size(); ++n) { size_t i = bases.size() - 1 - n; TypePtr base = pa11::strip_cv(bases[i]); if (destructor_base_entry_ && target_is_virtual_base_subobject(bare, base)) continue; Node action("base-fini-action " + base->name); action.type = base; lower_base_fini(action); emitted = true; } }
 FunctionOut FunctionLowerer::lower() { Binding* binding = fn_.binding; if (binding == NULL)
-throw runtime_error("missing function binding"); if (is_class_constructor_binding(binding)) { bool noop_body = lowir_function_definition_body_empty(fn_); if (noop_body && binding->is_generated_default_constructor && binding->is_defaulted && registered_constructor_body_nonempty(program_, binding)) noop_body = false; binding->is_noop_constructor = noop_body; } out_.binding = binding; string name = program_.symbol_for(binding); out_.name = name; TypePtr fn_type = binding->type;
-bool indirect_result = pa11::strip_cv(fn_type->base)->kind == TypeKind::Record && record_return_by_address(fn_type->base); ostringstream header;
-out_.returns_pointer_result = !indirect_result && scalar_lowir_type(fn_type->base) == "ptr";
-	vector<string> raw_parameter_names;
-	map<string, int> raw_parameter_counts;
-	for (size_t i = 0; i < fn_type->parameters.size(); ++i)
-	{
-		string pname = i < fn_.children.size() &&
-		starts_with(fn_.children[i].line, "parameter ") ? fn_.children[i].line.substr(10) : "";
-		size_t space = pname.find(' ');
-		pname = space == string::npos ? pname : pname.substr(0, space);
-		if ((pname.empty() || pname.compare(0, 7, "__param") == 0) &&
-		    i < binding->function_parameter_names.size() &&
-		    !binding->function_parameter_names[i].empty() &&
-		    binding->function_parameter_names[i].compare(0, 7, "__param") != 0)
-			pname = binding->function_parameter_names[i];
-		raw_parameter_names.push_back(pname);
-		if (!pname.empty())
-			++raw_parameter_counts[pname];
-	}
-	map<string, int> parameter_name_counts;
-	map<string, int> raw_parameter_seen;
-	header << "function @" << name << "(";
-	if (indirect_result)
-	{
-		header << "%ret : ptr [pass=indirect_result]";
-		parameter_name_counts["ret"] = 1;
-	}
-	for (size_t i = 0; i < fn_type->parameters.size(); ++i)
-	{
-		if (i != 0 || indirect_result)
-			header << ", ";
-		string pname = raw_parameter_names[i];
-		if (!pname.empty())
-			++raw_parameter_seen[pname];
-		if (pname.empty() ||
-		    raw_parameter_seen[pname] < raw_parameter_counts[pname])
-			pname = "__param" + to_string(i);
-		int& count = parameter_name_counts[pname];
-		++count;
-		if (count > 1)
-			pname += "__shadow" + to_string(count);
-		out_.parameter_names.push_back(pname);
-		TypePtr ptype = fn_type->parameters[i];
-		header << "%" << pname << " : " << lowir_parameter(ptype);
-	}
-	size_t hidden_pvb_index = 0;
-	bool member_this_param =
-		fn_.binding->owner != NULL &&
-		fn_.binding->owner->kind == ScopeKind::Class &&
-		!fn_.binding->is_static_member &&
-		!fn_type->parameters.empty();
-	for (size_t i = member_this_param ? 1 : 0;
-	     i < fn_type->parameters.size();
-	     ++i)
-	{
-		vector<TypePtr> vbases =
-			program_.hidden_virtual_bases_for_function_parameter(
-				fn_.binding, i, fn_type->parameters[i]);
-		for (size_t v = 0; v < vbases.size(); ++v)
-		{
-			if (hidden_pvb_index != 0 ||
-			    !fn_type->parameters.empty() ||
-			    indirect_result)
-				header << ", ";
-			header << "%__pvbptr" << hidden_pvb_index++ << " : ptr";
-		}
-	}
-	vector<TypePtr> this_vbases =
-		member_this_param &&
-		!is_class_constructor_binding(fn_.binding) &&
-		!is_class_destructor_binding(fn_.binding)
-		? (fn_.binding->is_virtual
-		   ? program_.hidden_virtual_bases_for_function_parameter(
-			   fn_.binding, 0, fn_type->parameters[0])
-		   : hidden_virtual_bases_for_record(class_record_for_member(fn_.binding)))
-		: vector<TypePtr>();
-	for (size_t v = 0; v < this_vbases.size(); ++v)
-	{
-		if (hidden_pvb_index != 0 ||
-		    !fn_type->parameters.empty() ||
-		    indirect_result ||
-		    v != 0)
-			header << ", ";
-		header << "%__vbptr" << v << " : ptr";
-	}
-	header << ") -> "
-	       << (indirect_result ? "void" : scalar_lowir_type(fn_type->base));
-	vector<string> metadata;
-	if (fn_type->variadic)
-		metadata.push_back("arity=variadic");
-	if (binding->language_linkage == "c")
-		metadata.push_back("linkage=c");
-	if (binding->unwind_no)
-		metadata.push_back("unwind=no");
-	if (binding->name == "__cppgm_init")
-	{
-		metadata.push_back("role=init");
-		metadata.push_back("binding=internal");
-	}
-	else if (binding->name == "__cppgm_fini")
-	{
-		metadata.push_back("role=fini");
-		metadata.push_back("binding=internal");
-	}
-	else if (binding->name == "main")
-	{
-		metadata.push_back("role=entry");
-		metadata.push_back("binding=strong");
-		out_.strong_binding = true;
-		metadata.push_back("keep_alias=yes");
-	}
-	else if (binding->name.compare(0, 8, "__lambda") == 0 ||
-	         binding_has_internal_linkage(binding))
-		metadata.push_back("binding=internal");
-		else if (binding->is_inline_definition ||
-		         (binding_has_template_specialization_context(binding) &&
-		          !binding->is_explicit_specialization_member))
-			metadata.push_back("binding=weak");
-	else
-	{
-		metadata.push_back("binding=strong");
-		out_.strong_binding = true;
-	}
-if (binding->name != "main" &&
-    binding->name != "__cppgm_init" &&
-    binding->name != "__cppgm_fini") {
-string object_symbol = global_object_symbol(binding);
-if (!object_symbol.empty())
-	metadata.push_back("object=" + object_symbol); }
-	if (program_.host_object_lowering &&
-	    binding->is_generated_default_constructor)
-		metadata.push_back("generated_default_ctor=yes");
-	if (binding->is_object_root && !binding->is_defaulted) metadata.push_back("object_root=yes"); header << metadata_suffix(metadata); out_.header = header.str();
+throw runtime_error("missing function binding"); if (is_class_constructor_binding(binding)) { bool noop_body = lowir_function_definition_body_empty(fn_); if (noop_body && binding->is_generated_default_constructor && binding->is_defaulted && registered_constructor_body_nonempty(program_, binding)) noop_body = false; binding->is_noop_constructor = noop_body; } TypePtr fn_type = binding->type;
+bool indirect_result = initialize_function_header(binding, fn_type);
 if (binding->is_generated_copy_move_assignment && fn_type->parameters.size() == 2 && fn_type->parameters[1]->kind == TypeKind::RValueReference && binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class) { TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() != NULL)
 { pa11::layout_record_type(record); for (size_t i = 0; i < record->fields.size(); ++i) {
 Binding* ctor = find_record_copy_move_constructor(record->fields[i]->type, true); if (ctor != NULL && ctor->is_inline_definition)
 program_.demand_inline_function(ctor); } } }
 cleanups_.push_back(vector<Cleanup>()); lower_params(); start_block("entry"); lower_param_stores();
-bool noexcept_terminate =
-	program_.host_object_lowering &&
-	binding->unwind_no &&
-	node_may_throw_for_noexcept_wrapper(fn_);
-bool unexpected_wrapper =
-	program_.host_object_lowering &&
-	binding->dynamic_exception_spec &&
-	node_may_throw_for_noexcept_wrapper(fn_);
+	bool body_may_throw =
+		!hosted_synthetic_body_known_nothrow(binding) &&
+		node_may_throw_for_noexcept_wrapper(fn_);
+	bool noexcept_terminate =
+		program_.host_object_lowering &&
+		binding->unwind_no &&
+		body_may_throw;
+	bool unexpected_wrapper =
+		program_.host_object_lowering &&
+		binding->dynamic_exception_spec &&
+		body_may_throw;
 string noexcept_dispatch;
 if (noexcept_terminate || unexpected_wrapper) {
 if (unexpected_wrapper)
@@ -731,7 +677,7 @@ noexcept_dispatch = fresh_block("noexcept_dispatch");
 instr("eh_try ^" + noexcept_dispatch);
 cleanups_.back().push_back(Cleanup("eh_end"));
 }
-if (!lower_hosted_vector_bool_move_body() && !lower_defaulted_storage_special_member()) for (size_t i = 0; i < fn_.children.size(); ++i) { if (starts_with(fn_.children[i].line, "compound-statement"))
+if (!lower_hosted_vector_bool_move_body() && !lower_hosted_vector_relocate_body() && !lower_hosted_vector_realloc_insert_body() && !lower_hosted_vector_range_insert_body() && !lower_hosted_vector_copy_constructor_body() && !lower_hosted_vector_copy_assignment_body() && !lower_hosted_vector_impl_move_constructor_body() && !lower_hosted_std_function_swap_body() && !lower_hosted_rbtree_assignment_body() && !lower_hosted_rbtree_const_iterator_node_constructor_body() && !lower_hosted_tuple_storage_default_constructor_body() && !lower_hosted_tuple_storage_head_body() && !lower_hosted_tuple_reference_constructor_body() && !lower_hosted_forward_as_tuple_body() && !lower_hosted_unique_ptr_destructor_body() && !lower_hosted_unique_ptr_impl_constructor_body() && !lower_hosted_unique_ptr_impl_assignment_body() && !lower_hosted_iter_equals_val_constructor_body() && !lower_hosted_normal_iterator_member_body() && !lower_hosted_normal_iterator_difference_body() && !lower_hosted_ops_compare_constructor_body() && !lower_hosted_uninit_destroy_guard_constructor_body() && !lower_hosted_uninit_destroy_guard_release_body() && !lower_hosted_hashtable_range_constructor_body() && !lower_hosted_hash_code_base_hash_code_body() && !lower_hosted_hashtable_count_constructor_body() && !lower_hosted_to_address_body() && !lower_hosted_type_info_comparison_body() && !lower_hosted_vector_bool_s_nword_body() && !lower_hosted_iterator_comparison_body() && !lower_hosted_deque_iterator_difference_body() && !lower_hosted_deque_iterator_order_body() && !lower_hosted_deque_iterator_plus_body() && !lower_hosted_bit_iterator_base_comparison_body() && !lower_hosted_bit_iterator_base_difference_body() && !lower_hosted_bit_iterator_plus_body() && !lower_hosted_bit_const_iterator_deref_body() && !lower_hosted_bit_const_iterator_preincrement_body() && !lower_hosted_equal_aux1_basic_string_body() && !lower_hosted_lexicographical_compare_int_body() && !lower_hosted_uninitialized_default_n_trivial_body() && !lower_hosted_allocator_comparison_body() && !lower_hosted_allocator_destroy_body() && !lower_hosted_alloc_traits_propagate_body() && !lower_hosted_pair_default_constructor_body() && !lower_hosted_pair_piecewise_index_constructor_body() && !lower_hosted_pair_assignment_body() && !lower_hosted_rbtree_copy_constructor_body() && !lower_hosted_temporary_buffer_constructor_body() && !lower_hosted_shared_control_body() && !lower_hosted_shared_count_copy_body() && !lower_hosted_shared_count_assignment_body() && !lower_hosted_shared_ptr_assignment_body() && !lower_hosted_basic_string_guard_destructor_body() && !lower_hosted_uninit_destroy_guard_destructor_body() && !lower_hosted_vector_guard_elts_destructor_body() && !lower_hosted_vector_base_deallocate_body() && !lower_hosted_vector_guard_alloc_destructor_body() && !lower_hosted_make_exception_ptr_body() && !lower_hosted_stoa_body() && !lower_defaulted_storage_special_member()) for (size_t i = 0; i < fn_.children.size(); ++i) { if (starts_with(fn_.children[i].line, "compound-statement"))
 lower_compound(fn_.children[i]); } if (current_ != NULL && !current_->terminated) {
 emit_scope_cleanups(cleanups_.back()); if (pa11::is_void_type(fn_type->base) || indirect_result) terminate("return void"); else if (pa11::strip_cv(fn_type->base)->kind == TypeKind::Record)
 { if (record_return_slot_.empty()) record_return_slot_ = fresh_aux_slot("retobj", slot_lowir_type(fn_type->base));
@@ -894,8 +840,10 @@ void FunctionLowerer::lower_params()
 { TypePtr fn_type = fn_.binding->type; size_t param_index = 0; for (size_t i = 0; i < fn_.children.size(); ++i)
 	{ if (!starts_with(fn_.children[i].line, "parameter ")) continue; string pname = fn_.children[i].line.substr(10);
 	size_t space = pname.find(' '); pname = space == string::npos ? pname : pname.substr(0, space); string source_name = pname; if (pname.empty()) pname = "__param" + to_string(param_index);
-	if (param_index < out_.parameter_names.size()) pname = out_.parameter_names[param_index];
-	if (pname.size() > 1 && pname[0] == 't') { int n = 0; bool digits = true;
+		if (param_index < out_.parameter_names.size()) pname = out_.parameter_names[param_index];
+		if (param_index >= fn_type->parameters.size())
+			continue;
+		if (pname.size() > 1 && pname[0] == 't') { int n = 0; bool digits = true;
 for (size_t j = 1; j < pname.size(); ++j) if (pname[j] >= '0' && pname[j] <= '9') n = n * 10 + (pname[j] - '0'); else
 digits = false; if (digits && n > temp_counter_) temp_counter_ = n; }
 Binding* binding = fn_.children[i].binding; TypePtr ptype = fn_type->parameters[param_index]; bool member_this_param = fn_.binding->owner != NULL && fn_.binding->owner->kind == ScopeKind::Class && !fn_.binding->is_static_member && param_index == 0; TypePtr ptype_bare = pa11::strip_cv(ptype); bool pvb_slots = !member_this_param && (ptype_bare->kind == TypeKind::LValueReference || ptype_bare->kind == TypeKind::RValueReference) && pa11::strip_cv(ptype_bare->base)->kind == TypeKind::Record; vector<TypePtr> param_vbases = pvb_slots ? hidden_virtual_bases_for_record(pa11::strip_cv(ptype_bare->base)) : vector<TypePtr>(); if (binding == NULL) {
@@ -904,11 +852,26 @@ if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_
 if (!source_name.empty() && pname.compare(0, 7, "__param") == 0) { bool duplicate_later = false; size_t later_index = 0; for (size_t j = 0; j < fn_.children.size(); ++j) { if (!starts_with(fn_.children[j].line, "parameter ")) continue; string later_name = fn_.children[j].line.substr(10); size_t later_space = later_name.find(' '); later_name = later_space == string::npos ? later_name : later_name.substr(0, later_space); if (later_index > param_index && later_name == source_name) duplicate_later = true; ++later_index; } if (duplicate_later) slots_[binding] = source_name; }
 if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(ptype)); for (size_t v = 0; v < param_vbases.size(); ++v) add_slot(pname + "__pvb" + to_string(v), "ptr"); if (pa11::strip_cv(ptype)->kind == TypeKind::Record &&
 record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_index; }
-} } void FunctionLowerer::lower_param_stores()
+} if (param_index == 0 && is_class_destructor_binding(fn_.binding) && fn_type->parameters.size() == 1) { string pname = out_.parameter_names.empty() ? "__param0" : out_.parameter_names[0]; if (slot_names_[pname] == 0) slot_names_[pname] = 1; add_slot(pname, slot_lowir_type(fn_type->parameters[0])); } } void FunctionLowerer::lower_param_stores()
 {
 	TypePtr fn_type = fn_.binding->type;
 	size_t param_index = 0;
 	size_t hidden_pvb_index = 0;
+	if (is_class_destructor_binding(fn_.binding) &&
+	    fn_type->parameters.size() == 1)
+	{
+		bool has_parameter_node = false;
+		for (size_t i = 0; i < fn_.children.size(); ++i)
+			if (starts_with(fn_.children[i].line, "parameter "))
+				has_parameter_node = true;
+		if (!has_parameter_node)
+		{
+			string pname = out_.parameter_names.empty()
+				? "__param0" : out_.parameter_names[0];
+			instr("store ptr %" + pname + ", $" + pname);
+			return;
+		}
+	}
 	for (size_t i = 0; i < fn_.children.size(); ++i)
 	{
 		if (!starts_with(fn_.children[i].line, "parameter "))
@@ -918,9 +881,11 @@ record_pass_by_address(ptype)) by_address_parameters_.insert(binding); ++param_i
 		pname = space == string::npos ? pname : pname.substr(0, space);
 			if (pname.empty())
 				pname = "__param" + to_string(param_index);
-			if (param_index < out_.parameter_names.size())
-				pname = out_.parameter_names[param_index];
-			TypePtr ptype = fn_type->parameters[param_index];
+				if (param_index < out_.parameter_names.size())
+					pname = out_.parameter_names[param_index];
+				if (param_index >= fn_type->parameters.size())
+					continue;
+				TypePtr ptype = fn_type->parameters[param_index];
 		bool member_this_param =
 			fn_.binding->owner != NULL &&
 			fn_.binding->owner->kind == ScopeKind::Class &&
@@ -1022,16 +987,77 @@ void append_assignment_dependency_members(TypePtr record, vector<Binding*>& memb
 		Binding* member = bare->scope->binding_order[i];
 		if (member == NULL ||
 		    member->kind != BindingKind::Variable ||
+		    member->owner != bare->scope ||
 		    member->is_static_member ||
 		    member->aliased_binding != NULL)
 			continue;
 		bool duplicate = false;
 		for (size_t j = 0; j < members.size(); ++j)
-			if (members[j] == member)
+			if (members[j] == member ||
+			    (members[j] != NULL &&
+			     members[j]->owner == member->owner &&
+			     members[j]->name == member->name))
 				duplicate = true;
 		if (!duplicate)
 			members.push_back(member);
 	}
+}
+
+string lowir_record_primary_name(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return "";
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	size_t scope = primary.rfind("::");
+	return scope == string::npos ? primary : primary.substr(scope + 2);
+}
+
+bool lowir_record_in_std_namespace(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	for (Scope* scope = bare.get() != NULL ? bare->scope : NULL;
+	     scope != NULL;
+	     scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+			return true;
+	return false;
+}
+
+bool hosted_pair_copy_move_storage_tail(const Binding* binding, TypePtr record)
+{
+	if (binding == NULL ||
+	    !is_class_constructor_binding(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 2 ||
+	    !is_reference(binding->type->parameters[1]))
+		return false;
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	TypePtr source = pa11::strip_cv(binding->type->parameters[1]->base);
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    source.get() == NULL ||
+	    source->kind != TypeKind::Record ||
+	    !pa11::same_type(bare, source) ||
+	    lowir_record_primary_name(bare) != "pair" ||
+	    !lowir_record_in_std_namespace(bare))
+		return false;
+	pa11::layout_record_type(bare);
+	bool saw_record_field = false;
+	for (size_t i = 0; i < bare->fields.size(); ++i)
+	{
+		TypePtr field = pa11::strip_cv(bare->fields[i]->type);
+		if (field->kind == TypeKind::Record)
+			saw_record_field = true;
+		else if (saw_record_field && record_has_storage_copy(field))
+			return true;
+	}
+	return false;
 }
 
 uint64_t assignment_storage_copy_limit(TypePtr record)
@@ -1160,20 +1186,133 @@ bool FunctionLowerer::lower_defaulted_assignment_fields(TypePtr record,
 		instr("copyobj " + to_string(total - cursor) +
 		      "x1 " + other_chunk + ", " + self_chunk);
 	}
+return true;
+}
+
+bool FunctionLowerer::lower_defaulted_constructor_fields(TypePtr record,
+                                                         bool move,
+                                                         const string& other_name)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != TypeKind::Record)
+		return false;
+	pa11::layout_record_type(bare);
+	vector<Binding*> members;
+	append_assignment_dependency_members(bare, members);
+	vector<pair<Binding*, Binding*> > field_ops;
+	for (size_t i = 0; i < members.size(); ++i)
+	{
+		TypePtr field_type = pa11::strip_cv(members[i]->type);
+		if (field_type->kind != TypeKind::Record)
+			continue;
+		Binding* ctor = find_copy_move_constructor(field_type, move);
+		if (ctor == NULL && move)
+			ctor = find_copy_move_constructor(field_type, false);
+		if (ctor == NULL)
+			continue;
+		field_ops.push_back(make_pair(members[i], ctor));
+	}
+	if (field_ops.empty())
+		return false;
+	string self;
+	string other;
+	function<void()> ensure_copy_bases = [&]() {
+		if (!self.empty())
+			return;
+		self = fresh_temp();
+		other = fresh_temp();
+		instr(self + " = load ptr $this");
+		instr(other + " = load ptr $" + other_name);
+	};
+	uint64_t cursor = 0;
+	for (size_t i = 0; i < field_ops.size(); ++i)
+	{
+		Binding* field = field_ops[i].first;
+		Binding* ctor = field_ops[i].second;
+		uint64_t offset = field->member_offset;
+		if (offset > cursor)
+		{
+			ensure_copy_bases();
+			if (cursor == 0)
+				instr("copyobj " + to_string(offset) + "x" +
+				      to_string(pa11::type_align(bare)) + " " +
+				      other + ", " + self);
+			else
+			{
+				string self_chunk = fresh_temp();
+				string other_chunk = fresh_temp();
+				instr(self_chunk + " = index i8 " + self + ", " +
+				      to_string(cursor));
+				instr(other_chunk + " = index i8 " + other + ", " +
+				      to_string(cursor));
+				instr("copyobj " + to_string(offset - cursor) +
+				      "x1 " + other_chunk + ", " + self_chunk);
+			}
+		}
+		program_.demand_function_declaration(ctor);
+		program_.demand_inline_function(ctor);
+		string self_base = fresh_temp();
+		string self_field = fresh_temp();
+		string other_base = fresh_temp();
+		string other_field = fresh_temp();
+		instr(self_base + " = load ptr $this");
+		instr(self_field + " = index i8 " + self_base + ", " +
+		      to_string(offset));
+		instr(other_base + " = load ptr $" + other_name);
+		instr(other_field + " = index i8 " + other_base + ", " +
+		      to_string(offset));
+		instr("call void @" + program_.symbol_for(ctor) +
+		      "(" + self_field + ", " + other_field + ")");
+		uint64_t end = assignment_member_storage_end(field);
+		if (end > cursor)
+			cursor = end;
+	}
+	uint64_t total = assignment_storage_copy_limit(bare);
+	if (total > cursor)
+	{
+		ensure_copy_bases();
+		if (cursor == 0)
+			instr("copyobj " + to_string(total) + "x" +
+			      to_string(pa11::type_align(bare)) + " " +
+			      other + ", " + self);
+		else
+		{
+			string self_chunk = fresh_temp();
+			string other_chunk = fresh_temp();
+			instr(self_chunk + " = index i8 " + self + ", " +
+			      to_string(cursor));
+			instr(other_chunk + " = index i8 " + other + ", " +
+			      to_string(cursor));
+			instr("copyobj " + to_string(total - cursor) +
+			      "x1 " + other_chunk + ", " + self_chunk);
+		}
+	}
 	return true;
 }
 
 bool FunctionLowerer::lower_defaulted_storage_special_member() { Binding* binding = fn_.binding;
-if (binding == NULL || !binding->is_defaulted || binding->owner == NULL || binding->owner->kind != ScopeKind::Class ||
+if (binding == NULL || (!binding->is_defaulted && !binding->is_generated_copy_move_constructor && !binding->is_generated_copy_move_assignment) || binding->owner == NULL || binding->owner->kind != ScopeKind::Class ||
 binding->type->kind != TypeKind::Function || binding->type->parameters.size() != 2 || !is_reference(binding->type->parameters[1])) return false;
-bool special = binding->name == binding->owner->name || binding->name == "operator="; if (!special) return false;
-for (size_t i = 0; i < fn_.children.size(); ++i) if (starts_with(fn_.children[i].line, "compound-statement") && !fn_.children[i].children.empty()) return false;
-	TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return false; if (binding->name == binding->owner->name && pa11::strip_cv(record)->is_polymorphic) return false; string other_name = "__param1";
+bool class_ctor = is_class_constructor_binding(binding);
+bool special = class_ctor || binding->name == "operator="; if (!special) return false;
+		TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return false;
+bool helper_ctor = class_ctor && !pa11::strip_cv(record)->is_polymorphic &&
+	(defaulted_copy_move_constructor_needs_helper(binding, record) ||
+	 hosted_pair_copy_move_storage_tail(binding, record));
+for (size_t i = 0; i < fn_.children.size(); ++i) if (starts_with(fn_.children[i].line, "compound-statement") && !fn_.children[i].children.empty() && !(helper_ctor && binding->is_generated_copy_move_constructor)) return false;
+		string other_name = "__param1";
 if (fn_.children.size() > 1 && starts_with(fn_.children[1].line, "parameter ")) { other_name = fn_.children[1].line.substr(10);
 size_t space = other_name.find(' '); other_name = space == string::npos ? other_name : other_name.substr(0, space); if (other_name.empty())
-other_name = "__param1"; } if (binding->name == "operator=") {
-bool move = binding->type->parameters[1]->kind == TypeKind::RValueReference; TypePtr bare = pa11::strip_cv(record); TypePtr direct_base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
-Binding* base_assign = direct_base.get() != NULL ? find_record_copy_move_assignment(direct_base, move) : NULL; if (base_assign != NULL) {
+other_name = "__param1"; } if (class_ctor) {
+if (pa11::strip_cv(record)->is_polymorphic) return false;
+if (helper_ctor) {
+bool move = binding->type->parameters[1]->kind == TypeKind::RValueReference;
+if (!lower_defaulted_constructor_fields(record, move, other_name)) return false;
+terminate("return void"); return true; }
+	} if (binding->name == "operator=") {
+	bool move = binding->type->parameters[1]->kind == TypeKind::RValueReference; TypePtr bare = pa11::strip_cv(record); TypePtr direct_base = bare->base.get() != NULL ? pa11::strip_cv(bare->base) : TypePtr();
+	Binding* base_assign = direct_base.get() != NULL ? find_record_copy_move_assignment(direct_base, move) : NULL;
+	if (base_assign != NULL) {
 program_.demand_function_declaration(base_assign); program_.demand_inline_function(base_assign); string self = fresh_temp(); instr(self + " = load ptr $this");
 string self_base = emit_base_subobject_addr(Value("ptr", self), record, direct_base).text;
 string other = fresh_temp(); instr(other + " = load ptr $" + other_name); string other_base = emit_base_subobject_addr(Value("ptr", other),

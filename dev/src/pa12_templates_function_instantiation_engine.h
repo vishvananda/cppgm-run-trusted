@@ -44,6 +44,11 @@ struct FunctionTemplateInstantiationEngine
 			map<string, Binding*>::iterator existing,
 			bool full_args_dependent);
 		void share_existing_specialization_if_available();
+		TemplateDeclaration* specialization_body_source(
+			TemplateDeclaration* source);
+		void remember_reused_specialization_body(
+			Binding* binding,
+			TemplateDeclaration* source);
 		bool specialization_matches_declaration_owner(Binding* binding);
 		bool specialization_signature_matches(Binding* binding);
 		void begin_completion();
@@ -72,6 +77,8 @@ struct FunctionTemplateInstantiationEngine
 	void model_hosted_write_type(TypePtr& type);
 	void model_hosted_function_assignment_type(TypePtr& type);
 	void model_hosted_vector_insert_type(TypePtr& type);
+	void model_hosted_make_pair_type(TypePtr& type);
+	bool resolve_dependent_enable_if_return_type(TypePtr& type);
 
 	Binding* create_specialization_binding(TypePtr type, bool force_value);
 	void copy_placeholder_properties(Binding* binding, bool copy_defaults);
@@ -85,13 +92,13 @@ struct FunctionTemplateInstantiationEngine
 	bool ordinary_class_template_member() const;
 	Binding* instantiate_ordinary_member_body(size_t body_pos);
 	Binding* instantiate_out_of_line_member_body(size_t body_pos);
-	void load_parameter_names(Binding* source,
-	                          Binding* target,
-	                          TypePtr type,
-	                          vector<string>& names);
-	PendingFunctionBody build_pending_body(Binding* binding,
-	                                       const vector<string>& names,
-	                                       size_t body_pos);
+		void load_parameter_names(Binding* source,
+		                          Binding* target,
+		                          TypePtr type,
+		                          vector<string>& names);
+		PendingFunctionBody build_pending_body(Binding* binding,
+		                                       const vector<string>& names,
+		                                       size_t body_pos);
 	void parse_or_queue_pending_body(PendingFunctionBody& pending);
 
 	Binding* replay_function_template();

@@ -1,0 +1,42 @@
+int cleaned;
+
+struct Guard
+{
+  ~Guard() { cleaned = 1; }
+};
+
+struct State
+{
+  int ok;
+  bool ready() { return ok != 0; }
+};
+
+void fail()
+{
+  throw 1;
+}
+
+bool probe(State* state)
+{
+  bool matched = false;
+  try
+  {
+    Guard guard;
+    if (state != 0 && state->ready())
+      fail();
+    matched = true;
+  }
+  catch (...)
+  {
+    return matched || cleaned == 0;
+  }
+  return true;
+}
+
+int main()
+{
+  State state;
+  state.ok = 1;
+  cleaned = 0;
+  return probe(&state) ? 1 : 0;
+}

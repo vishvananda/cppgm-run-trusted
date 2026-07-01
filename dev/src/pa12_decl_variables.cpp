@@ -106,6 +106,14 @@ bool static_member_constant_usable(Binding* binding)
 	       (binding->is_constexpr || pa11::type_has_const(binding->type));
 }
 
+bool incomplete_template_object_error(const runtime_error& err)
+{
+	string message = err.what();
+	return message == "incomplete object type" ||
+	       message == "incomplete class type" ||
+	       message == "incomplete array type";
+}
+
 void complete_static_member_array_type_from_initializer(Binding* variable,
                                                         Node& node,
                                                         Binding* source)
@@ -132,13 +140,11 @@ void complete_static_member_array_type_from_initializer(Binding* variable,
 
 }  // namespace
 
-Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
-                                             Scope* target,
-                                             Binding* variable,
-                                             const QualifiedName& qname,
-                                             TypePtr type,
-                                             const Expr* init,
-                                             Node& out)
+void Parser::initialize_variable_declaration_flags(const DeclSpecs& specs,
+                                                   Scope* target,
+                                                   Binding* variable,
+                                                   const QualifiedName& qname,
+                                                   TypePtr type)
 {
 	variable->language_linkage = current_language_linkage();
 	variable->is_constexpr = variable->is_constexpr || specs.constexpr_decl;
@@ -178,23 +184,91 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 		target->kind == ScopeKind::Class &&
 		!class_protected_access_.empty() &&
 		class_protected_access_.back();
-		if (target->kind == ScopeKind::Class)
+	if (target->kind == ScopeKind::Class)
+	{
+		TypePtr record = pa11::record_type_for_scope(target);
+		if (record.get() != NULL)
+			record->layout_valid = false;
+	}
+}
+
+void Parser::finish_static_member_variable_initializer(
+	Binding* variable,
+	const Expr* init,
+	Node& var,
+	bool defer_static_template_member)
+{
+	if (init != NULL && !var.children.empty())
+	{
+		static_member_initializers_[variable] = var.children[0];
+		ConstexprValue value;
+		bool eval_ok = false;
+		try
 		{
-			TypePtr record = pa11::record_type_for_scope(target);
-			if (record.get() != NULL)
-				record->layout_valid = false;
+			eval_ok = try_evaluate_constexpr_expr(var.children[0], value);
 		}
-		TypePtr object_type = pa11::strip_cv(type);
-		while (object_type.get() != NULL &&
-		       object_type->kind == pa11::TypeKind::Array)
-			object_type = pa11::strip_cv(object_type->base);
-	if (object_type.get() != NULL &&
+		catch (const runtime_error& err)
+		{
+			if (!(defer_static_template_member &&
+			      incomplete_template_object_error(err)))
+				throw;
+		}
+		if (static_member_constant_usable(variable) &&
+		    !variable->has_constant &&
+		    eval_ok &&
+		    !value.is_object &&
+		    !value.is_pointer)
+		{
+			variable->has_constant = true;
+			variable->constant_value = value.int_value;
+		}
+		if (!active_class_instantiations_.empty() &&
+		    !active_class_instantiation_dependent() &&
+		    pa11::strip_cv(variable->type)->kind == pa11::TypeKind::Array)
+			extra_lowir_nodes_.push_back(var);
+	}
+	else if (init == NULL && var.children.empty())
+	{
+		map<Binding*, Node>::const_iterator found =
+			find_static_member_initializer(static_member_initializers_,
+			                               variable);
+		if (found != static_member_initializers_.end())
+		{
+			complete_static_member_array_type_from_initializer(
+				variable,
+				var,
+				found->first);
+			add_child(var, found->second);
+		}
+	}
+}
+
+Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
+                                             Scope* target,
+                                             Binding* variable,
+                                             const QualifiedName& qname,
+                                             TypePtr type,
+                                             const Expr* init,
+                                             Node& out)
+{
+	initialize_variable_declaration_flags(specs, target, variable, qname, type);
+	TypePtr object_type = pa11::strip_cv(type);
+	while (object_type.get() != NULL &&
+	       object_type->kind == pa11::TypeKind::Array)
+		object_type = pa11::strip_cv(object_type->base);
+	bool defer_static_template_member =
+		variable->is_static_member &&
+		target->kind == ScopeKind::Class &&
+		!active_class_instantiations_.empty();
+	if (!defer_static_template_member &&
+	    object_type.get() != NULL &&
 	    object_type->kind == pa11::TypeKind::Record)
 	{
 		mark_template_specialization_demanded(object_type);
 		if (!type_is_template_dependent(object_type))
 			complete_template_record(object_type);
 	}
+	if (!defer_static_template_member)
 		ensure_default_destructor(type);
 		Node var("variable " + qname.name + " " + pa11::describe_type(type));
 	var.binding = variable;
@@ -203,44 +277,24 @@ Binding* Parser::finish_variable_declaration(const DeclSpecs& specs,
 	    target->kind == ScopeKind::Namespace &&
 	    init == NULL)
 		return variable;
-	apply_variable_initializer(specs, target, variable, type, init, var);
-	if (variable->is_static_member)
+	try
 	{
-		if (init != NULL && !var.children.empty())
-		{
-			static_member_initializers_[variable] = var.children[0];
-			ConstexprValue value;
-			bool eval_ok =
-				try_evaluate_constexpr_expr(var.children[0], value);
-			if (static_member_constant_usable(variable) &&
-			    !variable->has_constant &&
-			    eval_ok &&
-			    !value.is_object &&
-			    !value.is_pointer)
-			{
-				variable->has_constant = true;
-				variable->constant_value = value.int_value;
-			}
-			if (!active_class_instantiations_.empty() &&
-			    !active_class_instantiation_dependent() &&
-			    pa11::strip_cv(variable->type)->kind == pa11::TypeKind::Array)
-				extra_lowir_nodes_.push_back(var);
-		}
-		else if (init == NULL && var.children.empty())
-		{
-				map<Binding*, Node>::const_iterator found =
-					find_static_member_initializer(static_member_initializers_,
-					                               variable);
-				if (found != static_member_initializers_.end())
-				{
-					complete_static_member_array_type_from_initializer(
-						variable,
-						var,
-						found->first);
-					add_child(var, found->second);
-				}
-		}
+		apply_variable_initializer(specs, target, variable, type, init, var);
 	}
+	catch (const runtime_error& err)
+	{
+		if (!(variable->is_static_member &&
+		      target->kind == ScopeKind::Class &&
+		      !active_class_instantiations_.empty() &&
+		      incomplete_template_object_error(err)))
+			throw;
+	}
+	if (variable->is_static_member)
+		finish_static_member_variable_initializer(
+			variable,
+			init,
+			var,
+			defer_static_template_member);
 	else if (variable->is_constexpr && !var.children.empty())
 		static_member_initializers_[variable] = var.children[0];
 	add_child(out, var);

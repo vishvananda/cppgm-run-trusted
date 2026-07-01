@@ -1,0 +1,34 @@
+#include <string>
+#include <vector>
+
+struct Item {
+  std::string text;
+  int tag;
+
+  Item() : text(), tag(0) {}
+  Item(const char* value, int number) : text(value), tag(number) {}
+};
+
+int main()
+{
+  std::vector<Item> left;
+  left.push_back(Item("left", 1));
+
+  std::vector<Item> right;
+  right.push_back(Item("middle", 2));
+  right.push_back(Item("tail", 3));
+
+  left.insert(left.end(), right.begin(), right.end());
+
+  if (left.size() != 3)
+    return 10 + left.size();
+  if (!(left[0].text == "left") || left[0].tag != 1)
+    return 20;
+  if (!(left[1].text == "middle") || left[1].tag != 2)
+    return 30;
+  if (!(left[2].text == "tail") || left[2].tag != 3)
+    return 40;
+  if (!(right[0].text == "middle") || right[0].tag != 2)
+    return 50;
+  return 0;
+}

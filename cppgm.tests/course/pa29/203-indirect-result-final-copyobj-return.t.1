@@ -1,0 +1,31 @@
+struct Large {
+  long a;
+  long b;
+  long c;
+};
+
+Large make_large(int early) {
+  Large value;
+  value.a = 11;
+  value.b = 22;
+  value.c = 33;
+  if (early) {
+    return value;
+  }
+  value.a = 44;
+  value.b = 55;
+  value.c = 66;
+  return value;
+}
+
+int main() {
+  Large early = make_large(1);
+  Large late = make_large(0);
+  if (early.a != 11 || early.b != 22 || early.c != 33) {
+    return 1;
+  }
+  if (late.a != 44 || late.b != 55 || late.c != 66) {
+    return 2;
+  }
+  return 0;
+}

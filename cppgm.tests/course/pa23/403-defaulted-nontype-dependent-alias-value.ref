@@ -1,0 +1,21 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $t : obj<1x1>
+  slot $refarg__1 : i32
+
+  block ^entry:
+    %t1 = addr $t
+    store i32 0, $refarg__1
+    %t2 = addr $refarg__1
+    call void @tuple_int___tuple__ov3(%t1, %t2)
+    return i32 0
+}
+function @tuple_int___tuple__ov3(%this : ptr, %__param1 : ptr [pass=reference]) -> void [binding=weak, object=_ZN5tupleIJiEEC1IJiETnN9enable_ifIXsr3AndI17integral_constantIXeqsZT_sZT_EENS0_6EnableIJDpT_EEEEE5valueEiE4typeELi0EEEDpOS6_] {
+  slot $this : ptr
+  slot $__param1 : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %__param1, $__param1
+    return void
+}
+alias object _ZN5tupleIJiEEC2IJiETnN9enable_ifIXsr3AndI17integral_constantIXeqsZT_sZT_EENS0_6EnableIJDpT_EEEEE5valueEiE4typeELi0EEEDpOS6_ = @tuple_int___tuple__ov3

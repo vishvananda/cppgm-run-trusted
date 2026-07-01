@@ -1,0 +1,17 @@
+1 translation units
+start translation unit 1
+translation-unit
+  function-definition select function of (bool, enum class Choice) returning enum class Choice
+    parameter take_left bool
+    parameter current enum class Choice
+    compound-statement
+      expression-statement
+        assignment-expression lvalue enum class Choice OP_ASS:=
+          id-expression lvalue enum class Choice current
+          conditional-expression prvalue enum class Choice
+            id-expression lvalue bool take_left
+            id-expression lvalue enum class Choice current
+            literal prvalue enum class Choice 1
+      return-statement
+        id-expression lvalue enum class Choice current
+end translation unit

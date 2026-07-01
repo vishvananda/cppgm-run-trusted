@@ -1,0 +1,13 @@
+#include <map>
+#include <string>
+
+enum E { A };
+
+const std::map<E, std::string> m{
+  {A, "a"}
+};
+
+int main()
+{
+  return m.size() == 1 ? 0 : 1;
+}

@@ -1,0 +1,66 @@
+declare function @__external_runtime___Unwind_Resume() -> void [return=noreturn, role=eh_resume, linkage=c, binding=strong, object=_Unwind_Resume]
+declare function @__external_runtime____gxx_personality_v0() -> void [role=eh_personality, linkage=c, binding=strong, object=__gxx_personality_v0]
+declare function @R__R(%arg0 : ptr) -> void [binding=strong, object=_ZN1RC1Ev]
+declare function @R__R__ov2(%arg0 : ptr, %arg1 : ptr [pass=reference]) -> void [binding=strong, object=_ZN1RC1ERKS_]
+declare function @R___R(%arg0 : ptr) -> void [binding=strong, object=_ZN1RD1Ev]
+declare function @cond() -> u8 [binding=strong, object=_Z4condv]
+declare function @make(%ret : ptr [pass=indirect_result]) -> void [binding=strong, object=_Z4makev]
+
+function @f() -> void [binding=strong, object=_Z1fv] {
+  slot $live : obj<1x1>
+  slot $x : obj<1x1>
+  slot $arg__1 : obj<1x1>
+  slot $call__2 : u8
+
+  block ^entry:
+    %t1 = addr $live
+    call void @R__R(%t1)
+    %t2 = addr $x
+    %t3 = addr $arg__1
+    eh_try ^call_unwind_dispatch_4
+    %t4 = call u8 @cond()
+    store u8 %t4, $call__2
+    %t5 = load u8 $call__2
+    eh_end
+    jump ^call_unwind_end_5
+
+  block ^call_unwind_dispatch_4:
+    %t6 = addr $live
+    call void @R___R(%t6)
+    resume
+
+  block ^call_unwind_end_5:
+    branch %t5, ^condobj_then_1, ^condobj_else_2
+
+  block ^condobj_then_1:
+    eh_try ^call_unwind_dispatch_4
+    call void @make(%t3)
+    eh_end
+    jump ^condobj_end_3
+
+  block ^condobj_else_2:
+    eh_try ^call_unwind_dispatch_4
+    call void @R__R(%t3)
+    eh_end
+    jump ^condobj_end_3
+
+  block ^condobj_end_3:
+    eh_try ^call_unwind_dispatch_6
+    call void @R__R__ov2(%t2, %t3)
+    call void @R___R(%t3)
+    eh_end
+    jump ^call_unwind_end_7
+
+  block ^call_unwind_dispatch_6:
+    call void @R___R(%t3)
+    %t7 = addr $live
+    call void @R___R(%t7)
+    resume
+
+  block ^call_unwind_end_7:
+    %t8 = addr $x
+    call void @R___R(%t8)
+    %t9 = addr $live
+    call void @R___R(%t9)
+    return void
+}

@@ -42,6 +42,98 @@ bool append_anonymous_storage_member_initializers(
 	return emitted;
 }
 
+bool same_constructor_owner_template_family(TypePtr left, TypePtr right)
+{
+	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
+	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
+	if (l.get() == NULL || r.get() == NULL ||
+	    l->kind != pa11::TypeKind::Record ||
+	    r->kind != pa11::TypeKind::Record)
+		return false;
+	string l_primary = l->template_primary_name.empty()
+		? l->name : l->template_primary_name;
+	string r_primary = r->template_primary_name.empty()
+		? r->name : r->template_primary_name;
+	return l_primary == r_primary &&
+	       l->is_template_specialization == r->is_template_specialization;
+}
+
+bool same_constructor_self_record_family(TypePtr candidate, TypePtr current)
+{
+	TypePtr c = candidate.get() != NULL
+		? pa11::strip_cv(candidate) : TypePtr();
+	TypePtr self = current.get() != NULL
+		? pa11::strip_cv(current) : TypePtr();
+	if (c.get() == NULL || self.get() == NULL ||
+	    c->kind != pa11::TypeKind::Record ||
+	    self->kind != pa11::TypeKind::Record)
+		return false;
+	if (c.get() == self.get())
+		return true;
+	if (c->scope == NULL || self->scope == NULL ||
+	    c->scope->name != self->scope->name ||
+	    c->scope->parent == NULL || self->scope->parent == NULL)
+		return false;
+	TypePtr c_owner = pa11::record_type_for_scope(c->scope->parent);
+	TypePtr self_owner = pa11::record_type_for_scope(self->scope->parent);
+	return same_constructor_owner_template_family(c_owner, self_owner);
+}
+
+	TypePtr rebind_constructor_self_parameter_type(TypePtr type, TypePtr current)
+	{
+		if (type.get() == NULL)
+			return type;
+		switch (type->kind)
+		{
+		case pa11::TypeKind::Cv:
+			return pa11::make_cv(
+				rebind_constructor_self_parameter_type(type->base, current),
+				type->cv);
+	case pa11::TypeKind::Pointer:
+		return pa11::make_pointer(
+			rebind_constructor_self_parameter_type(type->base, current));
+	case pa11::TypeKind::LValueReference:
+		return pa11::make_lvalue_reference(
+			rebind_constructor_self_parameter_type(type->base, current));
+	case pa11::TypeKind::RValueReference:
+		return pa11::make_rvalue_reference(
+			rebind_constructor_self_parameter_type(type->base, current));
+	case pa11::TypeKind::Array:
+	{
+		TypePtr rebound = pa11::make_array(
+			rebind_constructor_self_parameter_type(type->base, current),
+			type->unknown_bound,
+			type->bound);
+		rebound->name = type->name;
+		return rebound;
+	}
+	case pa11::TypeKind::Function:
+	{
+		vector<TypePtr> params;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			params.push_back(
+				rebind_constructor_self_parameter_type(type->parameters[i],
+				                                       current));
+		TypePtr rebound = pa11::make_function(
+			rebind_constructor_self_parameter_type(type->base, current),
+			params,
+			type->variadic);
+		rebound->cv = type->cv;
+		rebound->ref_qualifier = type->ref_qualifier;
+		return rebound;
+	}
+		case pa11::TypeKind::MemberPointer:
+			return pa11::make_member_pointer(
+				rebind_constructor_self_parameter_type(type->member_class,
+				                                       current),
+				rebind_constructor_self_parameter_type(type->base, current));
+		default:
+			if (same_constructor_self_record_family(type, current))
+				return current;
+			return type;
+		}
+	}
+
 }  // namespace
 
 Binding* Parser::add_constructor_this_parameter(
@@ -84,9 +176,21 @@ map<string, vector<Binding*> > Parser::bind_constructor_body_parameters(
 		}
 		TypePtr parameter_type = parameters[i].type.get() != NULL
 			? substitute_template_type(parameters[i].type) : TypePtr();
+		TypePtr class_type =
+			function != NULL && function->owner != NULL &&
+			function->owner->kind == ScopeKind::Class
+			? pa11::record_type_for_scope(function->owner) : TypePtr();
+		if (class_type.get() != NULL)
+			parameter_type =
+				rebind_constructor_self_parameter_type(parameter_type,
+				                                       class_type);
 		if (parameter_type.get() == NULL &&
 		    i + 1 < function->type->parameters.size())
 			parameter_type = function->type->parameters[i + 1];
+		if (class_type.get() != NULL)
+			parameter_type =
+				rebind_constructor_self_parameter_type(parameter_type,
+				                                       class_type);
 		if (parameter_type.get() == NULL) {
 			if (!parameters[i].pack_expression_name.empty())
 				parameter_packs[parameters[i].pack_expression_name];
@@ -265,6 +369,12 @@ ConstructorInitializerParse Parser::parse_constructor_initializer_clause(
 						clause.have_init = true;
 					}
 				}
+			} else if (clause.parsed_args.empty()) {
+				clause.init.valid = true;
+				clause.init.category = ValueCategory::PRValue;
+				clause.init.braced_init_list = true;
+				clause.init.node = Node("braced-init-list");
+				clause.have_init = true;
 			} else if (clause.parsed_args.size() == 1) {
 				clause.init = clause.parsed_args[0];
 				clause.have_init = true;
@@ -810,14 +920,16 @@ void Parser::parse_immediate_qualified_constructor_definition(
 				class_scope, class_type, this_binding, body,
 				explicit_member_initializers, explicit_base_actions, direct_bases);
 			if (!delegating)
+			{
 				append_constructor_base_init_actions(class_type,
 				                                     direct_bases,
 				                                     explicit_base_actions,
 				                                     body);
-			append_constructor_member_init_actions(class_type,
-			                                       this_binding,
-			                                       explicit_member_initializers,
-			                                       body);
+				append_constructor_member_init_actions(class_type,
+				                                       this_binding,
+				                                       explicit_member_initializers,
+				                                       body);
+			}
 			append_constructor_compound_body(body, function_try_block);
 		} catch (...) {
 			active_functions_.pop_back();

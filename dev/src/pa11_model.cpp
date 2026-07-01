@@ -7,6 +7,7 @@ using namespace std;
 namespace pa11 {
 
 bool complete_hosted_record_layout(TypePtr type);
+bool refresh_hosted_sized_record_layout(TypePtr type);
 bool layout_hosted_basic_string_record(TypePtr type);
 void adjust_hosted_basic_string_layout(TypePtr type);
 void adjust_hosted_stream_layout(TypePtr type);
@@ -158,10 +159,11 @@ Type::Type(TypeKind k)
 	  nonvirtual_size(0),
 	  nonvirtual_align(1),
 	  direct_base_offset(0),
-	  direct_base_virtuals(),
-	  layout_valid(false),
-	  hosted_layout_synthesized(false),
-	  is_polymorphic(false),
+		  direct_base_virtuals(),
+		  layout_valid(false),
+		  hosted_layout_synthesized(false),
+		  template_record_shallow_complete(false),
+		  is_polymorphic(false),
 	  introduces_vptr(false),
 	  is_final_record(false)
 {
@@ -539,6 +541,10 @@ static bool type_template_identity_matches(const TypePtr& left,
                                            const TypePtr& right);
 bool same_type(const TypePtr& left, const TypePtr& right)
 {
+	if (left.get() == right.get())
+		return true;
+	if (left.get() == NULL || right.get() == NULL)
+		return false;
 	if (left->kind != right->kind)
 		return false;
 	if (left->kind == TypeKind::Fundamental)
@@ -644,15 +650,15 @@ uint64_t type_size(const TypePtr& type)
 	}
 	if (bare->kind == TypeKind::Enum)
 		return fundamental_size(bare->enum_underlying);
-		if (bare->kind == TypeKind::Record)
+	if (bare->kind == TypeKind::Record)
+	{
+		if (refresh_hosted_sized_record_layout(bare))
+			return bare->record_size;
+		if (!bare->complete)
 		{
-				if (!bare->complete)
-				{
-					if (!complete_hosted_record_layout(bare))
-					{
-						throw runtime_error("incomplete class type");
-					}
-				}
+			if (!complete_hosted_record_layout(bare))
+				throw runtime_error("incomplete class type");
+		}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_size;
@@ -664,15 +670,15 @@ uint64_t type_align(const TypePtr& type)
 	TypePtr bare = strip_cv(type);
 	if (bare->kind == TypeKind::Array)
 		return type_align(bare->base);
-		if (bare->kind == TypeKind::Record)
+	if (bare->kind == TypeKind::Record)
+	{
+		if (refresh_hosted_sized_record_layout(bare))
+			return bare->record_align;
+		if (!bare->complete)
 		{
-				if (!bare->complete)
-				{
-					if (!complete_hosted_record_layout(bare))
-					{
-						throw runtime_error("incomplete class type");
-					}
-				}
+			if (!complete_hosted_record_layout(bare))
+				throw runtime_error("incomplete class type");
+		}
 		if (!bare->layout_valid)
 			layout_record_type(bare);
 		return bare->record_align;
@@ -1122,6 +1128,8 @@ void layout_record_type(TypePtr type)
 			throw runtime_error("incomplete class type");
 		}
 	}
+	if (refresh_hosted_sized_record_layout(bare))
+		return;
 	if (bare->layout_valid)
 		return;
 	if (complete_hosted_record_layout(bare))

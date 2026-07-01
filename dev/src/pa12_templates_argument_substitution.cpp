@@ -15,9 +15,13 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
-	TemplateArgument Parser::substitute_template_argument(
-		const TemplateArgument& arg) const
-	{
+	size_t dependent_cache_template_argument_identity(
+		const TemplateArgument& argument,
+		int depth);
+
+		TemplateArgument Parser::substitute_template_argument(
+			const TemplateArgument& arg) const
+		{
 		if (arg.kind == TemplateArgumentKind::Pack &&
 		    arg.pack_expansion &&
 		    !arg.value_name.empty())
@@ -26,20 +30,37 @@ namespace internal {
 			out.pack_expansion = false;
 			return out;
 		}
-		string active_key = template_argument_key_part(arg);
-		if (find(active_template_argument_substitution_keys_.begin(),
-		         active_template_argument_substitution_keys_.end(),
-		         active_key) !=
-		    active_template_argument_substitution_keys_.end())
+		bool dependent_value_expression =
+			arg.kind == TemplateArgumentKind::Value &&
+			arg.dependent &&
+			arg.value_expr_end > arg.value_expr_begin;
+		bool simple_dependent_member_value =
+			arg.kind == TemplateArgumentKind::Value &&
+			arg.dependent &&
+			!arg.value_owner_template_name.empty() &&
+			!arg.value_member_name.empty() &&
+			arg.value_name.find("()") == string::npos;
+		if (dependent_value_expression &&
+		    function_template_candidate_instantiation_depth_ != 0 &&
+		    arg.value_name.empty() &&
+		    arg.value_owner_template_name.empty() &&
+		    arg.value_member_name.empty())
 			return arg;
-		struct ActiveTemplateArgumentSubstitution
-		{
-			vector<string>& keys;
-			ActiveTemplateArgumentSubstitution(vector<string>& k,
-			                                   const string& key)
-			  : keys(k)
+		size_t active_key =
+			dependent_cache_template_argument_identity(arg, 0);
+			if (find(active_template_argument_substitution_keys_.begin(),
+			         active_template_argument_substitution_keys_.end(),
+			         active_key) !=
+			    active_template_argument_substitution_keys_.end())
+				return arg;
+			struct ActiveTemplateArgumentSubstitution
 			{
-				keys.push_back(key);
+				vector<size_t>& keys;
+				ActiveTemplateArgumentSubstitution(vector<size_t>& k,
+				                                   size_t key)
+				  : keys(k)
+				{
+					keys.push_back(key);
 			}
 			~ActiveTemplateArgumentSubstitution()
 			{
@@ -49,10 +70,10 @@ namespace internal {
 			active_template_argument_substitution_keys_,
 			active_key);
 		TemplateArgument resolved_member_value;
-		bool dependent_value_expression =
-			arg.kind == TemplateArgumentKind::Value &&
-			arg.dependent &&
-			arg.value_expr_end > arg.value_expr_begin;
+		if (simple_dependent_member_value &&
+		    resolve_dependent_value_member_argument(arg,
+		                                            resolved_member_value))
+			return substitute_template_argument(resolved_member_value);
 		if (dependent_value_expression)
 		{
 			TemplateArgument evaluated;
@@ -60,21 +81,16 @@ namespace internal {
 				    try_evaluate_dependent_value_expression_argument(
 					    arg,
 					    evaluated))
-			{
-				if (!evaluated.dependent)
-					return evaluated;
-				if (template_argument_key_part(evaluated) ==
-				    template_argument_key_part(arg))
-					return evaluated;
-				return substitute_template_argument(evaluated);
-			}
+				{
+					if (!evaluated.dependent)
+						return evaluated;
+					if (dependent_cache_template_argument_identity(
+						    evaluated,
+						    0) == active_key)
+						return evaluated;
+					return substitute_template_argument(evaluated);
+				}
 		}
-		bool simple_dependent_member_value =
-			arg.kind == TemplateArgumentKind::Value &&
-			arg.dependent &&
-			!arg.value_owner_template_name.empty() &&
-			!arg.value_member_name.empty() &&
-			arg.value_name.find("()") == string::npos;
 		if (dependent_value_expression && !simple_dependent_member_value)
 			return arg;
 		if (arg.kind == TemplateArgumentKind::Value &&
@@ -83,14 +99,15 @@ namespace internal {
 		    arg.value_name.find("::") == string::npos)
 	{
 		TemplateArgument subst;
-		if (find_template_value_substitution(arg.value_name, subst) &&
-		    subst.kind == TemplateArgumentKind::Value)
-		{
-			if (template_argument_key_part(subst) ==
-			    template_argument_key_part(arg))
-				return arg;
-			return substitute_template_argument(subst);
-		}
+			if (find_template_value_substitution(arg.value_name, subst) &&
+			    subst.kind == TemplateArgumentKind::Value)
+			{
+				if (dependent_cache_template_argument_identity(
+					    subst,
+					    0) == active_key)
+					return arg;
+				return substitute_template_argument(subst);
+			}
 	}
 	if (arg.kind == TemplateArgumentKind::Value &&
 	    arg.dependent &&
@@ -187,7 +204,9 @@ namespace internal {
 		    subst.kind == TemplateArgumentKind::Template &&
 		    !(subst.template_declaration == arg.template_declaration &&
 		      subst.value_name == arg.value_name))
+		{
 			return subst;
+		}
 		if (arg.template_declaration == NULL)
 		{
 			size_t member_sep = arg.value_name.rfind("::");
@@ -241,7 +260,9 @@ namespace internal {
 						find_alias_template(qualifier,
 						                    lookup_name);
 				if (declaration != NULL)
+				{
 					return TemplateArgument::template_arg(declaration);
+				}
 			}
 		}
 	}

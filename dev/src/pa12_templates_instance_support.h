@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,11 @@ bool type_contains_parameter_name(
 	const std::string& name,
 	const std::map<const void*, std::vector<TemplateArgument> >&
 		record_arguments);
+void collect_type_parameter_names(
+	TypePtr type,
+	const std::map<const void*, std::vector<TemplateArgument> >&
+		record_arguments,
+	std::set<std::string>& names);
 bool type_mentions_active_record(
 	TypePtr type,
 	const std::vector<ActiveClassInstantiation>& active);

@@ -264,7 +264,9 @@ void validate_conversion(const Instruction& ins)
 	if (ins.op == "sext" || ins.op == "zext")
 	{
 		if (!dst_int || !src_int || ins.src_type.bits >= ins.type.bits)
+		{
 			throw runtime_error("invalid integer extension");
+		}
 	}
 	else if (ins.op == "trunc")
 	{
@@ -330,11 +332,11 @@ void validate_call(const Function& fn, const Program& program, const Instruction
 {
 	if (ins.a.kind != ValueKind::Function && !ins.signature.present)
 		throw runtime_error("indirect call missing signature");
-			if (ins.a.kind == ValueKind::Function &&
-			    program.function_by_name.find(ins.a.text) == program.function_by_name.end())
-			{
-					throw runtime_error("undefined function");
-			}
+	if (ins.a.kind == ValueKind::Function &&
+	    program.function_by_name.find(ins.a.text) == program.function_by_name.end())
+	{
+			throw runtime_error("undefined function");
+	}
 	for (size_t i = 0; i < ins.args.size(); ++i)
 		validate_symbol_value(fn, program, ins.args[i]);
 	for (size_t i = 0; i < ins.signature.params.size(); ++i)

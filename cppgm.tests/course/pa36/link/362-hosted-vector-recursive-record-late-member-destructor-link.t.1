@@ -1,0 +1,25 @@
+#include <vector>
+
+int destroyed;
+
+struct Later
+{
+  ~Later()
+  {
+    destroyed = destroyed + 1;
+  }
+};
+
+struct Node
+{
+  std::vector<Node> children;
+  Later later;
+};
+
+int main()
+{
+  {
+    Node n;
+  }
+  return destroyed == 1 ? 0 : 1;
+}

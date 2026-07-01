@@ -918,7 +918,10 @@ private:
 			return named_value(ValueKind::Slot, text);
 		if (is_global_token(text))
 			return named_value(ValueKind::Global, text);
-		throw runtime_error("expected storage");
+		ostringstream msg;
+		msg << "expected storage before " << text << " at line "
+		    << tokens_[pos_ - 1].line;
+		throw runtime_error(msg.str());
 	}
 
 	Value parse_addressable()

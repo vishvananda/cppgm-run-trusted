@@ -1,7 +1,7 @@
 #include "pa12_types_support.h"
 
 #include <algorithm>
-#include <set>
+#include <map>
 #include <stdexcept>
 
 using namespace std;
@@ -81,16 +81,17 @@ bool decltype_operand_is_parenthesized(const vector<Token>& tokens,
 
 bool instance_argument_structurally_dependent_seen(
 	const pa11::TemplateInstanceArgument& argument,
-	set<const void*>& seen);
+	vector<const void*>& seen);
 
 bool type_structurally_dependent_seen(TypePtr type,
-                                      set<const void*>& seen)
+                                      vector<const void*>& seen)
 {
 	if (type.get() == NULL)
 		return false;
 	type = pa11::strip_cv(type);
-	if (!seen.insert(type.get()).second)
+	if (find(seen.begin(), seen.end(), type.get()) != seen.end())
 		return false;
+	seen.push_back(type.get());
 	if (type->is_dependent_typename ||
 	    type->kind == pa11::TypeKind::TemplateParameter ||
 	    type->kind == pa11::TypeKind::TemplateTemplateParameter)
@@ -132,13 +133,13 @@ bool type_structurally_dependent_seen(TypePtr type,
 
 bool type_structurally_dependent(TypePtr type)
 {
-	set<const void*> seen;
+	vector<const void*> seen;
 	return type_structurally_dependent_seen(type, seen);
 }
 
 bool instance_argument_structurally_dependent_seen(
 	const pa11::TemplateInstanceArgument& argument,
-	set<const void*>& seen)
+	vector<const void*>& seen)
 {
 	if (argument.dependent ||
 	    (argument.kind != pa11::TemplateInstanceArgumentKind::Value &&
@@ -168,7 +169,7 @@ bool instance_argument_structurally_dependent_seen(
 bool instance_argument_structurally_dependent(
 	const pa11::TemplateInstanceArgument& argument)
 {
-	set<const void*> seen;
+	vector<const void*> seen;
 	return instance_argument_structurally_dependent_seen(argument, seen);
 }
 

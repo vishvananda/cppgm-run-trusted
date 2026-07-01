@@ -1,545 +1,55 @@
 #include "pa14_lowir_internal.h"
+#include "pa12_templates_function_support.h"
 
 namespace pa14 {
 namespace internal {
 
-bool constructor_record_contains_hosted_subobject(const Binding* binding);
+bool constructor_record_contains_hosted_subobject(const Binding* binding); bool hosted_addressed_function_needs_body(const Binding* binding);
+Binding* addressed_function_binding(const Node& node); TypePtr function_return_type(const Binding* binding);
+bool empty_defaulted_copy_move_constructor_needs_helper(const Node& node);
+Binding* call_expression_callee_binding(const Node& node);
+bool hosted_bit_const_iterator_deref_binding(const Binding* binding);
+bool hosted_bit_const_iterator_preincrement_binding(const Binding* binding);
+bool same_binding_or_alias(const Binding* left, const Binding* right);
+void collect_global_defaulted_constructor_demands(const Node& node, set<const Binding*>& out, bool in_function);
+void collect_explicit_defaulted_definitions(ProgramLowerer& program, const Node& node, const set<const Binding*>* demanded);
+bool constructor_set_contains_binding_or_alias(const set<const Binding*>& bindings, const Binding* binding);
+void collect_constructor_base_entry_references(ProgramLowerer& program, const Node& node);
+void collect_complete_constructor_entry_references(const Node& node, set<const Binding*>& out);
+void collect_static_downcast_sources(ProgramLowerer& program, const Node& node);
+void append_assignment_dependency_members(TypePtr record, vector<Binding*>& members);
+bool should_mark_direct_call_object_root(const Binding* binding,
+                                         bool hosted_compatibility);
+void collect_hosted_vector_bool_algorithm_dependencies(
+	const Binding* binding,
+	set<const Binding*>& out);
+void collect_node_lowered_constructor_calls(const Node& node,
+                                            set<const Binding*>& out);
+void collect_body_demand_calls_impl(const Node& node,
+                                    set<const Binding*>& out,
+                                    bool skip_inline_function_bodies,
+                                    TypePtr return_type,
+                                    bool skip_return_copy = false);
+
+bool lowir_skip_function_definition_node(const Node& node);
+bool default_constructor_call(const Binding* binding);
+bool hosted_nested_helper_body_root(const Binding* binding);
+void collect_direct_calls(const Node& node, set<const Binding*>& out);
+void collect_translation_unit_direct_calls(const Node& node, set<const Binding*>& out);
+void collect_addressed_functions(const Node& node, set<const Binding*>& out);
+void collect_translation_unit_addressed_functions(const Node& node, set<const Binding*>& out);
+void collect_hosted_helper_function_references(const Node& node, set<const Binding*>& out);
+void collect_node_implicit_lifecycle_calls(const Node& node, set<const Binding*>& out);
+void collect_implicit_lifecycle_calls(const Node& node, set<const Binding*>& out);
+void collect_lowered_constructor_calls(const Node& node, set<const Binding*>& out);
+void collect_translation_unit_body_demand_calls(const Node& node, set<const Binding*>& out);
+void collect_global_variable_constructor_demands(const Node& node, set<const Binding*>& out, bool in_function = false);
+void mark_object_root_bindings(const set<const Binding*>& bindings, bool hosted_compatibility, bool body_demand_roots = false);
+void note_function_definitions(ProgramLowerer& program, const Node& node);
+void collect_base_constructor_calls(const Node& node, set<const Binding*>& out);
+bool contains_call_expression(const Node& node);
 
 namespace {
-	bool hosted_addressed_function_needs_body(const Binding* binding)
-	{
-		if (binding == NULL || !hosted_library_binding(binding))
-			return true;
-		if (!binding->function_specialization_symbol.empty() ||
-		    (binding->aliased_binding != NULL &&
-		     !binding->aliased_binding->function_specialization_symbol.empty()))
-			return true;
-		TypePtr owner = class_record_for_member(binding);
-		owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
-		return record_is_template_specialization(owner);
-	}
-	Binding* call_expression_callee_binding(const Node& node)
-	{
-		if (!starts_with(node.line, "call-expression") ||
-		    node.children.empty())
-			return NULL;
-		const Node& callee = node.children[0];
-		if (callee.binding != NULL &&
-		    callee.binding->kind == BindingKind::Function &&
-		    !function_signature_has_unresolved_storage(callee.binding))
-			return callee.binding;
-		if ((starts_with(callee.line, "unary-expression") ||
-		     starts_with(callee.line, "cast-expression")) &&
-		    callee.children.size() == 1 &&
-		    callee.children[0].binding != NULL &&
-		    callee.children[0].binding->kind == BindingKind::Function &&
-		    !function_signature_has_unresolved_storage(
-			    callee.children[0].binding))
-			return callee.children[0].binding;
-		return NULL;
-	}
-				bool suppress_generated_aggregate_constructor_call(
-					const Binding* binding)
-			{
-				return binding != NULL &&
-				       binding->is_generated_aggregate_constructor;
-			}
-				bool suppress_generated_trivial_copy_move_constructor_call(
-					const Binding* binding)
-				{
-					if (binding == NULL ||
-					    !binding->is_defaulted ||
-					    !binding->is_inline_definition ||
-					    binding->is_object_root ||
-					    binding->type.get() == NULL ||
-					    binding->type->kind != TypeKind::Function ||
-					    binding->type->parameters.size() != 2 ||
-					    !is_reference(binding->type->parameters[1]))
-						return false;
-					TypePtr record = class_record_for_member(binding);
-					record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-					TypePtr param =
-						pa11::strip_cv(binding->type->parameters[1]->base);
-					return record.get() != NULL &&
-					       record->kind == TypeKind::Record &&
-					       param.get() != NULL &&
-					       param->kind == TypeKind::Record &&
-					       pa11::same_type(record, param) &&
-					       !defaulted_copy_move_constructor_needs_helper(
-						       const_cast<Binding*>(binding),
-						       record);
-				}
-			bool suppress_prelowered_constructor_body_demand(
-				const Binding* binding)
-			{
-				bool specialized =
-					binding_has_template_specialization_context(binding) ||
-					(binding != NULL &&
-					 !binding->function_specialization_symbol.empty()) ||
-					(binding != NULL &&
-					 binding->aliased_binding != NULL &&
-					 (binding_has_template_specialization_context(
-						  binding->aliased_binding) ||
-					  !binding->aliased_binding
-						   ->function_specialization_symbol.empty()));
-				return binding != NULL &&
-				       is_class_constructor_binding(binding) &&
-				       binding->is_inline_definition &&
-				       !hosted_library_binding(binding) &&
-				       !constructor_record_contains_hosted_subobject(binding) &&
-				       !binding->is_object_root &&
-				       (!binding->is_generated_copy_move_constructor ||
-				        suppress_generated_trivial_copy_move_constructor_call(
-					        binding)) &&
-				       !specialized;
-			}
-			bool suppress_prelowered_constructor_body_demand_for_type(
-				const Binding* binding,
-				TypePtr constructed_type)
-			{
-				TypePtr bare = constructed_type.get() != NULL
-					? pa11::strip_cv(constructed_type) : TypePtr();
-				if (record_is_template_specialization(bare))
-					return false;
-				return suppress_prelowered_constructor_body_demand(binding);
-			}
-		bool default_constructor_call(const Binding* binding)
-		{
-			return binding != NULL &&
-			       binding->owner != NULL &&
-			       binding->owner->kind == ScopeKind::Class &&
-			       binding->name == binding->owner->name &&
-			       binding->type.get() != NULL &&
-			       binding->type->kind == TypeKind::Function &&
-			       binding->type->parameters.size() == 1;
-		}
-	bool constant_evaluation_only_subtree(const Node& node)
-	{
-		if (starts_with(node.line, "static-assert-declaration"))
-			return true;
-		return starts_with(node.line, "variable ") &&
-		       node.binding != NULL &&
-		       (node.binding->is_constexpr || node.binding->has_constant);
-	}
-	bool skip_translation_unit_call_subtree(const Node& node)
-	{
-		if (constant_evaluation_only_subtree(node))
-			return true;
-		return starts_with(node.line, "function-definition ") &&
-		       node.binding != NULL &&
-		       node.binding->is_inline_definition;
-	}
-		void collect_direct_calls_impl(const Node& node,
-		                               set<const Binding*>& out,
-		                               bool skip_inline_function_bodies)
-	{
-		if (constant_evaluation_only_subtree(node) ||
-		    (skip_inline_function_bodies &&
-		     skip_translation_unit_call_subtree(node)))
-			return;
-		Binding* callee = node.direct_call != NULL
-			? node.direct_call : call_expression_callee_binding(node);
-		if (callee != NULL &&
-		    !suppress_generated_aggregate_constructor_call(callee) &&
-		    !suppress_prelowered_constructor_body_demand(callee) &&
-		    !suppress_noop_generated_constructor_call(node))
-			out.insert(callee);
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_direct_calls_impl(node.children[i],
-			                          out,
-			                          skip_inline_function_bodies);
-	}
-		void collect_direct_calls(const Node& node, set<const Binding*>& out)
-	{
-		collect_direct_calls_impl(node, out, false);
-	}
-	void collect_translation_unit_direct_calls(const Node& node,
-	                                           set<const Binding*>& out)
-	{
-		collect_direct_calls_impl(node, out, true);
-	}
-	void collect_addressed_functions_impl(const Node& node,
-	                                      set<const Binding*>& out,
-	                                      bool skip_inline_function_bodies)
-	{
-		if (constant_evaluation_only_subtree(node) ||
-		    (skip_inline_function_bodies &&
-		     skip_translation_unit_call_subtree(node)))
-			return;
-		if (starts_with(node.line, "unary-expression") &&
-		    node.has_op &&
-		    node.op == OP_AMP &&
-		    !node.children.empty() &&
-		    node.children[0].binding != NULL &&
-		    node.children[0].binding->kind == BindingKind::Function &&
-		    hosted_addressed_function_needs_body(node.children[0].binding))
-			out.insert(node.children[0].binding);
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_addressed_functions_impl(node.children[i],
-			                                 out,
-			                                 skip_inline_function_bodies);
-	}
-	void collect_addressed_functions(const Node& node,
-	                                 set<const Binding*>& out)
-	{
-		collect_addressed_functions_impl(node, out, false);
-	}
-	void collect_translation_unit_addressed_functions(const Node& node,
-	                                                  set<const Binding*>& out)
-	{
-		collect_addressed_functions_impl(node, out, true);
-	}
-	void collect_destructor_demands_for_type(TypePtr type,
-	                                         set<const Binding*>& out,
-	                                         set<const pa11::Type*>& seen)
-	{
-		if (type.get() == NULL)
-			return;
-		TypePtr bare = pa11::strip_cv(type);
-		if (bare->kind == TypeKind::Array)
-		{
-			collect_destructor_demands_for_type(bare->base, out, seen);
-			return;
-		}
-		if (bare->kind != TypeKind::Record)
-			return;
-		if (!seen.insert(bare.get()).second)
-			return;
-		Binding* dtor = find_destructor(bare);
-		if (dtor != NULL && (dtor->is_virtual || !dtor->is_noop_destructor))
-			out.insert(dtor);
-		try
-		{
-			pa11::layout_record_type(bare);
-		}
-		catch (const runtime_error& err)
-		{
-			string message = err.what();
-			if (message == "incomplete class type" ||
-			    message == "incomplete object type")
-				return;
-			throw;
-		}
-		vector<TypePtr> bases = pa11::record_direct_bases(bare);
-		for (size_t i = 0; i < bases.size(); ++i)
-			collect_destructor_demands_for_type(bases[i], out, seen);
-		for (size_t i = 0; i < bare->fields.size(); ++i)
-			collect_destructor_demands_for_type(bare->fields[i]->type,
-			                                    out,
-			                                    seen);
-	}
-	void collect_destructor_demands_for_type(TypePtr type,
-	                                         set<const Binding*>& out)
-	{
-		set<const pa11::Type*> seen;
-		collect_destructor_demands_for_type(type, out, seen);
-	}
-	void collect_vtable_demands_for_type(TypePtr type,
-	                                     set<const Binding*>& out,
-	                                     set<const pa11::Type*>& seen)
-	{
-		if (type.get() == NULL)
-			return;
-		TypePtr bare = pa11::strip_cv(type);
-		if (bare->kind == TypeKind::Array)
-		{
-			collect_vtable_demands_for_type(bare->base, out, seen);
-			return;
-		}
-		if (bare->kind != TypeKind::Record)
-			return;
-		if (!seen.insert(bare.get()).second)
-			return;
-		if (!bare->is_polymorphic)
-			return;
-		try
-		{
-			pa11::layout_record_type(bare);
-		}
-		catch (const runtime_error& err)
-		{
-			string message = err.what();
-			if (message == "incomplete class type" ||
-			    message == "incomplete object type")
-				return;
-			throw;
-		}
-		for (size_t i = 0; i < bare->virtual_entries.size(); ++i)
-			if (bare->virtual_entries[i].function != NULL)
-				out.insert(bare->virtual_entries[i].function);
-		vector<TypePtr> bases = pa11::record_direct_bases(bare);
-		for (size_t i = 0; i < bases.size(); ++i)
-			collect_vtable_demands_for_type(bases[i], out, seen);
-	}
-	void collect_vtable_demands_for_type(TypePtr type,
-	                                     set<const Binding*>& out)
-	{
-		set<const pa11::Type*> seen;
-		collect_vtable_demands_for_type(type, out, seen);
-	}
-	void collect_implicit_demands_for_type(TypePtr type,
-	                                       set<const Binding*>& out)
-	{
-		collect_destructor_demands_for_type(type, out);
-		collect_vtable_demands_for_type(type, out);
-	}
-	void collect_node_implicit_lifecycle_calls(const Node& node,
-	                                          set<const Binding*>& out)
-	{
-		if (starts_with(node.line, "variable ") && node.binding != NULL)
-			collect_implicit_demands_for_type(node.binding->type, out);
-		if (starts_with(node.line, "member-init-action") &&
-		    node.binding != NULL)
-			collect_implicit_demands_for_type(node.binding->type, out);
-		if (starts_with(node.line, "base-init-action") &&
-		    node.type.get() != NULL)
-			collect_implicit_demands_for_type(node.type, out);
-		if (node.type.get() != NULL && node.category != ValueCategory::LValue)
-			collect_implicit_demands_for_type(object_type(node.type), out);
-	}
-	void collect_implicit_lifecycle_calls(const Node& node,
-	                                      set<const Binding*>& out)
-	{
-		collect_node_implicit_lifecycle_calls(node, out);
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_implicit_lifecycle_calls(node.children[i], out);
-	}
-	void collect_copy_move_constructor_for_init(TypePtr target,
-	                                            const Node& init,
-	                                            set<const Binding*>& out)
-	{
-		if (target.get() == NULL || init.type.get() == NULL ||
-		    (init.category != ValueCategory::LValue &&
-		     init.category != ValueCategory::XValue))
-			return;
-		TypePtr dst = pa11::strip_cv(target);
-		TypePtr src = pa11::strip_cv(object_type(init.type));
-		if (dst->kind != TypeKind::Record ||
-		    src->kind != TypeKind::Record ||
-		    !(pa11::same_type(src, dst) ||
-		      record_has_base_subobject(src, dst)))
-			return;
-		Binding* copy_move =
-			find_copy_move_constructor(target,
-			                           init.category == ValueCategory::XValue);
-		if (copy_move == NULL && init.category == ValueCategory::XValue)
-			copy_move = find_copy_move_constructor(target, false);
-		if (copy_move == NULL &&
-		    init.category == ValueCategory::XValue &&
-		    dst->is_template_specialization)
-		{
-			Binding* any = find_any_copy_move_constructor(target, true);
-			if (any != NULL && !any->is_defaulted)
-				copy_move = any;
-		}
-			if (copy_move != NULL &&
-			    !suppress_generated_trivial_copy_move_constructor_call(
-				    copy_move) &&
-			    !no_op_generated_default_constructor(copy_move, target))
-				out.insert(copy_move);
-	}
-	void collect_node_lowered_constructor_calls(const Node& node,
-	                                           set<const Binding*>& out)
-	{
-		if (starts_with(node.line, "base-init-action") &&
-		    node.type.get() != NULL &&
-		    !node.children.empty())
-		{
-			const Node& init = node.children[0];
-			Binding* direct = node.direct_call != NULL
-				? node.direct_call : init.direct_call;
-			if (direct != NULL &&
-			    !suppress_generated_aggregate_constructor_call(direct) &&
-			    !suppress_prelowered_constructor_body_demand_for_type(
-				    direct,
-				    node.type) &&
-			    !no_op_generated_default_constructor(direct, node.type))
-				out.insert(direct);
-			const Node& copy_source =
-				starts_with(init.line, "braced-init-list") &&
-				init.children.size() == 1
-					? init.children[0]
-					: init;
-			collect_copy_move_constructor_for_init(node.type,
-			                                       copy_source,
-			                                       out);
-		}
-			if (starts_with(node.line, "member-init-action") &&
-			    node.binding != NULL &&
-			    !node.children.empty())
-		{
-			Binding* direct = node.direct_call != NULL
-				? node.direct_call : node.children[0].direct_call;
-			if (direct != NULL &&
-			    !suppress_generated_aggregate_constructor_call(direct) &&
-			    !suppress_prelowered_constructor_body_demand_for_type(
-				    direct,
-				    node.binding->type) &&
-			    !no_op_generated_default_constructor(direct,
-			                                         node.binding->type))
-				out.insert(direct);
-				collect_copy_move_constructor_for_init(node.binding->type,
-				                                       node.children[0],
-				                                       out);
-			}
-			if (starts_with(node.line, "braced-init-list") &&
-			    node.type.get() != NULL)
-			{
-				TypePtr bare = pa11::strip_cv(node.type);
-				if (bare->kind == TypeKind::Record)
-				{
-					Binding* ctor = node.direct_call != NULL
-						? node.direct_call
-						: find_constructor(bare,
-						                   node.children.size());
-					if (ctor != NULL &&
-					    !suppress_generated_aggregate_constructor_call(ctor) &&
-					    !suppress_prelowered_constructor_body_demand_for_type(
-						    ctor,
-						    bare) &&
-					    !no_op_generated_default_constructor(ctor, bare))
-						out.insert(ctor);
-				}
-			}
-		}
-	void collect_lowered_constructor_calls(const Node& node,
-	                                       set<const Binding*>& out)
-	{
-		collect_node_lowered_constructor_calls(node, out);
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_lowered_constructor_calls(node.children[i], out);
-	}
-	void collect_defaulted_assignment_field_calls(const Binding* binding,
-	                                             set<const Binding*>& out)
-	{
-		if (binding == NULL ||
-		    binding->name != "operator=" ||
-		    binding->type.get() == NULL ||
-		    binding->type->kind != TypeKind::Function ||
-		    binding->type->parameters.size() != 2)
-			return;
-		bool generated_or_defaulted =
-			binding->is_generated_copy_move_assignment ||
-			binding->is_defaulted;
-		if (!generated_or_defaulted)
-			return;
-		bool move =
-			binding->type->parameters[1]->kind ==
-			TypeKind::RValueReference;
-		TypePtr record = class_record_for_member(binding);
-		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-		if (record.get() == NULL || record->kind != TypeKind::Record)
-			return;
-		pa11::layout_record_type(record);
-		for (size_t i = 0; i < record->fields.size(); ++i)
-		{
-			Binding* op = find_record_copy_move_assignment(
-				record->fields[i]->type, move);
-			if (op == NULL && move)
-				op = find_record_copy_move_assignment(
-					record->fields[i]->type, false);
-				if (op != NULL)
-				{
-					out.insert(op);
-				}
-		}
-	}
-	void collect_body_demand_calls_impl(const Node& node,
-	                                    set<const Binding*>& out,
-	                                    bool skip_inline_function_bodies)
-	{
-		if (constant_evaluation_only_subtree(node) ||
-		    (skip_inline_function_bodies &&
-		     skip_translation_unit_call_subtree(node)))
-			return;
-		if (starts_with(node.line, "function-definition ") &&
-		    hosted_library_binding(node.binding) &&
-		    !node.binding->is_object_root)
-			return;
-		Binding* callee = node.direct_call != NULL
-			? node.direct_call : call_expression_callee_binding(node);
-		if (callee != NULL &&
-		    !suppress_generated_aggregate_constructor_call(callee) &&
-		    !suppress_prelowered_constructor_body_demand(callee) &&
-		    !suppress_noop_generated_constructor_call(node))
-			out.insert(callee);
-		if (starts_with(node.line, "unary-expression") &&
-		    node.has_op &&
-		    node.op == OP_AMP &&
-		    !node.children.empty() &&
-		    node.children[0].binding != NULL &&
-			node.children[0].binding->kind == BindingKind::Function &&
-		    hosted_addressed_function_needs_body(node.children[0].binding))
-			out.insert(node.children[0].binding);
-		if (callee != NULL)
-			collect_defaulted_assignment_field_calls(callee, out);
-		collect_node_implicit_lifecycle_calls(node, out);
-		collect_node_lowered_constructor_calls(node, out);
-		if (starts_with(node.line, "function-definition "))
-			collect_defaulted_assignment_field_calls(node.binding, out);
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_body_demand_calls_impl(node.children[i],
-			                               out,
-			                               skip_inline_function_bodies);
-	}
-	void collect_body_demand_calls(const Node& node,
-	                               set<const Binding*>& out)
-	{
-		collect_body_demand_calls_impl(node, out, false);
-	}
-	void collect_translation_unit_body_demand_calls(const Node& node,
-	                                                set<const Binding*>& out)
-	{
-		collect_body_demand_calls_impl(node, out, true);
-	}
-	void mark_object_root_bindings(const set<const Binding*>& bindings,
-	                               bool hosted_compatibility)
-	{
-		for (set<const Binding*>::const_iterator it = bindings.begin();
-		     it != bindings.end();
-		     ++it)
-		{
-			Binding* binding = const_cast<Binding*>(*it);
-			if (binding == NULL)
-				continue;
-			if (hosted_compatibility && hosted_library_binding(binding))
-				continue;
-			binding->is_object_root = true;
-			if (binding->aliased_binding != NULL)
-				binding->aliased_binding->is_object_root = true;
-		}
-	}
-	void note_function_definitions(ProgramLowerer& program, const Node& node)
-	{
-		if (starts_with(node.line, "function-definition ") &&
-		    node.binding != NULL)
-		{
-			program.function_definition_bindings.insert(node.binding);
-			if (node.binding->is_inline_definition &&
-			    !node.binding->is_explicit_defaulted_definition)
-				program.register_inline_definition(node);
-		}
-		for (size_t i = 0; i < node.children.size(); ++i)
-			note_function_definitions(program, node.children[i]);
-	}
-void collect_base_constructor_calls(const Node& node, set<const Binding*>& out)
-{
-	if (node.direct_call != NULL && starts_with(node.line, "base-init-action"))
-		out.insert(node.direct_call);
-	for (size_t i = 0; i < node.children.size(); ++i)
-		collect_base_constructor_calls(node.children[i], out);
-}
-bool contains_call_expression(const Node& node)
-{
-	if (starts_with(node.line, "call-expression") ||
-	    starts_with(node.line, "constructor-action") ||
-	    node.direct_call != NULL)
-		return true;
-	for (size_t i = 0; i < node.children.size(); ++i)
-		if (contains_call_expression(node.children[i]))
-			return true;
-	return false;
-}
 bool generated_copy_move_constructor_node(const Node& node)
 {
 	if (node.binding == NULL ||
@@ -634,37 +144,65 @@ bool binding_mentions_template_specialization(const Binding* binding)
 	return binding != NULL &&
 	       type_mentions_template_specialization(binding->type);
 }
-bool same_binding_or_alias(const Binding* left, const Binding* right)
+struct BindingReferenceIndex
 {
-	if (left == right ||
-	    (left != NULL && left->aliased_binding == right) ||
-	    (right != NULL && right->aliased_binding == left))
-		return true;
-	if (left == NULL || right == NULL ||
-	    left->kind != BindingKind::Function ||
-	    right->kind != BindingKind::Function)
+	set<const Binding*> bindings;
+	set<string> object_symbols;
+};
+void add_binding_reference(BindingReferenceIndex& index,
+                           const Binding* binding)
+{
+	if (binding == NULL)
+		return;
+	index.bindings.insert(binding);
+	if (binding->aliased_binding != NULL)
+		index.bindings.insert(binding->aliased_binding);
+	if (binding->kind != BindingKind::Function)
+		return;
+	string object = global_object_symbol(binding);
+	if (!object.empty())
+		index.object_symbols.insert(object);
+	if (binding->aliased_binding != NULL)
+	{
+		object = global_object_symbol(binding->aliased_binding);
+		if (!object.empty())
+			index.object_symbols.insert(object);
+	}
+}
+BindingReferenceIndex make_binding_reference_index(
+	const set<const Binding*>& bindings)
+{
+	BindingReferenceIndex index;
+	for (set<const Binding*>::const_iterator it = bindings.begin();
+	     it != bindings.end();
+	     ++it)
+		add_binding_reference(index, *it);
+	return index;
+}
+bool binding_reference_index_contains(const BindingReferenceIndex& index,
+                                      const Binding* binding)
+{
+	if (binding == NULL)
 		return false;
-	string left_object = global_object_symbol(left);
-	string right_object = global_object_symbol(right);
-	if (!left_object.empty() && left_object == right_object)
+	if (index.bindings.count(binding) != 0)
 		return true;
-	string left_symbol = left->function_specialization_symbol;
-	string right_symbol = right->function_specialization_symbol;
-	if (left_symbol.empty() && left->aliased_binding != NULL)
-		left_symbol = left->aliased_binding->function_specialization_symbol;
-	if (right_symbol.empty() && right->aliased_binding != NULL)
-		right_symbol = right->aliased_binding->function_specialization_symbol;
-	return !left_symbol.empty() && left_symbol == right_symbol;
+	if (binding->aliased_binding != NULL &&
+	    index.bindings.count(binding->aliased_binding) != 0)
+		return true;
+	if (binding->kind != BindingKind::Function)
+		return false;
+	string object = global_object_symbol(binding);
+	if (object.empty() && binding->aliased_binding != NULL)
+		object = global_object_symbol(binding->aliased_binding);
+	return !object.empty() && index.object_symbols.count(object) != 0;
 }
 bool early_hidden_friend_definition(const Node& node,
-                                    const set<const Binding*>& direct_calls)
+                                    const BindingReferenceIndex& direct_index)
 {
 	if (node.binding == NULL || !node.binding->is_hidden_friend)
 		return false;
-	for (set<const Binding*>::const_iterator it = direct_calls.begin();
-	     it != direct_calls.end(); ++it)
-		if (same_binding_or_alias(node.binding, *it))
-			return true;
+	if (binding_reference_index_contains(direct_index, node.binding))
+		return true;
 	if (node.binding->is_constexpr)
 		return false;
 	return !contains_call_expression(node) &&
@@ -698,12 +236,15 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 	else
 		program.collect_node(node);
 }
+const Node* extra_node_for_binding(const vector<Node>& extra,
+                                   const Binding* binding);
 	bool referenced_extra_function(const Node& node,
-	                               const set<const Binding*>& direct_calls,
+	                               const BindingReferenceIndex& direct_index,
 	                               bool hosted_compatibility)
 	{
 		if (!starts_with(node.line, "function-definition ") ||
 		    node.binding == NULL ||
+		    lowir_skip_function_definition_node(node) ||
 		    node.binding->is_inline_definition)
 			return false;
 		if (hosted_compatibility &&
@@ -712,32 +253,59 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 			return false;
 		if (node.binding->is_object_root)
 			return true;
-	for (set<const Binding*>::const_iterator it = direct_calls.begin();
-	     it != direct_calls.end(); ++it)
-		if (same_binding_or_alias(node.binding, *it))
-			return true;
-	return false;
+	return binding_reference_index_contains(direct_index, node.binding);
+}
+void collect_referenced_extra_function_node(
+	ProgramLowerer& program,
+	const Node& node,
+	const BindingReferenceIndex& direct_index,
+	bool hosted_compatibility,
+	set<string>& collected)
+{
+	if (!referenced_extra_function(node,
+	                               direct_index,
+	                               hosted_compatibility))
+		return;
+	string name = program.symbol_for(node.binding);
+	if (program.defined_functions.find(name) !=
+	        program.defined_functions.end() ||
+	    !collected.insert(name).second)
+		return;
+	program.collect_node(node);
 }
 	void collect_referenced_extra_functions(ProgramLowerer& program,
 	                                        const vector<Node>& extra,
 	                                        const set<const Binding*>& direct_calls,
 	                                        bool hosted_compatibility)
 	{
+		BindingReferenceIndex direct_index =
+			make_binding_reference_index(direct_calls);
 		set<string> collected;
 		for (size_t i = 0; i < extra.size(); ++i)
 		{
-			if (!referenced_extra_function(extra[i],
-			                               direct_calls,
-			                               hosted_compatibility))
+			if (extra[i].binding == NULL ||
+			    !extra[i].binding->is_object_root)
 				continue;
-			string name = program.symbol_for(extra[i].binding);
-		if (program.defined_functions.find(name) !=
-		        program.defined_functions.end() ||
-		    !collected.insert(name).second)
-			continue;
-		program.collect_node(extra[i]);
+			collect_referenced_extra_function_node(program,
+			                                       extra[i],
+			                                       direct_index,
+			                                       hosted_compatibility,
+			                                       collected);
+		}
+		for (set<const Binding*>::const_iterator it = direct_calls.begin();
+		     it != direct_calls.end();
+		     ++it)
+		{
+			const Node* node = extra_node_for_binding(extra, *it);
+			if (node == NULL)
+				continue;
+			collect_referenced_extra_function_node(program,
+			                                       *node,
+			                                       direct_index,
+			                                       hosted_compatibility,
+			                                       collected);
+		}
 	}
-}
 	void demand_object_roots(ProgramLowerer& program,
 	                         const vector<Node>& extra,
 	                         const set<const Binding*>& root_definitions)
@@ -778,7 +346,17 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 				                      hosted_compatibility);
 			return;
 		}
-		program.collect_node(node);
+		if (starts_with(node.line, "variable ") ||
+		    starts_with(node.line, "function-declaration ") ||
+		    starts_with(node.line, "function-definition "))
+		{
+			program.collect_node(node);
+			return;
+		}
+		for (size_t i = 0; i < node.children.size(); ++i)
+			collect_filtered_node(program,
+			                      node.children[i],
+			                      hosted_compatibility);
 	}
 	void collect_translation_unit_filtered(ProgramLowerer& program,
 	                                       const Node& root,
@@ -790,184 +368,23 @@ void collect_extra_variable(ProgramLowerer& program, const Node& node)
 			                      hosted_compatibility);
 		program.emit_pending_inline_definitions();
 	}
-	void collect_explicit_defaulted_definitions(ProgramLowerer& program,
-	                                            const Node& node)
-	{
-		if (starts_with(node.line, "function-definition ") &&
-		    ((node.binding != NULL &&
-		      node.binding->is_explicit_defaulted_definition) ||
-		     node.token_text == "defaulted-definition"))
-		{
-			program.collect_node(node);
-			return;
-		}
-		for (size_t i = 0; i < node.children.size(); ++i)
-			collect_explicit_defaulted_definitions(program, node.children[i]);
-	}
 	void demand_early_hidden_friends(ProgramLowerer& program,
 		                                 const vector<Node>& extra,
 		                                 const set<const Binding*>& direct_calls)
 {
+	BindingReferenceIndex direct_index =
+		make_binding_reference_index(direct_calls);
 	for (size_t i = 0; i < extra.size(); ++i)
 	{
-		if (!early_hidden_friend_definition(extra[i], direct_calls))
+		if (!early_hidden_friend_definition(extra[i], direct_index))
 			continue;
 		program.demand_inline_function(extra[i].binding);
 		program.emit_pending_inline_definitions();
 		}
 	}
-void insert_constructor_binding_aliases(set<const Binding*>& out,
-                                        const Binding* binding)
-{
-	if (binding == NULL)
-		return;
-	out.insert(binding);
-	const Binding* canonical = canonical_constructor_binding(binding);
-	if (canonical != NULL)
-		out.insert(canonical);
-	if (binding->aliased_binding != NULL)
-		out.insert(binding->aliased_binding);
-	if (canonical != NULL && canonical->aliased_binding != NULL)
-		out.insert(canonical->aliased_binding);
-}
-bool constructor_set_contains_binding_or_alias(
-	const set<const Binding*>& bindings,
-	const Binding* binding)
-{
-	if (binding == NULL)
-		return false;
-	if (bindings.count(binding) != 0)
-		return true;
-	const Binding* canonical = canonical_constructor_binding(binding);
-	if (canonical != NULL && bindings.count(canonical) != 0)
-		return true;
-	if (binding->aliased_binding != NULL &&
-	    bindings.count(binding->aliased_binding) != 0)
-		return true;
-	if (canonical != NULL &&
-	    canonical->aliased_binding != NULL &&
-	    bindings.count(canonical->aliased_binding) != 0)
-		return true;
-	for (set<const Binding*>::const_iterator it = bindings.begin();
-	     it != bindings.end();
-	     ++it)
-		if (same_binding_or_alias(*it, binding))
-			return true;
-	return false;
-}
-const Binding* first_class_constructor_direct_call(const Node& node)
-{
-	if (node.direct_call != NULL &&
-	    is_class_constructor_binding(node.direct_call))
-		return node.direct_call;
-	for (size_t i = 0; i < node.children.size(); ++i)
-	{
-		const Binding* found =
-			first_class_constructor_direct_call(node.children[i]);
-		if (found != NULL)
-			return found;
-	}
-	return NULL;
-}
-const Binding* base_init_action_constructor_call(const Node& node)
-{
-	if (!starts_with(node.line, "base-init-action"))
-		return NULL;
-	if (node.direct_call != NULL &&
-	    is_class_constructor_binding(node.direct_call))
-		return node.direct_call;
-	if (!node.children.empty())
-		return first_class_constructor_direct_call(node.children[0]);
-	return NULL;
-}
-void collect_constructor_base_entry_references(ProgramLowerer& program,
-                                               const Node& node)
-{
-	const Binding* base_ctor = base_init_action_constructor_call(node);
-	if (base_ctor != NULL)
-	{
-		insert_constructor_binding_aliases(
-			program.referenced_constructor_base_entries,
-			base_ctor);
-		if (node.token_text == "inherited-constructor")
-			insert_constructor_binding_aliases(
-				program.constructor_base_entry_only_references,
-				base_ctor);
-	}
-	for (size_t i = 0; i < node.children.size(); ++i)
-		collect_constructor_base_entry_references(program, node.children[i]);
-}
-void collect_complete_constructor_entry_references_impl(
-	const Node& node,
-	set<const Binding*>& out,
-	const Binding* suppressed_base_init_ctor)
-{
-	const Binding* suppressed = suppressed_base_init_ctor;
-	if (starts_with(node.line, "base-init-action"))
-	{
-		const Binding* base_ctor =
-			base_init_action_constructor_call(node);
-		if (base_ctor != NULL)
-			suppressed = base_ctor;
-	}
-	if (node.direct_call != NULL &&
-	    is_class_constructor_binding(node.direct_call) &&
-	    (suppressed == NULL ||
-	     !same_binding_or_alias(node.direct_call, suppressed)))
-		insert_constructor_binding_aliases(out, node.direct_call);
-	for (size_t i = 0; i < node.children.size(); ++i)
-		collect_complete_constructor_entry_references_impl(
-			node.children[i],
-			out,
-			suppressed);
-}
-void collect_complete_constructor_entry_references(
-	const Node& node,
-	set<const Binding*>& out)
-{
-	collect_complete_constructor_entry_references_impl(node, out, NULL);
-}
-void collect_static_downcast_sources(ProgramLowerer& program, const Node& node)
-{
-	if (starts_with(node.line, "cast-expression") &&
-	    !node.is_dynamic_cast_expression &&
-	    !node.children.empty())
-	{
-		TypePtr source = pa11::strip_cv(node.children[0].type);
-		TypePtr target = pa11::strip_cv(node.type);
-		if (source.get() != NULL &&
-		    target.get() != NULL &&
-		    source->kind == TypeKind::Pointer &&
-		    target->kind == TypeKind::Pointer)
-		{
-			TypePtr source_record = pa11::strip_cv(source->base);
-			TypePtr target_record = pa11::strip_cv(target->base);
-			if (source_record.get() != NULL &&
-			    target_record.get() != NULL &&
-			    source_record->kind == TypeKind::Record &&
-			    target_record->kind == TypeKind::Record &&
-			    record_has_base_subobject(target_record, source_record))
-				program.mark_static_downcast_source_record(source_record);
-		}
-		if (target.get() != NULL &&
-		    is_reference(target))
-		{
-			TypePtr source_record =
-				source.get() != NULL && is_reference(source)
-					? pa11::strip_cv(source->base)
-					: source;
-			TypePtr target_record = pa11::strip_cv(target->base);
-			if (source_record.get() != NULL &&
-			    target_record.get() != NULL &&
-			    source_record->kind == TypeKind::Record &&
-			    target_record->kind == TypeKind::Record &&
-			    record_has_base_subobject(target_record, source_record))
-				program.mark_static_downcast_source_record(source_record);
-		}
-	}
-	for (size_t i = 0; i < node.children.size(); ++i)
-		collect_static_downcast_sources(program, node.children[i]);
-}
+	void collect_generated_copy_move_field_constructors(
+		const Binding* binding,
+		set<const Binding*>& out);
 	void demand_referenced_inline_definitions(
 		ProgramLowerer& program,
 		const set<const Binding*>& direct_calls,
@@ -980,13 +397,32 @@ void collect_static_downcast_sources(ProgramLowerer& program, const Node& node)
 			const Binding* binding = *it;
 			if (binding == NULL)
 				continue;
+			if (binding->is_generated_copy_move_constructor)
+			{
+				set<const Binding*> generated_constructor_deps;
+				collect_generated_copy_move_field_constructors(
+					binding,
+					generated_constructor_deps);
+				for (set<const Binding*>::const_iterator dep =
+					     generated_constructor_deps.begin();
+				     dep != generated_constructor_deps.end();
+				     ++dep)
+					program.demand_inline_function(*dep);
+			}
+			bool explicit_noninline_specialization =
+				binding->is_explicit_specialization_member &&
+				!binding->is_inline_definition;
 			bool inline_body =
 				binding->is_inline_definition ||
 				(binding->aliased_binding != NULL &&
 				 binding->aliased_binding->is_inline_definition) ||
-				binding_has_template_specialization_context(binding) ||
-				!binding->function_specialization_symbol.empty() ||
+				(!explicit_noninline_specialization &&
+				 binding_has_template_specialization_context(binding)) ||
+				(!explicit_noninline_specialization &&
+				 !binding->function_specialization_symbol.empty()) ||
 				(binding->aliased_binding != NULL &&
+				 !binding->aliased_binding
+					  ->is_explicit_specialization_member &&
 				 !binding->aliased_binding
 					  ->function_specialization_symbol.empty());
 			if (inline_body &&
@@ -1002,6 +438,10 @@ void collect_static_downcast_sources(ProgramLowerer& program, const Node& node)
 				program.demand_inline_function(binding, false);
 				continue;
 			}
+			if (inline_body &&
+			    hosted_library_binding(binding) &&
+			    !hosted_library_body_candidate(binding))
+				continue;
 			if (inline_body && hosted_library_body_candidate(binding))
 			{
 				if (is_class_constructor_binding(binding) &&
@@ -1017,11 +457,11 @@ void collect_static_downcast_sources(ProgramLowerer& program, const Node& node)
 					continue;
 				}
 					program.demand_inline_function(binding);
-				}
-				else if (inline_body)
-				{
-					program.demand_inline_function(binding);
-				}
+			}
+			else if (inline_body)
+			{
+				program.demand_inline_function(binding);
+			}
 		}
 		program.emit_pending_inline_definitions();
 	}
@@ -1041,10 +481,85 @@ void collect_static_downcast_sources(ProgramLowerer& program, const Node& node)
 		set<const Binding*> generated_calls;
 		collect_direct_calls(extra[i], generated_calls);
 		collect_lowered_constructor_calls(extra[i], generated_calls);
+		collect_generated_copy_move_field_constructors(extra[i].binding,
+		                                               generated_calls);
 		for (set<const Binding*>::const_iterator it = generated_calls.begin();
 		     it != generated_calls.end(); ++it)
 			program.demand_inline_function(*it);
 	}
+}
+void collect_copy_move_member_constructors_for_record(
+	TypePtr record,
+	bool move,
+	set<const Binding*>& out,
+	set<const pa11::Type*>& seen_records)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !seen_records.insert(bare.get()).second)
+		return;
+	pa11::layout_record_type(bare);
+	vector<TypePtr> bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < bases.size(); ++i)
+	{
+		TypePtr base = bases[i].get() != NULL
+			? pa11::strip_cv(bases[i]) : TypePtr();
+		if (base.get() == NULL || base->kind != TypeKind::Record)
+			continue;
+		Binding* ctor = find_copy_move_constructor(base, move);
+		if (ctor == NULL && move)
+			ctor = find_copy_move_constructor(base, false);
+		if (ctor != NULL)
+		{
+			out.insert(ctor);
+			collect_copy_move_member_constructors_for_record(base,
+			                                                 move,
+			                                                 out,
+			                                                 seen_records);
+		}
+	}
+	vector<Binding*> members;
+	append_assignment_dependency_members(bare, members);
+	for (size_t i = 0; i < members.size(); ++i)
+	{
+		if (members[i] == NULL)
+			continue;
+		TypePtr member_type = pa11::strip_cv(members[i]->type);
+		if (member_type.get() == NULL ||
+		    member_type->kind != TypeKind::Record)
+			continue;
+		Binding* ctor = find_copy_move_constructor(member_type, move);
+		if (ctor == NULL && move)
+			ctor = find_copy_move_constructor(member_type, false);
+		if (ctor != NULL)
+		{
+			out.insert(ctor);
+			collect_copy_move_member_constructors_for_record(member_type,
+			                                                 move,
+			                                                 out,
+			                                                 seen_records);
+		}
+	}
+}
+void collect_generated_copy_move_field_constructors(
+	const Binding* binding,
+	set<const Binding*>& out)
+{
+	if (binding == NULL ||
+	    !binding->is_generated_copy_move_constructor ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 2 ||
+	    !is_reference(binding->type->parameters[1]))
+		return;
+	TypePtr record = class_record_for_member(binding);
+	bool move = binding->type->parameters[1]->kind == TypeKind::RValueReference;
+	set<const pa11::Type*> seen_records;
+	collect_copy_move_member_constructors_for_record(record,
+	                                                 move,
+	                                                 out,
+	                                                 seen_records);
 }
 void collect_generated_copy_move_body_demands(const vector<Node>& extra,
                                               set<const Binding*>& out,
@@ -1064,37 +579,130 @@ void collect_generated_copy_move_body_demands(const vector<Node>& extra,
 		collect_addressed_functions(extra[i], out);
 		collect_implicit_lifecycle_calls(extra[i], out);
 		collect_lowered_constructor_calls(extra[i], out);
+		collect_generated_copy_move_field_constructors(extra[i].binding,
+		                                               out);
 	}
 }
-void emit_deferred_constant_template_static_members(ProgramLowerer& program)
+struct ExtraNodeLookupIndex
 {
-	vector<const Binding*> ready;
-	for (map<const Binding*, Node>::const_iterator it =
-		     program.deferred_global_definitions.begin();
-	     it != program.deferred_global_definitions.end();
-	     ++it)
-	{
-		const Binding* binding = it->first;
-		if (binding == NULL ||
-		    !binding->is_template_static_member_definition ||
-		    !binding->has_constant)
-			continue;
-		TypePtr object = strip_for_value(binding->type);
-		TypePtr bare = pa11::strip_cv(object);
-		if (bare->kind == TypeKind::Array ||
-		    bare->kind == TypeKind::Record)
-			continue;
-		ready.push_back(binding);
-	}
-	for (size_t i = 0; i < ready.size(); ++i)
-		program.demand_deferred_global_definition(ready[i]);
+	size_t indexed_size;
+	map<const Binding*, size_t> by_binding;
+	map<string, size_t> by_symbol;
+	map<string, size_t> by_object;
+
+	ExtraNodeLookupIndex() : indexed_size(0) {}
+};
+typedef pair<const vector<Node>*, pair<size_t, const Binding*> >
+	ExtraNodeCacheKey;
+map<const vector<Node>*, ExtraNodeLookupIndex>& extra_node_lookup_indexes()
+{
+	static map<const vector<Node>*, ExtraNodeLookupIndex> indexes;
+	return indexes;
+}
+map<ExtraNodeCacheKey, size_t>& extra_node_lookup_hits()
+{
+	static map<ExtraNodeCacheKey, size_t> hits;
+	return hits;
+}
+set<ExtraNodeCacheKey>& extra_node_lookup_misses()
+{
+	static set<ExtraNodeCacheKey> misses;
+	return misses;
+}
+void clear_extra_node_lookup_cache()
+{
+	extra_node_lookup_indexes().clear();
+	extra_node_lookup_hits().clear();
+	extra_node_lookup_misses().clear();
 }
 	const Node* extra_node_for_binding(const vector<Node>& extra,
 	                                   const Binding* binding)
 {
+	map<const vector<Node>*, ExtraNodeLookupIndex>& indexes =
+		extra_node_lookup_indexes();
+	ExtraNodeLookupIndex& index = indexes[&extra];
+	if (index.indexed_size > extra.size())
+	{
+		index.by_binding.clear();
+		index.by_symbol.clear();
+		index.by_object.clear();
+		index.indexed_size = 0;
+	}
+	if (index.indexed_size < extra.size())
+	{
+		for (size_t i = index.indexed_size; i < extra.size(); ++i)
+		{
+			const Binding* node_binding = extra[i].binding;
+			if (node_binding == NULL)
+				continue;
+			index.by_binding[node_binding] = i;
+			if (node_binding->aliased_binding != NULL)
+				index.by_binding[node_binding->aliased_binding] = i;
+			const string* symbol = &node_binding->function_specialization_symbol;
+			if (symbol->empty() && node_binding->aliased_binding != NULL)
+				symbol = &node_binding->aliased_binding
+					          ->function_specialization_symbol;
+			if (!symbol->empty())
+				index.by_symbol[*symbol] = i;
+			string object = global_object_symbol(node_binding);
+			if (!object.empty())
+				index.by_object[object] = i;
+			if (node_binding->aliased_binding != NULL)
+			{
+				object = global_object_symbol(node_binding->aliased_binding);
+				if (!object.empty())
+					index.by_object[object] = i;
+			}
+		}
+		index.indexed_size = extra.size();
+	}
+	if (binding != NULL)
+	{
+		map<const Binding*, size_t>::const_iterator exact =
+			index.by_binding.find(binding);
+		if (exact != index.by_binding.end() && exact->second < extra.size())
+			return &extra[exact->second];
+		const string* symbol = &binding->function_specialization_symbol;
+		if (symbol->empty() && binding->aliased_binding != NULL)
+			symbol = &binding->aliased_binding->function_specialization_symbol;
+		if (!symbol->empty())
+		{
+			map<string, size_t>::const_iterator found_symbol =
+				index.by_symbol.find(*symbol);
+			if (found_symbol != index.by_symbol.end() &&
+			    found_symbol->second < extra.size())
+				return &extra[found_symbol->second];
+		}
+		string object = global_object_symbol(binding);
+		if (object.empty() && binding->aliased_binding != NULL)
+			object = global_object_symbol(binding->aliased_binding);
+		if (!object.empty())
+		{
+			map<string, size_t>::const_iterator found_object =
+				index.by_object.find(object);
+			if (found_object != index.by_object.end() &&
+			    found_object->second < extra.size())
+				return &extra[found_object->second];
+		}
+	}
+	map<ExtraNodeCacheKey, size_t>& hits = extra_node_lookup_hits();
+	set<ExtraNodeCacheKey>& misses = extra_node_lookup_misses();
+	ExtraNodeCacheKey key =
+		make_pair(&extra, make_pair(extra.size(), binding));
+	map<ExtraNodeCacheKey, size_t>::const_iterator cached = hits.find(key);
+	if (cached != hits.end() &&
+	    cached->second < extra.size() &&
+	    same_binding_or_alias(extra[cached->second].binding, binding))
+		return &extra[cached->second];
+	if (misses.find(key) != misses.end())
+		return NULL;
 	for (size_t i = 0; i < extra.size(); ++i)
 		if (same_binding_or_alias(extra[i].binding, binding))
+		{
+			hits[key] = i;
 			return &extra[i];
+		}
+	misses.insert(key);
 	return NULL;
 }
 void demand_noop_generated_default_dependencies(
@@ -1174,9 +782,9 @@ bool demand_parser_direct_call_body(pa12::internal::Parser& parser,
                                     set<string>& processed_hosted,
                                     set<const Binding*>& scanned_bodies,
                                     bool hosted_compatibility)
-{
-	if (!processed.insert(call).second)
-		return false;
+	{
+		if (!processed.insert(call).second)
+			return false;
 	if (hosted_compatibility && hosted_library_binding(call))
 	{
 		string key = hosted_demand_key(call);
@@ -1185,20 +793,46 @@ bool demand_parser_direct_call_body(pa12::internal::Parser& parser,
 	}
 	Binding* object_root_call = const_cast<Binding*>(call);
 	if (hosted_compatibility &&
-	    object_root_call != NULL &&
-	    !hosted_library_binding(object_root_call))
+	    should_mark_direct_call_object_root(object_root_call,
+	                                        hosted_compatibility))
 	{
 		object_root_call->is_object_root = true;
 		if (object_root_call->aliased_binding != NULL)
 			object_root_call->aliased_binding->is_object_root = true;
 	}
-	bool candidate =
-		!hosted_compatibility ||
-		hosted_library_body_candidate(call) ||
-		default_constructor_call(call);
-		if (candidate)
-			parser.demand_lowir_function_body(const_cast<Binding*>(call));
-		const vector<Node>& function_extra = parser.extra_lowir_nodes();
+	const Binding* hosted_alias =
+		hosted_compatibility
+		? hosted_map_base_lvalue_operator_index_alias(call) : NULL;
+	if (hosted_alias != NULL)
+	{
+		Binding* alias_root = const_cast<Binding*>(hosted_alias);
+		alias_root->is_object_root = true;
+		if (alias_root->aliased_binding != NULL)
+			alias_root->aliased_binding->is_object_root = true;
+		direct_calls.insert(hosted_alias);
+		return true;
+	}
+	if (hosted_compatibility)
+		collect_hosted_vector_bool_algorithm_dependencies(call,
+		                                                   direct_calls);
+		bool can_demand = parser.can_demand_lowir_function_body(const_cast<Binding*>(call));
+		bool hosted_external_stream_call = hosted_compatibility && hosted_external_stream_function_binding(call);
+		bool hosted_synthetic_inline = hosted_compatibility &&
+			lowir_synthesizable_hosted_inline_body(call);
+		bool hosted_body_root =
+			object_root_call != NULL && object_root_call->is_object_root;
+		bool candidate = !hosted_compatibility || !hosted_library_binding(call) ||
+			(hosted_body_root &&
+			 hosted_library_body_candidate(call) && !hosted_synthetic_inline) ||
+			(hosted_body_root &&
+			 hosted_nested_helper_body_root(call) &&
+			 !hosted_synthetic_inline) ||
+			(default_constructor_call(call) && !hosted_external_stream_call) ||
+			(!hosted_library_binding(call) &&
+			 can_demand && !hosted_synthetic_inline);
+				if (candidate)
+					parser.demand_lowir_function_body(const_cast<Binding*>(call));
+	const vector<Node>& function_extra = parser.extra_lowir_nodes();
 	const Node* body = extra_node_for_binding(function_extra, call);
 	if (body == NULL && call->aliased_binding != NULL)
 		body = extra_node_for_binding(function_extra, call->aliased_binding);
@@ -1228,19 +862,15 @@ bool demand_parser_direct_call_body(pa12::internal::Parser& parser,
 			hosted_compatibility &&
 			hosted_library_binding(body->binding) &&
 			!body->binding->is_object_root;
-		bool hosted_root_template_body =
-			hosted_compatibility &&
-			hosted_library_binding(body->binding) &&
-			body->binding->is_object_root &&
-			binding_has_template_specialization_context(body->binding);
-		if (hosted_root_template_body &&
-		    body->binding->name == "operator=")
+		if (hosted_nonroot_body)
 			return true;
 		collect_direct_calls(*body, direct_calls);
 		collect_addressed_functions(*body, direct_calls);
 		collect_implicit_lifecycle_calls(*body, direct_calls);
-		if (!hosted_nonroot_body)
-			collect_lowered_constructor_calls(*body, direct_calls);
+		collect_lowered_constructor_calls(*body, direct_calls);
+		if (hosted_compatibility)
+			collect_hosted_helper_function_references(*body,
+			                                          direct_calls);
 	}
 	return true;
 }
@@ -1286,20 +916,16 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 			    node.binding->aliased_binding != NULL &&
 			    direct_calls.count(node.binding->aliased_binding) != 0)
 				scan_extra = true;
-				if (scan_extra &&
-				    hosted_compatibility &&
-				    node.binding != NULL &&
-				    hosted_library_binding(node.binding) &&
-				    node.binding->is_object_root &&
-				    binding_has_template_specialization_context(node.binding) &&
-				    node.binding->name == "operator=")
-					scan_extra = false;
 			if (scan_extra)
 			{
 				collect_direct_calls(node, direct_calls);
 				collect_addressed_functions(node, direct_calls);
 				collect_implicit_lifecycle_calls(node, direct_calls);
 				collect_lowered_constructor_calls(node, direct_calls);
+				if (hosted_compatibility)
+					collect_hosted_helper_function_references(
+						node,
+						direct_calls);
 				progress = true;
 			}
 			++scanned_extra;
@@ -1318,35 +944,43 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 		for (;;)
 		{
 			set<const Binding*> discovered;
-			for (size_t i = 0; i < extra.size(); ++i)
+			BindingReferenceIndex direct_index =
+				make_binding_reference_index(direct_calls);
+			for (set<const Binding*>::const_iterator it = direct_calls.begin();
+			     it != direct_calls.end();
+			     ++it)
 			{
-				const Node& node = extra[i];
+				const Node* extra_node = extra_node_for_binding(extra, *it);
+				if (extra_node == NULL)
+					continue;
+				const Node& node = *extra_node;
 				if (!starts_with(node.line, "function-definition ") ||
 				    node.binding == NULL)
 					continue;
-				bool referenced = false;
-				for (set<const Binding*>::const_iterator it =
-					     direct_calls.begin();
-				     it != direct_calls.end();
-				     ++it)
-					if (same_binding_or_alias(node.binding, *it))
-					{
-						referenced = true;
-						break;
-					}
+				bool referenced =
+					binding_reference_index_contains(direct_index,
+					                                 node.binding);
 				if (!referenced || !scanned.insert(node.binding).second)
+					continue;
+				if (hosted_compatibility &&
+				    hosted_library_binding(node.binding) &&
+				    !node.binding->is_object_root)
 					continue;
 				collect_node_implicit_lifecycle_calls(node, discovered);
 				collect_node_lowered_constructor_calls(node, discovered);
+				TypePtr return_type = function_return_type(node.binding);
 				for (size_t child = 0; child < node.children.size(); ++child)
-					collect_body_demand_calls(node.children[child],
-					                          discovered);
+					collect_body_demand_calls_impl(node.children[child],
+					                               discovered,
+					                               false,
+					                               return_type);
 			}
 			if (discovered.empty())
 				break;
 			if (hosted_compatibility)
 				mark_object_root_bindings(discovered,
-				                          hosted_compatibility);
+				                          hosted_compatibility,
+				                          true);
 			demand_parser_direct_call_bodies(parser,
 			                                 discovered,
 			                                 hosted_compatibility);
@@ -1356,15 +990,12 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 				break;
 		}
 	}
-	void collect_parser_output(ProgramLowerer& program,
-	                           pa12::internal::Parser& parser,
-	                           bool hosted_compatibility)
+	void collect_parser_direct_demands(pa12::internal::Parser& parser,
+	                                   const vector<Node>& extra,
+	                                   bool hosted_compatibility,
+	                                   set<const Binding*>& direct_calls)
 	{
-		const vector<Node>& extra = parser.extra_lowir_nodes();
-		set<const Binding*> direct_calls;
 		set<const Binding*> body_demands;
-		set<const Binding*> root_definitions;
-		set<const Binding*> complete_constructor_entries;
 		if (hosted_compatibility)
 			collect_translation_unit_body_demand_calls(parser.root(),
 			                                           direct_calls);
@@ -1374,16 +1005,25 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 			                                      direct_calls);
 			collect_translation_unit_addressed_functions(parser.root(),
 			                                             direct_calls);
+			collect_global_defaulted_constructor_demands(parser.root(),
+			                                             direct_calls,
+			                                             false);
 		}
+		collect_global_variable_constructor_demands(parser.root(),
+		                                            direct_calls);
 		if (hosted_compatibility)
-			mark_object_root_bindings(direct_calls, hosted_compatibility);
+			mark_object_root_bindings(direct_calls,
+			                          hosted_compatibility,
+			                          true);
 		demand_parser_direct_call_bodies(parser,
 		                                 direct_calls,
 		                                 hosted_compatibility);
 		collect_translation_unit_body_demand_calls(parser.root(),
 		                                           body_demands);
 		if (hosted_compatibility)
-			mark_object_root_bindings(body_demands, hosted_compatibility);
+			mark_object_root_bindings(body_demands,
+			                          hosted_compatibility,
+			                          true);
 		demand_parser_direct_call_bodies(parser,
 		                                 body_demands,
 		                                 hosted_compatibility);
@@ -1394,6 +1034,9 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 			collect_hosted_streambuf_virtual_body_demands(
 				extra,
 				virtual_body_demands);
+			mark_object_root_bindings(virtual_body_demands,
+			                          hosted_compatibility,
+			                          true);
 			demand_parser_direct_call_bodies(parser,
 			                                 virtual_body_demands,
 			                                 hosted_compatibility);
@@ -1408,7 +1051,8 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 				generated_copy_move_demands,
 				hosted_compatibility);
 			mark_object_root_bindings(generated_copy_move_demands,
-			                          hosted_compatibility);
+			                          hosted_compatibility,
+			                          true);
 			demand_parser_direct_call_bodies(parser,
 			                                 generated_copy_move_demands,
 			                                 hosted_compatibility);
@@ -1419,16 +1063,27 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 		                                    extra,
 		                                    direct_calls,
 		                                    hosted_compatibility);
-		parser.complete_static_member_initializer_replays();
-		collect_static_downcast_sources(program, parser.root());
+	}
+
+		void collect_parser_definition_metadata(
+		ProgramLowerer& program,
+		pa12::internal::Parser& parser,
+		const vector<Node>& extra,
+		const set<const Binding*>& direct_calls,
+		set<const Binding*>& root_definitions,
+		set<const Binding*>& complete_constructor_entries)
+		{
+			parser.complete_static_member_initializer_replays();
+			collect_static_downcast_sources(program, parser.root());
 		for (size_t i = 0; i < extra.size(); ++i)
 			collect_static_downcast_sources(program, extra[i]);
 		note_function_definitions(program, parser.root());
 		root_definitions = program.function_definition_bindings;
 		for (size_t i = 0; i < extra.size(); ++i)
 			note_function_definitions(program, extra[i]);
-		collect_complete_constructor_entry_references(parser.root(),
-		                                              complete_constructor_entries);
+		collect_complete_constructor_entry_references(
+			parser.root(),
+			complete_constructor_entries);
 		for (size_t i = 0; i < extra.size(); ++i)
 		{
 			collect_constructor_base_entry_references(program, extra[i]);
@@ -1436,42 +1091,118 @@ void demand_parser_direct_call_bodies(pa12::internal::Parser& parser,
 				extra[i],
 				complete_constructor_entries);
 		}
-			for (size_t i = 0; i < extra.size(); ++i)
+		for (size_t i = 0; i < extra.size(); ++i)
+			if (!empty_defaulted_copy_move_constructor_needs_helper(extra[i]))
 				program.register_inline_definition(extra[i]);
-			for (size_t i = 0; i < extra.size(); ++i)
-				collect_extra_variable(program, extra[i]);
-			demand_referenced_inline_definitions(
-				program,
-				direct_calls,
-				complete_constructor_entries);
-			demand_object_roots(program, extra, root_definitions);
-		demand_early_hidden_friends(program, extra, direct_calls);
+		for (size_t i = 0; i < extra.size(); ++i)
+			collect_extra_variable(program, extra[i]);
+		demand_referenced_inline_definitions(program,
+		                                     direct_calls,
+		                                     complete_constructor_entries);
+		demand_object_roots(program, extra, root_definitions);
+	}
+	void collect_parser_translation_unit(ProgramLowerer& program,
+	                                     pa12::internal::Parser& parser,
+	                                     bool hosted_compatibility)
+	{
 		if (hosted_compatibility)
 			collect_translation_unit_filtered(program,
 			                                  parser.root(),
 			                                  hosted_compatibility);
 		else
 			program.collect_translation_unit(parser.root());
-		if (hosted_compatibility)
-			emit_deferred_constant_template_static_members(program);
-			collect_explicit_defaulted_definitions(program, parser.root());
-			collect_referenced_extra_functions(program,
-			                                   extra,
-			                                   direct_calls,
+	}
+	void collect_parser_late_demands(
+		ProgramLowerer& program,
+		pa12::internal::Parser& parser,
+		const vector<Node>& extra,
+		const set<const Binding*>& direct_calls,
+		const set<const Binding*>& root_definitions,
+		const set<const Binding*>& complete_constructor_entries,
+		bool hosted_compatibility)
+	{
+		set<const Binding*> defaulted_definition_demands = direct_calls;
+		collect_global_defaulted_constructor_demands(
+			parser.root(),
+			defaulted_definition_demands,
+			false);
+		collect_explicit_defaulted_definitions(program,
+		                                      parser.root(),
+		                                      &defaulted_definition_demands);
+		for (size_t i = 0; i < extra.size(); ++i)
+			if (extra[i].token_text == "defaulted-definition")
+				collect_explicit_defaulted_definitions(
+					program,
+					extra[i],
+					&defaulted_definition_demands);
+		collect_referenced_extra_functions(program,
+		                                   extra,
+		                                   direct_calls,
 		                                   hosted_compatibility);
-	demand_noop_generated_default_dependencies(program, extra, direct_calls);
-	demand_generated_copy_move_dependencies(program,
-	                                        extra,
-	                                        hosted_compatibility);
-	program.emit_pending_inline_definitions();
-	program.emit_pending_synthetic_assignment_functions();
+		demand_noop_generated_default_dependencies(program,
+		                                           extra,
+		                                           direct_calls);
+		demand_generated_copy_move_dependencies(program,
+		                                        extra,
+		                                        hosted_compatibility);
+		for (size_t i = 0; i < extra.size(); ++i)
+			if (!empty_defaulted_copy_move_constructor_needs_helper(extra[i]))
+				program.register_inline_definition(extra[i]);
+		demand_object_roots(program, extra, root_definitions);
+		demand_referenced_inline_definitions(program,
+		                                     direct_calls,
+		                                     complete_constructor_entries);
+		program.emit_pending_inline_definitions();
+		program.emit_pending_synthetic_assignment_functions();
+	}
+	void collect_parser_output(ProgramLowerer& program,
+	                           pa12::internal::Parser& parser,
+	                           bool hosted_compatibility)
+	{
+		NativeLifecycleDemandScope native_lifecycle_scope(
+			program.native_lowering);
+		const vector<Node>& extra = parser.extra_lowir_nodes();
+		set<const Binding*> direct_calls;
+		set<const Binding*> root_definitions;
+		set<const Binding*> complete_constructor_entries;
+		collect_parser_direct_demands(parser,
+		                              extra,
+		                              hosted_compatibility,
+		                              direct_calls);
+		collect_parser_definition_metadata(program,
+		                                   parser,
+		                                   extra,
+		                                   direct_calls,
+		                                   root_definitions,
+		                                   complete_constructor_entries);
+		demand_early_hidden_friends(program, extra, direct_calls);
+		collect_parser_translation_unit(program, parser, hosted_compatibility);
+		collect_parser_late_demands(program,
+		                            parser,
+		                            extra,
+		                            direct_calls,
+		                            root_definitions,
+		                            complete_constructor_entries,
+		                            hosted_compatibility);
 }
 }  // namespace
+void clear_lowir_emit_caches()
+{
+	clear_extra_node_lookup_cache();
+	clear_global_object_symbol_cache();
+	clear_same_binding_or_alias_cache();
+	clear_lowir_emit_root_caches();
+	clear_lowir_function_order_caches();
+	clear_lowir_function_order_early_caches();
+	clear_lowir_inline_order_caches();
+	clear_lowir_inline_order_ranked_caches();
+}
 }  // namespace internal
 void emit_lowir(const vector<string>& srcfiles,
                 const string& outfile,
                 const Options& options)
 {
+	internal::clear_lowir_emit_caches();
 	internal::ProgramLowerer program(options.native_lowering,
 	                                 options.host_object_lowering);
 	vector<unique_ptr<pa12::internal::Parser> > parsers;
@@ -1489,6 +1220,9 @@ void emit_lowir(const vector<string>& srcfiles,
 		parsers.push_back(std::move(parser));
 	}
 	program.emit_global_lifecycle_functions();
+	program.emit_referenced_allocator_noop_constructors();
+	program.emit_referenced_noop_constructor_base_entries();
 	program.write(outfile);
+	internal::clear_lowir_emit_caches();
 }
 }  // namespace pa14

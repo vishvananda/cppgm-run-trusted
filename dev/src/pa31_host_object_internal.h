@@ -293,8 +293,14 @@ struct X86
 		else if (mod == 2 || (mod == 0 && base == 5))
 			u32(static_cast<uint32_t>(mem.disp));
 	}
+	void operand16(int width)
+	{
+		if (width == 16)
+			u8(0x66);
+	}
 	void reg_mem(int width, uint8_t op, int reg, const Mem& mem)
 	{
+		operand16(width);
 		rex(width == 64, reg, 0, mem.base == RIP ? 0 : mem.base,
 		    width == 8 && reg >= 4);
 		u8(op);
@@ -302,15 +308,18 @@ struct X86
 	}
 	void reg_reg(int width, uint8_t op, int reg, int rm)
 	{
+		operand16(width);
 		rex(width == 64, reg, 0, rm, width == 8 && (reg >= 4 || rm >= 4));
 		u8(op);
 		modrm(3, reg, rm);
 	}
 	void mov_imm(int width, int reg, uint64_t value)
 	{
+		operand16(width);
 		rex(width == 64, 0, 0, reg, width == 8 && reg >= 4);
 		u8((width == 8 ? 0xb0 : 0xb8) + (reg & 7));
 		if (width == 8) u8(static_cast<uint8_t>(value));
+		else if (width == 16) text.bytes.u16(static_cast<uint16_t>(value));
 		else if (width == 32) u32(static_cast<uint32_t>(value));
 		else text.bytes.u64(value);
 	}
@@ -340,6 +349,7 @@ struct X86
 	}
 	void imul(int width, int dst, int src)
 	{
+		operand16(width);
 		rex(width == 64, dst, 0, src);
 		u8(0x0f);
 		u8(0xaf);
@@ -347,9 +357,11 @@ struct X86
 	}
 	void idiv_reg(int width, int src)
 	{
+		operand16(width);
 		if (width == 64)
 			rex(true);
 		u8(0x99);
+		operand16(width);
 		rex(width == 64, 0, 0, src);
 		u8(0xf7);
 		modrm(3, 7, src);
@@ -363,12 +375,14 @@ struct X86
 		}
 		else
 			mov_imm(64, RDX, 0);
+		operand16(width);
 		rex(width == 64, 0, 0, src);
 		u8(width == 8 ? 0xf6 : 0xf7);
 		modrm(3, 6, src);
 	}
 	void shift_cl(int width, int subop, int dst)
 	{
+		operand16(width);
 		rex(width == 64, subop, 0, dst);
 		u8(0xd3);
 		modrm(3, subop, dst);
@@ -421,6 +435,50 @@ struct X86
 		u8(0xdb);
 		memop(7, mem);
 	}
+	void x87_fstp_float(const Mem& mem, int bits)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		if (bits == 32)
+			u8(0xd9);
+		else if (bits == 64)
+			u8(0xdd);
+		else
+			throw runtime_error("invalid x87 float store width");
+		memop(3, mem);
+	}
+	void x87_fnstcw(const Mem& mem)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		u8(0xd9);
+		memop(7, mem);
+	}
+	void x87_fldcw(const Mem& mem)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		u8(0xd9);
+		memop(5, mem);
+	}
+	void x87_fistp(const Mem& mem, int bits)
+	{
+		rex(false, 0, 0, mem.base == RIP ? 0 : mem.base);
+		if (bits == 16)
+		{
+			u8(0xdf);
+			memop(3, mem);
+		}
+		else if (bits == 32)
+		{
+			u8(0xdb);
+			memop(3, mem);
+		}
+		else if (bits == 64)
+		{
+			u8(0xdf);
+			memop(7, mem);
+		}
+		else
+			throw runtime_error("invalid x87 integer store width");
+	}
 	void x87_fucomip_st1()
 	{
 		u8(0xdf);
@@ -461,6 +519,33 @@ struct X86
 		u8(0xb6);
 		modrm(3, dst, src);
 	}
+	void movzx16(int dst, int src)
+	{
+		rex(false, dst, 0, src, dst >= 8 || src >= 8);
+		u8(0x0f);
+		u8(0xb7);
+		modrm(3, dst, src);
+	}
+	void movsx8(int dst, int src, bool to64)
+	{
+		rex(to64, dst, 0, src, dst >= 8 || src >= 4);
+		u8(0x0f);
+		u8(0xbe);
+		modrm(3, dst, src);
+	}
+	void movsx16(int dst, int src, bool to64)
+	{
+		rex(to64, dst, 0, src, dst >= 8 || src >= 8);
+		u8(0x0f);
+		u8(0xbf);
+		modrm(3, dst, src);
+	}
+	void movsxd32(int dst, int src)
+	{
+		rex(true, dst, 0, src);
+		u8(0x63);
+		modrm(3, dst, src);
+	}
 	void sub_rsp(size_t bytes)
 	{
 		if (bytes == 0) return;
@@ -494,10 +579,20 @@ struct EhRange
 		string type_symbol;
 		vector<string> exception_spec_types;
 		int selector;
+		int raw_selector;
 		bool catch_all;
 		bool exception_spec;
-		CatchInfo() : selector(0), catch_all(false), exception_spec(false) {}
+		CatchInfo() : selector(0), raw_selector(0),
+		              catch_all(false), exception_spec(false) {}
 	};
+	int ensure_catch_type_index(map<string, int>& type_index,
+	                            vector<string>& types,
+	                            const CatchInfo& c);
+	int ensure_exception_spec_filter(map<string, int>& type_index,
+	                                 vector<string>& types,
+	                                 map<string, int>& spec_filters,
+	                                 vector<unsigned char>& spec_table,
+	                                 const CatchInfo& c);
 struct FunctionInfo
 {
 	string symbol;
@@ -505,8 +600,10 @@ struct FunctionInfo
 	size_t start;
 	size_t size;
 	bool has_lsda;
+	bool emit_fde;
 	size_t lsda_offset;
-	FunctionInfo() : start(0), size(0), has_lsda(false), lsda_offset(0) {}
+	FunctionInfo() : start(0), size(0), has_lsda(false), emit_fde(true),
+	                 lsda_offset(0) {}
 };
 struct SimpleCtorStore
 {
@@ -534,9 +631,12 @@ struct Unit
 		Section& function_text_section(const Function& fn);
 		bool is_thread_local_global(const string& name) const;
 		bool is_imported_global(const string& name) const;
+		bool is_imported_function(const string& name) const;
+		bool is_imported_symbol_address(const string& name) const;
 		string tls_wrapper_for_global(const string& name) const;
 	void emit_tls_wrapper_for_global(const Global& g);
 	bool prunes_function(const string& name) const;
+	bool aliases_noop_constructor_to_complete_entry(const Function& fn) const;
 	set<string> emitted_tls_wrappers;
 };
 struct FuncGen
@@ -549,10 +649,13 @@ struct FuncGen
 	vector<Patch> jumps;
 	vector<EhRange> ranges;
 	vector<EhRange> active_ranges;
+	map<string, vector<EhRange> > block_entry_ranges;
 		map<string, vector<CatchInfo> > catches;
 		set<string> landing_blocks;
 		set<string> cleanup_blocks;
 		set<string> cleanup_action_blocks;
+	vector<string> lsda_types;
+	vector<unsigned char> lsda_spec_table;
 	size_t frame_size;
 	size_t exc_off;
 	size_t sel_off;
@@ -564,6 +667,8 @@ struct FuncGen
 		  exc_off(0), sel_off(0), va_reg_save_off(0), has_eh(false),
 		  has_va_start(false) {}
 		void emit(FunctionInfo& info);
+		void analyze_eh_regions();
+		void assign_lsda_selectors();
 		void emit_instruction(const Instruction& ins, const string& block);
 		bool emit_value_instruction(const Instruction& ins);
 		bool emit_const_instruction(const Instruction& ins);
@@ -575,8 +680,13 @@ struct FuncGen
 		bool emit_arithmetic_instruction(const Instruction& ins);
 	bool emit_protected_instruction(const Instruction& ins);
 	bool emit_eh_instruction(const Instruction& ins, const string& block);
-	bool emit_control_instruction(const Instruction& ins);
+	bool emit_control_instruction(const Instruction& ins,
+	                              const string& block);
 	void load_value(const Value& v, const Type& target, int reg);
+	void extend_integer_register(const Type& src,
+	                             const Type& dst,
+	                             int reg,
+	                             bool sign_extend);
 	void load_float_value(const Value& v, const Type& target, int xmm);
 	void load_f80_value_to_x87(const Value& v);
 	void store_value(const Value& dst, const Type& type, int reg);
@@ -589,6 +699,7 @@ struct FuncGen
 		void value_storage_address(const Value& v, int reg);
 		void tls_address(const string& name, int reg);
 		void imported_global_address(const string& name, int reg);
+		void imported_symbol_address(const string& name, int reg);
 	void copy_bytes(const Value& src, const Value& dst, const Span& span);
 	void copy_memory(int src_reg, int dst_reg, size_t bytes);
 	void copy_memory_to_frame(int src_reg, size_t dst_off, size_t bytes);
@@ -610,7 +721,7 @@ struct FuncGen
 	void emit_switch(const Instruction& ins);
 	void patch_jumps(size_t base);
 	void finish_lsda(FunctionInfo& info, size_t base);
-	void save_landing_registers();
+	void save_landing_registers(const string& block);
 };
 
 size_t align_up(size_t value, size_t align);

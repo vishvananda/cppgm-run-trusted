@@ -1,0 +1,16 @@
+#include <string>
+#include <unordered_map>
+
+enum ETokenType { NAME, VALUE };
+
+const std::unordered_map<std::string, ETokenType> tokens{
+  {"name", NAME},
+  {"value", VALUE}
+};
+
+int main()
+{
+  std::unordered_map<std::string, ETokenType>::const_iterator it =
+      tokens.find("value");
+  return it != tokens.end() && it->second == VALUE ? 0 : 1;
+}

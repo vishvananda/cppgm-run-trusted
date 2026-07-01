@@ -226,11 +226,16 @@ void Parser::parse_using_family(Node& out)
 					declaration->name = current_scope()->name;
 					declaration->parameters =
 						inherited_template->second->parameters;
+					declaration->function_parameter_pack_expansions =
+						inherited_template->second
+							->function_parameter_pack_expansions;
 					declaration->has_definition = true;
 					declaration->constructor_template = true;
 					declaration->generic_function_type = fn_type;
 					declaration->placeholder = ctor;
 					declaration->inherited_constructor_base = inherited;
+					declaration->inherited_constructor_base_template =
+						inherited_template->second;
 					declaration->inherited_constructor_base_type = base;
 					template_declarations_.push_back(std::move(holder));
 					function_template_placeholders_[ctor] = declaration;

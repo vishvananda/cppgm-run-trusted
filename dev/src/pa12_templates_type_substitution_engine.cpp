@@ -1,148 +1,42 @@
 #include "pa12_templates_function_support.h"
 #include "pa12_templates_instance_support.h"
+#include "pa12_templates_type_substitution_engine.h"
 #include "pa12_types_support.h"
 
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
-
 using namespace std;
 
 namespace pa12 {
 namespace internal {
-namespace {
 
-bool active_class_instantiation_named(
-	const vector<ActiveClassInstantiation>& active,
-	const string& name)
-{
-	for (size_t i = 0; i < active.size(); ++i)
-		if (active[i].declaration != NULL &&
-		    active[i].declaration->name == name)
-			return true;
-	return false;
-}
+const size_t kDependentTypeSubstitutionCacheLimit = 65536;
 
+size_t dependent_type_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_type_cache_string_hash(const string& value);
 bool hosted_nonrecord_member_typename_probe(
 	bool hosted_compatibility,
 	const vector<ActiveClassInstantiation>& active,
 	const string& root_name,
 	const string& suffix,
-	TypePtr root_substitution)
-{
-	if (!hosted_compatibility ||
-	    root_name.empty() ||
-	    suffix.empty() ||
-	    !active_class_instantiation_named(active, "allocator_traits"))
-		return false;
-	TypePtr bare_root = root_substitution.get() != NULL
-		? pa11::strip_cv(root_substitution) : TypePtr();
-	return bare_root.get() != NULL &&
-	       !bare_root->is_dependent_typename &&
-	       bare_root->kind != pa11::TypeKind::Record &&
-	       bare_root->kind != pa11::TypeKind::TemplateParameter;
-}
+	TypePtr root_substitution);
+bool dependent_typename_member_type_name(TypePtr type);
+size_t shallow_type_cache_hash(TypePtr type);
+size_t shallow_template_argument_cache_hash(const TemplateArgument& argument);
+bool replayable_dependent_value_argument(const TemplateArgument& argument);
+bool replayable_dependent_value_instance_argument(const pa11::TemplateInstanceArgument& argument);
+bool dependent_decltype_has_template_argument_name(const string& spelling, const string& name);
 
-struct TypeSubstitutionResult
-{
-	bool handled;
-	TypePtr type;
-	static TypeSubstitutionResult none()
+bool TypeSubstitutionEngine::preserves_self_reference(const TypePtr& type) const
 	{
-		TypeSubstitutionResult result;
-		result.handled = false;
-		return result;
-	}
-	static TypeSubstitutionResult done(TypePtr type)
-	{
-		TypeSubstitutionResult result;
-		result.handled = true;
-		result.type = type;
-		return result;
-	}
-};
-
-struct ActiveDependentTypeSubstitution
-{
-	vector<string>& keys;
-	ActiveDependentTypeSubstitution(vector<string>& k, const string& key)
-	  : keys(k)
-	{
-		keys.push_back(key);
-	}
-	~ActiveDependentTypeSubstitution()
-	{
-		keys.pop_back();
-	}
-};
-
-}  // namespace
-
-struct TypeSubstitutionEngine
-{
-	const Parser& p;
-	explicit TypeSubstitutionEngine(const Parser& parser) : p(parser) {}
-	TypePtr substitute(TypePtr type) const;
-	bool preserves_self_reference(TypePtr type) const;
-	TypeSubstitutionResult substitute_plain_dependent(TypePtr type) const;
-	string active_dependent_key(TypePtr type) const;
-	bool concrete_substitution_context() const;
-	TypeSubstitutionResult substitute_dependent_decltype(
-		TypePtr type,
-		bool replay_errors_are_hard) const;
-	TypeSubstitutionResult substitute_dependent_arguments(
-		TypePtr type,
-		bool concrete_context) const;
-	TypeSubstitutionResult substitute_dependent_builtin(TypePtr type) const;
-	bool split_dependent_root(TypePtr type,
-	                          string& root_name,
-	                          string& suffix) const;
-	bool find_dependent_root_substitution(TypePtr type,
-	                                      const string& root_name,
-	                                      TypePtr& root_subst) const;
-	TypeSubstitutionResult substitute_dependent_qualified_root(
-		TypePtr type,
-		bool concrete_context) const;
-	bool dependent_root_still_dependent(TypePtr type) const;
-	bool dependent_primary_still_dependent(TypePtr type) const;
-	bool dependent_arguments_still_dependent(TypePtr type) const;
-	bool dependent_typename_still_dependent(TypePtr type) const;
-	TypePtr substitute_dependent_typename(TypePtr type) const;
-	TypeSubstitutionResult substitute_simple(TypePtr type) const;
-	bool record_arguments_are_still_dependent(TypePtr type) const;
-	string record_primary_name(TypePtr type) const;
-	bool argument_count_too_large(TemplateDeclaration* declaration,
-	                              const vector<TemplateArgument>& args) const;
-	TypeSubstitutionResult substitute_template_template_record(
-		TypePtr type,
-		const string& primary_name) const;
-	void record_source_arguments(TypePtr type,
-	                             vector<TemplateArgument>& fallback_args,
-	                             const vector<TemplateArgument>*& source_args) const;
-	TemplateDeclaration* find_record_declaration(
-		TypePtr type,
-		const string& primary_name,
-		const vector<TemplateArgument>* source_args) const;
-	TypeSubstitutionResult substitute_primary_pack_record(
-		TypePtr type,
-		TemplateDeclaration* record_decl) const;
-	vector<TemplateArgument> expand_substituted_record_argument(
-		TemplateDeclaration* record_decl,
-		const vector<TemplateArgument>& source_args,
-		size_t& index) const;
-	vector<TemplateArgument> substitute_record_arguments(
-		TemplateDeclaration* record_decl,
-		const vector<TemplateArgument>& source_args) const;
-	TypeSubstitutionResult instantiate_substituted_record(
-		TypePtr type,
-		TemplateDeclaration* record_decl,
-		const vector<TemplateArgument>& source_args) const;
-	TypeSubstitutionResult substitute_record(TypePtr type) const;
-};
-
-bool TypeSubstitutionEngine::preserves_self_reference(TypePtr type) const
-{
-	TypePtr bare_input = pa11::strip_cv(type);
+		TypePtr bare_input = pa11::strip_cv(type);
+		if (!type_structurally_dependent(bare_input) &&
+		    !record_arguments_are_still_dependent(bare_input))
+			return false;
+		map<pair<const void*, string>, bool> contains_cache;
+	bool cache_ready = false;
+	size_t cache_key = 0;
 	for (size_t si = p.template_type_substitutions_.size(); si > 0; --si)
 		for (map<string, TypePtr>::const_iterator it =
 			     p.template_type_substitutions_[si - 1].begin();
@@ -150,18 +44,74 @@ bool TypeSubstitutionEngine::preserves_self_reference(TypePtr type) const
 		     ++it) {
 			TypePtr subst = it->second.get() != NULL
 				? pa11::strip_cv(it->second) : TypePtr();
-			if (subst.get() != NULL &&
-			    subst.get() == bare_input.get() &&
-			    type_contains_parameter_name(it->second,
-			                                 it->first,
-			                                 p.record_template_arguments_))
+			if (subst.get() == NULL || subst.get() != bare_input.get())
+				continue;
+			if (!cache_ready)
+			{
+				cache_key = dependent_type_cache_hash_combine(
+					0x51f,
+					active_dependent_key(type));
+				cache_key = dependent_type_cache_hash_combine(
+					cache_key,
+					p.record_template_arguments_.size());
+				map<size_t, bool>::const_iterator cached =
+					p.preserves_self_reference_cache_.find(cache_key);
+				if (cached != p.preserves_self_reference_cache_.end())
+					return cached->second;
+				cache_ready = true;
+			}
+			pair<const void*, string> key(subst.get(), it->first);
+			map<pair<const void*, string>, bool>::iterator cached =
+				contains_cache.find(key);
+			bool self_reference = cached != contains_cache.end()
+				? cached->second
+				: type_contains_parameter_name(it->second,
+				                               it->first,
+				                               p.record_template_arguments_);
+			if (cached == contains_cache.end())
+				contains_cache[key] = self_reference;
+			if (self_reference ||
+			    (subst->is_dependent_typename &&
+			     !self_substitution_can_change(it->second)))
+			{
+				p.preserves_self_reference_cache_[cache_key] = true;
 				return true;
+			}
+		}
+	if (cache_ready)
+		p.preserves_self_reference_cache_[cache_key] = false;
+	return false;
+}
+
+bool TypeSubstitutionEngine::self_substitution_can_change(const TypePtr& type) const
+{
+	set<string> parameter_names;
+	collect_type_parameter_names(type,
+	                             p.record_template_arguments_,
+	                             parameter_names);
+	if (parameter_names.empty())
+		return false;
+	for (size_t si = p.template_type_substitutions_.size(); si > 0; --si)
+		for (map<string, TypePtr>::const_iterator it =
+			     p.template_type_substitutions_[si - 1].begin();
+		     it != p.template_type_substitutions_[si - 1].end();
+		     ++it) {
+			if (parameter_names.count(it->first) == 0)
+				continue;
+			TypePtr subst = it->second.get() != NULL
+				? pa11::strip_cv(it->second) : TypePtr();
+			if (subst.get() == NULL)
+				continue;
+			if (subst->kind == pa11::TypeKind::TemplateParameter &&
+			    subst->name == it->first)
+				continue;
+			return true;
 		}
 	return false;
 }
 
 TypeSubstitutionResult
-TypeSubstitutionEngine::substitute_plain_dependent(TypePtr type) const
+TypeSubstitutionEngine::substitute_plain_dependent(const TypePtr& type) const
 {
 	if (type->dependent_typename_qualified ||
 	    type->dependent_typename_template_id ||
@@ -179,28 +129,96 @@ TypeSubstitutionEngine::substitute_plain_dependent(TypePtr type) const
 	return TypeSubstitutionResult::done(p.substitute_template_type(subst));
 }
 
-string TypeSubstitutionEngine::active_dependent_key(TypePtr type) const
+size_t TypeSubstitutionEngine::active_dependent_key(const TypePtr& type) const
 {
-	string key = to_string(reinterpret_cast<uintptr_t>(type.get())) + "|" +
-	             type->name + "|" + type->template_primary_name + "|" +
-	             to_string(type->template_arguments.size()) + "|" +
-	             to_string(
-		             type->dependent_typename_template_argument_lists.size()) +
-	             "|T" + to_string(p.template_type_substitutions_.size()) +
-	             "|V" + to_string(p.template_value_substitutions_.size()) +
-	             "|S" +
-	             to_string(reinterpret_cast<uintptr_t>(p.current_scope())) +
-	             "|D" + to_string(p.validating_template_definition_ ? 1 : 0) +
-	             "|F" +
-	             to_string(p.function_template_candidate_instantiation_depth_);
+	size_t key = shallow_type_cache_hash(type);
+	key = dependent_type_cache_hash_combine(
+		key,
+		reinterpret_cast<uintptr_t>(p.current_scope()));
+	key = dependent_type_cache_hash_combine(
+		key,
+		p.validating_template_definition_ ? 1 : 0);
+	key = dependent_type_cache_hash_combine(
+		key,
+		p.function_template_candidate_instantiation_depth_);
+	key = dependent_type_cache_hash_combine(
+		key,
+		p.template_type_substitutions_.size());
+	key = dependent_type_cache_hash_combine(
+		key,
+		p.template_value_substitutions_.size());
+	for (size_t i = 0; i < p.template_type_substitutions_.size(); ++i)
+	{
+		key = dependent_type_cache_hash_combine(key, i);
+		for (map<string, TypePtr>::const_iterator it =
+			     p.template_type_substitutions_[i].begin();
+		     it != p.template_type_substitutions_[i].end();
+		     ++it)
+		{
+			key = dependent_type_cache_hash_combine(
+				key,
+				dependent_type_cache_string_hash(it->first));
+			key = dependent_type_cache_hash_combine(
+				key,
+				shallow_type_cache_hash(it->second));
+		}
+	}
 	for (size_t i = 0; i < p.template_value_substitutions_.size(); ++i)
+	{
+		key = dependent_type_cache_hash_combine(key, i);
 		for (map<string, TemplateArgument>::const_iterator it =
 			     p.template_value_substitutions_[i].begin();
 		     it != p.template_value_substitutions_[i].end();
 		     ++it)
-			key += "|VN:" + it->first + ":" +
-			       to_string(static_cast<int>(it->second.kind));
+		{
+			key = dependent_type_cache_hash_combine(
+				key,
+				dependent_type_cache_string_hash(it->first));
+			key = dependent_type_cache_hash_combine(
+				key,
+				shallow_template_argument_cache_hash(it->second));
+		}
+	}
 	return key;
+}
+
+bool TypeSubstitutionEngine::active_dependent_substitution(const TypePtr& type) const
+{
+	if (type.get() == NULL || !type->is_dependent_typename)
+		return false;
+	size_t type_key = reinterpret_cast<size_t>(type.get());
+	if (find(p.active_dependent_type_substitution_types_.begin(),
+	         p.active_dependent_type_substitution_types_.end(),
+	         type_key) != p.active_dependent_type_substitution_types_.end())
+		return true;
+	for (size_t i = 0; i < p.active_dependent_type_substitution_types_.size();
+	     ++i)
+	{
+		const pa11::Type* active =
+			reinterpret_cast<const pa11::Type*>(
+				p.active_dependent_type_substitution_types_[i]);
+		if (active != NULL &&
+		    active->is_dependent_typename &&
+		    active->name == type->name &&
+		    active->template_primary_name == type->template_primary_name &&
+		    active->dependent_typename_qualified ==
+			    type->dependent_typename_qualified &&
+		    active->dependent_typename_template_id ==
+			    type->dependent_typename_template_id &&
+		    active->dependent_typename_decltype ==
+			    type->dependent_typename_decltype &&
+		    active->template_arguments.size() ==
+			    type->template_arguments.size() &&
+		    active->dependent_typename_template_argument_lists.size() ==
+			    type->dependent_typename_template_argument_lists.size())
+			return true;
+	}
+	if (p.active_dependent_type_substitution_keys_.empty())
+		return false;
+	size_t key = active_dependent_key(type);
+	return find(p.active_dependent_type_substitution_keys_.begin(),
+	            p.active_dependent_type_substitution_keys_.end(),
+	            key) != p.active_dependent_type_substitution_keys_.end();
 }
 
 bool TypeSubstitutionEngine::concrete_substitution_context() const
@@ -251,8 +269,103 @@ bool TypeSubstitutionEngine::concrete_substitution_context() const
 	return concrete;
 }
 
+bool TypeSubstitutionEngine::has_template_substitution_name(
+	const string& name) const
+{
+	for (size_t i = 0; i < p.template_type_substitutions_.size(); ++i)
+		if (p.template_type_substitutions_[i].find(name) !=
+		    p.template_type_substitutions_[i].end())
+			return true;
+	for (size_t i = 0; i < p.template_value_substitutions_.size(); ++i)
+		if (p.template_value_substitutions_[i].find(name) !=
+		    p.template_value_substitutions_[i].end())
+			return true;
+	return false;
+}
+
+bool TypeSubstitutionEngine::unresolved_foreign_decltype_template_argument(
+	const TypePtr& type,
+	const string& message) const
+{
+	if (message.compare(0, 16, "name not found: ") != 0)
+		return false;
+	string name = message.substr(16);
+	return type.get() != NULL &&
+	       dependent_decltype_has_template_argument_name(type->name, name) &&
+	       !has_template_substitution_name(name);
+}
+
+bool token_is_simple(const vector<Token>& tokens, size_t index, ETokenType type)
+{
+	return index < tokens.size() &&
+	       tokens[index].kind == posttoken::TokenKind::Simple &&
+	       tokens[index].type == type;
+}
+
+bool token_is_inside_template_argument_list(const vector<Token>& tokens,
+                                            size_t index)
+{
+	int depth = 0;
+	for (size_t i = 0; i < index && i < tokens.size(); ++i)
+	{
+		if (token_is_simple(tokens, i, OP_LT))
+			++depth;
+		else if (token_is_simple(tokens, i, OP_GT) && depth > 0)
+			--depth;
+	}
+	return depth > 0;
+}
+
+bool decltype_identifier_is_template_argument(
+	const vector<Token>& tokens,
+	size_t index)
+{
+	if (index == 0 ||
+	    !token_is_inside_template_argument_list(tokens, index) ||
+	    (!token_is_simple(tokens, index - 1, OP_LT) &&
+	     !token_is_simple(tokens, index - 1, OP_COMMA)))
+		return false;
+	size_t next = index + 1;
+	if (token_is_simple(tokens, next, OP_DOTS))
+		++next;
+	return token_is_simple(tokens, next, OP_GT) ||
+	       token_is_simple(tokens, next, OP_COMMA);
+}
+
+bool TypeSubstitutionEngine::dependent_decltype_has_unsubstituted_template_argument(
+	const TypePtr& type,
+	const vector<Token>& tokens) const
+{
+	if (type.get() == NULL)
+		return false;
+	set<string> seen;
+	for (size_t i = 0; i < tokens.size(); ++i) {
+		const Token& token = tokens[i];
+		if (token.kind != posttoken::TokenKind::Identifier)
+			continue;
+		const string& name = token.source;
+		if (!seen.insert(name).second)
+			continue;
+		if (!decltype_identifier_is_template_argument(tokens, i))
+			continue;
+		if (has_template_substitution_name(name))
+			continue;
+		Binding* binding = pa11::lookup_unqualified(p.current_scope(),
+		                                            name,
+		                                            pa11::LOOKUP_TYPE);
+		TypePtr bound_type = binding != NULL && binding->type.get() != NULL
+			? pa11::strip_cv(binding->type) : TypePtr();
+		if (bound_type.get() != NULL &&
+		    bound_type->kind != pa11::TypeKind::TemplateParameter &&
+		    bound_type->kind != pa11::TypeKind::TemplateTemplateParameter)
+			continue;
+		return true;
+	}
+	return false;
+}
+
 TypeSubstitutionResult TypeSubstitutionEngine::substitute_dependent_decltype(
-	TypePtr type,
+	const TypePtr& type,
 	bool replay_errors_are_hard) const
 {
 	if (!type->dependent_typename_decltype ||
@@ -261,12 +374,17 @@ TypeSubstitutionResult TypeSubstitutionEngine::substitute_dependent_decltype(
 	     p.template_value_substitutions_.empty() &&
 	     p.function_template_candidate_instantiation_depth_ == 0))
 		return TypeSubstitutionResult::none();
+	if (!replay_errors_are_hard)
+		return TypeSubstitutionResult::none();
 	vector<Token> replay_tokens;
 	if (!collect_replay_tokens(type->name, replay_tokens)) {
 		if (replay_errors_are_hard)
 			throw runtime_error("failed to tokenize dependent decltype");
 		return TypeSubstitutionResult::none();
 	}
+	if (dependent_decltype_has_unsubstituted_template_argument(type,
+	                                                          replay_tokens))
+		return TypeSubstitutionResult::none();
 	Parser* self = const_cast<Parser*>(&p);
 	vector<Token> saved_tokens;
 	size_t saved_pos = self->pos_;
@@ -279,15 +397,23 @@ TypeSubstitutionResult TypeSubstitutionEngine::substitute_dependent_decltype(
 		self->replaying_dependent_decltype_ = true;
 		replayed = self->parse_decltype_specifier();
 		self->expect_eof();
-	} catch (const runtime_error& err) {
+		} catch (const runtime_error& err) {
+			string message = err.what();
+			bool concrete = concrete_substitution_context();
 		bool unresolved_candidate =
 			p.function_template_candidate_instantiation_depth_ != 0 &&
-			string(err.what()).compare(0, 16, "name not found: ") == 0;
+			(message.compare(0, 16, "name not found: ") == 0 ||
+			 (message == "cannot resolve call overload" &&
+			  !(concrete && !p.active_class_instantiation_dependent())));
+		bool unresolved_foreign_template_argument =
+			unresolved_foreign_decltype_template_argument(type, message);
 		self->tokens_.swap(replay_tokens);
 		self->tokens_.swap(saved_tokens);
 		self->pos_ = saved_pos;
 		self->replaying_dependent_decltype_ = saved_replaying;
-		if (replay_errors_are_hard && !unresolved_candidate)
+		if (replay_errors_are_hard &&
+		    !unresolved_candidate &&
+		    !unresolved_foreign_template_argument)
 			throw;
 		return TypeSubstitutionResult::none();
 	}
@@ -297,17 +423,22 @@ TypeSubstitutionResult TypeSubstitutionEngine::substitute_dependent_decltype(
 	self->replaying_dependent_decltype_ = saved_replaying;
 	if (replayed.get() == NULL)
 		return TypeSubstitutionResult::none();
-	if (replayed->is_dependent_typename &&
-	    replayed->dependent_typename_decltype &&
-	    replayed->name == type->name &&
-	    replayed->template_arguments.empty())
-		return TypeSubstitutionResult::done(type);
+		if (replayed->is_dependent_typename &&
+		    replayed->dependent_typename_decltype &&
+		    replayed->name == type->name &&
+		    replayed->template_arguments.empty())
+		{
+			if (!type->template_arguments.empty() ||
+			    !type->dependent_typename_template_argument_lists.empty())
+				return TypeSubstitutionResult::none();
+			return TypeSubstitutionResult::done(type);
+		}
 	return TypeSubstitutionResult::done(p.substitute_template_type(replayed));
 }
 
 TypeSubstitutionResult
 TypeSubstitutionEngine::substitute_dependent_arguments(
-	TypePtr type,
+	const TypePtr& type,
 	bool concrete_context) const
 {
 	if (type->template_arguments.empty() &&
@@ -421,7 +552,7 @@ TypeSubstitutionEngine::substitute_dependent_arguments(
 }
 
 TypeSubstitutionResult
-TypeSubstitutionEngine::substitute_dependent_builtin(TypePtr type) const
+TypeSubstitutionEngine::substitute_dependent_builtin(const TypePtr& type) const
 {
 	string transform_name = !type->template_primary_name.empty()
 		? type->template_primary_name : type->name;
@@ -476,7 +607,7 @@ TypeSubstitutionEngine::substitute_dependent_builtin(TypePtr type) const
 }
 
 bool TypeSubstitutionEngine::split_dependent_root(
-	TypePtr type,
+	const TypePtr& type,
 	string& root_name,
 	string& suffix) const
 {
@@ -493,7 +624,7 @@ bool TypeSubstitutionEngine::split_dependent_root(
 }
 
 bool TypeSubstitutionEngine::find_dependent_root_substitution(
-	TypePtr type,
+	const TypePtr& type,
 	const string& root_name,
 	TypePtr& root_subst) const
 {
@@ -544,7 +675,7 @@ bool TypeSubstitutionEngine::find_dependent_root_substitution(
 
 TypeSubstitutionResult
 TypeSubstitutionEngine::substitute_dependent_qualified_root(
-	TypePtr type,
+	const TypePtr& type,
 	bool concrete_context) const
 {
 	if (!type->dependent_typename_qualified)
@@ -607,12 +738,12 @@ TypeSubstitutionEngine::substitute_dependent_qualified_root(
 		if (resolved.get() != NULL && resolved != type)
 			return TypeSubstitutionResult::done(
 				p.substitute_template_type(resolved));
-		throw runtime_error("dependent typename not resolved");
+			throw runtime_error("dependent typename not resolved");
 	}
 	return TypeSubstitutionResult::none();
 }
 
-bool TypeSubstitutionEngine::dependent_root_still_dependent(TypePtr type) const
+bool TypeSubstitutionEngine::dependent_root_still_dependent(const TypePtr& type) const
 {
 	if (!type->dependent_typename_qualified)
 		return false;
@@ -632,7 +763,7 @@ bool TypeSubstitutionEngine::dependent_root_still_dependent(TypePtr type) const
 	return p.type_is_template_dependent(substituted_root);
 }
 
-bool TypeSubstitutionEngine::dependent_primary_still_dependent(TypePtr type) const
+bool TypeSubstitutionEngine::dependent_primary_still_dependent(const TypePtr& type) const
 {
 	if (type->template_primary_name.empty())
 		return false;
@@ -649,7 +780,7 @@ bool TypeSubstitutionEngine::dependent_primary_still_dependent(TypePtr type) con
 }
 
 bool TypeSubstitutionEngine::dependent_arguments_still_dependent(
-	TypePtr type) const
+	const TypePtr& type) const
 {
 	if (type->template_arguments.empty())
 		return template_type_has_template_parameter(
@@ -695,7 +826,7 @@ bool TypeSubstitutionEngine::dependent_arguments_still_dependent(
 }
 
 bool TypeSubstitutionEngine::dependent_typename_still_dependent(
-	TypePtr type) const
+	const TypePtr& type) const
 {
 	return dependent_root_still_dependent(type) ||
 	       dependent_primary_still_dependent(type) ||
@@ -703,19 +834,38 @@ bool TypeSubstitutionEngine::dependent_typename_still_dependent(
 }
 
 TypePtr TypeSubstitutionEngine::substitute_dependent_typename(
-	TypePtr type) const
+	const TypePtr& type) const
 {
 	TypeSubstitutionResult plain = substitute_plain_dependent(type);
 	if (plain.handled)
 		return plain.type;
-	string key = active_dependent_key(type);
-	if (find(p.active_dependent_type_substitution_keys_.begin(),
-	         p.active_dependent_type_substitution_keys_.end(),
-	         key) != p.active_dependent_type_substitution_keys_.end())
+	const void* type_key = type.get();
+	if (active_dependent_substitution(type))
 		return type;
+	size_t cache_key = active_dependent_key(type);
+	bool cacheable_dependent_type = true;
+	if (cacheable_dependent_type)
+	{
+		map<size_t, TypePtr>::const_iterator cached =
+			p.dependent_type_substitution_cache_.find(cache_key);
+		if (cached != p.dependent_type_substitution_cache_.end())
+			return cached->second;
+	}
+	auto remember_dependent_cache = [&](TypePtr result) -> TypePtr {
+		if (cacheable_dependent_type)
+		{
+			p.dependent_type_substitution_cache_[cache_key] = result;
+			if (p.dependent_type_substitution_cache_.size() >
+			    kDependentTypeSubstitutionCacheLimit)
+				p.dependent_type_substitution_cache_.clear();
+		}
+		return result;
+	};
 	ActiveDependentTypeSubstitution active(
 		p.active_dependent_type_substitution_keys_,
-		key);
+		p.active_dependent_type_substitution_types_,
+		cache_key,
+		type_key);
 	bool concrete = concrete_substitution_context();
 	bool replay_hard =
 		p.function_template_candidate_instantiation_depth_ != 0 ||
@@ -723,35 +873,46 @@ TypePtr TypeSubstitutionEngine::substitute_dependent_typename(
 	TypeSubstitutionResult replay =
 		substitute_dependent_decltype(type, replay_hard);
 	if (replay.handled)
-		return replay.type;
+		return remember_dependent_cache(replay.type);
 	TypePtr resolved = p.resolve_dependent_typename_type(type);
 	if (resolved.get() != NULL && resolved != type) {
 		if (resolved->is_dependent_typename &&
 		    resolved->name == type->name &&
 		    resolved->template_primary_name == type->template_primary_name &&
-		    resolved->template_arguments.size() ==
-			    type->template_arguments.size())
-			return type;
-		return p.substitute_template_type(resolved);
-	}
+			    resolved->template_arguments.size() ==
+				    type->template_arguments.size()) {
+				return remember_dependent_cache(type);
+			}
+			TypePtr substituted = p.substitute_template_type(resolved);
+			return remember_dependent_cache(substituted);
+		}
+	TypePtr current = type;
 	TypeSubstitutionResult arguments =
-		substitute_dependent_arguments(type, concrete);
+		substitute_dependent_arguments(current, concrete);
 	if (arguments.handled)
-		type = arguments.type;
-	TypeSubstitutionResult builtin = substitute_dependent_builtin(type);
+		current = arguments.type;
+	TypeSubstitutionResult builtin = substitute_dependent_builtin(current);
 	if (builtin.handled)
-		return builtin.type;
+		return remember_dependent_cache(builtin.type);
 	TypeSubstitutionResult qualified =
-		substitute_dependent_qualified_root(type, concrete);
-	if (qualified.handled)
-		return qualified.type;
-	if (!dependent_typename_still_dependent(type))
-		throw runtime_error("dependent typename not resolved");
-	return type;
+		substitute_dependent_qualified_root(current, concrete);
+		if (qualified.handled)
+			return remember_dependent_cache(qualified.type);
+		if (current->dependent_typename_qualified &&
+		    current->dependent_typename_template_id &&
+		    dependent_typename_member_type_name(current) &&
+		    !p.active_class_instantiations_.empty() &&
+		    p.function_template_candidate_instantiation_depth_ == 0)
+		{
+			return remember_dependent_cache(current);
+		}
+			if (!dependent_typename_still_dependent(current))
+				throw runtime_error("dependent typename not resolved");
+	return remember_dependent_cache(current);
 }
 
 TypeSubstitutionResult TypeSubstitutionEngine::substitute_simple(
-	TypePtr type) const
+	const TypePtr& type) const
 {
 	if (type->kind == pa11::TypeKind::TemplateParameter) {
 		TypePtr subst;
@@ -791,27 +952,71 @@ TypeSubstitutionResult TypeSubstitutionEngine::substitute_simple(
 }
 
 bool TypeSubstitutionEngine::record_arguments_are_still_dependent(
-	TypePtr type) const
+	const TypePtr& type) const
 {
+	if (type.get() == NULL)
+		return false;
+	size_t cache_key = dependent_type_cache_hash_combine(
+		0x5a1d,
+		reinterpret_cast<uintptr_t>(type.get()));
+	cache_key = dependent_type_cache_hash_combine(
+		cache_key,
+		p.record_template_arguments_.size());
 	map<const void*, vector<TemplateArgument> >::const_iterator args =
 		p.record_template_arguments_.find(type.get());
+	if (args != p.record_template_arguments_.end())
+	{
+		cache_key = dependent_type_cache_hash_combine(
+			cache_key,
+			args->second.size());
+		for (size_t i = 0; i < args->second.size(); ++i)
+			cache_key = dependent_type_cache_hash_combine(
+				cache_key,
+				shallow_template_argument_cache_hash(args->second[i]));
+	}
+	else
+		cache_key = dependent_type_cache_hash_combine(
+			cache_key,
+			type->template_arguments.size());
+	map<size_t, bool>::const_iterator cached =
+		p.record_arguments_still_dependent_cache_.find(cache_key);
+	if (cached != p.record_arguments_still_dependent_cache_.end())
+		return cached->second;
+	bool result = false;
 	if (args != p.record_template_arguments_.end()) {
 		for (size_t i = 0; i < args->second.size(); ++i)
 			if (template_argument_has_template_parameter(
 				    args->second[i],
-				    p.record_template_arguments_))
-				return true;
-		return false;
+				    p.record_template_arguments_) ||
+			    replayable_dependent_value_argument(args->second[i]))
+			{
+				result = true;
+				break;
+		}
+		p.record_arguments_still_dependent_cache_[cache_key] = result;
+		if (p.record_arguments_still_dependent_cache_.size() >
+		    kDependentTypeSubstitutionCacheLimit)
+			p.record_arguments_still_dependent_cache_.clear();
+		return result;
 	}
 	for (size_t i = 0; i < type->template_arguments.size(); ++i)
 		if (template_instance_argument_has_template_parameter(
 			    type->template_arguments[i],
-			    p.record_template_arguments_))
-			return true;
-	return false;
+			    p.record_template_arguments_) ||
+		    replayable_dependent_value_instance_argument(
+			    type->template_arguments[i]))
+		{
+			result = true;
+			break;
+		}
+	p.record_arguments_still_dependent_cache_[cache_key] = result;
+	if (p.record_arguments_still_dependent_cache_.size() >
+	    kDependentTypeSubstitutionCacheLimit)
+		p.record_arguments_still_dependent_cache_.clear();
+	return result;
 }
 
-string TypeSubstitutionEngine::record_primary_name(TypePtr type) const
+string TypeSubstitutionEngine::record_primary_name(const TypePtr& type) const
 {
 	string name = type->template_primary_name.empty()
 		? type->name : type->template_primary_name;
@@ -833,9 +1038,23 @@ bool TypeSubstitutionEngine::argument_count_too_large(
 	return args.size() > declaration->parameters.size();
 }
 
+bool TypeSubstitutionEngine::argument_count_too_small(
+	TemplateDeclaration* declaration,
+	const vector<TemplateArgument>& args) const
+{
+	if (declaration == NULL)
+		return false;
+	size_t required = 0;
+	for (size_t i = 0; i < declaration->parameters.size(); ++i)
+		if (!declaration->parameters[i].has_default &&
+		    !declaration->parameters[i].is_pack)
+			++required;
+	return args.size() < required;
+}
+
 TypeSubstitutionResult
 TypeSubstitutionEngine::substitute_template_template_record(
-	TypePtr type,
+	const TypePtr& type,
 	const string& primary_name) const
 {
 	TemplateArgument template_subst;
@@ -879,8 +1098,10 @@ TypeSubstitutionEngine::substitute_template_template_record(
 	}
 	substituted = flatten_template_argument_packs(substituted);
 	if (argument_count_too_large(template_subst.template_declaration,
+	                             substituted) ||
+	    argument_count_too_small(template_subst.template_declaration,
 	                             substituted))
-		return TypeSubstitutionResult::done(type);
+		throw runtime_error("template argument arity mismatch");
 	Parser* self = const_cast<Parser*>(&p);
 	return TypeSubstitutionResult::done(
 		template_subst.template_declaration->kind ==
@@ -892,7 +1113,7 @@ TypeSubstitutionEngine::substitute_template_template_record(
 }
 
 void TypeSubstitutionEngine::record_source_arguments(
-	TypePtr type,
+	const TypePtr& type,
 	vector<TemplateArgument>& fallback_args,
 	const vector<TemplateArgument>*& source_args) const
 {
@@ -927,7 +1148,7 @@ void TypeSubstitutionEngine::record_source_arguments(
 }
 
 TemplateDeclaration* TypeSubstitutionEngine::find_record_declaration(
-	TypePtr type,
+	const TypePtr& type,
 	const string& primary_name,
 	const vector<TemplateArgument>* source_args) const
 {
@@ -976,7 +1197,7 @@ TemplateDeclaration* TypeSubstitutionEngine::find_record_declaration(
 
 TypeSubstitutionResult
 TypeSubstitutionEngine::substitute_primary_pack_record(
-	TypePtr type,
+	const TypePtr& type,
 	TemplateDeclaration* record_decl) const
 {
 	if (record_decl == NULL ||
@@ -1139,7 +1360,7 @@ vector<TemplateArgument> TypeSubstitutionEngine::substitute_record_arguments(
 
 TypeSubstitutionResult
 TypeSubstitutionEngine::instantiate_substituted_record(
-	TypePtr type,
+	const TypePtr& type,
 	TemplateDeclaration* record_decl,
 	const vector<TemplateArgument>& source_args) const
 {
@@ -1148,49 +1369,19 @@ TypeSubstitutionEngine::instantiate_substituted_record(
 	if (p.template_argument_key(substituted) ==
 	    p.template_argument_key(source_args))
 		return TypeSubstitutionResult::none();
-	if (argument_count_too_large(record_decl, substituted))
+	if (argument_count_too_large(record_decl, substituted) ||
+	    argument_count_too_small(record_decl, substituted))
 		return TypeSubstitutionResult::done(type);
 	return TypeSubstitutionResult::done(
 		const_cast<Parser*>(&p)->instantiate_class_template(record_decl,
 		                                                    substituted));
 }
 
-TypeSubstitutionResult TypeSubstitutionEngine::substitute_record(
-	TypePtr type) const
-{
-	if (type->kind != pa11::TypeKind::Record ||
-	    !type->is_template_specialization)
-		return TypeSubstitutionResult::none();
-	if (!type_structurally_dependent(type) &&
-	    !record_arguments_are_still_dependent(type))
-		return TypeSubstitutionResult::done(type);
-	string primary_name = record_primary_name(type);
-	TypeSubstitutionResult templ =
-		substitute_template_template_record(type, primary_name);
-	if (templ.handled)
-		return templ;
-	vector<TemplateArgument> fallback_args;
-	const vector<TemplateArgument>* source_args = NULL;
-	record_source_arguments(type, fallback_args, source_args);
-	TemplateDeclaration* record_decl =
-		find_record_declaration(type, primary_name, source_args);
-	if (record_decl != NULL &&
-	    find(p.completing_class_template_arguments_.begin(),
-	         p.completing_class_template_arguments_.end(),
-	         record_decl) != p.completing_class_template_arguments_.end())
-		return TypeSubstitutionResult::done(type);
-	TypeSubstitutionResult pack =
-		substitute_primary_pack_record(type, record_decl);
-	if (pack.handled)
-		return pack;
-	if (record_decl != NULL && source_args != NULL)
-		return instantiate_substituted_record(type, record_decl, *source_args);
-	return TypeSubstitutionResult::done(type);
-}
-
-TypePtr TypeSubstitutionEngine::substitute(TypePtr type) const
+TypePtr TypeSubstitutionEngine::substitute(const TypePtr& type) const
 {
 	if (type.get() == NULL)
+		return type;
+	if (active_dependent_substitution(type))
 		return type;
 	if (preserves_self_reference(type))
 		return type;
@@ -1265,6 +1456,9 @@ TypePtr TypeSubstitutionEngine::substitute(TypePtr type) const
 	TypeSubstitutionResult record = substitute_record(type);
 	if (record.handled)
 		return record.type;
+	TypeSubstitutionResult member = substitute_member_record_owner(type);
+	if (member.handled)
+		return member.type;
 	return type;
 }
 

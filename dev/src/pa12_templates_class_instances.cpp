@@ -1,4 +1,5 @@
 #include "pa12_templates_instance_support.h"
+#include "pa12_types_support.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -34,14 +35,69 @@ bool hosted_shared_ptr_template(const TemplateDeclaration* declaration)
 {
 	if (declaration == NULL ||
 	    (declaration->name != "shared_ptr" &&
-	     declaration->name != "__shared_ptr"))
+	     declaration->name != pa11::abi_private_name("_shared_ptr") &&
+	     declaration->name != "weak_ptr" &&
+	     declaration->name != "__weak_ptr"))
 		return false;
 	for (Scope* scope = declaration->owner;
 	     scope != NULL;
 	     scope = scope->parent)
 		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+				return true;
+	return false;
+}
+
+uint64_t hosted_align_up(uint64_t value, uint64_t align)
+{
+	return align == 0 ? value : ((value + align - 1) / align) * align;
+}
+
+bool hosted_field_duplicate(const vector<Binding*>& fields, Binding* member)
+{
+	for (size_t i = 0; i < fields.size(); ++i)
+		if (fields[i] == member ||
+		    (fields[i] != NULL &&
+		     fields[i]->owner == member->owner &&
+		     fields[i]->name == member->name))
 			return true;
 	return false;
+}
+
+void sync_hosted_record_fields_from_scope(TypePtr bare)
+{
+	if (bare.get() == NULL || bare->scope == NULL)
+		return;
+	vector<Binding*> fields;
+	uint64_t offset = 0;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member == NULL ||
+		    member->kind != BindingKind::Variable ||
+		    member->owner != bare->scope ||
+		    member->is_static_member ||
+		    member->aliased_binding != NULL ||
+		    hosted_field_duplicate(fields, member))
+			continue;
+		uint64_t align = 1;
+		uint64_t size = 1;
+		try
+		{
+			align = max<uint64_t>(uint64_t(1), pa11::type_align(member->type));
+			size = max<uint64_t>(uint64_t(1), pa11::type_size(member->type));
+		}
+		catch (const runtime_error&)
+		{
+			continue;
+		}
+		offset = hosted_align_up(offset, align);
+		member->member_offset = offset;
+		member->bit_offset = 0;
+		member->is_bit_field = false;
+		fields.push_back(member);
+		offset += size;
+	}
+	bare->fields = fields;
 }
 
 void complete_hosted_shared_ptr_layout(TypePtr type)
@@ -50,10 +106,8 @@ void complete_hosted_shared_ptr_layout(TypePtr type)
 	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
 		return;
 	bare->complete = true;
-	bare->fields.clear();
-	bare->direct_bases.clear();
-	bare->direct_base_offsets.clear();
-	bare->direct_base_virtuals.clear();
+	sync_hosted_record_fields_from_scope(bare);
+	bare->direct_base_offsets.assign(bare->direct_bases.size(), 0);
 	bare->virtual_bases.clear();
 	bare->virtual_base_offsets.clear();
 	bare->direct_base_offset = 0;
@@ -118,9 +172,7 @@ TypePtr Parser::instantiate_class_template(
 	for (size_t i = 0; i < full_args.size(); ++i)
 	{
 		bool argument_dependent =
-			template_argument_has_template_parameter(
-				full_args[i],
-				record_template_arguments_);
+			template_argument_dependent_cached(full_args[i]);
 		if (argument_dependent)
 			template_dependent = true;
 		if (argument_dependent ||
@@ -129,10 +181,10 @@ TypePtr Parser::instantiate_class_template(
 		                                 active_class_instantiations_)))
 			dependent = true;
 	}
-	TemplateDeclaration* selected_declaration = declaration;
-	vector<TemplateArgument> selected_args = full_args;
-	TemplateDeclaration* best_partial = NULL;
-	(void)template_dependent;
+		TemplateDeclaration* selected_declaration = declaration;
+		vector<TemplateArgument> selected_args = full_args;
+		TemplateDeclaration* best_partial = NULL;
+		(void)template_dependent;
 	string owner_key;
 	TypePtr owner_record = pa11::record_type_for_scope(declaration->owner);
 	owner_record = owner_record.get() != NULL
@@ -141,12 +193,12 @@ TypePtr Parser::instantiate_class_template(
 		owner_record.get() != NULL
 		? record_template_arguments_.find(owner_record.get())
 		: record_template_arguments_.end();
-	if (owner_args != record_template_arguments_.end())
-		owner_key = template_argument_key(owner_args->second);
-	string key = template_argument_key(full_args);
-	if (!owner_key.empty())
-		key = owner_key + "::" + declaration->name + "<" + key + ">";
-	if (declaration->completing_specializations.count(key) != 0)
+		if (owner_args != record_template_arguments_.end())
+			owner_key = template_argument_key(owner_args->second);
+		string key = template_argument_key(full_args);
+		if (!owner_key.empty())
+			key = owner_key + "::" + declaration->name + "<" + key + ">";
+		if (declaration->completing_specializations.count(key) != 0)
 	{
 		for (size_t i = active_class_instantiations_.size(); i > 0; --i)
 		{
@@ -167,11 +219,50 @@ TypePtr Parser::instantiate_class_template(
 			if (active_key == key)
 				return active.type;
 		}
-		map<string, TypePtr>::iterator existing =
-			declaration->class_specializations.find(key);
-		if (existing != declaration->class_specializations.end())
-			return existing->second;
+			map<string, TypePtr>::iterator existing =
+				declaration->class_specializations.find(key);
+			if (existing != declaration->class_specializations.end())
+			{
+				return existing->second;
+			}
 		throw runtime_error("recursive class template instantiation");
+	}
+	if (function_template_candidate_instantiation_depth_ != 0)
+	{
+				map<string, TypePtr>::iterator existing =
+					declaration->class_specializations.find(key);
+				if (existing != declaration->class_specializations.end())
+				{
+					bool stale_forward_specialization = false;
+					TypePtr existing_record = pa11::strip_cv(existing->second);
+					map<const void*, TemplateDeclaration*>::iterator existing_decl =
+						record_template_declarations_.find(
+							existing_record.get());
+					if (existing_decl != record_template_declarations_.end() &&
+					    existing_decl->second != NULL &&
+					    !existing_decl->second->has_definition)
+					{
+						string exact_specialization_key =
+							template_argument_key(specialization_match_args);
+						for (size_t i = 0;
+						     i < declaration->class_specialization_declarations.size();
+						     ++i)
+						{
+							TemplateDeclaration* candidate =
+								declaration->class_specialization_declarations[i];
+							if (candidate->has_definition &&
+							    template_argument_key(
+								    candidate->class_specialization_pattern) ==
+								    exact_specialization_key)
+							{
+								stale_forward_specialization = true;
+								break;
+							}
+						}
+					}
+					if (!stale_forward_specialization)
+						return existing->second;
+				}
 	}
 	declaration->completing_specializations.insert(key);
 	try
@@ -181,19 +272,21 @@ TypePtr Parser::instantiate_class_template(
 		     ++i)
 		{
 			try
-			{
-				TemplateDeclaration* candidate =
-					declaration->class_specialization_declarations[i];
-				vector<TemplateArgument> candidate_args;
-					bool candidate_match =
-						match_class_specialization(declaration,
-						                           candidate,
+					{
+						TemplateDeclaration* candidate =
+							declaration->class_specialization_declarations[i];
+						vector<TemplateArgument> candidate_args;
+						bool candidate_match =
+							match_class_specialization(declaration,
+							                           candidate,
 						                           specialization_match_args,
 						                           arguments.size(),
 						                           candidate_args,
 						                           record_template_arguments_);
-					if (!candidate_match)
-						continue;
+						if (!candidate_match)
+						{
+							continue;
+						}
 					if (best_partial == NULL ||
 				    class_specialization_more_specialized(
 					    candidate,
@@ -264,7 +357,7 @@ TypePtr Parser::instantiate_class_template(
 		throw;
 	}
 	declaration->completing_specializations.erase(key);
-	string selected_key = template_argument_key(selected_args);
+		string selected_key = template_argument_key(selected_args);
 	if (!owner_key.empty())
 		selected_key = owner_key + "::" + selected_declaration->name +
 		               "<" + selected_key + ">";
@@ -287,12 +380,12 @@ TypePtr Parser::instantiate_class_template(
 		if (active_key == selected_key)
 			return active.type;
 	}
-	map<string, TypePtr>::iterator existing =
-		declaration->class_specializations.find(key);
-	if (existing != declaration->class_specializations.end())
-	{
-		TypePtr existing_record = pa11::strip_cv(existing->second);
-		existing_record->template_primary_name = declaration->name;
+		map<string, TypePtr>::iterator existing =
+			declaration->class_specializations.find(key);
+			if (existing != declaration->class_specializations.end())
+			{
+				TypePtr existing_record = pa11::strip_cv(existing->second);
+			existing_record->template_primary_name = declaration->name;
 		existing_record->template_arguments = template_instance_arguments(full_args);
 		record_template_arguments_[existing_record.get()] = selected_args;
 		map<const void*, TemplateDeclaration*>::iterator existing_decl =
@@ -329,9 +422,9 @@ TypePtr Parser::instantiate_class_template(
 			record_template_arguments_[existing_record.get()] = selected_args;
 			existing_record->complete = false;
 		}
-		if (function_template_candidate_instantiation_depth_ == 0)
-			candidate_only_class_template_specializations_.erase(
-				existing->second.get());
+			if (function_template_candidate_instantiation_depth_ == 0)
+				candidate_only_class_template_specializations_.erase(
+					existing->second.get());
 		bool complete_now =
 			!dependent &&
 			defer_class_template_completion_depth_ == 0 &&
@@ -371,9 +464,9 @@ TypePtr Parser::instantiate_class_template(
 		                  BindingKind::Type,
 		                  declaration->name,
 		                  type);
-	injected->target_scope = class_scope;
-	declaration->class_specializations[key] = type;
-	record_template_declarations_[type.get()] = selected_declaration;
+		injected->target_scope = class_scope;
+			declaration->class_specializations[key] = type;
+		record_template_declarations_[type.get()] = selected_declaration;
 	record_template_arguments_[type.get()] = selected_args;
 	if (function_template_candidate_instantiation_depth_ != 0)
 		candidate_only_class_template_specializations_.insert(type.get());
@@ -386,6 +479,84 @@ TypePtr Parser::instantiate_class_template(
 	if (complete_now)
 		complete_template_record(type);
 	return type;
+}
+
+void Parser::complete_template_record_for_member_lookup(TypePtr type)
+{
+	++shallow_template_record_completion_depth_;
+	try
+	{
+		complete_template_record(type);
+	}
+	catch (...)
+	{
+		--shallow_template_record_completion_depth_;
+		throw;
+	}
+	--shallow_template_record_completion_depth_;
+}
+
+void Parser::complete_shallow_template_record(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record)
+		return;
+	if (!bare->template_record_shallow_complete)
+		return;
+	bare->template_record_shallow_complete = false;
+	Scope* class_scope = bare->scope;
+	for (size_t i = 0; class_scope != NULL &&
+	     i < class_scope->binding_order.size(); ++i)
+	{
+		Binding* field = class_scope->binding_order[i];
+		if (field->kind != BindingKind::Variable ||
+		    field->is_static_member ||
+		    field->aliased_binding != NULL)
+			continue;
+		field->type = substitute_template_type(field->type);
+		TypePtr field_type = field->type;
+		field_type = field_type.get() != NULL
+			? pa11::strip_cv(field_type) : TypePtr();
+		while (field_type.get() != NULL &&
+		       field_type->kind == pa11::TypeKind::Array)
+			field_type = pa11::strip_cv(field_type->base);
+		if (field_type.get() != NULL &&
+		    field_type->kind == pa11::TypeKind::Record &&
+		    field_type.get() != bare.get() &&
+		    !type_is_template_dependent(field_type))
+			complete_template_record(field_type);
+	}
+	for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+		if (extra_lowir_nodes_[i].binding != NULL &&
+		    extra_lowir_nodes_[i].binding->owner == class_scope)
+			resolve_pending_member_initializers(class_scope,
+			                                    extra_lowir_nodes_[i]);
+	for (size_t i = 0; i < bare->direct_bases.size(); ++i)
+	{
+		TypePtr direct_base =
+			bare->direct_bases[i].get() != NULL
+			? pa11::strip_cv(bare->direct_bases[i]) : TypePtr();
+		if (direct_base.get() != NULL &&
+		    direct_base->kind == pa11::TypeKind::Record &&
+		    direct_base.get() != bare.get() &&
+		    !type_is_template_dependent(direct_base))
+			complete_template_record(direct_base);
+	}
+	try
+	{
+		if (!type_is_template_dependent(bare) &&
+		    !type_structurally_dependent(bare))
+			pa11::layout_record_type(bare);
+	}
+	catch (const runtime_error& err)
+	{
+		if ((string(err.what()) != "incomplete class type" &&
+		     string(err.what()) != "incomplete object type" &&
+		     string(err.what()) != "incomplete array type") ||
+		    active_class_instantiations_.empty())
+			throw;
+	}
+	instantiate_member_variable_templates(bare);
 }
 
 void Parser::complete_template_record(TypePtr type)
@@ -420,6 +591,13 @@ void Parser::complete_template_record(TypePtr type)
 			return;
 	}
 	bool replay_synthesized_layout = bare->hosted_layout_synthesized;
+	if (bare->complete &&
+	    bare->template_record_shallow_complete &&
+	    shallow_template_record_completion_depth_ == 0)
+	{
+		complete_shallow_template_record(bare);
+		return;
+	}
 	if (bare->complete && !replay_synthesized_layout)
 		return;
 	candidate_only_class_template_specializations_.erase(bare.get());
@@ -500,8 +678,8 @@ void Parser::complete_template_record(TypePtr type)
 					if (parameter.is_pack)
 					{
 						owner_subst[parameter.name] =
-							pa11::make_template_parameter_type(
-								parameter.name);
+							template_parameter_placeholder_type(
+								parameter);
 						owner_value_subst[parameter.name] =
 							owner_args->second[i];
 						if (owner_args->second[i].kind ==
@@ -536,6 +714,8 @@ void Parser::complete_template_record(TypePtr type)
 
 	size_t save_pos = pos_;
 	int save_local_type_counter = local_type_counter_;
+	int save_local_record_declaration_counter =
+		local_record_declaration_counter_;
 	bool tokens_are_declaration_tokens =
 		tokens_.size() == declaration_tokens_.size() &&
 		(tokens_.empty() ||
@@ -543,8 +723,10 @@ void Parser::complete_template_record(TypePtr type)
 		  tokens_.back().source == declaration_tokens_.back().source));
 	vector<Token> complete_save_tokens;
 	if (!tokens_are_declaration_tokens)
-		complete_save_tokens = tokens_;
+		complete_save_tokens.swap(tokens_);
 	vector<Scope*> save_scopes = scopes_;
+	vector<bool> save_class_private_access = class_private_access_;
+	vector<bool> save_class_protected_access = class_protected_access_;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
 	vector<map<string, TemplateArgument> > save_value_subst =
 		template_value_substitutions_;
@@ -560,9 +742,11 @@ void Parser::complete_template_record(TypePtr type)
 			{
 				if (declaration->parameters[i].is_pack)
 				{
+					const TemplateParameterInfo& parameter =
+						declaration->parameters[i];
 					subst[declaration->parameters[i].name] =
-						pa11::make_template_parameter_type(
-							declaration->parameters[i].name);
+						template_parameter_placeholder_type(
+							parameter);
 					value_subst[declaration->parameters[i].name] =
 						args[i];
 					if (args[i].kind == TemplateArgumentKind::Pack &&
@@ -623,11 +807,15 @@ void Parser::complete_template_record(TypePtr type)
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
-		if (!tokens_are_declaration_tokens)
-			tokens_ = complete_save_tokens;
+			if (!tokens_are_declaration_tokens)
+				tokens_.swap(complete_save_tokens);
 		scopes_ = save_scopes;
+		class_private_access_ = save_class_private_access;
+		class_protected_access_ = save_class_protected_access;
 		pos_ = save_pos;
 		local_type_counter_ = save_local_type_counter;
+		local_record_declaration_counter_ =
+			save_local_record_declaration_counter;
 		declaration->completing_specializations.erase(key);
 		if (replay_synthesized_layout)
 		{
@@ -665,11 +853,15 @@ void Parser::complete_template_record(TypePtr type)
 		template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
-		if (!tokens_are_declaration_tokens)
-			tokens_ = complete_save_tokens;
+			if (!tokens_are_declaration_tokens)
+				tokens_.swap(complete_save_tokens);
 		scopes_ = save_scopes;
+		class_private_access_ = save_class_private_access;
+		class_protected_access_ = save_class_protected_access;
 		pos_ = save_pos;
 		local_type_counter_ = save_local_type_counter;
+		local_record_declaration_counter_ =
+			save_local_record_declaration_counter;
 		declaration->completing_specializations.erase(key);
 		if (replay_synthesized_layout)
 		{
@@ -685,14 +877,24 @@ void Parser::complete_template_record(TypePtr type)
 	template_type_substitutions_ = save_subst;
 	template_value_substitutions_ = save_value_subst;
 	template_type_parameter_packs_ = save_pack_subst;
-	if (!tokens_are_declaration_tokens)
-		tokens_ = complete_save_tokens;
+		if (!tokens_are_declaration_tokens)
+			tokens_.swap(complete_save_tokens);
 	scopes_ = save_scopes;
-	pos_ = save_pos;
-	declaration->completing_specializations.erase(key);
-	bare->hosted_layout_synthesized = false;
-	instantiate_member_variable_templates(type);
-}
+	class_private_access_ = save_class_private_access;
+	class_protected_access_ = save_class_protected_access;
+		pos_ = save_pos;
+	local_record_declaration_counter_ =
+		save_local_record_declaration_counter;
+		declaration->completing_specializations.erase(key);
+		bare->hosted_layout_synthesized = false;
+		if (shallow_template_record_completion_depth_ != 0)
+			bare->template_record_shallow_complete = true;
+		else
+		{
+			bare->template_record_shallow_complete = false;
+			instantiate_member_variable_templates(type);
+		}
+	}
 
 void Parser::mark_template_argument_demanded(
 	const TemplateArgument& argument)
@@ -751,7 +953,13 @@ void Parser::mark_template_specialization_demanded(TypePtr type)
 		case pa11::TypeKind::Record:
 				candidate_only_class_template_specializations_.erase(type.get());
 				if (type->is_template_specialization)
-					demanded_class_template_specializations_.insert(type.get());
+				{
+					bool already_demanded =
+						!demanded_class_template_specializations_
+							.insert(type.get()).second;
+					if (already_demanded && type->complete)
+						break;
+				}
 			if (type->is_template_specialization &&
 			    !type_is_template_dependent(type) &&
 			    defer_class_template_completion_depth_ == 0 &&
@@ -775,23 +983,70 @@ void Parser::mark_template_specialization_demanded(TypePtr type)
 	}
 }
 
-void Parser::complete_member_class_template_record(Binding* binding)
+Binding* Parser::complete_member_class_template_record(Binding* binding,
+                                                       Scope* requested_owner)
 {
 	if (binding == NULL || binding->type.get() == NULL)
-		return;
+		return binding;
 	TypePtr bare = pa11::strip_cv(binding->type);
-	if (bare->kind != pa11::TypeKind::Record ||
-	    (bare->complete && bare->scope != NULL))
-		return;
-	TypePtr owner_record = binding->owner != NULL
-		? pa11::record_type_for_scope(binding->owner) : TypePtr();
+	if (bare->kind != pa11::TypeKind::Record)
+		return binding;
+	Scope* member_owner =
+		requested_owner != NULL && requested_owner->kind == ScopeKind::Class
+		? requested_owner : binding->owner;
+	if (member_owner != NULL &&
+	    member_owner->kind == ScopeKind::Class &&
+	    binding->kind == BindingKind::Type &&
+	    (binding->owner != member_owner ||
+	     (bare->scope != NULL && bare->scope->parent != member_owner)))
+	{
+		Binding* owned =
+			pa11::find_owned_binding(member_owner,
+			                         binding->name,
+			                         BindingKind::Type);
+		if (owned != NULL && owned->type.get() != NULL)
+		{
+			binding = owned;
+			bare = pa11::strip_cv(binding->type);
+		}
+		else
+		{
+			Scope* member_scope =
+				pa11::create_child_scope(member_owner,
+				                         ScopeKind::Class,
+				                         binding->name);
+			TypePtr member_record =
+				pa11::make_record_type(scoped_type_display_name(member_owner,
+				                                                binding->name),
+				                       bare->tag.empty() ? "struct" : bare->tag,
+				                       false,
+				                       member_scope);
+		member_record->template_primary_name = bare->template_primary_name;
+		member_record->is_template_specialization =
+			bare->is_template_specialization;
+		member_record->template_arguments = bare->template_arguments;
+			Binding* materialized =
+				pa11::add_binding(member_owner,
+				                  BindingKind::Type,
+				                  binding->name,
+				                  member_record);
+			materialized->target_scope = member_scope;
+			record_owner_scopes_[member_record.get()] = member_owner;
+			binding = materialized;
+		bare = member_record;
+		}
+	}
+	if (bare->complete && bare->scope != NULL)
+		return binding;
+	TypePtr owner_record = member_owner != NULL
+		? pa11::record_type_for_scope(member_owner) : TypePtr();
 	if (owner_record.get() == NULL)
-		return;
+		return binding;
 	owner_record = pa11::strip_cv(owner_record);
 	map<const void*, TemplateDeclaration*>::iterator outer =
 		record_template_declarations_.find(owner_record.get());
 	if (outer == record_template_declarations_.end())
-		return;
+		return binding;
 	map<pair<TemplateDeclaration*, string>, TemplateDeclaration*>::iterator found =
 		member_class_templates_.find(make_pair(outer->second, binding->name));
 	TemplateDeclaration* declaration = found != member_class_templates_.end()
@@ -816,9 +1071,9 @@ void Parser::complete_member_class_template_record(Binding* binding)
 			}
 		}
 		if (declaration == NULL)
-			return;
+			return binding;
 		if (!declaration->has_definition)
-			return;
+			return binding;
 		vector<TemplateArgument> owner_args =
 			record_template_arguments_[owner_record.get()];
 		vector<TemplateArgument> member_args;
@@ -831,14 +1086,20 @@ void Parser::complete_member_class_template_record(Binding* binding)
 				member_args.push_back(
 					template_argument_from_instance_argument(
 						bare->template_arguments[i]));
+		record_template_declarations_[bare.get()] = declaration;
+		record_template_arguments_[bare.get()] = member_args;
 		string key = template_argument_key(owner_args) + "::" + binding->name +
 		             "<" + template_argument_key(member_args) + ">";
 		if (declaration->completing_specializations.count(key) != 0)
-			return;
+			return binding;
 		declaration->completing_specializations.insert(key);
 
 		size_t save_pos = pos_;
 		vector<Scope*> save_scopes = scopes_;
+		vector<bool> save_class_private_access = class_private_access_;
+		vector<bool> save_class_protected_access = class_protected_access_;
+		vector<ActiveClassInstantiation> save_active_class_instantiations =
+			active_class_instantiations_;
 		vector<map<string, TypePtr> > save_subst =
 			template_type_substitutions_;
 		vector<map<string, TemplateArgument> > save_value_subst =
@@ -859,8 +1120,8 @@ void Parser::complete_member_class_template_record(Binding* binding)
 					if (parameter.is_pack)
 					{
 						owner_subst[parameter.name] =
-							pa11::make_template_parameter_type(
-								parameter.name);
+							template_parameter_placeholder_type(
+								parameter);
 						owner_value_subst[parameter.name] =
 							owner_args[i];
 						owner_pack_subst.insert(parameter.name);
@@ -885,9 +1146,11 @@ void Parser::complete_member_class_template_record(Binding* binding)
 				{
 					if (declaration->parameters[i].is_pack)
 					{
+						const TemplateParameterInfo& parameter =
+							declaration->parameters[i];
 						subst[declaration->parameters[i].name] =
-							pa11::make_template_parameter_type(
-								declaration->parameters[i].name);
+							template_parameter_placeholder_type(
+								parameter);
 						value_subst[declaration->parameters[i].name] =
 							member_args[i];
 						pack_subst.insert(
@@ -911,27 +1174,50 @@ void Parser::complete_member_class_template_record(Binding* binding)
 		template_value_substitutions_.push_back(value_subst);
 		template_type_parameter_packs_.push_back(pack_subst);
 	scopes_.clear();
-	scopes_.push_back(declaration->lexical_scope != NULL
+		scopes_.push_back(declaration->lexical_scope != NULL
 	                  ? declaration->lexical_scope
 	                  : declaration->owner);
 	pos_ = declaration->decl_begin;
-	TypePtr parsed = parse_class_specifier();
+	active_class_instantiations_.push_back(
+		ActiveClassInstantiation(declaration, key, bare));
+	TypePtr parsed;
+	try
+	{
+		parsed = parse_class_specifier();
+	}
+	catch (...)
+	{
+		active_class_instantiations_ = save_active_class_instantiations;
+		template_type_substitutions_ = save_subst;
+		template_value_substitutions_ = save_value_subst;
+		template_type_parameter_packs_ = save_pack_subst;
+		class_private_access_ = save_class_private_access;
+		class_protected_access_ = save_class_protected_access;
+		scopes_ = save_scopes;
+		pos_ = save_pos;
+		declaration->completing_specializations.erase(key);
+		throw;
+	}
+	active_class_instantiations_ = save_active_class_instantiations;
 	TypePtr parsed_bare = pa11::strip_cv(parsed);
 	if (!bare->complete &&
 	    parsed_bare.get() != NULL &&
 	    parsed_bare->kind == pa11::TypeKind::Record &&
 	    parsed_bare->complete &&
 	    parsed_bare->scope != NULL)
-	{
-		*bare = *parsed_bare;
-		binding->target_scope = bare->scope;
-	}
-		template_type_substitutions_ = save_subst;
+		{
+			*bare = *parsed_bare;
+			binding->target_scope = bare->scope;
+		}
+			template_type_substitutions_ = save_subst;
 		template_value_substitutions_ = save_value_subst;
 		template_type_parameter_packs_ = save_pack_subst;
+		class_private_access_ = save_class_private_access;
+		class_protected_access_ = save_class_protected_access;
 		scopes_ = save_scopes;
 	pos_ = save_pos;
 	declaration->completing_specializations.erase(key);
+	return binding;
 }
 
 }  // namespace internal

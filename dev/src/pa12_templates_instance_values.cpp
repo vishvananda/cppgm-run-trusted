@@ -119,6 +119,78 @@ size_t value_eval_instance_arg_hash(const pa11::TemplateInstanceArgument& arg,
 	return out;
 }
 
+string unqualified_value_owner(string name)
+{
+	size_t args = name.find('<');
+	if (args != string::npos)
+		name = name.substr(0, args);
+	size_t scope = name.rfind("::");
+	if (scope != string::npos)
+		name = name.substr(scope + 2);
+	return name;
+}
+
+bool candidate_depth_trait_member_replay_allowed(const TemplateArgument& arg)
+{
+	if (arg.value_member_name != "value" &&
+	    arg.value_member_name != "__value")
+		return false;
+	string owner = unqualified_value_owner(arg.value_owner_template_name);
+	return owner == "is_same" ||
+	       owner == "__are_same" ||
+	       owner == "__same_value_type" ||
+	       owner == "is_class" ||
+	       owner == "is_pointer" ||
+	       owner == "__is_pointer" ||
+	       owner == "is_reference" ||
+	       owner == "__is_reference" ||
+	       owner == "is_lvalue_reference" ||
+	       owner == "is_rvalue_reference" ||
+	       owner == "is_constructible" ||
+	       owner == "__is_constructible" ||
+	       owner == "is_nothrow_constructible" ||
+	       owner == "__is_nothrow_constructible" ||
+	       owner == "is_trivially_constructible" ||
+	       owner == "__is_trivially_constructible" ||
+	       owner == "is_copy_constructible" ||
+	       owner == "is_nothrow_copy_constructible" ||
+	       owner == "is_trivially_copy_constructible" ||
+	       owner == "is_move_constructible" ||
+	       owner == "is_nothrow_move_constructible" ||
+	       owner == "is_trivially_move_constructible" ||
+	       owner == "is_assignable" ||
+	       owner == "__is_assignable" ||
+	       owner == "is_nothrow_assignable" ||
+	       owner == "__is_nothrow_assignable" ||
+	       owner == "is_trivially_assignable" ||
+	       owner == "__is_trivially_assignable" ||
+	       owner == "is_copy_assignable" ||
+	       owner == "is_nothrow_copy_assignable" ||
+	       owner == "is_trivially_copy_assignable" ||
+	       owner == "is_move_assignable" ||
+	       owner == "is_nothrow_move_assignable" ||
+	       owner == "is_trivially_move_assignable" ||
+	       owner == "is_convertible" ||
+	       owner == "__is_convertible" ||
+	       owner == "__and_" ||
+	       owner == "__or_" ||
+	       owner == "__not_" ||
+	       owner == "__has_esft_base";
+}
+
+bool candidate_depth_value_replay_allowed(const TemplateArgument& arg)
+{
+	return arg.value_name == "__integer_pack" ||
+	       (!arg.value_owner_template_name.empty() &&
+	        arg.value_member_name.empty()) ||
+	       candidate_depth_trait_member_replay_allowed(arg) ||
+	       arg.value_name.compare(0, 5, "__is_") == 0 ||
+	       arg.value_name.compare(0, 6, "__has_") == 0 ||
+	       arg.value_name.compare(0, 12, "__reference_") == 0 ||
+	       arg.value_name.compare(0, 7, "sizeof ") == 0 ||
+	       arg.value_name.compare(0, 8, "alignof ") == 0;
+}
+
 }  // namespace
 
 bool Parser::template_value_argument_matches_for_template_match(
@@ -192,7 +264,7 @@ bool Parser::try_evaluate_template_value_argument_for_template_match(
 			if (parameter.is_pack)
 			{
 				subst[parameter.name] =
-					pa11::make_template_parameter_type(parameter.name);
+					template_parameter_placeholder_type(parameter);
 				value_subst[parameter.name] = arg;
 				pack_subst.insert(parameter.name);
 			}
@@ -523,6 +595,9 @@ bool Parser::try_evaluate_dependent_value_expression_argument(
 	if (validating_template_definition_ &&
 	    template_argument_has_template_parameter(arg,
 	                                             record_template_arguments_))
+		return false;
+	if (function_template_candidate_instantiation_depth_ != 0 &&
+	    !candidate_depth_value_replay_allowed(arg))
 		return false;
 	string active_key =
 		to_string(arg.value_expr_begin) + ":" + to_string(arg.value_expr_end);

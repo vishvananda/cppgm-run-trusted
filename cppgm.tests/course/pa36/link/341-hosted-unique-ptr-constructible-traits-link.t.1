@@ -1,0 +1,18 @@
+#include <memory>
+#include <type_traits>
+
+static_assert(!std::is_copy_constructible<std::unique_ptr<int> >::value,
+              "unique_ptr copy constructible");
+static_assert(std::is_move_constructible<std::unique_ptr<int> >::value,
+              "unique_ptr move constructible");
+static_assert(!__is_constructible(std::unique_ptr<int>,
+                                  const std::unique_ptr<int>&),
+              "builtin unique_ptr copy constructible");
+static_assert(__is_constructible(std::unique_ptr<int>,
+                                 std::unique_ptr<int>&&),
+              "builtin unique_ptr move constructible");
+
+int main()
+{
+  return 0;
+}

@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -13,208 +15,10 @@ namespace pa12 {
 namespace internal {
 Parser* active_template_match_parser = NULL;
 const vector<TemplateParameterInfo>* active_template_match_parameters = NULL;
-bool same_template_record_type(TypePtr left, TypePtr right)
-{
-	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
-	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
-	if (l.get() == NULL || r.get() == NULL)
-		return false;
-	if (pa11::same_type(l, r))
-		return true;
-	return l->kind == pa11::TypeKind::Record &&
-	       r->kind == pa11::TypeKind::Record &&
-	       l->is_template_specialization &&
-	       r->is_template_specialization &&
-	       l->template_primary_name == r->template_primary_name &&
-	       l->name == r->name;
-}
-bool template_record_owner_name_match(TypePtr left, TypePtr right)
-{
-	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
-	TypePtr r = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
-	if (l.get() == NULL ||
-	    r.get() == NULL ||
-	    l->kind != pa11::TypeKind::Record ||
-	    r->kind != pa11::TypeKind::Record ||
-	    l->name != r->name)
-		return false;
-	string l_primary = !l->template_primary_name.empty()
-		? l->template_primary_name : l->name;
-	string r_primary = !r->template_primary_name.empty()
-		? r->template_primary_name : r->name;
-	return l_primary == r_primary &&
-	       (l->is_template_specialization || r->is_template_specialization);
-}
-bool template_instance_argument_contains_parameter_name(
-	const pa11::TemplateInstanceArgument& argument,
-	const string& name,
-	const map<const void*, vector<TemplateArgument> >& record_arguments);
-bool template_argument_contains_parameter_name(
+bool template_record_owner_name_match(TypePtr left, TypePtr right);
+size_t dependent_cache_template_argument_identity(
 	const TemplateArgument& argument,
-	const string& name,
-	const map<const void*, vector<TemplateArgument> >& record_arguments);
-bool type_contains_parameter_name(
-	TypePtr type,
-	const string& name,
-	const map<const void*, vector<TemplateArgument> >& record_arguments)
-{
-	if (type.get() == NULL)
-		return false;
-	type = pa11::strip_cv(type);
-	if (type->kind == pa11::TypeKind::TemplateParameter)
-	{
-		if (type->is_dependent_typename)
-		{
-			for (size_t i = 0; i < type->template_arguments.size(); ++i)
-				if (template_instance_argument_contains_parameter_name(
-					    type->template_arguments[i],
-					    name,
-					    record_arguments))
-					return true;
-			for (size_t i = 0;
-			     i < type->dependent_typename_template_argument_lists.size();
-			     ++i)
-				for (size_t j = 0;
-				     j < type->dependent_typename_template_argument_lists[i].size();
-				     ++j)
-					if (template_instance_argument_contains_parameter_name(
-						    type->dependent_typename_template_argument_lists[i][j],
-						    name,
-						    record_arguments))
-						return true;
-		}
-		return pa11::is_deducible_template_parameter_type(type) &&
-		       type->name == name;
-	}
-	if (type->kind == pa11::TypeKind::Pointer ||
-	    type->kind == pa11::TypeKind::LValueReference ||
-	    type->kind == pa11::TypeKind::RValueReference)
-		return type_contains_parameter_name(type->base,
-		                                    name,
-		                                    record_arguments);
-	if (type->kind == pa11::TypeKind::Array)
-	{
-		if (type->unknown_bound && type->name == name)
-			return true;
-		return type_contains_parameter_name(type->base,
-		                                    name,
-		                                    record_arguments);
-	}
-	if (type->kind == pa11::TypeKind::Function)
-	{
-		if (type_contains_parameter_name(type->base,
-		                                 name,
-		                                 record_arguments))
-			return true;
-		for (size_t i = 0; i < type->parameters.size(); ++i)
-			if (type_contains_parameter_name(type->parameters[i],
-			                                 name,
-			                                 record_arguments))
-				return true;
-		return false;
-	}
-	if (type->kind == pa11::TypeKind::MemberPointer)
-		return type_contains_parameter_name(type->member_class,
-		                                    name,
-		                                    record_arguments) ||
-		       type_contains_parameter_name(type->base,
-		                                    name,
-		                                    record_arguments);
-	if (type->is_template_specialization)
-	{
-		if (type->is_dependent_typename &&
-		    type->dependent_typename_template_id &&
-		    type->template_primary_name == name)
-			return true;
-		for (size_t i = 0; i < type->template_arguments.size(); ++i)
-			if (template_instance_argument_contains_parameter_name(
-				    type->template_arguments[i],
-				    name,
-				    record_arguments))
-				return true;
-		map<const void*, vector<TemplateArgument> >::const_iterator found =
-			record_arguments.find(type.get());
-		if (found != record_arguments.end())
-			for (size_t i = 0; i < found->second.size(); ++i)
-				if (template_argument_contains_parameter_name(
-					    found->second[i],
-					    name,
-					    record_arguments))
-					return true;
-	}
-	return false;
-}
-bool template_instance_argument_contains_parameter_name(
-	const pa11::TemplateInstanceArgument& argument,
-	const string& name,
-	const map<const void*, vector<TemplateArgument> >& record_arguments)
-{
-	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type)
-		return type_contains_parameter_name(argument.type,
-		                                    name,
-		                                    record_arguments);
-	if (argument.kind == pa11::TemplateInstanceArgumentKind::Value)
-	{
-		for (size_t i = 0;
-		     i < argument.value_owner_template_arguments.size();
-		     ++i)
-			if (template_instance_argument_contains_parameter_name(
-				    argument.value_owner_template_arguments[i],
-				    name,
-				    record_arguments))
-				return true;
-		return argument.value_owner_template_name == name ||
-		       (argument.dependent && argument.value_name == name) ||
-		       type_contains_parameter_name(argument.type,
-		                                    name,
-		                                    record_arguments);
-	}
-	if (argument.kind == pa11::TemplateInstanceArgumentKind::Pack)
-		for (size_t i = 0; i < argument.pack.size(); ++i)
-			if (template_instance_argument_contains_parameter_name(
-				    argument.pack[i],
-				    name,
-				    record_arguments))
-				return true;
-	return false;
-}
-bool template_argument_contains_parameter_name(
-	const TemplateArgument& argument,
-	const string& name,
-	const map<const void*, vector<TemplateArgument> >& record_arguments)
-{
-	if (argument.kind == TemplateArgumentKind::Type)
-		return type_contains_parameter_name(argument.type,
-		                                    name,
-		                                    record_arguments);
-	if (argument.kind == TemplateArgumentKind::Value)
-	{
-		for (size_t i = 0;
-		     i < argument.value_owner_template_arguments.size();
-		     ++i)
-			if (template_instance_argument_contains_parameter_name(
-				    argument.value_owner_template_arguments[i],
-				    name,
-				    record_arguments))
-				return true;
-		return argument.value_owner_template_name == name ||
-		       (argument.dependent && argument.value_name == name) ||
-		       type_contains_parameter_name(argument.type,
-		                                    name,
-		                                    record_arguments);
-	}
-	if (argument.kind == TemplateArgumentKind::Pack)
-		for (size_t i = 0; i < argument.pack.size(); ++i)
-			if (template_argument_contains_parameter_name(
-				    argument.pack[i],
-				    name,
-				    record_arguments))
-				return true;
-	if (argument.kind == TemplateArgumentKind::Template)
-		return argument.template_declaration == NULL &&
-		       argument.value_name == name;
-	return false;
-}
+	int depth);
 bool declaration_starts_class_key(const vector<Token>& tokens,
                                   const TemplateDeclaration* declaration)
 {
@@ -229,6 +33,28 @@ bool declaration_starts_class_key(const vector<Token>& tokens,
 static bool same_signature_template_argument(
 	const pa11::TemplateInstanceArgument& left,
 	const pa11::TemplateInstanceArgument& right);
+static bool same_signature_template_argument_list(
+	const vector<pa11::TemplateInstanceArgument>& left,
+	const vector<pa11::TemplateInstanceArgument>& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_signature_template_argument(left[i], right[i]))
+			return false;
+	return true;
+}
+static bool same_signature_template_argument_lists(
+	const vector<vector<pa11::TemplateInstanceArgument> >& left,
+	const vector<vector<pa11::TemplateInstanceArgument> >& right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (size_t i = 0; i < left.size(); ++i)
+		if (!same_signature_template_argument_list(left[i], right[i]))
+			return false;
+	return true;
+}
 static bool same_signature_type(TypePtr left, TypePtr right)
 {
 	TypePtr l = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
@@ -239,6 +65,22 @@ static bool same_signature_type(TypePtr left, TypePtr right)
 		return true;
 	if (l->kind != r->kind)
 		return false;
+	if (l->is_dependent_typename || r->is_dependent_typename)
+		return l->is_dependent_typename == r->is_dependent_typename &&
+		       l->name == r->name &&
+		       l->template_primary_name == r->template_primary_name &&
+		       l->dependent_typename_qualified ==
+			       r->dependent_typename_qualified &&
+		       l->dependent_typename_template_id ==
+			       r->dependent_typename_template_id &&
+		       l->dependent_typename_decltype ==
+			       r->dependent_typename_decltype &&
+		       same_signature_template_argument_list(
+			       l->template_arguments,
+			       r->template_arguments) &&
+		       same_signature_template_argument_lists(
+			       l->dependent_typename_template_argument_lists,
+			       r->dependent_typename_template_argument_lists);
 	if (l->kind == pa11::TypeKind::Pointer ||
 	    l->kind == pa11::TypeKind::LValueReference ||
 	    l->kind == pa11::TypeKind::RValueReference)
@@ -547,11 +389,27 @@ string template_type_spelling(TypePtr type)
 string template_type_key(TypePtr type);
 string template_instance_argument_key(
 	const pa11::TemplateInstanceArgument& argument);
-map<const void*, string>& template_type_key_cache()
-{
-	static map<const void*, string> cache;
-	return cache;
-}
+	map<const void*, pair<size_t, string> >& template_type_key_cache()
+	{
+		static map<const void*, pair<size_t, string> > cache;
+		return cache;
+	}
+	vector<size_t>& template_type_key_active_stack()
+	{
+		static vector<size_t> active;
+		return active;
+	}
+	string template_type_key_placeholder(TypePtr type, const string& tag)
+	{
+		TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+		ostringstream out;
+		out << tag << "(";
+		if (bare.get() != NULL)
+			out << static_cast<int>(bare->kind) << "|" << bare->name << "|"
+			    << bare->template_primary_name << "@" << bare.get();
+		out << ")";
+		return out.str();
+	}
 void clear_template_type_key_cache()
 {
 	template_type_key_cache().clear();
@@ -561,106 +419,157 @@ void discard_template_type_key_cache(TypePtr type)
 	if (type.get() != NULL)
 		template_type_key_cache().erase(type.get());
 }
-string template_type_cache_fingerprint(TypePtr type, int depth);
-string instance_argument_cache_fingerprint(
-	const pa11::TemplateInstanceArgument& argument,
-	int depth);
-string instance_argument_cache_fingerprint(
-	const pa11::TemplateInstanceArgument& argument)
+void remember_template_type_key(TypePtr type,
+                                size_t fingerprint,
+                                const string& key)
 {
-	return instance_argument_cache_fingerprint(argument, 0);
+	if (key.size() > 65536)
+	{
+		template_type_key_cache().erase(type.get());
+		return;
+	}
+	template_type_key_cache()[type.get()] = make_pair(fingerprint, key);
 }
-string instance_argument_cache_fingerprint(
+size_t template_key_hash_combine(size_t seed, size_t value)
+{
+	return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) +
+	               (seed >> 2));
+}
+size_t template_key_string_hash(const string& value)
+{
+	return template_key_hash_combine(value.size(), hash<string>()(value));
+}
+size_t template_type_cache_hash(TypePtr type, int depth);
+size_t instance_argument_cache_hash(
 	const pa11::TemplateInstanceArgument& argument,
 	int depth)
 {
-	ostringstream out;
-	out << static_cast<int>(argument.kind) << "|" << argument.type.get()
-	    << "|" << argument.value << "|" << argument.dependent << "|"
-	    << argument.value_expr_begin << ":" << argument.value_expr_end
-	    << "|" << argument.value_name << "|" << argument.template_name << "|"
-	    << argument.value_owner_template_name << "::"
-	    << argument.value_member_name << "|" << argument.pack.size();
+	size_t out = static_cast<size_t>(argument.kind);
+	out = template_key_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(argument.type.get()));
+	out = template_key_hash_combine(out, argument.value);
+	out = template_key_hash_combine(out, argument.dependent);
+	out = template_key_hash_combine(out, argument.value_negated);
+	out = template_key_hash_combine(out, argument.value_expr_begin);
+	out = template_key_hash_combine(out, argument.value_expr_end);
+	out = template_key_hash_combine(
+		out,
+		template_key_string_hash(argument.value_name));
+	out = template_key_hash_combine(
+		out,
+		template_key_string_hash(argument.template_name));
+	out = template_key_hash_combine(
+		out,
+		template_key_string_hash(argument.value_owner_template_name));
+	out = template_key_hash_combine(
+		out,
+		template_key_string_hash(argument.value_member_name));
+	out = template_key_hash_combine(out, argument.pack.size());
+	out = template_key_hash_combine(
+		out,
+		argument.value_owner_template_arguments.size());
 	if (depth > 8)
-		return out.str() + "|...";
-	out << "|type{" << template_type_cache_fingerprint(argument.type,
-	                                                   depth + 1)
-	    << "}";
+		return template_key_hash_combine(out, 0x51a7e);
+	out = template_key_hash_combine(
+		out,
+		template_type_cache_hash(argument.type, depth + 1));
 	for (size_t i = 0; i < argument.pack.size(); ++i)
-		out << "|p" << i << "{"
-		    << instance_argument_cache_fingerprint(argument.pack[i],
-		                                           depth + 1)
-		    << "}";
+		out = template_key_hash_combine(
+			out,
+			instance_argument_cache_hash(argument.pack[i], depth + 1));
 	for (size_t i = 0; i < argument.value_owner_template_arguments.size(); ++i)
-		out << "|o" << i << "{"
-		    << instance_argument_cache_fingerprint(
-			    argument.value_owner_template_arguments[i],
-			    depth + 1)
-		    << "}";
-	return out.str();
+		out = template_key_hash_combine(
+			out,
+			instance_argument_cache_hash(
+				argument.value_owner_template_arguments[i],
+				depth + 1));
+	return out;
 }
-string shallow_instance_argument_fingerprint(
-	const pa11::TemplateInstanceArgument& argument)
-{
-	return instance_argument_cache_fingerprint(argument);
-}
-string record_specialization_fingerprint(TypePtr type)
-{
-	ostringstream out;
-	out << type->template_primary_name << "|" << type->template_arguments.size()
-	    << "|" << type->scope;
-	for (size_t i = 0; i < type->template_arguments.size(); ++i)
-		out << "|" << shallow_instance_argument_fingerprint(
-			type->template_arguments[i]);
-	return out.str();
-}
-string template_type_cache_fingerprint(TypePtr type, int depth)
+size_t template_type_cache_hash(TypePtr type, int depth)
 {
 	if (type.get() == NULL)
-		return "";
-	ostringstream out;
-	out << static_cast<int>(type->kind) << "|" << type->fundamental << "|"
-	    << type->cv << "|" << type->ref_qualifier << "|" << type->base.get()
-	    << "|" << type->member_class.get() << "|" << type->unknown_bound
-	    << "|" << type->bound << "|" << type->name << "|"
-	    << type->template_primary_name << "|" << type->scope << "|"
-	    << type->is_template_specialization << "|"
-	    << type->is_extern_template_instantiation << "|"
-	    << type->is_dependent_typename << "|"
-	    << type->parameters.size() << "|" << type->template_arguments.size();
+		return 0;
+	size_t out = static_cast<size_t>(type->kind);
+	out = template_key_hash_combine(out, type->fundamental);
+	out = template_key_hash_combine(out, type->cv);
+	out = template_key_hash_combine(out, type->ref_qualifier);
+	out = template_key_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(type->base.get()));
+	out = template_key_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(type->member_class.get()));
+	out = template_key_hash_combine(out, type->unknown_bound);
+	out = template_key_hash_combine(out, type->bound);
+	out = template_key_hash_combine(out, template_key_string_hash(type->name));
+	out = template_key_hash_combine(
+		out,
+		template_key_string_hash(type->template_primary_name));
+	out = template_key_hash_combine(
+		out,
+		reinterpret_cast<uintptr_t>(type->scope));
+	out = template_key_hash_combine(out, type->is_template_specialization);
+	out = template_key_hash_combine(out, type->is_extern_template_instantiation);
+	out = template_key_hash_combine(out, type->is_dependent_typename);
+	out = template_key_hash_combine(out, type->parameters.size());
+	out = template_key_hash_combine(out, type->template_arguments.size());
+	out = template_key_hash_combine(
+		out,
+		type->dependent_typename_template_argument_lists.size());
 	if (depth > 8)
-		return out.str() + "|...";
-	out << "|base{" << template_type_cache_fingerprint(type->base,
-	                                                   depth + 1)
-	    << "}";
-	out << "|member{" << template_type_cache_fingerprint(type->member_class,
-	                                                     depth + 1)
-	    << "}";
+		return template_key_hash_combine(out, 0x62b31);
+	out = template_key_hash_combine(
+		out,
+		template_type_cache_hash(type->base, depth + 1));
+	out = template_key_hash_combine(
+		out,
+		template_type_cache_hash(type->member_class, depth + 1));
 	for (size_t i = 0; i < type->parameters.size(); ++i)
 	{
 		TypePtr param = type->parameters[i].get() != NULL
 			? pa11::strip_cv(type->parameters[i]) : TypePtr();
-		out << "|p" << i << ":" << type->parameters[i].get() << ":"
-		    << (param.get() != NULL ? static_cast<int>(param->kind) : -1)
-		    << ":" << (param.get() != NULL ? param->name : string())
-		    << ":"
-		    << (param.get() != NULL ? param->template_primary_name
-		                            : string())
-		    << "{"
-		    << template_type_cache_fingerprint(type->parameters[i],
-		                                       depth + 1)
-		    << "}";
+		out = template_key_hash_combine(
+			out,
+			reinterpret_cast<uintptr_t>(type->parameters[i].get()));
+		out = template_key_hash_combine(
+			out,
+			param.get() != NULL ? static_cast<size_t>(param->kind)
+			                    : static_cast<size_t>(-1));
+		out = template_key_hash_combine(
+			out,
+			param.get() != NULL ? template_key_string_hash(param->name) : 0);
+		out = template_key_hash_combine(
+			out,
+			param.get() != NULL
+			? template_key_string_hash(param->template_primary_name)
+			: 0);
+		out = template_key_hash_combine(
+			out,
+			template_type_cache_hash(type->parameters[i], depth + 1));
 	}
 	for (size_t i = 0; i < type->template_arguments.size(); ++i)
-		out << "|a" << i << ":"
-		    << instance_argument_cache_fingerprint(
-			    type->template_arguments[i],
-			    depth + 1);
-	return out.str();
-}
-string template_type_cache_fingerprint(TypePtr type)
-{
-	return template_type_cache_fingerprint(type, 0);
+		out = template_key_hash_combine(
+			out,
+			instance_argument_cache_hash(type->template_arguments[i],
+			                             depth + 1));
+	for (size_t i = 0;
+	     i < type->dependent_typename_template_argument_lists.size();
+	     ++i)
+	{
+		out = template_key_hash_combine(
+			out,
+			type->dependent_typename_template_argument_lists[i].size());
+		for (size_t j = 0;
+		     j < type->dependent_typename_template_argument_lists[i].size();
+		     ++j)
+			out = template_key_hash_combine(
+				out,
+				instance_argument_cache_hash(
+					type->dependent_typename_template_argument_lists[i][j],
+					depth + 1));
+	}
+	return out;
 }
 string template_instance_argument_pack_key(
 	const vector<pa11::TemplateInstanceArgument>& arguments)
@@ -671,6 +580,19 @@ string template_instance_argument_pack_key(
 		if (i != 0)
 			out << ",";
 		out << template_instance_argument_key(arguments[i]);
+	}
+	return out.str();
+}
+string template_instance_argument_lists_key(
+	const vector<vector<pa11::TemplateInstanceArgument> >& lists)
+{
+	ostringstream out;
+	for (size_t i = 0; i < lists.size(); ++i)
+	{
+		if (i != 0)
+			out << ";";
+		out << "[" << template_instance_argument_pack_key(lists[i])
+		    << "]";
 	}
 	return out.str();
 }
@@ -702,15 +624,57 @@ string dependent_value_member_key(const TemplateArgument& arg)
 		    arg.value_owner_template_arguments);
 	return out.str();
 }
-string template_type_key(TypePtr type)
-{
-	if (type.get() == NULL)
-		return "";
-	map<const void*, string>& cache = template_type_key_cache();
-	map<const void*, string>::const_iterator cached = cache.find(type.get());
-	if (cached != cache.end())
-		return cached->second;
+	string template_type_key(TypePtr type)
+	{
+		if (type.get() == NULL)
+			return "";
+		vector<size_t>& active = template_type_key_active_stack();
+		size_t active_key = reinterpret_cast<size_t>(type.get());
+		if (find(active.begin(), active.end(), active_key) != active.end())
+			return template_type_key_placeholder(type, "cycle");
+		if (active.size() > 32)
+			return template_type_key_placeholder(type, "depth");
+		struct ActiveTemplateTypeKey
+		{
+			vector<size_t>& active;
+			explicit ActiveTemplateTypeKey(vector<size_t>& a,
+			                               size_t key)
+				: active(a)
+			{
+				active.push_back(key);
+			}
+			~ActiveTemplateTypeKey()
+			{
+				active.pop_back();
+			}
+		} active_type_key(active, active_key);
+		map<const void*, pair<size_t, string> >& cache =
+			template_type_key_cache();
+		map<const void*, pair<size_t, string> >::const_iterator cached =
+			cache.find(type.get());
+		if (cached != cache.end() && cached->second.second.size() > 4096)
+			return cached->second.second;
+		size_t fingerprint = template_type_cache_hash(type, 0);
+	if (cached != cache.end() && cached->second.first == fingerprint)
+		return cached->second.second;
 	string result;
+	if (type->is_dependent_typename)
+	{
+		ostringstream out;
+		out << "dep(" << static_cast<int>(type->kind) << "|"
+		    << type->name << "|" << type->template_primary_name << "|"
+		    << type->dependent_typename_qualified << "|"
+		    << type->dependent_typename_template_id << "|"
+		    << type->dependent_typename_decltype << "<"
+		    << template_instance_argument_pack_key(type->template_arguments)
+		    << ">["
+		    << template_instance_argument_lists_key(
+			       type->dependent_typename_template_argument_lists)
+		    << "])";
+		result = out.str();
+		remember_template_type_key(type, fingerprint, result);
+		return result;
+	}
 	switch (type->kind)
 	{
 	case pa11::TypeKind::Cv:
@@ -782,7 +746,7 @@ string template_type_key(TypePtr type)
 		result = template_type_spelling(type);
 		break;
 	}
-	cache[type.get()] = result;
+	remember_template_type_key(type, fingerprint, result);
 	return result;
 }
 string template_argument_spelling(const TemplateArgument& argument)
@@ -822,282 +786,15 @@ string template_argument_spelling(const TemplateArgument& argument)
 	}
 	return out.str();
 }
-size_t template_argument_hash_combine(size_t seed, size_t value)
-{
-	return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) +
-	               (seed >> 2));
-}
-size_t template_argument_string_hash(const string& value)
-{
-	return template_argument_hash_combine(value.size(),
-	                                      hash<string>()(value));
-}
-size_t template_argument_instance_fingerprint(
-	const pa11::TemplateInstanceArgument& argument,
-	int depth);
-size_t template_type_cache_hash(TypePtr type, int depth)
-{
-	if (type.get() == NULL)
-		return 0;
-	size_t out = static_cast<size_t>(type->kind);
-	out = template_argument_hash_combine(out, type->fundamental);
-	out = template_argument_hash_combine(out, type->cv);
-	out = template_argument_hash_combine(out, type->ref_qualifier);
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(type->base.get()));
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(type->member_class.get()));
-	out = template_argument_hash_combine(out, type->unknown_bound);
-	out = template_argument_hash_combine(out, type->bound);
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(type->name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(type->template_primary_name));
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(type->scope));
-	out = template_argument_hash_combine(out, type->is_template_specialization);
-	out = template_argument_hash_combine(out, type->is_dependent_typename);
-	out = template_argument_hash_combine(out, type->parameters.size());
-	out = template_argument_hash_combine(out, type->template_arguments.size());
-	if (depth > 8)
-		return template_argument_hash_combine(out, 0x62b31);
-	out = template_argument_hash_combine(
-		out,
-		template_type_cache_hash(type->base, depth + 1));
-	out = template_argument_hash_combine(
-		out,
-		template_type_cache_hash(type->member_class, depth + 1));
-	for (size_t i = 0; i < type->parameters.size(); ++i)
-	{
-		TypePtr param = type->parameters[i].get() != NULL
-			? pa11::strip_cv(type->parameters[i]) : TypePtr();
-		out = template_argument_hash_combine(
-			out,
-			reinterpret_cast<uintptr_t>(type->parameters[i].get()));
-		out = template_argument_hash_combine(
-			out,
-			param.get() != NULL ? static_cast<size_t>(param->kind)
-			                    : static_cast<size_t>(-1));
-		out = template_argument_hash_combine(
-			out,
-			param.get() != NULL
-			? template_argument_string_hash(param->name) : 0);
-		out = template_argument_hash_combine(
-			out,
-			param.get() != NULL
-			? template_argument_string_hash(param->template_primary_name)
-			: 0);
-		out = template_argument_hash_combine(
-			out,
-			template_type_cache_hash(type->parameters[i], depth + 1));
-	}
-	for (size_t i = 0; i < type->template_arguments.size(); ++i)
-		out = template_argument_hash_combine(
-			out,
-			template_argument_instance_fingerprint(
-				type->template_arguments[i],
-				depth + 1));
-	return out;
-}
-size_t template_argument_instance_fingerprint(
-	const pa11::TemplateInstanceArgument& argument,
-	int depth)
-{
-	size_t out = static_cast<size_t>(argument.kind);
-	if (depth > 8)
-		return template_argument_hash_combine(out, 0x51a7e);
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(argument.type.get()));
-	out = template_argument_hash_combine(
-		out,
-		template_type_cache_hash(argument.type, depth + 1));
-	out = template_argument_hash_combine(out, argument.value);
-	out = template_argument_hash_combine(out, argument.dependent);
-	out = template_argument_hash_combine(out, argument.value_negated);
-	out = template_argument_hash_combine(out, argument.value_expr_begin);
-	out = template_argument_hash_combine(out, argument.value_expr_end);
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.template_name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_owner_template_name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_member_name));
-	out = template_argument_hash_combine(out, argument.pack.size());
-	for (size_t i = 0; i < argument.pack.size(); ++i)
-		out = template_argument_hash_combine(
-			out,
-			template_argument_instance_fingerprint(argument.pack[i],
-			                                       depth + 1));
-	out = template_argument_hash_combine(
-		out,
-		argument.value_owner_template_arguments.size());
-	for (size_t i = 0;
-	     i < argument.value_owner_template_arguments.size();
-	     ++i)
-		out = template_argument_hash_combine(
-			out,
-			template_argument_instance_fingerprint(
-				argument.value_owner_template_arguments[i],
-				depth + 1));
-	return out;
-}
-size_t template_argument_instance_fingerprint(
-	const pa11::TemplateInstanceArgument& argument)
-{
-	return template_argument_instance_fingerprint(argument, 0);
-}
-size_t template_argument_cache_fingerprint(const TemplateArgument& argument,
-                                           int depth)
-{
-	size_t out = static_cast<size_t>(argument.kind);
-	if (depth > 8)
-		return template_argument_hash_combine(out, 0x7a91);
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(argument.type.get()));
-	out = template_argument_hash_combine(
-		out,
-		template_type_cache_hash(argument.type, depth + 1));
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(argument.template_declaration));
-	out = template_argument_hash_combine(
-		out,
-		reinterpret_cast<uintptr_t>(argument.value_binding));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_owner_template_name));
-	out = template_argument_hash_combine(
-		out,
-		template_argument_string_hash(argument.value_member_name));
-	out = template_argument_hash_combine(out, argument.value);
-	out = template_argument_hash_combine(out, argument.dependent);
-	out = template_argument_hash_combine(out, argument.value_negated);
-	out = template_argument_hash_combine(out, argument.pack_expansion);
-	out = template_argument_hash_combine(out, argument.value_expr_begin);
-	out = template_argument_hash_combine(out, argument.value_expr_end);
-	out = template_argument_hash_combine(out, argument.pack.size());
-	for (size_t i = 0; i < argument.pack.size(); ++i)
-		out = template_argument_hash_combine(
-			out,
-			template_argument_cache_fingerprint(argument.pack[i],
-			                                    depth + 1));
-	out = template_argument_hash_combine(
-		out,
-		argument.value_owner_template_arguments.size());
-	for (size_t i = 0;
-	     i < argument.value_owner_template_arguments.size();
-	     ++i)
-		out = template_argument_hash_combine(
-			out,
-			template_argument_instance_fingerprint(
-				argument.value_owner_template_arguments[i],
-				depth + 1));
-	return out;
-}
-size_t template_argument_cache_fingerprint(const TemplateArgument& argument)
-{
-	return template_argument_cache_fingerprint(argument, 0);
-}
-bool same_instance_argument_identity(
-	const pa11::TemplateInstanceArgument& left,
-	const pa11::TemplateInstanceArgument& right)
-{
-	if (left.kind != right.kind ||
-	    left.type.get() != right.type.get() ||
-	    left.value != right.value ||
-	    left.dependent != right.dependent ||
-	    left.value_negated != right.value_negated ||
-	    left.value_expr_begin != right.value_expr_begin ||
-	    left.value_expr_end != right.value_expr_end ||
-	    left.value_name != right.value_name ||
-	    left.template_name != right.template_name ||
-	    left.value_owner_template_name != right.value_owner_template_name ||
-	    left.value_member_name != right.value_member_name ||
-	    left.pack.size() != right.pack.size() ||
-	    left.value_owner_template_arguments.size() !=
-		    right.value_owner_template_arguments.size())
-		return false;
-	for (size_t i = 0; i < left.pack.size(); ++i)
-		if (!same_instance_argument_identity(left.pack[i], right.pack[i]))
-			return false;
-	for (size_t i = 0; i < left.value_owner_template_arguments.size(); ++i)
-		if (!same_instance_argument_identity(
-			    left.value_owner_template_arguments[i],
-			    right.value_owner_template_arguments[i]))
-			return false;
-	return true;
-}
-bool same_template_argument_identity(const TemplateArgument& left,
-                                     const TemplateArgument& right)
-{
-	if (left.kind != right.kind ||
-	    left.type.get() != right.type.get() ||
-	    left.template_declaration != right.template_declaration ||
-	    left.value_binding != right.value_binding ||
-	    left.value_name != right.value_name ||
-	    left.value_owner_template_name != right.value_owner_template_name ||
-	    left.value_member_name != right.value_member_name ||
-	    left.value != right.value ||
-	    left.dependent != right.dependent ||
-	    left.value_negated != right.value_negated ||
-	    left.pack_expansion != right.pack_expansion ||
-	    left.value_expr_begin != right.value_expr_begin ||
-	    left.value_expr_end != right.value_expr_end ||
-	    left.pack.size() != right.pack.size() ||
-	    left.value_owner_template_arguments.size() !=
-		    right.value_owner_template_arguments.size())
-		return false;
-	for (size_t i = 0; i < left.pack.size(); ++i)
-		if (!same_template_argument_identity(left.pack[i], right.pack[i]))
-			return false;
-	for (size_t i = 0; i < left.value_owner_template_arguments.size(); ++i)
-		if (!same_instance_argument_identity(
-			    left.value_owner_template_arguments[i],
-			    right.value_owner_template_arguments[i]))
-			return false;
-	return true;
-}
 string template_argument_key_part(const TemplateArgument& argument)
 {
 	static map<const TemplateArgument*, pair<size_t, string> > cache;
-	static map<size_t, vector<pair<TemplateArgument, string> > >
-		structural_cache;
-	size_t fingerprint = template_argument_cache_fingerprint(argument);
+	size_t fingerprint =
+		dependent_cache_template_argument_identity(argument, 0);
 	map<const TemplateArgument*, pair<size_t, string> >::const_iterator cached =
 		cache.find(&argument);
 	if (cached != cache.end() && cached->second.first == fingerprint)
 		return cached->second.second;
-	map<size_t, vector<pair<TemplateArgument, string> > >::const_iterator
-		structural = structural_cache.find(fingerprint);
-	if (structural != structural_cache.end())
-	{
-		const vector<pair<TemplateArgument, string> >& entries =
-			structural->second;
-		for (size_t i = 0; i < entries.size(); ++i)
-			if (same_template_argument_identity(entries[i].first,
-			                                    argument))
-			{
-				cache[&argument] =
-					make_pair(fingerprint, entries[i].second);
-				return entries[i].second;
-			}
-	}
 	string result;
 	if (argument.kind == TemplateArgumentKind::Type)
 		result = string(argument.pack_expansion ? "TE(" : "T(") +
@@ -1163,7 +860,6 @@ string template_argument_key_part(const TemplateArgument& argument)
 		result = out.str();
 	}
 	cache[&argument] = make_pair(fingerprint, result);
-	structural_cache[fingerprint].push_back(make_pair(argument, result));
 	return result;
 }
 string template_argument_spelling(const vector<TemplateArgument>& arguments)

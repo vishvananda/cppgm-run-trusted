@@ -1,0 +1,43 @@
+#include <string>
+#include <vector>
+
+struct Block
+{
+  std::string name;
+  std::vector<std::string> instrs;
+  bool terminated;
+
+  explicit Block(const std::string& n) : name(n), terminated(false) {}
+};
+
+struct FunctionOut
+{
+  std::vector<Block> blocks;
+
+  FunctionOut() {}
+
+  FunctionOut(const FunctionOut& other)
+  {
+    *this = other;
+  }
+
+  FunctionOut& operator=(const FunctionOut& other)
+  {
+    blocks = other.blocks;
+    return *this;
+  }
+};
+
+int main()
+{
+  std::vector<FunctionOut> functions;
+  for (int i = 0; i < 20; ++i)
+  {
+    FunctionOut fn;
+    fn.blocks.push_back(Block("entry"));
+    fn.blocks[0].instrs.push_back("ret void");
+    functions.insert(functions.begin(), fn);
+  }
+
+  return functions[0].blocks[0].instrs[0].size() == 8 ? 0 : 1;
+}

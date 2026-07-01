@@ -586,7 +586,7 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 	auto complete_qualifier_record = [&](TypePtr qualifier_type) {
 		size_t saved_pos = pos_;
 		vector<Scope*> saved_scopes = scopes_;
-		complete_template_record(qualifier_type);
+		complete_template_record_for_member_lookup(qualifier_type);
 		scopes_ = saved_scopes;
 		pos_ = saved_pos;
 	};
@@ -658,10 +658,9 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 								dependent_bare.get() != NULL &&
 								dependent_bare->kind == pa11::TypeKind::Record &&
 								dependent_bare->scope != NULL;
-							if (type_is_template_dependent(type) &&
-							    !dependent_has_scope &&
-							    template_argument_expression_depth_ == 0 &&
-							    templ != NULL)
+								if (type_is_template_dependent(type) &&
+								    !dependent_has_scope &&
+								    templ != NULL)
 							{
 								Binding* primary =
 									pa11::lookup_qualified(templ->owner,
@@ -764,12 +763,103 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 					{
 						vector<TemplateArgument> arguments;
 						parse_template_argument_list(arguments);
-						if (consume(OP_COLON2))
-						{
-							TypePtr type;
-						if (have_template_subst &&
-						    template_subst.template_declaration != NULL)
-						{
+							if (consume(OP_COLON2))
+								{
+									TypePtr type;
+									bool resolved_bool_alias_qualifier = false;
+										if (alias != NULL)
+										{
+										vector<TemplateArgument> predicates;
+									for (size_t ai = 0; ai < arguments.size(); ++ai)
+									{
+										TemplateArgument substituted_argument =
+											substitute_template_argument(arguments[ai]);
+										if (substituted_argument.kind ==
+										    TemplateArgumentKind::Pack)
+											predicates.insert(
+												predicates.end(),
+												substituted_argument.pack.begin(),
+												substituted_argument.pack.end());
+										else
+											predicates.push_back(substituted_argument);
+									}
+									bool all_true = true;
+									bool all_known = true;
+									for (size_t pi = 0; pi < predicates.size(); ++pi)
+									{
+										if (predicates[pi].kind != TemplateArgumentKind::Type)
+										{
+											all_known = false;
+											break;
+										}
+										TypePtr pred = predicates[pi].type.get() != NULL
+											? pa11::strip_cv(predicates[pi].type)
+											: TypePtr();
+										if (pred.get() == NULL ||
+										    pred->kind != pa11::TypeKind::Record ||
+										    pred->scope == NULL ||
+										    type_is_template_dependent(pred))
+										{
+											all_known = false;
+											break;
+										}
+										try
+										{
+											complete_template_record(pred);
+										}
+										catch (const runtime_error&)
+										{
+											all_known = false;
+											break;
+										}
+										vector<Binding*> values =
+											lookup_qualified_set(pred->scope,
+											                     "value",
+											                     pa11::LOOKUP_VALUE);
+										Binding* value = NULL;
+										for (size_t vi = 0; vi < values.size(); ++vi)
+											if (values[vi]->has_constant)
+											{
+												value = values[vi];
+												break;
+											}
+										if (value == NULL)
+										{
+											all_known = false;
+											break;
+										}
+										if (value->constant_value == 0)
+											all_true = false;
+									}
+										if (all_known)
+										{
+											vector<Binding*> bool_types =
+												lookup_unqualified_set(
+													current_scope(),
+													all_true ? "true_type" : "false_type",
+													pa11::LOOKUP_TYPE);
+												if (!bool_types.empty())
+												{
+													type = bool_types[0]->type;
+													resolved_bool_alias_qualifier = true;
+												}
+											}
+									}
+								if (resolved_bool_alias_qualifier)
+								{
+									type = pa11::strip_cv(type);
+									if (type->kind != pa11::TypeKind::Record ||
+									    type->scope == NULL)
+										throw runtime_error(
+											"template-id qualifier is not a scope");
+									scope = type->scope;
+									text = root + "::";
+								}
+								else
+								{
+								if (type.get() == NULL && have_template_subst &&
+								    template_subst.template_declaration != NULL)
+							{
 							if (template_subst.template_declaration->kind ==
 							    TemplateDeclarationKind::Alias)
 								type = instantiate_alias_template(
@@ -814,19 +904,42 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 												root,
 												arguments);
 									else
-										type =
-											dependent_arguments && templ != NULL
-											? make_dependent_template_qualifier(
-												templ,
-												root,
-												arguments)
-											: (alias != NULL
-											   ? instantiate_alias_template(alias, arguments)
-											   : instantiate_class_template(templ, arguments));
+											type =
+												dependent_arguments && templ != NULL
+												? make_dependent_template_qualifier(
+													templ,
+													root,
+													arguments)
+												: (alias != NULL
+												   ? instantiate_alias_template(alias, arguments)
+												   : instantiate_class_template(templ, arguments));
+										}
+										TypePtr qualifier_bare =
+											type.get() != NULL
+										? pa11::strip_cv(type) : TypePtr();
+									bool concrete_record_qualifier =
+										qualifier_bare.get() != NULL &&
+										qualifier_bare->kind == pa11::TypeKind::Record &&
+										qualifier_bare->scope != NULL;
+									if (!resolved_bool_alias_qualifier &&
+									    type.get() != NULL &&
+									    !concrete_record_qualifier &&
+									    type_is_template_dependent(type))
+								{
+									try
+									{
+										TypePtr substituted =
+											substitute_template_type(type);
+										if (substituted.get() != NULL)
+											type = substituted;
+									}
+									catch (const runtime_error&)
+									{
+									}
 								}
-							TypePtr dependent_bare =
-								type.get() != NULL
-								? pa11::strip_cv(type) : TypePtr();
+								TypePtr dependent_bare =
+									type.get() != NULL
+									? pa11::strip_cv(type) : TypePtr();
 							bool dependent_has_scope =
 								dependent_bare.get() != NULL &&
 								dependent_bare->kind == pa11::TypeKind::Record &&
@@ -851,9 +964,10 @@ Scope* Parser::parse_nested_name_specifier(string* spelling)
 					    type->scope == NULL)
 						throw runtime_error(
 							"template-id qualifier is not a scope");
-					scope = type->scope;
-					text = root + "::";
-				}
+						scope = type->scope;
+						text = root + "::";
+								}
+					}
 				else
 					pos_ = save;
 			}

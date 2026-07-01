@@ -1,0 +1,15 @@
+# hosted vector push materializes conditional C-string as string
+#include <string>
+#include <vector>
+
+int main()
+{
+  std::vector<std::string> values;
+  bool use_first = false;
+
+  values.push_back(use_first ? "binding=internal" : "binding=strong");
+
+  if (values.size() != 1)
+    return 1;
+  return values[0] == "binding=strong" ? 0 : 2;
+}

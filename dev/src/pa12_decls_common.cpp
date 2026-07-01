@@ -15,8 +15,6 @@ bool aggregate_blocking_constructor(Binding* binding)
 	    binding->is_generated_aggregate_constructor ||
 	    binding->is_generated_copy_move_constructor)
 		return false;
-	if (binding->is_defaulted && binding->type->parameters.size() == 1)
-		return false;
 	return true;
 }
 
@@ -63,4 +61,3 @@ bool string_literal_initializes_array(TypePtr type,
 
 }  // namespace internal
 }  // namespace pa12
-

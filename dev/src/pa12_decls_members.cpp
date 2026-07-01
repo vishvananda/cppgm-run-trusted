@@ -134,16 +134,17 @@ void Parser::parse_constructor_body_from_parameters(
 			                                   explicit_member_initializers,
 			                                   explicit_base_actions,
 			                                   direct_bases);
-		if (delegating) { }
-		else
+		if (!delegating)
+		{
 			append_constructor_base_init_actions(class_type,
 			                                     direct_bases,
 			                                     explicit_base_actions,
 			                                     body);
-		append_constructor_member_init_actions(class_type,
-		                                       this_binding,
-		                                       explicit_member_initializers,
-		                                       body);
+			append_constructor_member_init_actions(class_type,
+			                                       this_binding,
+			                                       explicit_member_initializers,
+			                                       body);
+		}
 		append_constructor_compound_body(body, function_try_block);
 	} catch (...) {
 		function_parameter_pack_substitutions_.pop_back();
@@ -393,7 +394,20 @@ bool Parser::parse_conversion_function_member(bool explicit_conv,
 			return true; }
 		throw runtime_error("unsupported conversion function definition"); }
 	if (consume(OP_SEMICOLON))
+	{
+		Node fn("function-declaration " + qualified_decl_name(function) +
+		        " " + pa11::describe_type(fn_type));
+		fn.binding = function;
+		fn.type = fn_type;
+		if (!force_new_function_binding_ &&
+		    active_class_instantiations_.empty())
+			add_child(root_, fn);
+		else
+			generated_nodes_.push_back(fn);
+		if (force_new_function_binding_)
+			extra_lowir_nodes_.push_back(fn);
 		return true;
+	}
 	if (!at(OP_LBRACE))
 		throw runtime_error("conversion function missing body");
 	Node fn("function-definition " + qualified_decl_name(function) + " " +

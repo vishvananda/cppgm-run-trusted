@@ -1,4 +1,5 @@
 #include "pa12_expr_parser_support.h"
+#include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_abi_internal.h"
 #include "pa12_templates_function_support.h"
 #include <algorithm>
@@ -66,9 +67,9 @@ record->scope != NULL && !scope_is_lambda_closure(record->scope)) return it->sec
 } return NULL; } void collect_lambda_local_bindings(const Node& node, set<Binding*>& out)
 { if ((node_is_parameter_decl(node) || node_is_variable_decl(node)) && node.binding != NULL) out.insert(node.binding);
 for (size_t i = 0; i < node.children.size(); ++i) collect_lambda_local_bindings(node.children[i], out); } void collect_lambda_capture_uses(const Node& node,
-set<Binding*>& excluded, set<Binding*>& out) { if (!node_is_parameter_decl(node) && node_starts_with(node, "member-expression") && node.binding != NULL && node.binding->owner != NULL && scope_is_lambda_closure(node.binding->owner)) { out.insert(node.binding); return; } if (!node_is_parameter_decl(node) &&
-lambda_capture_binding_candidate(node.binding) && excluded.count(node.binding) == 0) out.insert(node.binding); for (size_t i = 0; i < node.children.size(); ++i)
-collect_lambda_capture_uses(node.children[i], excluded, out); } Node lambda_capture_id_node(Binding* binding) {
+set<Binding*>& excluded, set<Binding*>& seen, vector<Binding*>& out) { if (!node_is_parameter_decl(node) && node_starts_with(node, "member-expression") && node.binding != NULL && node.binding->owner != NULL && scope_is_lambda_closure(node.binding->owner)) { if (seen.insert(node.binding).second) out.push_back(node.binding); return; } if (!node_is_parameter_decl(node) &&
+lambda_capture_binding_candidate(node.binding) && excluded.count(node.binding) == 0 && seen.insert(node.binding).second) out.push_back(node.binding); for (size_t i = 0; i < node.children.size(); ++i)
+collect_lambda_capture_uses(node.children[i], excluded, seen, out); } Node lambda_capture_id_node(Binding* binding) {
 Node node("id-expression lvalue " + pa11::describe_type(binding->type) + " " + binding->name); node.binding = binding; node.type = binding->type;
 node.category = ValueCategory::LValue; return node; } Node lambda_capture_member_node(Binding* field,
 Binding* this_binding, TypePtr this_type) { Node this_node("id-expression prvalue " + pa11::describe_type(this_type) +
@@ -206,7 +207,7 @@ vector<TemplateParameterInfo> lambda_parameters;
 bool lambda_template_scope = false; if (at(OP_LT)) { lambda_parameters = parse_template_parameter_clause();
 map<string, TypePtr> parameter_types; map<string, TemplateArgument> parameter_values; set<string> pack_names;
 for (size_t i = 0; i < lambda_parameters.size(); ++i) { const TemplateParameterInfo& parameter = lambda_parameters[i]; if (parameter.name.empty()) continue;
-if (parameter.kind == TemplateParameterKind::Type) { parameter_types[parameter.name] = pa11::make_template_parameter_type(parameter.name); if (parameter.is_pack) pack_names.insert(parameter.name); }
+if (parameter.kind == TemplateParameterKind::Type) { parameter_types[parameter.name] = template_parameter_placeholder_type(parameter); if (parameter.is_pack) pack_names.insert(parameter.name); }
 else { TemplateArgument arg = TemplateArgument::dependent_value_arg(parameter.type.get() != NULL ? parameter.type : pa11::make_fundamental(FT_INT)); arg.value_name = parameter.name;
 if (parameter.is_pack) { vector<TemplateArgument> pack; pack.push_back(arg); parameter_values[parameter.name] = TemplateArgument::pack_arg(pack); } else parameter_values[parameter.name] = arg; } }
 template_type_substitutions_.push_back(parameter_types); template_value_substitutions_.push_back(parameter_values); template_type_parameter_packs_.push_back(pack_names); lambda_template_scope = true; }
@@ -225,7 +226,7 @@ false); call_op->language_linkage = current_language_linkage(); call_op->is_inli
 call_op->ref_qualifier = suffix.ref_qualifier; vector<string> operator_names(1, "this"); vector<Expr> operator_defaults(1);
 for (size_t i = 0; i < suffix.parameters.size(); ++i) { operator_names.push_back(suffix.parameters[i].name); operator_defaults.push_back(suffix.parameters[i].default_value); }
 function_parameter_names_[call_op] = operator_names; if (lambda_template_scope) lambda_template_parameters_[call_op] = lambda_parameters;
-default_arguments_[call_op] = operator_defaults; string context_abi = context_function != NULL ? (context_function->function_specialization_symbol.empty() ? abi_binding_symbol(context_function, map<string, size_t>())
+default_arguments_[call_op] = default_arguments_for_binding(call_op, operator_defaults); string context_abi = context_function != NULL ? (context_function->function_specialization_symbol.empty() ? abi_binding_symbol(context_function, map<string, size_t>())
 : context_function->function_specialization_symbol) : string("_Z0v"); string encoded_context = context_abi.compare(0, 2, "_Z") == 0
 ? context_abi.substr(2) : context_abi; bool template_or_member_context = context_function != NULL &&
 ((context_function->owner != NULL && context_function->owner->kind == ScopeKind::Class) || !context_function->function_specialization_symbol.empty()); string closure_abi;
@@ -240,15 +241,15 @@ TypePtr object = capture.is_this ? capture.binding->type : expression_object_typ
 ? (capture.is_this ? object : pa11::make_lvalue_reference(object)) : lvalue_to_rvalue_type(capture.binding->type);
 capture.field = add_value(closure_scope, BindingKind::Variable, capture.name,
 capture.field_type); capture.field->is_reference_member = capture.by_reference && !capture.is_this; capture_fields[capture.binding] = capture.field;
-capture.initializer = lambda_capture_id_node(capture.binding); capture_initializers.push_back(capture.initializer); } int local_type_count_before = local_type_counter_;
+capture.initializer = lambda_capture_id_node(capture.binding); capture_initializers.push_back(capture.initializer); } int local_type_count_before = local_type_counter_; int local_record_declaration_count_before = local_record_declaration_counter_;
 if (suffix.trailing_return.get() == NULL) { auto_return_functions_.insert(call_op); auto_return_patterns_[call_op] = result;
 } Node operator_wrapper; Node operator_node("function-definition " + qualified_decl_name(call_op) + " " + pa11::describe_type(operator_type));
 operator_node.binding = call_op; operator_node.type = operator_type; add_child(operator_wrapper, operator_node); parse_function_body_from_parameters(call_op,
 suffix.parameters, operator_wrapper); if (suffix.trailing_return.get() == NULL) {
 result = call_op->type->base; auto_return_functions_.erase(call_op); auto_return_patterns_.erase(call_op); auto_return_deduced_.erase(call_op);
 } Node& parsed_operator_for_captures = operator_wrapper.children.back(); if (default_capture) {
-set<Binding*> excluded; collect_lambda_local_bindings(parsed_operator_for_captures, excluded); set<Binding*> used;
-collect_lambda_capture_uses(parsed_operator_for_captures, excluded, used); for (set<Binding*>::const_iterator it = used.begin();
+set<Binding*> excluded; collect_lambda_local_bindings(parsed_operator_for_captures, excluded); set<Binding*> seen; vector<Binding*> used;
+collect_lambda_capture_uses(parsed_operator_for_captures, excluded, seen, used); for (vector<Binding*>::const_iterator it = used.begin();
 it != used.end(); ++it) { if (capture_fields.find(*it) != capture_fields.end())
 continue; LambdaCapture capture; capture.binding = *it; capture.is_this = (*it)->name == "this";
 capture.name = capture.is_this ? "__this" : (*it)->name; capture.by_reference = capture.is_this ? false : default_by_reference; TypePtr object = capture.is_this
@@ -277,9 +278,9 @@ Binding* old_binding = parsed_operator.children[operator_param_index].binding; i
 { Node body = parsed_operator.children.back(); rewrite_bindings(body, replacements); add_child(fn, body);
 } vector<Expr> helper_defaults; for (size_t i = 0; i < suffix.parameters.size(); ++i) helper_defaults.push_back(suffix.parameters[i].default_value);
 function_parameter_names_[function] = helper_names; if (lambda_template_scope) lambda_template_parameters_[function] = lambda_parameters;
-default_arguments_[function] = helper_defaults; remember_function_body(function, fn); if (!lambda_template_scope) extra_lowir_nodes_.push_back(fn);
+default_arguments_[function] = default_arguments_for_binding(function, helper_defaults); remember_function_body(function, fn); if (!lambda_template_scope) extra_lowir_nodes_.push_back(fn);
 lambda_closure_types_[function] = closure; lambda_call_operators_[function] = call_op; lambda_ordinals_[function] = ordinal; if (!capture_initializers.empty())
-lambda_capture_initializers_[function] = capture_initializers; if (local_type_counter_ != local_type_count_before || !captures.empty() || default_capture) lambda_requires_closure_object_.insert(function);
+lambda_capture_initializers_[function] = capture_initializers; if (local_type_counter_ != local_type_count_before || local_record_declaration_counter_ != local_record_declaration_count_before || !captures.empty() || default_capture) lambda_requires_closure_object_.insert(function);
 Expr out; out.valid = true; out.binding = function; out.type = function->type;
 out.category = ValueCategory::LValue; out.node = Node("id-expression lvalue " + pa11::describe_type(function->type) + " " + name); out.node.binding = function;
 annotate_expr_node(out); if (lambda_template_scope) { template_type_substitutions_ = lambda_save_subst; template_value_substitutions_ = lambda_save_value_subst; template_type_parameter_packs_ = lambda_save_pack_subst; } if (!captures.empty() || default_capture) return lambda_closure_expr(out); return out;
@@ -344,8 +345,12 @@ add_child(out.node, placement.node); if (array_new) add_child(out.node, bound.no
 add_child(out.node, args[i].node); annotate_expr_node(out); return out; }
 Expr Parser::parse_delete_expression() { consume(OP_COLON2); expect(KW_DELETE);
 bool array_delete = false; if (consume(OP_LSQUARE)) { expect(OP_RSQUARE);
-array_delete = true; } Expr operand = parse_unary_expression(); TypePtr ptr_type = pa11::strip_cv(expression_object_type(operand.type));
-if (ptr_type->kind != pa11::TypeKind::Pointer) throw runtime_error("delete operand is not pointer"); QualifiedName opname; opname.name = array_delete ? "operatordelete[]" : "operatordelete";
+array_delete = true; } Expr operand = parse_unary_expression(); TypePtr object_type = expression_object_type(operand.type);
+TypePtr ptr_type = pa11::strip_cv(object_type);
+if (ptr_type->kind != pa11::TypeKind::Pointer &&
+    !type_is_template_dependent(object_type)) {
+	throw runtime_error("delete operand is not pointer");
+} QualifiedName opname; opname.name = array_delete ? "operatordelete[]" : "operatordelete";
 opname.spelling = array_delete ? "::operatordelete[]" : "::operatordelete"; opname.qualified = true; opname.qualifier = global_scope(); Expr op = make_builtin_id_expr(opname);
 if (!op.valid || op.binding == NULL) throw runtime_error("operator delete not found"); Expr out; out.valid = true;
 out.binding = op.binding; out.type = pa11::make_fundamental(FT_VOID); out.category = ValueCategory::PRValue; out.node = Node(string("delete-expression prvalue void") +
@@ -367,10 +372,11 @@ args.push_back(size); return make_call_expr(callee, args); } if (!source.empty()
 TypePtr type = pa11::make_array(pa11::make_cv(pa11::make_fundamental(info.type), pa11::CV_CONST), false, ordinary_string_elements(source,
 info.elements)); out.type = type; out.category = ValueCategory::LValue; out.constant_expression = true;
 out.node = Node("literal lvalue " + pa11::describe_type(type) + " " + source); out.node.token_text = source; annotate_expr_node(out); return out;
-} if (is_float_literal_text(source)) { out.type = floating_literal_type(source);
-out.constant_expression = true; } else if (!source.empty() && source[source.size() - 1] == '\'') {
+} if (!source.empty() && source[source.size() - 1] == '\'') {
 CharacterLiteralInfo info; if (!AnalyzeCharacterLiteral(source, false, info)) throw runtime_error("invalid character literal"); out.type = pa11::make_fundamental(info.type);
 out.constant_expression = true; out.has_constant_value = true; out.constant_value = info.code_point; out.null_pointer_constant = false;
+} else if (is_float_literal_text(source)) { out.type = floating_literal_type(source);
+out.constant_expression = true;
 } else { IntegerLiteralInfo info;
 if (!AnalyzeIntegerLiteral(source, info)) throw runtime_error("invalid integer literal"); if (info.user_defined) {
 QualifiedName name; name.name = "operator\"\"" + info.ud_suffix; name.spelling = name.name; name.has_template_arguments = true;
@@ -407,7 +413,7 @@ return make_dependent_sizeof_pack_expr(name); throw runtime_error("parameter pac
 } expect(OP_LPAREN); size_t save = pos_; uint64_t value = 0;
 bool parsed_type_operand = false; try { TypePtr type = parse_type_id();
 expect(OP_RPAREN); parsed_type_operand = true; if (type_is_template_dependent(type)) return make_dependent_sizeof_expr(keyword, type);
-try { TypePtr bare = pa11::strip_cv(type); if (!type_is_template_dependent(type) &&
+try { TypePtr bare = pa11::strip_cv(type); while (bare.get() != NULL && bare->kind == pa11::TypeKind::Array) bare = pa11::strip_cv(bare->base); if (!type_is_template_dependent(type) &&
 bare->kind == pa11::TypeKind::Record) complete_template_record(bare); value = is_sizeof ? pa11::type_size(type) : pa11::type_align(type); }
 catch (const runtime_error& err) { if (!type_is_template_dependent(type) || (string(err.what()) != "incomplete object type" &&
 string(err.what()) != "incomplete class type")) throw; value = 8; }
@@ -417,7 +423,7 @@ try { expr = parse_expression(); }
 catch (...) { --unevaluated_expression_depth_; throw;
 } --unevaluated_expression_depth_; expect(OP_RPAREN); TypePtr object_type = expression_object_type(expr.type);
 if (type_is_template_dependent(object_type)) return make_dependent_sizeof_expr(keyword, object_type); try {
-TypePtr bare = pa11::strip_cv(object_type); if (!type_is_template_dependent(object_type) && bare->kind == pa11::TypeKind::Record) complete_template_record(bare);
+TypePtr bare = pa11::strip_cv(object_type); while (bare.get() != NULL && bare->kind == pa11::TypeKind::Array) bare = pa11::strip_cv(bare->base); if (!type_is_template_dependent(object_type) && bare->kind == pa11::TypeKind::Record) complete_template_record(bare);
 value = is_sizeof ? pa11::type_size(object_type) : pa11::type_align(object_type); } catch (const runtime_error& err)
 { if (!type_is_template_dependent(object_type) || (string(err.what()) != "incomplete object type" && string(err.what()) != "incomplete class type"))
 throw; value = 8; } }

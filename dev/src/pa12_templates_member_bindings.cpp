@@ -1,4 +1,4 @@
-#include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 
 using namespace std;
 
@@ -44,7 +44,8 @@ void copy_member_template_placeholder_state(
 	map<Binding*, vector<Expr> >::iterator defaults =
 		default_arguments.find(source);
 	if (defaults != default_arguments.end())
-		default_arguments[placeholder] = defaults->second;
+		default_arguments[placeholder] =
+			default_arguments_for_binding(placeholder, defaults->second);
 }
 
 void assign_member_template_alias_state(Binding* alias, Binding* source)

@@ -10,6 +10,7 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
 namespace {
 string quote_string_literal(const string& value)
 {
@@ -310,9 +311,56 @@ Declarator::Declarator() : has_name(false), asm_label()
 {
 }
 
+Declarator::Declarator(Declarator&& other)
+	: prefix(other.prefix),
+	  suffixes(other.suffixes),
+	  inner(other.inner.release()),
+	  has_name(other.has_name),
+	  name(other.name),
+	  asm_label(other.asm_label)
+{
+	other.has_name = false;
+	other.asm_label.clear();
+}
+
+Declarator& Declarator::operator=(Declarator&& other)
+{
+	if (this == &other)
+		return *this;
+	prefix = other.prefix;
+	suffixes = other.suffixes;
+	inner.reset(other.inner.release());
+	has_name = other.has_name;
+	name = other.name;
+	asm_label = other.asm_label;
+	other.has_name = false;
+	other.asm_label.clear();
+	return *this;
+}
+
 PendingFunctionBody::PendingFunctionBody()
 	: function(NULL), body_pos(0), constructor_body(false), prebuilt_node(false)
 {
+}
+
+PendingFunctionBody& PendingFunctionBody::operator=(
+	const PendingFunctionBody& other)
+{
+	if (this == &other)
+		return *this;
+	function = other.function;
+	node = other.node;
+	parameters = other.parameters;
+	body_pos = other.body_pos;
+	constructor_body = other.constructor_body;
+	prebuilt_node = other.prebuilt_node;
+	class_type = other.class_type;
+	scopes = other.scopes;
+	friend_class_scopes = other.friend_class_scopes;
+	type_substitutions = other.type_substitutions;
+	value_substitutions = other.value_substitutions;
+	pack_substitutions = other.pack_substitutions;
+	return *this;
 }
 
 TemplateParameterInfo::TemplateParameterInfo()
@@ -322,6 +370,19 @@ TemplateParameterInfo::TemplateParameterInfo()
 	  default_begin(0),
 	  default_end(0)
 {
+}
+
+TypePtr template_parameter_placeholder_type(
+	const TemplateParameterInfo& parameter)
+{
+	if (parameter.name.empty())
+		return pa11::make_template_parameter_type(parameter.name);
+	TemplateParameterInfo& mutable_parameter =
+		const_cast<TemplateParameterInfo&>(parameter);
+	if (mutable_parameter.placeholder_type.get() == NULL)
+		mutable_parameter.placeholder_type =
+			pa11::make_template_parameter_type(parameter.name);
+	return mutable_parameter.placeholder_type;
 }
 
 TemplateDeclaration::TemplateDeclaration()
@@ -340,6 +401,7 @@ TemplateDeclaration::TemplateDeclaration()
 		  friend_class_scope(NULL),
 		placeholder(NULL),
 		inherited_constructor_base(NULL),
+		inherited_constructor_base_template(NULL),
 		inherited_constructor_base_type()
 {
 }
@@ -486,12 +548,14 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  replay_function_type_override_(),
 	  replay_function_type_override_owner_(NULL),
 	  replay_function_type_override_name_(),
-	  replay_function_template_declaration_(NULL),
-	  replay_function_template_arguments_(),
-	  explicit_conversion_context_(0),
+		  replay_function_template_declaration_(NULL),
+		  replay_function_template_arguments_(),
+		  explicit_conversion_context_(0),
+		  user_defined_conversion_depth_(0),
 	  root_("translation-unit"),
 	  hosted_compatibility_(options.hosted_compatibility),
 	  local_type_counter_(0),
+	  local_record_declaration_counter_(0),
 	  range_for_counter_(0),
 	  force_new_function_binding_(false),
 	  defer_function_template_bodies_(false),
@@ -500,10 +564,12 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  parsing_base_specifier_(false),
 	  validating_template_definition_(false),
 	  override_function_parameter_names_(false),
-	  replaying_dependent_decltype_(false),
-	  parsing_default_template_argument_(false),
+		  replaying_dependent_decltype_(false),
+		  parsing_default_template_argument_(false),
+		  parsing_class_specialization_pattern_(false),
 	  single_linkage_specification_declaration_(false),
-		  defer_class_template_completion_depth_(0),
+	  defer_class_template_completion_depth_(0),
+	  shallow_template_record_completion_depth_(0),
 	  function_template_candidate_instantiation_depth_(0),
 	  direct_template_call_depth_(0),
 	  template_argument_expression_depth_(0),
@@ -511,7 +577,10 @@ Parser::Parser(const string& srcfile, const Options& options)
 	  unevaluated_expression_depth_(0),
 	  suppress_qualifier_template_member_instantiation_depth_(0),
 	  short_circuit_static_member_demand_depth_(0),
-	  member_function_template_generation_(0)
+	  class_friend_function_generation_(0),
+	  member_function_template_generation_(0),
+	  function_bodies_generation_(0),
+	  function_body_name_index_generation_((size_t)-1)
 		{
 		pa10::Options pa10_options;
 		pa10_options.preprocess = options.preprocess;
@@ -732,73 +801,80 @@ bool Parser::consume_explicit_specifier()
 
 void Parser::parse_translation_unit()
 {
-	while (!at_eof())
-		parse_declaration_into(root_);
-	expect_eof();
-	for (size_t i = 0; i < template_declarations_.size(); ++i)
+	try
 	{
-		TemplateDeclaration* declaration = template_declarations_[i].get();
-		if (declaration->kind != TemplateDeclarationKind::Class)
-			continue;
-		vector<TypePtr> specializations;
-		for (map<string, TypePtr>::const_iterator it =
-			     declaration->class_specializations.begin();
-		     it != declaration->class_specializations.end();
-		     ++it)
-			specializations.push_back(it->second);
-		for (size_t j = 0; j < specializations.size(); ++j)
+		while (!at_eof())
+			parse_declaration_into(root_);
+		expect_eof();
+		for (size_t i = 0; i < template_declarations_.size(); ++i)
 		{
-				TypePtr type = pa11::strip_cv(specializations[j]);
-				if (candidate_only_class_template_specializations_.count(
-					    type.get()) != 0)
-					continue;
-				if (demanded_class_template_specializations_.count(
-					    type.get()) == 0)
-					continue;
-				map<const void*, vector<TemplateArgument> >::const_iterator args =
-					record_template_arguments_.find(type.get());
-			if (args == record_template_arguments_.end())
+			TemplateDeclaration* declaration = template_declarations_[i].get();
+			if (declaration->kind != TemplateDeclarationKind::Class)
 				continue;
-			bool dependent = false;
-			for (size_t k = 0; k < args->second.size(); ++k)
+			vector<TypePtr> specializations;
+			for (map<string, TypePtr>::const_iterator it =
+				     declaration->class_specializations.begin();
+			     it != declaration->class_specializations.end();
+			     ++it)
+				specializations.push_back(it->second);
+			for (size_t j = 0; j < specializations.size(); ++j)
 			{
-				vector<TemplateArgument> pending;
-				pending.push_back(args->second[k]);
-				while (!pending.empty())
+					TypePtr type = pa11::strip_cv(specializations[j]);
+					if (candidate_only_class_template_specializations_.count(
+						    type.get()) != 0)
+						continue;
+					if (demanded_class_template_specializations_.count(
+						    type.get()) == 0)
+						continue;
+					map<const void*, vector<TemplateArgument> >::const_iterator args =
+						record_template_arguments_.find(type.get());
+				if (args == record_template_arguments_.end())
+					continue;
+				bool dependent = false;
+				for (size_t k = 0; k < args->second.size(); ++k)
 				{
-					TemplateArgument arg = pending.back();
-					pending.pop_back();
-					if (arg.kind == TemplateArgumentKind::Type)
+					vector<TemplateArgument> pending;
+					pending.push_back(args->second[k]);
+					while (!pending.empty())
 					{
-						if (type_is_template_dependent(arg.type))
-							dependent = true;
-					}
-					else if (arg.kind == TemplateArgumentKind::Value)
-					{
-						if (arg.dependent ||
-						    type_is_template_dependent(arg.type))
-							dependent = true;
-					}
-					else if (arg.kind == TemplateArgumentKind::Template)
-					{
-						if (arg.template_declaration == NULL)
-							dependent = true;
-					}
-					else
-					{
-						for (size_t p = 0; p < arg.pack.size(); ++p)
-							pending.push_back(arg.pack[p]);
+						TemplateArgument arg = pending.back();
+						pending.pop_back();
+						if (arg.kind == TemplateArgumentKind::Type)
+						{
+							if (type_is_template_dependent(arg.type))
+								dependent = true;
+						}
+						else if (arg.kind == TemplateArgumentKind::Value)
+						{
+							if (arg.dependent ||
+							    type_is_template_dependent(arg.type))
+								dependent = true;
+						}
+						else if (arg.kind == TemplateArgumentKind::Template)
+						{
+							if (arg.template_declaration == NULL)
+								dependent = true;
+						}
+						else
+						{
+							for (size_t p = 0; p < arg.pack.size(); ++p)
+								pending.push_back(arg.pack[p]);
+						}
 					}
 				}
+				if (dependent)
+					continue;
+				complete_template_record(type);
+				instantiate_member_function_templates(type);
+				instantiate_member_variable_templates(type);
 			}
-			if (dependent)
-				continue;
-			complete_template_record(type);
-			instantiate_member_function_templates(type);
-			instantiate_member_variable_templates(type);
 		}
+		complete_static_member_initializer_replays();
 	}
-	complete_static_member_initializer_replays();
+	catch (const exception& err)
+	{
+		throw;
+	}
 }
 
 void Parser::skip_balanced(ETokenType open, ETokenType close)

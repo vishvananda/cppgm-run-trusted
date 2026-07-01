@@ -3,6 +3,8 @@
 #include "pa12_templates_function_support.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <functional>
 #include <stdexcept>
 
 using namespace std;
@@ -176,6 +178,31 @@ Binding* find_matching_function_template_placeholder(
 	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
 	if (it == scope->members.end())
 		return NULL;
+	size_t cache_key = reinterpret_cast<uintptr_t>(&placeholders);
+	auto mix = [&cache_key](size_t value) {
+		cache_key ^= value + 0x9e3779b97f4a7c15ULL +
+		             (cache_key << 6) + (cache_key >> 2);
+	};
+	mix(reinterpret_cast<uintptr_t>(scope));
+	mix(hash<string>()(name));
+	mix(reinterpret_cast<uintptr_t>(type.get()));
+	mix(reinterpret_cast<uintptr_t>(&parameters));
+	mix(parameters.size());
+	mix(placeholders.size());
+	mix(it->second.size());
+	if (!it->second.empty())
+	{
+		mix(reinterpret_cast<uintptr_t>(it->second.front()));
+		mix(reinterpret_cast<uintptr_t>(it->second.back()));
+	}
+	static map<size_t, Binding*> success_cache;
+	static set<size_t> miss_cache;
+	map<size_t, Binding*>::const_iterator cached =
+		success_cache.find(cache_key);
+	if (cached != success_cache.end())
+		return cached->second;
+	if (miss_cache.find(cache_key) != miss_cache.end())
+		return NULL;
 	for (size_t i = 0; i < it->second.size(); ++i)
 	{
 		Binding* binding = it->second[i];
@@ -187,8 +214,12 @@ Binding* find_matching_function_template_placeholder(
 		if (templ != placeholders.end() &&
 		    template_parameter_lists_match(templ->second->parameters,
 		                                   parameters))
+		{
+			success_cache[cache_key] = binding;
 			return binding;
+		}
 	}
+	miss_cache.insert(cache_key);
 	return NULL;
 }
 
@@ -204,7 +235,7 @@ void collect_template_parameter_placeholders(
 			continue;
 		if (parameter.kind == TemplateParameterKind::Type)
 			parameter_types[parameter.name] =
-				pa11::make_template_parameter_type(parameter.name);
+				template_parameter_placeholder_type(parameter);
 		else if (parameter.kind == TemplateParameterKind::NonType)
 		{
 			TemplateArgument arg = TemplateArgument::dependent_value_arg(

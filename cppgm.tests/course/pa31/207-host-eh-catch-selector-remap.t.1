@@ -1,0 +1,37 @@
+int stage;
+
+void throw_int()
+{
+  throw 1;
+}
+
+void throw_long()
+{
+  throw 2L;
+}
+
+void run()
+{
+  try {
+    throw_int();
+  } catch(int) {
+    stage += 1;
+  }
+
+  try {
+    throw_long();
+  } catch(...) {
+    stage += 2;
+    throw;
+  }
+}
+
+int main()
+{
+  try {
+    run();
+  } catch(long) {
+    return stage == 3 ? 0 : stage;
+  }
+  return 10;
+}

@@ -460,9 +460,11 @@ string typeinfo_name_spelling(TypePtr record)
 		return record_key_function_candidate(record) != NULL &&
 		       !record_key_function_defined_here(program, record);
 	}
-	bool hosted_extern_template_stream_record(TypePtr record)
+	bool hosted_extern_template_stream_record(const ProgramLowerer& program,
+	                                          TypePtr record)
 	{
-		return record_uses_hosted_external_stream_vtable(record);
+		return program.host_object_lowering &&
+		       record_uses_hosted_external_stream_vtable(record);
 	}
 	void declare_external_record_rtti(ProgramLowerer& program, TypePtr record)
 	{
@@ -571,7 +573,7 @@ void emit_incomplete_record_typeinfo(ProgramLowerer& program, TypePtr record)
 		TypePtr bare = pa11::strip_cv(record);
 		if (bare->kind != TypeKind::Record)
 			return;
-		if (hosted_extern_template_stream_record(bare) ||
+		if (hosted_extern_template_stream_record(*this, bare) ||
 		    record_imports_key_function_vtable(*this, bare))
 		{
 			declare_external_record_rtti(*this, bare);
@@ -1422,7 +1424,7 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 		}
 	}
 		emitted_vtables.insert(bare.get());
-		if (hosted_extern_template_stream_record(bare) ||
+		if (hosted_extern_template_stream_record(*this, bare) ||
 		    record_imports_key_function_vtable(*this, bare))
 		{
 			declare_external_record_vtable(*this, bare);
@@ -1495,5 +1497,4 @@ void ProgramLowerer::demand_vtable(TypePtr record, bool include_bases)
 	}
 	emit_vtt(*this, bare);
 }
-}  // namespace internal
-}  // namespace pa14
+} }  // namespace pa14::internal

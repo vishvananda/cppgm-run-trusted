@@ -1,0 +1,39 @@
+#include <vector>
+
+static int check_copy(const std::vector<bool>& source)
+{
+  std::vector<bool> copy;
+  copy = source;
+
+  if (copy.size() != source.size())
+    return 1;
+  for (std::vector<bool>::size_type i = 0; i < copy.size(); ++i)
+    if (copy[i] != source[i])
+      return 2;
+  return 0;
+}
+
+int main()
+{
+  std::vector<bool> bits;
+  bits.push_back(true);
+  bits.push_back(false);
+  bits.push_back(true);
+  bits.push_back(true);
+  bits.push_back(false);
+
+  int first = check_copy(bits);
+  if (first != 0)
+    return first;
+
+  std::vector<bool> other;
+  other.push_back(false);
+  other.push_back(false);
+  other = bits;
+
+  if (other.size() != 5)
+    return 3;
+  if (!other[0] || other[1] || !other[2] || !other[3] || other[4])
+    return 4;
+  return 0;
+}

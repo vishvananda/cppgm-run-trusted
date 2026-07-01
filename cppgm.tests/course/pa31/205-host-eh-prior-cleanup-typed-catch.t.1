@@ -1,0 +1,39 @@
+int destroyed;
+
+struct V
+{
+  ~V()
+  {
+    ++destroyed;
+  }
+};
+
+void touch(V *, int value)
+{
+  if(value == 0) {
+    throw 3;
+  }
+}
+
+bool f()
+{
+  V v;
+  touch(&v, 1);
+  try {
+    throw 7;
+  } catch(int) {
+    return false;
+  }
+  return true;
+}
+
+int main()
+{
+  if(f()) {
+    return 1;
+  }
+  if(destroyed != 1) {
+    return 2;
+  }
+  return 0;
+}

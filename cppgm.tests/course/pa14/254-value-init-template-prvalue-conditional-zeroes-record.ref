@@ -1,0 +1,69 @@
+declare function @cond() -> u8 [binding=strong, object=_Z4condv]
+declare function @make() -> obj<16x8> [binding=strong, object=_Z4makev]
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $s : obj<16x8>
+  slot $cond__1 : i32
+  slot $land__2 : i64
+
+  block ^entry:
+    %t1 = addr $s
+    %t2 = call u8 @cond()
+    branch %t2, ^condobj_then_1, ^condobj_else_2
+
+  block ^condobj_then_1:
+    %t3 = call obj<16x8> @make()
+    copyobj 16x8 %t3, %t1
+    jump ^condobj_end_3
+
+  block ^condobj_else_2:
+    store i64 0, %t1
+    %t4 = index i8 %t1, 8
+    store i64 0, %t4
+    call void @S_int___S(%t1)
+    jump ^condobj_end_3
+
+  block ^condobj_end_3:
+    %t5 = addr $s
+    %t6 = index i8 [projection=field] %t5, 0
+    %t7 = load i64 %t6
+    %t8 = cmp eq i64 %t7, 0
+    branch %t8, ^land_rhs_7, ^land_short_8
+
+  block ^land_rhs_7:
+    %t9 = addr $s
+    %t10 = index i8 [projection=field] %t9, 8
+    %t11 = load i64 %t10
+    %t12 = cmp eq i64 %t11, 0
+    %t13 = cmp ne i64 %t12, 0
+    store i64 %t13, $land__2
+    jump ^land_end_9
+
+  block ^land_short_8:
+    store i64 0, $land__2
+    jump ^land_end_9
+
+  block ^land_end_9:
+    %t14 = load i64 $land__2
+    branch %t14, ^cond_then_4, ^cond_else_5
+
+  block ^cond_then_4:
+    store i32 0, $cond__1
+    jump ^cond_end_6
+
+  block ^cond_else_5:
+    store i32 1, $cond__1
+    jump ^cond_end_6
+
+  block ^cond_end_6:
+    %t15 = load i32 $cond__1
+    return i32 %t15
+}
+function @S_int___S(%this : ptr) -> void [unwind=no, binding=weak, object=_ZN1SIiEC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    return void
+}
+alias object _ZN1SIiEC2Ev = @S_int___S

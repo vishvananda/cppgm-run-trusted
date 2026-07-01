@@ -1,0 +1,19 @@
+#include <vector>
+
+int main()
+{
+  std::vector<std::vector<bool> > bits(3);
+  bits[0].assign(4, false);
+  bits[1].assign(7, true);
+  bits[2].assign(2, false);
+
+  if (bits[0].size() != 4 || bits[1].size() != 7 || bits[2].size() != 2)
+    return 1;
+  if (bits[0][0])
+    return 2;
+  if (!bits[1][6])
+    return 3;
+  if (bits[2][1])
+    return 4;
+  return 0;
+}

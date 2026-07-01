@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_support.h"
 
 using namespace std;
@@ -66,17 +67,17 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	ctor->function_parameter_names = ctor_names;
 	vector<Expr> ctor_defaults(fn_params.size());
 	bool have_ctor_defaults = false;
-		for (size_t i = 0; i < signature_parameter_indices.size(); ++i)
+	for (size_t i = 0; i < signature_parameter_indices.size(); ++i)
+	{
+		ParameterInfo& parameter =
+			parameters[signature_parameter_indices[i]];
+		if (parameter.has_default)
 		{
-			ParameterInfo& parameter =
-				parameters[signature_parameter_indices[i]];
-			if (parameter.has_default)
-			{
-				ctor_defaults[i + 1] = parameter.default_value;
-				have_ctor_defaults = true;
-				ctor->has_default_arguments = true;
-			}
+			ctor_defaults[i + 1] = parameter.default_value;
+			have_ctor_defaults = true;
+			ctor->has_default_arguments = true;
 		}
+	}
 	if (have_ctor_defaults)
 		default_arguments_[ctor] = ctor_defaults;
 	ctor->is_inline_definition = at(OP_LBRACE) || at(OP_COLON) || at_try_keyword() ||
@@ -98,8 +99,31 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 		if (consume(KW_DEFAULT))
 		{
 			ctor->is_defaulted = true;
+			ctor->is_explicit_defaulted_definition = true;
 			ctor->is_inline_definition = true;
+			ctor->is_generated_default_constructor = false;
+			ctor->is_generated_copy_move_constructor = false;
+			ctor->is_generated_copy_move_assignment = false;
+			ctor->is_generated_default_destructor = false;
+			ctor->is_noop_constructor =
+				signature_parameter_indices.empty();
 			ctor->unwind_no = true;
+			if (signature_parameter_indices.empty())
+			{
+				Node fn("function-definition " +
+				        qualified_decl_name(ctor) + " " +
+				        pa11::describe_type(fn_type));
+				fn.binding = ctor;
+				fn.type = fn_type;
+				fn.token_text = "defaulted-definition";
+				Node this_node("parameter this " +
+				               pa11::describe_type(fn_params[0]));
+				this_node.type = fn_params[0];
+				add_child(fn, this_node);
+				add_child(fn, Node("compound-statement"));
+				remember_function_body(ctor, fn);
+				extra_lowir_nodes_.push_back(fn);
+			}
 			if (signature_parameter_indices.size() == 1)
 			{
 				ParameterInfo& parameter =
@@ -145,14 +169,17 @@ bool Parser::parse_constructor_like_member(bool explicit_ctor,
 	}
 	if (consume(OP_SEMICOLON))
 	{
+		Node fn("function-declaration " + qualified_decl_name(ctor) +
+		        " " + pa11::describe_type(fn_type));
+		fn.binding = ctor;
+		fn.type = fn_type;
+		if (!force_new_function_binding_ &&
+		    active_class_instantiations_.empty())
+			add_child(root_, fn);
+		else
+			generated_nodes_.push_back(fn);
 		if (force_new_function_binding_)
-		{
-			Node fn("function-declaration " + qualified_decl_name(ctor) +
-			        " " + pa11::describe_type(fn_type));
-			fn.binding = ctor;
-			fn.type = fn_type;
 			extra_lowir_nodes_.push_back(fn);
-		}
 		return true;
 	}
 

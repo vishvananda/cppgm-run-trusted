@@ -14,6 +14,8 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+
 bool same_template_argument_value(
 	const TemplateArgument& left,
 	const TemplateArgument& right,
@@ -42,6 +44,66 @@ bool match_template_argument_sequence_pattern(
 	const vector<TemplateArgument>& actual,
 	map<string, TemplateArgument>& deduced,
 	const map<const void*, vector<TemplateArgument> >& record_arguments);
+
+bool template_parameter_lists_match_cache_key(
+	const vector<TemplateParameterInfo>& left,
+	const vector<TemplateParameterInfo>& right,
+	size_t& key)
+{
+	key = dependent_cache_hash_combine(0x7e90, left.size());
+	key = dependent_cache_hash_combine(key, right.size());
+	key = dependent_cache_hash_combine(
+		key,
+		reinterpret_cast<uintptr_t>(active_template_match_parser));
+	for (size_t i = 0; i < left.size(); ++i)
+	{
+		key = dependent_cache_hash_combine(
+			key,
+			static_cast<size_t>(left[i].kind));
+		key = dependent_cache_hash_combine(
+			key,
+			static_cast<size_t>(right[i].kind));
+		key = dependent_cache_hash_combine(key, left[i].is_pack);
+		key = dependent_cache_hash_combine(key, right[i].is_pack);
+		key = dependent_cache_hash_combine(
+			key,
+			left[i].template_parameters.size());
+		key = dependent_cache_hash_combine(
+			key,
+			right[i].template_parameters.size());
+		if (left[i].kind == TemplateParameterKind::NonType)
+		{
+			size_t left_type_key = active_template_match_parser != NULL
+				? active_template_match_parser
+					->dependent_typename_match_cache_key(left[i].type)
+				: reinterpret_cast<uintptr_t>(left[i].type.get());
+			size_t right_type_key = active_template_match_parser != NULL
+				? active_template_match_parser
+					->dependent_typename_match_cache_key(right[i].type)
+				: reinterpret_cast<uintptr_t>(right[i].type.get());
+			key = dependent_cache_hash_combine(key, left_type_key);
+			key = dependent_cache_hash_combine(key, right_type_key);
+		}
+		for (size_t j = 0; j < left[i].template_parameters.size(); ++j)
+		{
+			key = dependent_cache_hash_combine(
+				key,
+				static_cast<size_t>(
+					left[i].template_parameters[j].kind));
+			key = dependent_cache_hash_combine(
+				key,
+				static_cast<size_t>(
+					right[i].template_parameters[j].kind));
+			key = dependent_cache_hash_combine(
+				key,
+				left[i].template_parameters[j].is_pack);
+			key = dependent_cache_hash_combine(
+				key,
+				right[i].template_parameters[j].is_pack);
+		}
+	}
+	return true;
+}
 
 bool template_argument_sequence_has_pack_expansion(
 	const vector<TemplateArgument>& pattern);
@@ -349,6 +411,23 @@ bool same_template_record_primary(TypePtr left, TypePtr right)
 		return false;
 	if (left->template_primary_name != right->template_primary_name)
 		return false;
+	if (active_template_match_parser != NULL)
+	{
+		TemplateDeclaration* left_decl =
+			active_template_match_parser
+				->primary_class_template_declaration_for_match(left);
+		TemplateDeclaration* right_decl =
+			active_template_match_parser
+				->primary_class_template_declaration_for_match(right);
+		if (left_decl != NULL && right_decl != NULL)
+		{
+			if (left_decl == right_decl)
+				return true;
+			if (left_decl->owner != right_decl->owner ||
+			    left_decl->name != right_decl->name)
+				return false;
+		}
+	}
 	Scope* left_owner = left->scope != NULL ? left->scope->parent : NULL;
 	Scope* right_owner = right->scope != NULL ? right->scope->parent : NULL;
 	return left_owner == right_owner;
@@ -594,28 +673,89 @@ bool template_parameter_lists_match(const vector<TemplateParameterInfo>& left,
 {
 	if (left.size() != right.size())
 		return false;
+	size_t address_key = dependent_cache_hash_combine(
+		reinterpret_cast<uintptr_t>(&left),
+		reinterpret_cast<uintptr_t>(&right));
+	address_key = dependent_cache_hash_combine(address_key, left.size());
+	for (size_t i = 0; i < left.size(); ++i)
+	{
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			static_cast<size_t>(left[i].kind));
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			static_cast<size_t>(right[i].kind));
+		address_key = dependent_cache_hash_combine(address_key,
+		                                          left[i].is_pack);
+		address_key = dependent_cache_hash_combine(address_key,
+		                                          right[i].is_pack);
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			reinterpret_cast<uintptr_t>(left[i].type.get()));
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			reinterpret_cast<uintptr_t>(right[i].type.get()));
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			left[i].template_parameters.size());
+		address_key = dependent_cache_hash_combine(
+			address_key,
+			right[i].template_parameters.size());
+	}
+	static map<size_t, bool> address_cache;
+	map<size_t, bool>::const_iterator address_cached =
+		address_cache.find(address_key);
+	if (address_cached != address_cache.end())
+		return address_cached->second;
+	size_t cache_key = 0;
+	static map<size_t, bool> cache;
+	if (template_parameter_lists_match_cache_key(left, right, cache_key))
+	{
+		map<size_t, bool>::const_iterator cached = cache.find(cache_key);
+		if (cached != cache.end())
+		{
+			address_cache[address_key] = cached->second;
+			return cached->second;
+		}
+	}
+	bool result = true;
 	for (size_t i = 0; i < left.size(); ++i)
 	{
 			if (left[i].kind != right[i].kind ||
 			    left[i].is_pack != right[i].is_pack ||
 			    left[i].template_parameters.size() !=
 				    right[i].template_parameters.size())
-				return false;
+			{
+				result = false;
+				break;
+			}
 			if (left[i].kind == TemplateParameterKind::NonType &&
 			    left[i].type.get() != NULL &&
 			    right[i].type.get() != NULL &&
+			    left[i].type != right[i].type &&
+			    !pa11::same_type(left[i].type, right[i].type) &&
 			    !same_template_parameter_match_type(left[i].type,
 			                                        right[i].type,
 			                                        0))
-				return false;
+			{
+				result = false;
+				break;
+			}
 			for (size_t j = 0; j < left[i].template_parameters.size(); ++j)
 			if (left[i].template_parameters[j].kind !=
 				    right[i].template_parameters[j].kind ||
 			    left[i].template_parameters[j].is_pack !=
 				    right[i].template_parameters[j].is_pack)
-				return false;
+			{
+				result = false;
+				break;
+			}
+			if (!result)
+				break;
 	}
-	return true;
+	cache[cache_key] = result;
+	address_cache[address_key] = result;
+	return result;
 }
 
 bool template_template_parameter_compatible(
@@ -771,13 +911,14 @@ bool match_template_type_pattern(
 	TypePtr actual,
 	map<string, TemplateArgument>& deduced,
 	const map<const void*, vector<TemplateArgument> >& record_arguments)
-{ if (pattern.get() == NULL || actual.get() == NULL) return pattern.get() == actual.get(); string active_dependent_parameter_name; if (simple_active_dependent_type_parameter(pattern, active_dependent_parameter_name)) {
-TemplateArgument arg = TemplateArgument::type_arg(actual); map<string, TemplateArgument>::iterator found = deduced.find(active_dependent_parameter_name); if (found == deduced.end()) {
+		{ if (pattern.get() == NULL || actual.get() == NULL) return pattern.get() == actual.get();
+	string active_dependent_parameter_name; if (simple_active_dependent_type_parameter(pattern, active_dependent_parameter_name)) {
+	TemplateArgument arg = TemplateArgument::type_arg(actual); map<string, TemplateArgument>::iterator found = deduced.find(active_dependent_parameter_name); if (found == deduced.end()) {
 deduced[active_dependent_parameter_name] = arg; return true; } return same_template_argument_value(found->second, arg, record_arguments); } bool active_template_template_pattern = pattern->is_dependent_typename &&
 pattern->dependent_typename_template_id && !pattern->template_primary_name.empty() && active_match_parameter_is_template_template( pattern->template_primary_name); if (pattern->is_dependent_typename &&
 active_template_match_parser != NULL && !active_template_template_pattern) { try { TypePtr substituted = active_template_match_parser ->substitute_type_for_template_match(pattern, deduced);
 if (substituted.get() != NULL && substituted.get() != pattern.get() && template_type_key(substituted) != template_type_key(pattern)) return match_template_type_pattern(substituted, actual, deduced, record_arguments); }
-catch (const runtime_error&) { return false; } } if (active_template_template_pattern && active_template_match_parser != NULL) { if (actual->kind == pa11::TypeKind::Cv) return false; TemplateArgument actual_template =
+	catch (const runtime_error&) { if (!(pattern->dependent_typename_template_id && pattern->kind == pa11::TypeKind::Record)) return false; } } if (active_template_template_pattern && active_template_match_parser != NULL) { if (actual->kind == pa11::TypeKind::Cv) return false; TemplateArgument actual_template =
 TemplateArgument::template_arg( active_template_match_parser ->class_template_declaration_for_match(actual)); if (actual_template.template_declaration == NULL && actual->is_template_specialization &&
 actual->scope == NULL) actual_template.value_name = actual->template_primary_name; if (actual_template.template_declaration == NULL && actual_template.value_name.empty()) return false;
 const TemplateParameterInfo* template_parameter = active_match_template_template_parameter( pattern->template_primary_name); if (template_parameter != NULL && actual_template.template_declaration != NULL &&
@@ -799,12 +940,13 @@ TemplateArgument bound = TemplateArgument::value_arg( pa11::make_fundamental(FT_
 else if (!actual->unknown_bound) return false; } else if (actual->unknown_bound || pattern->bound != actual->bound) return false; return match_template_type_pattern(pattern->base, actual->base, deduced,
 record_arguments); case pa11::TypeKind::Function: if (pattern->cv != actual->cv || pattern->ref_qualifier != actual->ref_qualifier || pattern->variadic != actual->variadic) return false;
 if (!match_template_type_pattern(pattern->base, actual->base, deduced, record_arguments)) return false; return match_function_parameter_type_sequence( pattern->parameters, actual->parameters, deduced, record_arguments);
-case pa11::TypeKind::MemberPointer: return match_template_type_pattern(pattern->member_class, actual->member_class, deduced, record_arguments) && match_template_type_pattern(pattern->base, actual->base, deduced,
-record_arguments); case pa11::TypeKind::Record: { map<const void*, vector<TemplateArgument> >::const_iterator same_pit = record_arguments.find(pattern.get()); bool same_type_needs_deduction =
-same_pit != record_arguments.end() && template_arguments_have_deducible_pattern(same_pit->second, record_arguments); if (pa11::same_type(pattern, actual) && !same_type_needs_deduction) return true;
-if (pattern->is_template_specialization && !pattern->template_primary_name.empty() && active_template_match_parser != NULL && (pattern->scope == NULL || active_match_parameter_is_template_template(
-pattern->template_primary_name))) { TemplateArgument actual_template = TemplateArgument::template_arg( active_template_match_parser ->class_template_declaration_for_match(actual));
-if (actual_template.template_declaration == NULL && actual->is_template_specialization && actual->scope == NULL) actual_template.value_name = actual->template_primary_name;
+	case pa11::TypeKind::MemberPointer: return match_template_type_pattern(pattern->member_class, actual->member_class, deduced, record_arguments) && match_template_type_pattern(pattern->base, actual->base, deduced,
+	record_arguments); case pa11::TypeKind::Record: { map<const void*, vector<TemplateArgument> >::const_iterator same_pit = record_arguments.find(pattern.get()); bool same_type_needs_deduction =
+	same_pit != record_arguments.end() && template_arguments_have_deducible_pattern(same_pit->second, record_arguments); if (pa11::same_type(pattern, actual) && !same_type_needs_deduction) return true;
+	TemplateDeclaration* pattern_template_for_match = active_template_match_parser != NULL ? active_template_match_parser->class_template_declaration_for_match(pattern) : NULL;
+	if (pattern->is_template_specialization && !pattern->template_primary_name.empty() && active_template_match_parser != NULL && (active_match_parameter_is_template_template(
+	pattern->template_primary_name) || (pattern->scope == NULL && pattern_template_for_match == NULL))) { TemplateArgument actual_template = TemplateArgument::template_arg( active_template_match_parser ->class_template_declaration_for_match(actual));
+	if (actual_template.template_declaration == NULL && actual->is_template_specialization && actual->scope == NULL) actual_template.value_name = actual->template_primary_name;
 if (actual_template.template_declaration == NULL && actual_template.value_name.empty()) return false; const TemplateParameterInfo* template_parameter = active_match_template_template_parameter(
 pattern->template_primary_name); if (template_parameter != NULL && actual_template.template_declaration != NULL && !template_template_parameter_lists_compatible( template_parameter->template_parameters,
 actual_template.template_declaration->parameters)) return false; map<string, TemplateArgument>::iterator found = deduced.find(pattern->template_primary_name); if (found == deduced.end())
@@ -813,8 +955,8 @@ map<const void*, vector<TemplateArgument> >::const_iterator pit = record_argumen
 bool have_pattern_instance_args = !pattern->template_arguments.empty(); vector<TemplateArgument> pattern_instance_args = have_pattern_instance_args ? match_template_arguments_from_instance_arguments(
 pattern->template_arguments) : vector<TemplateArgument>(); bool use_pattern_record_args = pit != record_arguments.end() && (!have_pattern_instance_args || pit->second.size() == pattern_instance_args.size()) &&
 template_arguments_have_deducible_pattern( pit->second, record_arguments); vector<TemplateArgument> pattern_args = use_pattern_record_args ? pit->second : have_pattern_instance_args ? pattern_instance_args
-: (pit != record_arguments.end() ? pit->second : vector<TemplateArgument>()); vector<TemplateArgument> actual_args = !actual->template_arguments.empty() ? match_template_arguments_from_instance_arguments(
-actual->template_arguments) : (ait != record_arguments.end() ? ait->second : vector<TemplateArgument>()); bool pattern_has_pack_pattern = false; for (size_t i = 0; i < pattern_args.size(); ++i) { string pack_name;
+: (pit != record_arguments.end() ? pit->second : vector<TemplateArgument>()); vector<TemplateArgument> actual_instance_args = !actual->template_arguments.empty() ? match_template_arguments_from_instance_arguments(
+actual->template_arguments) : vector<TemplateArgument>(); vector<TemplateArgument> actual_args = !actual_instance_args.empty() && actual_instance_args.size() == pattern_args.size() ? actual_instance_args : ait != record_arguments.end() ? ait->second : actual_instance_args; bool pattern_has_pack_pattern = false; for (size_t i = 0; i < pattern_args.size(); ++i) { string pack_name;
 if (pattern_args[i].pack_expansion || pack_argument_parameter_name(pattern_args[i], pack_name)) pattern_has_pack_pattern = true; } if (pattern_has_pack_pattern) actual_args =
 flatten_actual_template_argument_packs(actual_args); return match_template_argument_sequence_pattern(pattern_args, actual_args, deduced, record_arguments); } if (!same_template_record_primary(pattern, actual))
 return false; map<const void*, vector<TemplateArgument> >::const_iterator pit = record_arguments.find(pattern.get()); map<const void*, vector<TemplateArgument> >::const_iterator ait = record_arguments.find(actual.get());
@@ -822,8 +964,8 @@ if (pit == record_arguments.end()) return false; bool have_pattern_instance_args
 ? match_template_arguments_from_instance_arguments( pattern->template_arguments) : vector<TemplateArgument>(); bool compatible_pattern_record_args = !have_pattern_instance_args ||
 pit->second.size() == pattern_instance_args.size(); bool use_pattern_record_args = compatible_pattern_record_args && (template_arguments_have_pack_expansion_recursive( pit->second) ||
 template_arguments_have_deducible_pattern( pit->second, record_arguments)); vector<TemplateArgument> pattern_args = use_pattern_record_args ? pit->second : have_pattern_instance_args ? pattern_instance_args
-: pit->second; vector<TemplateArgument> actual_args = ait != record_arguments.end() && template_arguments_have_pack_expansion_recursive(ait->second) ? ait->second : !actual->template_arguments.empty()
-? match_template_arguments_from_instance_arguments( actual->template_arguments) : (ait != record_arguments.end() ? ait->second : vector<TemplateArgument>()); bool pattern_has_pack_pattern = false;
+: pit->second; vector<TemplateArgument> actual_instance_args = !actual->template_arguments.empty()
+? match_template_arguments_from_instance_arguments( actual->template_arguments) : vector<TemplateArgument>(); vector<TemplateArgument> actual_args = !actual_instance_args.empty() && actual_instance_args.size() == pattern_args.size() ? actual_instance_args : ait != record_arguments.end() ? ait->second : actual_instance_args; bool pattern_has_pack_pattern = false;
 for (size_t i = 0; i < pattern_args.size(); ++i) { string pack_name; if (pattern_args[i].pack_expansion || pack_argument_parameter_name(pattern_args[i], pack_name)) pattern_has_pack_pattern = true; }
 if (pattern_has_pack_pattern) actual_args = flatten_actual_template_argument_packs(actual_args); bool actual_has_template_arguments = !actual->template_arguments.empty() || ait != record_arguments.end();
 if (actual_args.empty() && !actual_has_template_arguments) return false; bool matched = match_template_argument_sequence_pattern(pattern_args, actual_args, deduced, record_arguments); return matched; }

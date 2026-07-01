@@ -53,6 +53,25 @@ size_t alias_cache_type_hash(TypePtr type)
 		out = alias_cache_hash_combine(
 			out,
 			alias_cache_instance_arg_hash(type->template_arguments[i], 1));
+	out = alias_cache_hash_combine(
+		out,
+		type->dependent_typename_template_argument_lists.size());
+	for (size_t i = 0;
+	     i < type->dependent_typename_template_argument_lists.size();
+	     ++i)
+	{
+		out = alias_cache_hash_combine(
+			out,
+			type->dependent_typename_template_argument_lists[i].size());
+		for (size_t j = 0;
+		     j < type->dependent_typename_template_argument_lists[i].size();
+		     ++j)
+			out = alias_cache_hash_combine(
+				out,
+				alias_cache_instance_arg_hash(
+					type->dependent_typename_template_argument_lists[i][j],
+					1));
+	}
 	return out;
 }
 
@@ -137,6 +156,21 @@ string alias_cache_argument_key(const vector<TemplateArgument>& arguments)
 			out,
 			alias_cache_argument_hash(arguments[i], 0));
 	return to_string(out);
+}
+
+bool context_sensitive_alias_template(const vector<Token>& tokens,
+                                      const TemplateDeclaration* declaration)
+{
+	if (declaration == NULL)
+		return false;
+	for (size_t i = declaration->decl_begin;
+	     i < declaration->decl_end && i < tokens.size();
+	     ++i)
+		if (tokens[i].kind == posttoken::TokenKind::Simple &&
+		    (tokens[i].type == KW_TYPENAME ||
+		     tokens[i].type == KW_DECLTYPE))
+			return true;
+	return false;
 }
 
 }  // namespace
@@ -380,21 +414,26 @@ TemplateDeclaration* Parser::find_class_template(Scope* scope,
 			if (found != NULL)
 				return found;
 		}
-		TypePtr base = record.get() != NULL && record->base.get() != NULL
-			? pa11::strip_cv(record->base) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL &&
-		    record_dependent_base_lookup_skips_.count(
-			    pa11::strip_cv(record).get()) == 0)
-		{
-			TemplateDeclaration* found =
-				find_class_template(base->scope, name);
-			if (found != NULL)
-				return found;
+			vector<TypePtr> bases = record.get() != NULL
+				? pa11::record_direct_bases(record) : vector<TypePtr>();
+			for (size_t b = 0; b < bases.size(); ++b)
+			{
+				TypePtr base = bases[b].get() != NULL
+					? pa11::strip_cv(bases[b]) : TypePtr();
+				if (base.get() != NULL &&
+				    base->kind == pa11::TypeKind::Record &&
+				    base->scope != NULL &&
+				    record_dependent_base_lookup_skips_.count(
+					    pa11::strip_cv(record).get()) == 0)
+				{
+					TemplateDeclaration* found =
+						find_class_template(base->scope, name);
+					if (found != NULL)
+						return found;
+				}
+			}
+			return NULL;
 		}
-		return NULL;
-	}
 	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
 	{
 		TemplateDeclaration* found = find_class_template(cur, name);
@@ -508,22 +547,27 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 			if (found != NULL)
 				return found;
 		}
-		TypePtr record = pa11::record_type_for_scope(scope);
-		TypePtr base = record.get() != NULL && record->base.get() != NULL
-			? pa11::strip_cv(record->base) : TypePtr();
-		if (base.get() != NULL &&
-		    base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL &&
-		    record_dependent_base_lookup_skips_.count(
-			    pa11::strip_cv(record).get()) == 0)
-		{
-			TemplateDeclaration* found =
-				find_alias_template(base->scope, name);
-			if (found != NULL)
-				return found;
+			TypePtr record = pa11::record_type_for_scope(scope);
+			vector<TypePtr> bases = record.get() != NULL
+				? pa11::record_direct_bases(record) : vector<TypePtr>();
+			for (size_t b = 0; b < bases.size(); ++b)
+			{
+				TypePtr base = bases[b].get() != NULL
+					? pa11::strip_cv(bases[b]) : TypePtr();
+				if (base.get() != NULL &&
+				    base->kind == pa11::TypeKind::Record &&
+				    base->scope != NULL &&
+				    record_dependent_base_lookup_skips_.count(
+					    pa11::strip_cv(record).get()) == 0)
+				{
+					TemplateDeclaration* found =
+						find_alias_template(base->scope, name);
+					if (found != NULL)
+						return found;
+				}
+			}
+			return NULL;
 		}
-		return NULL;
-	}
 	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
 	{
 		TemplateDeclaration* found = find_alias_template(cur, name);
@@ -537,9 +581,9 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 			TemplateDeclaration* declaration,
 			const vector<TemplateArgument>& arguments)
 		{
-				vector<TemplateArgument> full_args =
-					complete_template_arguments(declaration, arguments);
-			size_t save_pos = pos_;
+					vector<TemplateArgument> full_args =
+						complete_template_arguments(declaration, arguments);
+				size_t save_pos = pos_;
 	vector<Token> save_tokens;
 	vector<Scope*> save_scopes;
 	vector<map<string, TypePtr> > save_subst = template_type_substitutions_;
@@ -579,9 +623,11 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 				{
 					if (owner_decl->second->parameters[i].is_pack)
 					{
+						const TemplateParameterInfo& parameter =
+							owner_decl->second->parameters[i];
 						owner_subst[param_name] =
-							pa11::make_template_parameter_type(
-								param_name);
+							template_parameter_placeholder_type(
+								parameter);
 						owner_value_subst[param_name] =
 							substitute_template_argument(
 								owner_args->second[i]);
@@ -629,27 +675,23 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 			for (size_t i = 0; i < full_args.size(); ++i)
 				if ((full_args[i].kind == TemplateArgumentKind::Value &&
 				     full_args[i].dependent) ||
-				    template_argument_has_template_parameter(
-					    full_args[i],
-					    record_template_arguments_))
+				    template_argument_dependent_cached(full_args[i]))
 					dependent_alias_arguments = true;
 		}
-		bool dependent_default_alias_argument = false;
-		for (size_t i = arguments.size(); i < full_args.size(); ++i)
-			if ((full_args[i].kind == TemplateArgumentKind::Value &&
-			     full_args[i].dependent) ||
-			    template_argument_has_template_parameter(
-				    full_args[i],
-				    record_template_arguments_))
-				dependent_default_alias_argument = true;
+			bool dependent_default_alias_argument = false;
+			for (size_t i = arguments.size(); i < full_args.size(); ++i)
+				if ((full_args[i].kind == TemplateArgumentKind::Value &&
+				     full_args[i].dependent) ||
+				    template_argument_dependent_cached(full_args[i]))
+					dependent_default_alias_argument = true;
 			if (dependent_alias_arguments && dependent_default_alias_argument)
 			{
 				TypePtr out = pa11::make_dependent_typename_type(
 					declaration->name,
-				false,
-				true,
-				false);
-			discard_template_type_key_cache(out);
+					false,
+					true,
+					false);
+				discard_template_type_key_cache(out);
 			out->template_primary_name = declaration->name;
 			out->template_arguments = template_instance_arguments(full_args);
 			return out;
@@ -662,9 +704,11 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 	    full_args[2].kind == TemplateArgumentKind::Type)
 		return full_args[0].value != 0 ? full_args[1].type
 		                               : full_args[2].type;
-	bool cacheable_alias = !parsing_base_specifier_;
+	bool cacheable_alias =
+		!parsing_base_specifier_ &&
+		!context_sensitive_alias_template(declaration_tokens_, declaration);
 	string alias_key;
-	if (cacheable_alias)
+		if (cacheable_alias)
 	{
 		if (owner_args != record_template_arguments_.end())
 			alias_key = alias_cache_argument_key(owner_args->second) + "::";
@@ -693,14 +737,53 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 				alias_key += "|TS" + to_string(subst_hash);
 				break;
 			}
-		}
-		alias_key += validating_template_definition_ ? "|v" : "|n";
-		map<pair<TemplateDeclaration*, string>, TypePtr>::const_iterator cached =
-			alias_template_specializations_.find(
-				make_pair(declaration, alias_key));
-		if (cached != alias_template_specializations_.end())
-			return cached->second;
-	}
+			}
+			alias_key += validating_template_definition_ ? "|v" : "|n";
+				map<pair<TemplateDeclaration*, string>, TypePtr>::const_iterator cached =
+					alias_template_specializations_.find(
+						make_pair(declaration, alias_key));
+				if (cached != alias_template_specializations_.end())
+				{
+					TypePtr cached_type = cached->second;
+					TypePtr cached_bare = cached_type.get() != NULL
+						? pa11::strip_cv(cached_type) : TypePtr();
+					if (cached_bare.get() != NULL &&
+					    cached_bare->kind == pa11::TypeKind::TemplateParameter &&
+					    !type_is_template_dependent(cached_bare) &&
+					    cached_bare->scope == NULL)
+					{
+						TemplateDeclaration* nested_alias =
+							find_alias_template(NULL, cached_bare->name);
+						if (nested_alias == NULL)
+							for (map<Scope*, map<string, TemplateDeclaration*> >::iterator
+								     sit = alias_templates_.begin();
+							     sit != alias_templates_.end() && nested_alias == NULL;
+							     ++sit)
+							{
+								map<string, TemplateDeclaration*>::iterator it =
+									sit->second.find(cached_bare->name);
+								if (it != sit->second.end())
+									nested_alias = it->second;
+							}
+						if (nested_alias != NULL && nested_alias != declaration)
+						{
+								try
+								{
+									TypePtr expanded_alias =
+										instantiate_alias_template(
+										nested_alias,
+										vector<TemplateArgument>());
+								if (expanded_alias.get() != NULL)
+									return expanded_alias;
+							}
+							catch (const runtime_error&)
+							{
+							}
+						}
+					}
+					return cached_type;
+				}
+			}
 	for (size_t i = 0; i < full_args.size() &&
 	     i < declaration->parameters.size(); ++i)
 		if (!declaration->parameters[i].name.empty())
@@ -710,9 +793,11 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 			{
 				if (declaration->parameters[i].is_pack)
 				{
+					const TemplateParameterInfo& parameter =
+						declaration->parameters[i];
 					subst[declaration->parameters[i].name] =
-						pa11::make_template_parameter_type(
-							declaration->parameters[i].name);
+						template_parameter_placeholder_type(
+							parameter);
 					value_subst[declaration->parameters[i].name] =
 						full_args[i];
 					pack_subst.insert(declaration->parameters[i].name);
@@ -771,24 +856,81 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 		{
 			discard_template_type_key_cache(type);
 			type->template_primary_name = declaration->name;
+			type->dependent_typename_template_id = true;
 			type->template_arguments = template_instance_arguments(full_args);
 		}
-			if (type.get() != NULL &&
-			    type->is_dependent_typename &&
-			    dependent_alias_arguments)
+				if (type.get() != NULL &&
+				    type->is_dependent_typename &&
+				    dependent_alias_arguments)
 				{
-					template_type_substitutions_ = save_subst;
-				template_value_substitutions_ = save_value_subst;
-				template_type_parameter_packs_ = save_pack_subst;
-				if (!tokens_are_declaration_tokens)
-					tokens_ = save_tokens;
-				scopes_ = save_scopes;
-				pos_ = save_pos;
-				return type;
-			}
-				if (type.get() != NULL)
+						try
+						{
+							TypePtr substituted = substitute_template_type(type);
+						if (substituted.get() == NULL ||
+						    type_is_template_dependent(substituted))
+						{
+							template_type_substitutions_ = save_subst;
+							template_value_substitutions_ = save_value_subst;
+							template_type_parameter_packs_ = save_pack_subst;
+							if (!tokens_are_declaration_tokens)
+								tokens_ = save_tokens;
+							scopes_ = save_scopes;
+							pos_ = save_pos;
+							return substituted.get() != NULL ? substituted : type;
+						}
+						type = substituted;
+					}
+					catch (const runtime_error&)
+					{
+						template_type_substitutions_ = save_subst;
+						template_value_substitutions_ = save_value_subst;
+						template_type_parameter_packs_ = save_pack_subst;
+						if (!tokens_are_declaration_tokens)
+							tokens_ = save_tokens;
+						scopes_ = save_scopes;
+						pos_ = save_pos;
+						return type;
+					}
+				}
+				else if (type.get() != NULL)
 					type = substitute_template_type(type);
-			if (parsing_base_specifier_ &&
+				TypePtr alias_result_bare = type.get() != NULL
+					? pa11::strip_cv(type) : TypePtr();
+				if (alias_result_bare.get() != NULL &&
+				    alias_result_bare->kind == pa11::TypeKind::TemplateParameter &&
+				    !type_is_template_dependent(alias_result_bare) &&
+				    alias_result_bare->scope == NULL)
+				{
+					TemplateDeclaration* nested_alias =
+						find_alias_template(NULL, alias_result_bare->name);
+					if (nested_alias == NULL)
+						for (map<Scope*, map<string, TemplateDeclaration*> >::iterator
+							     sit = alias_templates_.begin();
+						     sit != alias_templates_.end() && nested_alias == NULL;
+						     ++sit)
+						{
+							map<string, TemplateDeclaration*>::iterator it =
+								sit->second.find(alias_result_bare->name);
+							if (it != sit->second.end())
+								nested_alias = it->second;
+						}
+						if (nested_alias != NULL && nested_alias != declaration)
+					{
+						try
+						{
+							TypePtr expanded_alias =
+								instantiate_alias_template(
+									nested_alias,
+									vector<TemplateArgument>());
+							if (expanded_alias.get() != NULL)
+								type = expanded_alias;
+						}
+						catch (const runtime_error&)
+						{
+						}
+					}
+				}
+				if (parsing_base_specifier_ &&
 		    !active_class_instantiations_.empty() &&
 		    type.get() == active_class_instantiations_.back().type.get())
 		{
@@ -865,9 +1007,11 @@ TemplateDeclaration* Parser::find_alias_template(Scope* scope,
 		tokens_ = save_tokens;
 	scopes_ = save_scopes;
 	pos_ = save_pos;
-	if (cacheable_alias)
-		alias_template_specializations_[make_pair(declaration, alias_key)] =
-			type;
+		if (cacheable_alias)
+		{
+			alias_template_specializations_[make_pair(declaration, alias_key)] =
+				type;
+		}
 	return type;
 }
 

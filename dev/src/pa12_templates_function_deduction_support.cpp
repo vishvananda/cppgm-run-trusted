@@ -86,52 +86,89 @@ bool type_has_explicit_template_argument_pack(TypePtr type)
 	return false;
 }
 
-bool function_parameter_pack_name(TemplateDeclaration* declaration,
-                                  TypePtr pattern,
-                                  string& name)
+bool function_parameter_pack_name(
+	TemplateDeclaration* declaration,
+	TypePtr pattern,
+	string& name,
+	map<const void*, pair<bool, string> >* cache)
 {
 	if (pattern.get() == NULL)
 		return false;
 	TypePtr bare = pa11::strip_cv(pattern);
+	if (cache != NULL)
+	{
+		map<const void*, pair<bool, string> >::iterator found =
+			cache->find(bare.get());
+		if (found != cache->end())
+		{
+			if (found->second.first)
+				name = found->second.second;
+			return found->second.first;
+		}
+	}
+	bool result = false;
+	string result_name;
 	if (bare->kind == pa11::TypeKind::Pointer ||
 	    bare->kind == pa11::TypeKind::LValueReference ||
 	    bare->kind == pa11::TypeKind::RValueReference ||
 	    bare->kind == pa11::TypeKind::Array)
-		return function_parameter_pack_name(declaration, bare->base, name);
-	if (bare->kind == pa11::TypeKind::Record &&
-	    bare->is_template_specialization &&
-	    !bare->template_primary_name.empty() &&
-	    bare->scope == NULL)
-		return false;
-	if (bare->kind == pa11::TypeKind::TemplateParameter &&
-	    pa11::is_deducible_template_parameter_type(bare) &&
-	    declaration_parameter_is_pack(declaration, bare->name))
 	{
-		name = bare->name;
-		return true;
+		result = function_parameter_pack_name(declaration,
+		                                      bare->base,
+		                                      result_name,
+		                                      cache);
 	}
-	if (bare->kind == pa11::TypeKind::Function)
+	else if (bare->kind == pa11::TypeKind::Record &&
+	         bare->is_template_specialization &&
+	         !bare->template_primary_name.empty() &&
+	         bare->scope == NULL)
+		result = false;
+	else if (bare->kind == pa11::TypeKind::TemplateParameter &&
+	         pa11::is_deducible_template_parameter_type(bare) &&
+	         declaration_parameter_is_pack(declaration, bare->name))
 	{
-		if (function_parameter_pack_name(declaration, bare->base, name))
-			return true;
-		for (size_t i = 0; i < bare->parameters.size(); ++i)
-			if (function_parameter_pack_name(declaration,
-			                                 bare->parameters[i],
-			                                 name))
-				return true;
+		result = true;
+		result_name = bare->name;
 	}
-	if (bare->kind == pa11::TypeKind::MemberPointer)
-		return function_parameter_pack_name(declaration,
-		                                    bare->member_class,
-		                                    name) ||
-		       function_parameter_pack_name(declaration,
-		                                    bare->base,
-		                                    name);
-	if (type_has_explicit_template_argument_pack(pattern))
-		return false;
-	if (!template_type_has_template_parameter_name(pattern, name))
-		return false;
-	return declaration_parameter_is_pack(declaration, name);
+	else if (bare->kind == pa11::TypeKind::Function)
+	{
+		result = function_parameter_pack_name(declaration,
+		                                      bare->base,
+		                                      result_name,
+		                                      cache);
+		for (size_t i = 0; !result && i < bare->parameters.size(); ++i)
+			result = function_parameter_pack_name(declaration,
+			                                      bare->parameters[i],
+			                                      result_name,
+			                                      cache);
+	}
+	else if (bare->kind == pa11::TypeKind::MemberPointer)
+	{
+		result = function_parameter_pack_name(declaration,
+		                                      bare->member_class,
+		                                      result_name,
+		                                      cache) ||
+		         function_parameter_pack_name(declaration,
+		                                      bare->base,
+		                                      result_name,
+		                                      cache);
+	}
+	else if (!type_has_explicit_template_argument_pack(pattern) &&
+	         template_type_has_template_parameter_name(pattern, result_name) &&
+	         declaration_parameter_is_pack(declaration, result_name))
+		result = true;
+	if (cache != NULL)
+		(*cache)[bare.get()] = make_pair(result, result_name);
+	if (result)
+		name = result_name;
+	return result;
+}
+
+bool function_parameter_pack_name(TemplateDeclaration* declaration,
+                                  TypePtr pattern,
+                                  string& name)
+{
+	return function_parameter_pack_name(declaration, pattern, name, NULL);
 }
 
 bool Parser::function_parameter_type_pack_expansion_name(TypePtr pattern,

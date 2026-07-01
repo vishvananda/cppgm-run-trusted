@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 
 namespace pa14 {
 namespace internal {
@@ -18,7 +19,36 @@ Value FunctionLowerer::emit_logical_binary(const Node& expr)
 	{
 		logical_call_result_slot_ = slot;
 		logical_call_result_type_ = expr.children[1].type;
+		logical_call_result_expr_ = &expr.children[1];
 		logical_call_result_consumed_ = false;
+	}
+	const Node& rhs_node = expr.children[1];
+	bool protect_rhs_member_call = false;
+	if (eh_try_depth_ == 0 &&
+	    has_active_cleanups() &&
+	    starts_with(rhs_node.line, "binary-expression") &&
+	    rhs_node.children.size() == 2 &&
+	    starts_with(rhs_node.children[0].line, "member-expression") &&
+	    !rhs_node.children[0].children.empty() &&
+	    starts_with(rhs_node.children[0].children[0].line,
+	                "call-expression") &&
+	    rhs_node.children[0].category == ValueCategory::LValue &&
+	    scalar_lowir_type(rhs_node.children[0].type).compare(0, 4, "obj<") != 0)
+	{
+		TypePtr object_value =
+			pa11::strip_cv(strip_for_value(rhs_node.children[0].children[0].type));
+		protect_rhs_member_call =
+			object_value.get() != NULL && object_value->kind == TypeKind::Pointer;
+	}
+	string dispatch;
+	bool define_dispatch = false;
+	if (protect_rhs_member_call)
+	{
+		dispatch = active_unwind_dispatch_.empty()
+			? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+		define_dispatch = active_unwind_dispatch_.empty();
+		instr("eh_try ^" + dispatch);
+		++eh_try_depth_;
 	}
 	Value raw = emit_rvalue(expr.children[1]);
 	if (!logical_call_result_consumed_)
@@ -27,8 +57,24 @@ Value FunctionLowerer::emit_logical_binary(const Node& expr)
 		instr("store i64 " + rv.text + ", $" + slot);
 		emit_pending_temp_cleanups();
 	}
+	if (protect_rhs_member_call)
+	{
+		--eh_try_depth_;
+		instr("eh_end");
+		if (define_dispatch)
+		{
+			string unwind_end = fresh_block("call_unwind_end");
+			terminate("jump ^" + unwind_end);
+			active_unwind_dispatch_ = dispatch;
+			active_unwind_cleanup_depth_ = cleanups_.size();
+			start_block(dispatch);
+			emit_shared_unwind_dispatch_body();
+			start_block(unwind_end);
+		}
+	}
 	logical_call_result_slot_.clear();
 	logical_call_result_type_.reset();
+	logical_call_result_expr_ = NULL;
 	logical_call_result_consumed_ = false;
 	terminate("jump ^" + end);
 	start_block(sh);

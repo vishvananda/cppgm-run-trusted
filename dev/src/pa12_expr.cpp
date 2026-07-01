@@ -73,6 +73,34 @@ bool type_is_pointer(TypePtr type)
 	return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer;
 }
 
+bool type_is_character_object(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Fundamental)
+		return false;
+	return bare->fundamental == FT_CHAR ||
+	       bare->fundamental == FT_SIGNED_CHAR ||
+	       bare->fundamental == FT_UNSIGNED_CHAR;
+}
+
+bool type_is_character_pointer_like(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind == pa11::TypeKind::Array ||
+	    bare->kind == pa11::TypeKind::Pointer)
+		return type_is_character_object(bare->base);
+	return false;
+}
+
+bool type_is_basic_string_record(TypePtr type)
+{
+	TypePtr bare = pa11::strip_cv(type);
+	if (bare->kind != pa11::TypeKind::Record)
+		return false;
+	return bare->name == "basic_string" ||
+	       bare->template_primary_name == "basic_string";
+}
+
 bool scope_chain_contains(Scope* scope, Scope* candidate)
 {
 	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
@@ -524,16 +552,22 @@ Expr Parser::parse_conditional_expression()
 	expect(OP_COLON);
 	Expr no = parse_assignment_expression();
 	TypePtr result_type = usual_arithmetic_type(yes.type, no.type);
+	TypePtr yes_value_type = lvalue_to_rvalue_type(yes.type);
+	TypePtr no_value_type = lvalue_to_rvalue_type(no.type);
 	ValueCategory category = ValueCategory::PRValue;
-	if (pa11::same_type(yes.type, no.type))
+	bool conditional_type_resolved = false;
+	if (pa11::same_type(yes_value_type, no_value_type))
 	{
-		result_type = lvalue_to_rvalue_type(yes.type);
+		result_type = yes_value_type;
 		if (yes.category == ValueCategory::LValue &&
-		    no.category == ValueCategory::LValue)
+		    no.category == ValueCategory::LValue &&
+		    pa11::same_type(expression_object_type(yes.type),
+		                    expression_object_type(no.type)))
 		{
-			result_type = yes.type;
+			result_type = expression_object_type(yes.type);
 			category = ValueCategory::LValue;
 		}
+		conditional_type_resolved = true;
 	}
 	else if (yes.category == ValueCategory::LValue &&
 	         no.category == ValueCategory::LValue &&
@@ -548,28 +582,104 @@ Expr Parser::parse_conditional_expression()
 		{
 			result_type = y;
 			category = ValueCategory::LValue;
+			conditional_type_resolved = true;
 		}
 		else if (record_base_distance(y, n) < 1000000)
 		{
 			result_type = n;
 			category = ValueCategory::LValue;
+			conditional_type_resolved = true;
 		}
 	}
-	else if (type_is_pointer(yes.type) && type_is_pointer(no.type))
+	if (!conditional_type_resolved)
 	{
-		if (pointer_conversion_viable(yes.type, no.type))
-			result_type = lvalue_to_rvalue_type(no.type);
-		else
-			result_type = lvalue_to_rvalue_type(yes.type);
+		TypePtr yes_object = pa11::strip_cv(expression_object_type(yes.type));
+		TypePtr no_object = pa11::strip_cv(expression_object_type(no.type));
+		bool yes_record = yes_object->kind == pa11::TypeKind::Record;
+		bool no_record = no_object->kind == pa11::TypeKind::Record;
+		bool yes_string_source =
+			type_is_character_pointer_like(yes.type) ||
+			type_is_nullptr(yes.type) ||
+			yes.null_pointer_constant;
+		bool no_string_source =
+			type_is_character_pointer_like(no.type) ||
+			type_is_nullptr(no.type) ||
+			no.null_pointer_constant;
+		if (yes_record != no_record &&
+		    ((no_record && type_is_basic_string_record(no_object) &&
+		      yes_string_source) ||
+		     (yes_record && type_is_basic_string_record(yes_object) &&
+		      no_string_source)))
+		{
+			if (no_record)
+			{
+				try
+				{
+					Conversion yes_to_no =
+						convert_to(yes, lvalue_to_rvalue_type(no.type));
+					if (yes_to_no.viable)
+					{
+						yes = yes_to_no.expr;
+						result_type = lvalue_to_rvalue_type(no.type);
+						conditional_type_resolved = true;
+					}
+				}
+				catch (const runtime_error&)
+				{
+				}
+			}
+			else if (yes_record)
+			{
+				try
+				{
+					Conversion no_to_yes =
+						convert_to(no, lvalue_to_rvalue_type(yes.type));
+					if (no_to_yes.viable)
+					{
+						no = no_to_yes.expr;
+						result_type = lvalue_to_rvalue_type(yes.type);
+						conditional_type_resolved = true;
+					}
+				}
+				catch (const runtime_error&)
+				{
+				}
+			}
+		}
 	}
-	else if (type_is_nullptr(yes.type) && type_is_pointer(no.type))
-		result_type = lvalue_to_rvalue_type(no.type);
-	else if (type_is_pointer(yes.type) && type_is_nullptr(no.type))
-		result_type = lvalue_to_rvalue_type(yes.type);
-	else if (yes.null_pointer_constant && type_is_pointer(no.type))
-		result_type = lvalue_to_rvalue_type(no.type);
-	else if (type_is_pointer(yes.type) && no.null_pointer_constant)
-		result_type = lvalue_to_rvalue_type(yes.type);
+	if (!conditional_type_resolved &&
+	    type_is_pointer(yes_value_type) && type_is_pointer(no_value_type))
+	{
+		if (pointer_conversion_viable(yes_value_type, no_value_type))
+			result_type = no_value_type;
+		else
+			result_type = yes_value_type;
+		conditional_type_resolved = true;
+	}
+	else if (!conditional_type_resolved &&
+	         type_is_nullptr(yes_value_type) && type_is_pointer(no_value_type))
+	{
+		result_type = no_value_type;
+		conditional_type_resolved = true;
+	}
+	else if (!conditional_type_resolved &&
+	         type_is_pointer(yes_value_type) && type_is_nullptr(no_value_type))
+	{
+		result_type = yes_value_type;
+		conditional_type_resolved = true;
+	}
+	else if (!conditional_type_resolved &&
+	         yes.null_pointer_constant && type_is_pointer(no_value_type))
+	{
+		result_type = no_value_type;
+		conditional_type_resolved = true;
+	}
+	else if (!conditional_type_resolved &&
+	         type_is_pointer(yes_value_type) && no.null_pointer_constant)
+	{
+		result_type = yes_value_type;
+		conditional_type_resolved = true;
+	}
 	if (fold_selected_conditional)
 	{
 		Expr selected = cond.constant_value != 0 ? yes : no;

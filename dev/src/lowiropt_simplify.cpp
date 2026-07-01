@@ -10,14 +10,19 @@
 using namespace std;
 
 namespace lowiropt {
+
+bool remove_unreachable_weak_functions(lowir2cy86::Program& program);
+
 namespace {
 
 using lowir2cy86::Block;
 using lowir2cy86::Function;
+using lowir2cy86::Global;
 using lowir2cy86::InstrKind;
 using lowir2cy86::Instruction;
 using lowir2cy86::Metadata;
 using lowir2cy86::MetadataItem;
+using lowir2cy86::Parameter;
 using lowir2cy86::Program;
 using lowir2cy86::Slot;
 using lowir2cy86::SwitchCase;
@@ -36,6 +41,8 @@ struct ExprFact
 	string temp;
 	size_t block;
 };
+
+typedef vector<vector<unsigned long long> > Dominators;
 
 Value literal_value(const string& text)
 {
@@ -92,7 +99,43 @@ void count_storage_temp(const Value& value, set<string>& out)
 		out.insert(value.text);
 }
 
-set<string> storage_temp_uses(const Function& fn)
+bool pass_uses_storage(const Metadata& metadata)
+{
+	const string pass = lowir2cy86::metadata_value(metadata, "pass");
+	return pass == "reference" || pass == "indirect_result" ||
+	       pass == "by_address" || pass == "decay";
+}
+
+const vector<Parameter>* call_parameters(const Instruction& ins,
+                                         const Program& program)
+{
+	if (ins.signature.present)
+		return &ins.signature.params;
+	if (ins.a.kind != ValueKind::Function)
+		return NULL;
+	map<string, size_t>::const_iterator it =
+	    program.function_by_name.find(ins.a.text);
+	if (it == program.function_by_name.end())
+		return NULL;
+	return &program.functions[it->second].params;
+}
+
+void count_call_storage_temps(const Instruction& ins,
+                              const Program& program,
+                              set<string>& out)
+{
+	if (ins.kind != InstrKind::Call)
+		return;
+	const vector<Parameter>* params = call_parameters(ins, program);
+	if (params == NULL)
+		return;
+	const size_t n = min(ins.args.size(), params->size());
+	for (size_t i = 0; i < n; ++i)
+		if (pass_uses_storage((*params)[i].metadata))
+			count_storage_temp(ins.args[i], out);
+}
+
+set<string> storage_temp_uses(const Function& fn, const Program& program)
 {
 	set<string> out;
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
@@ -104,27 +147,63 @@ set<string> storage_temp_uses(const Function& fn)
 			    ins.kind == InstrKind::VaArg)
 				count_storage_temp(ins.a, out);
 			else if (ins.kind == InstrKind::Store ||
-			         ins.kind == InstrKind::AtomicStore ||
-			         ins.kind == InstrKind::AtomicExchange ||
-			         ins.kind == InstrKind::AtomicCompareExchange ||
+			         ins.kind == InstrKind::AtomicStore)
+				count_storage_temp(ins.b, out);
+			else if (ins.kind == InstrKind::AtomicExchange ||
 			         ins.kind == InstrKind::AtomicAddFetch)
+				count_storage_temp(ins.a, out);
+			else if (ins.kind == InstrKind::AtomicCompareExchange)
+			{
+				count_storage_temp(ins.a, out);
 				count_storage_temp(ins.b, out);
+			}
 			else if (ins.kind == InstrKind::CopyObj)
+			{
+				count_storage_temp(ins.a, out);
 				count_storage_temp(ins.b, out);
+			}
 			else if (ins.kind == InstrKind::ZeroInit)
 				count_storage_temp(ins.a, out);
-		}
+			count_call_storage_temps(ins, program, out);
+	}
 	return out;
 }
 
-bool dominates(const vector<set<size_t> >& doms, size_t def_block, size_t use_block)
+bool storage_value_kind(ValueKind kind)
 {
-	return use_block < doms.size() && doms[use_block].count(def_block) != 0;
+	return kind == ValueKind::Temp || kind == ValueKind::Slot ||
+	       kind == ValueKind::Global;
+}
+
+bool may_record_temp_replacement(const Instruction& ins,
+                                 const Value& replacement,
+                                 const set<string>& storage_temps)
+{
+	if (!ins.has_dest || storage_temps.count(ins.dest) == 0)
+		return true;
+	return storage_value_kind(replacement.kind);
+}
+
+bool dom_bit(const vector<unsigned long long>& bits, size_t index)
+{
+	return index / 64 < bits.size() &&
+	       (bits[index / 64] & (1ULL << (index % 64))) != 0;
+}
+
+void set_dom_bit(vector<unsigned long long>& bits, size_t index)
+{
+	if (index / 64 < bits.size())
+		bits[index / 64] |= 1ULL << (index % 64);
+}
+
+bool dominates(const Dominators& doms, size_t def_block, size_t use_block)
+{
+	return use_block < doms.size() && dom_bit(doms[use_block], def_block);
 }
 
 bool replace_value(Value& value,
                    const map<string, Fact>& facts,
-                   const vector<set<size_t> >& doms,
+                   const Dominators& doms,
                    size_t block)
 {
 	set<string> seen;
@@ -147,7 +226,7 @@ bool replace_value(Value& value,
 
 bool replace_instruction_values(Instruction& ins,
                                 const map<string, Fact>& facts,
-                                const vector<set<size_t> >& doms,
+                                const Dominators& doms,
                                 size_t block)
 {
 	bool changed = false;
@@ -484,7 +563,7 @@ bool simplify_instruction(Function& fn,
                           const Program& program,
                           Instruction& ins,
                           size_t block,
-                          const vector<set<size_t> >& doms,
+                          const Dominators& doms,
                           const set<string>& storage_temps,
                           map<string, Fact>& facts,
                           map<string, vector<ExprFact> >& exprs,
@@ -497,13 +576,8 @@ bool simplify_instruction(Function& fn,
 	bool has_replacement = false;
 	if (ins.kind == InstrKind::Const || ins.kind == InstrKind::Copy)
 	{
-		if (!(ins.kind == InstrKind::Const && ins.has_dest &&
-		      ins.type.text == "ptr" &&
-		      storage_temps.count(ins.dest) != 0))
-		{
-			replacement = ins.a;
-			has_replacement = true;
-		}
+		replacement = ins.a;
+		has_replacement = true;
 	}
 	else if (ins.kind == InstrKind::Unary)
 		has_replacement = fold_unary(ins, replacement);
@@ -517,7 +591,8 @@ bool simplify_instruction(Function& fn,
 	else if (ins.kind == InstrKind::Convert)
 		has_replacement = fold_convert(ins, replacement);
 
-	if (ins.has_dest && has_replacement)
+	if (ins.has_dest && has_replacement &&
+	    may_record_temp_replacement(ins, replacement, storage_temps))
 	{
 		Fact fact;
 		fact.value = replacement;
@@ -637,18 +712,20 @@ map<string, size_t> block_indices(const Function& fn)
 	return out;
 }
 
-vector<set<size_t> > compute_dominators(const Function& fn)
+Dominators compute_dominators(const Function& fn)
 {
 	const size_t n = fn.blocks.size();
-	vector<set<size_t> > doms(n);
+	const size_t words = (n + 63) / 64;
+	Dominators doms(n, vector<unsigned long long>(words, 0));
 	if (n == 0)
 		return doms;
-	set<size_t> all;
+	vector<unsigned long long> all(words, ~0ULL);
+	if (n % 64 != 0)
+		all.back() = (1ULL << (n % 64)) - 1;
 	for (size_t i = 0; i < n; ++i)
-		all.insert(i);
-	for (size_t i = 0; i < n; ++i)
-		doms[i] = i == 0 ? set<size_t>() : all;
-	doms[0].insert(0);
+		if (i != 0)
+			doms[i] = all;
+	set_dom_bit(doms[0], 0);
 
 	map<string, size_t> index = block_indices(fn);
 	vector<vector<size_t> > preds(n);
@@ -670,18 +747,15 @@ vector<set<size_t> > compute_dominators(const Function& fn)
 		changed = false;
 		for (size_t b = 1; b < n; ++b)
 		{
-			set<size_t> next = all;
-			if (preds[b].empty())
-				next.clear();
-			for (size_t p = 0; p < preds[b].size(); ++p)
+			vector<unsigned long long> next(words, 0);
+			if (!preds[b].empty())
 			{
-				set<size_t> intersection;
-				set_intersection(next.begin(), next.end(),
-				                 doms[preds[b][p]].begin(), doms[preds[b][p]].end(),
-				                 inserter(intersection, intersection.begin()));
-				next.swap(intersection);
+				next = doms[preds[b][0]];
+				for (size_t p = 1; p < preds[b].size(); ++p)
+					for (size_t w = 0; w < words; ++w)
+						next[w] &= doms[preds[b][p]][w];
 			}
-			next.insert(b);
+			set_dom_bit(next, b);
 			if (next != doms[b])
 			{
 				doms[b].swap(next);
@@ -859,30 +933,6 @@ bool cleanup_cfg(Function& fn)
 	return changed;
 }
 
-void count_value_use(const Value& value, map<string, int>& uses)
-{
-	if (value.kind == ValueKind::Temp)
-		++uses[value.text];
-}
-
-map<string, int> count_temp_uses(const Function& fn)
-{
-	map<string, int> uses;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-		{
-			const Instruction& ins = fn.blocks[b].instructions[i];
-			count_value_use(ins.a, uses);
-			count_value_use(ins.b, uses);
-			count_value_use(ins.c, uses);
-			for (size_t a = 0; a < ins.args.size(); ++a)
-				count_value_use(ins.args[a], uses);
-			for (size_t c = 0; c < ins.switch_cases.size(); ++c)
-				count_value_use(ins.switch_cases[c].value, uses);
-		}
-	return uses;
-}
-
 bool metadata_is(const Metadata& md, const string& key, const string& value)
 {
 	return lowir2cy86::metadata_value(md, key) == value;
@@ -950,91 +1000,6 @@ bool strip_no_unwind_eh(Function& fn, const Program& program)
 		fn.blocks[b].instructions.swap(kept);
 	}
 	return true;
-}
-
-bool direct_function_readnone_nothrow(const Program& program, const string& name)
-{
-	map<string, size_t>::const_iterator it = program.function_by_name.find(name);
-	if (it == program.function_by_name.end())
-		return false;
-	const Function& fn = program.functions[it->second];
-	if (metadata_is(fn.metadata, "effects", "readnone") &&
-	    metadata_is(fn.metadata, "unwind", "no") &&
-	    !metadata_is(fn.metadata, "return", "noreturn"))
-		return true;
-	if (fn.declaration)
-		return false;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-		{
-			const Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == InstrKind::Call || ins.kind == InstrKind::Store ||
-			    ins.kind == InstrKind::AtomicStore ||
-			    ins.kind == InstrKind::AtomicExchange ||
-			    ins.kind == InstrKind::AtomicCompareExchange ||
-			    ins.kind == InstrKind::AtomicAddFetch ||
-			    ins.kind == InstrKind::Throw || ins.kind == InstrKind::Resume ||
-			    ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup)
-				return false;
-		}
-	return true;
-}
-
-bool removable_unused_call(const Program& program, const Instruction& ins)
-{
-	if (ins.kind != InstrKind::Call || !ins.has_dest)
-		return false;
-	if (ins.a.kind == ValueKind::Function)
-		return direct_function_readnone_nothrow(program, ins.a.text);
-	return metadata_is(ins.signature.metadata, "effects", "readnone") &&
-	       metadata_is(ins.signature.metadata, "unwind", "no") &&
-	       !metadata_is(ins.signature.metadata, "return", "noreturn");
-}
-
-bool pure_unused_instruction(const Program& program, const Instruction& ins)
-{
-	if (!ins.has_dest)
-		return false;
-	if (removable_unused_call(program, ins))
-		return true;
-	if (ins.kind == InstrKind::Const || ins.kind == InstrKind::Copy ||
-	    ins.kind == InstrKind::Addr || ins.kind == InstrKind::Index ||
-	    ins.kind == InstrKind::Unary || ins.kind == InstrKind::Binary ||
-	    ins.kind == InstrKind::Cmp || ins.kind == InstrKind::Convert)
-		return true;
-	if (ins.kind == InstrKind::Load && ins.a.kind == ValueKind::Slot)
-		return true;
-	return false;
-}
-
-bool remove_unused_temps(Function& fn, const Program& program)
-{
-	bool changed = false;
-	for (;;)
-	{
-		map<string, int> uses = count_temp_uses(fn);
-		bool pass = false;
-		for (size_t b = 0; b < fn.blocks.size(); ++b)
-		{
-			vector<Instruction> kept;
-			for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-			{
-				const Instruction& ins = fn.blocks[b].instructions[i];
-				if (ins.has_dest && uses[ins.dest] == 0 &&
-				    pure_unused_instruction(program, ins))
-				{
-					pass = true;
-					continue;
-				}
-				kept.push_back(ins);
-			}
-			fn.blocks[b].instructions.swap(kept);
-		}
-		changed = changed || pass;
-		if (!pass)
-			break;
-	}
-	return changed;
 }
 
 void collect_slot_uses(const Function& fn,
@@ -1141,7 +1106,7 @@ void replace_instruction_temps(Instruction& ins,
 }
 
 bool promote_single_store_slots(Function& fn,
-                                const vector<set<size_t> >& doms,
+                                const Dominators& doms,
                                 bool inline_artifacts_only)
 {
 	map<string, SlotStore> stores;
@@ -1274,56 +1239,58 @@ bool function_has_inline_artifact(const Function& fn)
 
 bool simplify_function(Function& fn, Program& program)
 {
-	bool changed = false;
-	map<string, Fact> facts;
-	map<string, vector<ExprFact> > exprs;
-	map<string, const Instruction*> defs;
-	bool has_eh = false;
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-			has_eh = has_eh ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhTry ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhCleanup ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhCatch ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhCatchAll ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhFilter ||
-			         fn.blocks[b].instructions[i].kind == InstrKind::EhEnd;
-	vector<set<size_t> > doms = compute_dominators(fn);
-	set<string> storage_temps = storage_temp_uses(fn);
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
+	bool any_changed = false;
+	for (;;)
 	{
-		if (has_eh && b != 0)
+		bool changed = false;
+		map<string, Fact> facts;
+		map<string, vector<ExprFact> > exprs;
+		map<string, const Instruction*> defs;
+		bool has_eh = false;
+		for (size_t b = 0; b < fn.blocks.size(); ++b)
+			for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+				has_eh = has_eh ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhTry ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhCleanup ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhCatch ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhCatchAll ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhFilter ||
+				         fn.blocks[b].instructions[i].kind == InstrKind::EhEnd;
+		Dominators doms = compute_dominators(fn);
+		set<string> storage_temps = storage_temp_uses(fn, program);
+		for (size_t b = 0; b < fn.blocks.size(); ++b)
 		{
-			facts.clear();
-			exprs.clear();
-		}
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-		{
-			bool c = simplify_instruction(fn, program,
-			                              fn.blocks[b].instructions[i],
+			if (has_eh && b != 0)
+			{
+				facts.clear();
+				exprs.clear();
+			}
+			for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+			{
+				bool c = simplify_instruction(fn, program,
+				                              fn.blocks[b].instructions[i],
 			                              b, doms, storage_temps, facts,
 			                              exprs, defs);
-			changed = c || changed;
+				changed = c || changed;
+			}
 		}
+		const bool broad_slot_cleanup =
+		    function_has_inline_artifact(fn) || metadata_is(fn.metadata, "role", "entry");
+		bool c = promote_single_store_slots(fn, doms, !broad_slot_cleanup);
+		changed = c || changed;
+		c = remove_unused_temps(fn, program);
+		changed = c || changed;
+		c = remove_dead_slot_traffic(fn);
+		changed = c || changed;
+		c = strip_no_unwind_eh(fn, program);
+		changed = c || changed;
+		c = cleanup_cfg(fn);
+		changed = c || changed;
+		any_changed = any_changed || changed;
+		if (!changed)
+			break;
 	}
-	rebuild_program(program);
-	const bool broad_slot_cleanup =
-	    function_has_inline_artifact(fn) || metadata_is(fn.metadata, "role", "entry");
-	bool c = promote_single_store_slots(fn, doms, !broad_slot_cleanup);
-	changed = c || changed;
-	rebuild_program(program);
-	c = remove_unused_temps(fn, program);
-	changed = c || changed;
-	rebuild_program(program);
-	c = remove_dead_slot_traffic(fn);
-	changed = c || changed;
-	rebuild_program(program);
-	c = strip_no_unwind_eh(fn, program);
-	changed = c || changed;
-	rebuild_program(program);
-	c = cleanup_cfg(fn);
-	changed = c || changed;
-	return changed;
+	return any_changed;
 }
 
 bool add_prefer_local_binding(Function& fn)
@@ -1349,7 +1316,7 @@ bool add_prefer_local_binding(Function& fn)
 	return true;
 }
 
-bool simplify_o1_once(Program& program)
+bool simplify_o1_once(Program& program, map<string, int>& inline_index_cache)
 {
 	rebuild_program(program);
 	bool changed = false;
@@ -1360,17 +1327,15 @@ bool simplify_o1_once(Program& program)
 		if (!program.functions[i].declaration)
 			changed = simplify_function(program.functions[i], program) || changed;
 	}
-	rebuild_program(program);
-	bool inlined = inline_o1_once(program);
+	bool inlined = inline_o1_once(program, inline_index_cache);
 	changed = inlined || changed;
-	rebuild_program(program);
 	return changed;
 }
 
-bool run_o1_fixedpoint(Program& program)
+bool run_o1_fixedpoint(Program& program, map<string, int>& inline_index_cache)
 {
 	bool changed = false;
-	while (simplify_o1_once(program))
+	while (simplify_o1_once(program, inline_index_cache))
 	{
 		changed = true;
 	}
@@ -1379,7 +1344,7 @@ bool run_o1_fixedpoint(Program& program)
 
 }  // namespace
 
-Program optimize_program(Program program, int level)
+Program optimize_program(Program program, int level, bool prune_unreachable_weak)
 {
 	if (level < 0 || level > 2)
 		throw runtime_error("unsupported optimization level");
@@ -1392,7 +1357,10 @@ Program optimize_program(Program program, int level)
 		lowir2cy86::validate_fragment(program);
 		return program;
 	}
-	run_o1_fixedpoint(program);
+	if (level >= 2 && prune_unreachable_weak)
+		remove_unreachable_weak_functions(program);
+	map<string, int> inline_index_cache;
+	run_o1_fixedpoint(program, inline_index_cache);
 	if (level == 1)
 	{
 		lowir2cy86::validate_fragment(program);
@@ -1401,11 +1369,13 @@ Program optimize_program(Program program, int level)
 	for (;;)
 	{
 		bool changed = promote_o2_slots_once(program);
-		changed = run_o1_fixedpoint(program) || changed;
+		changed = run_o1_fixedpoint(program, inline_index_cache) || changed;
+		if (prune_unreachable_weak)
+			changed = remove_unreachable_weak_functions(program) || changed;
 		if (!changed)
 			break;
 	}
-	canonicalize_optimized_program(program, original);
+	canonicalize_optimized_program(program, original, !prune_unreachable_weak);
 	lowir2cy86::validate_fragment(program);
 	return program;
 }

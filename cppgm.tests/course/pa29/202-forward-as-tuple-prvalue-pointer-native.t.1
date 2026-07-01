@@ -1,0 +1,17 @@
+#include <tuple>
+
+struct Scope {
+  int value;
+};
+
+Scope global_scope;
+
+Scope* current_scope() {
+  return &global_scope;
+}
+
+int main() {
+  std::tuple<Scope*&&> saved = std::forward_as_tuple(current_scope());
+  (void)saved;
+  return 0;
+}

@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 
 namespace pa14 {
 namespace internal {
@@ -57,6 +58,53 @@ bool direct_call_fp_test(const Node& expr)
 	       name == "__builtin_isnan" ||
 	       name == "__builtin_isnormal" ||
 	       name == "__builtin_signbit";
+}
+
+bool gnu_atomic_builtin_name(const string& name)
+{
+	return name == "__atomic_load_n" ||
+	       name == "__atomic_load" ||
+	       name == "__atomic_store_n" ||
+	       name == "__atomic_store" ||
+	       name == "__atomic_exchange_n" ||
+	       name == "__atomic_compare_exchange" ||
+	       name == "__atomic_compare_exchange_n" ||
+	       name == "__atomic_fetch_add" ||
+	       name == "__atomic_fetch_sub" ||
+	       name == "__atomic_fetch_and" ||
+	       name == "__atomic_fetch_or" ||
+	       name == "__atomic_fetch_xor" ||
+	       name == "__atomic_add_fetch" ||
+	       name == "__atomic_sub_fetch" ||
+	       name == "__atomic_and_fetch" ||
+	       name == "__atomic_or_fetch" ||
+	       name == "__atomic_xor_fetch" ||
+	       name == "__atomic_always_lock_free" ||
+	       name == "__atomic_is_lock_free" ||
+	       name == "__atomic_thread_fence" ||
+	       name == "__atomic_signal_fence" ||
+	       name == "__atomic_test_and_set" ||
+	       name == "__atomic_clear" ||
+	       name == "__sync_lock_test_and_set" ||
+	       name == "__sync_lock_release";
+}
+
+bool c11_atomic_builtin_name(const string& name)
+{
+	return name == "__c11_atomic_load" ||
+	       name == "__c11_atomic_init" ||
+	       name == "__c11_atomic_store" ||
+	       name == "__c11_atomic_exchange" ||
+	       name == "__c11_atomic_compare_exchange_strong" ||
+	       name == "__c11_atomic_compare_exchange_weak" ||
+	       name == "__c11_atomic_fetch_add" ||
+	       name == "__c11_atomic_fetch_sub" ||
+	       name == "__c11_atomic_fetch_and" ||
+	       name == "__c11_atomic_fetch_or" ||
+	       name == "__c11_atomic_fetch_xor" ||
+	       name == "__c11_atomic_is_lock_free" ||
+	       name == "__c11_atomic_thread_fence" ||
+	       name == "__c11_atomic_signal_fence";
 }
 
 }  // namespace
@@ -221,11 +269,10 @@ Value FunctionLowerer::emit_call_rvalue(const Node& expr)
 	if (direct_call_bit_count(expr))
 		return emit_builtin_bit_count(expr);
 	if (expr.direct_call != NULL &&
-	    (expr.direct_call->name.compare(0, 8, "__atomic") == 0 ||
-	     expr.direct_call->name.compare(0, 6, "__sync") == 0))
+	    gnu_atomic_builtin_name(expr.direct_call->name))
 		return emit_gnu_atomic_builtin(expr);
 	if (expr.direct_call != NULL &&
-	    expr.direct_call->name.compare(0, 5, "__c11") == 0)
+	    c11_atomic_builtin_name(expr.direct_call->name))
 		return emit_c11_atomic_builtin(expr);
 	bool handled_hash_next = false;
 	Value hash_next = emit_hosted_hash_node_next_call(expr,
@@ -651,6 +698,35 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 		return emit_new_expression(expr);
 	if (starts_with(expr.line, "delete-expression"))
 		return emit_delete_expression(expr);
+	if (starts_with(expr.line, "braced-init-list") ||
+	    starts_with(expr.line, "initializer-list-object"))
+	{
+		TypePtr bare = expr.type.get() != NULL
+			? pa11::strip_cv(expr.type) : TypePtr();
+		if (bare.get() != NULL &&
+		    (bare->kind == TypeKind::Record ||
+		     bare->kind == TypeKind::Array))
+		{
+			string slot = fresh_aux_slot("braced",
+			                             slot_lowir_type(expr.type));
+			string addr_name = fresh_temp();
+			instr(addr_name + " = addr $" + slot);
+			Value addr("ptr", addr_name);
+			function<Value()> addr_for = [addr]() { return addr; };
+			if (starts_with(expr.line, "initializer-list-object"))
+				lower_initializer_list_init(addr_for, expr.type, expr);
+			else
+				lower_object_init(addr_for, expr.type, expr);
+			return addr;
+		}
+		if (expr.children.size() == 1)
+			return convert_value(emit_rvalue(expr.children[0]),
+			                     expr.children[0].type,
+			                     expr.type);
+		if (bare.get() != NULL &&
+		    bare->kind == TypeKind::Fundamental)
+			return Value(scalar_lowir_type(expr.type), "0");
+	}
 	if (starts_with(expr.line, "subscript-expression") ||
 	    starts_with(expr.line, "member-pointer-expression"))
 	{
@@ -669,7 +745,9 @@ Value FunctionLowerer::emit_rvalue(const Node& expr)
 	if (starts_with(expr.line, "sizeof-expression"))
 	{
 		string tmp = fresh_temp();
-		instr(tmp + " = const i64 " + expr.token_text);
+		string value = expr.has_constant_value
+			? to_string(expr.constant_value) : expr.token_text;
+		instr(tmp + " = const i64 " + value);
 		return Value("i64", tmp);
 	}
 	if (starts_with(expr.line, "pseudo-destructor-expression"))

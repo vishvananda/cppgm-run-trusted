@@ -1,0 +1,18 @@
+#include <vector>
+
+int main()
+{
+  std::vector<bool> bits(3, false);
+  if (bits.size() != 3)
+    return 1;
+  bits[1] = true;
+  if (bits.size() != 3)
+    return 2;
+  if (bits[0])
+    return 3;
+  if (!bits[1])
+    return 4;
+  if (bits[2])
+    return 5;
+  return 0;
+}

@@ -1,0 +1,73 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $a : obj<4x4>
+  slot $b : obj<4x4>
+  slot $cond__1 : i32
+
+  block ^entry:
+    %t1 = addr $a
+    call void @S__S(%t1)
+    %t2 = addr $b
+    %t3 = addr $a
+    call void @S__S__ov2(%t2, %t3, 1)
+    %t4 = addr $b
+    %t5 = index i8 [projection=field] %t4, 0
+    %t6 = load i32 %t5
+    %t7 = cmp eq i32 %t6, 7
+    branch %t7, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t8 = load i32 $cond__1
+    return i32 %t8
+}
+function @S__S(%this : ptr) -> void [binding=weak, object=_ZN1SC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 3, %t2
+    return void
+}
+function @S__S__ov2(%this : ptr, %other : ptr [pass=reference], %add : u8) -> void [binding=weak, object=_ZN1SC1ERKS_b] {
+  slot $this : ptr
+  slot $other : ptr
+  slot $add : u8
+  slot $cond__1 : i32
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %other, $other
+    store u8 %add, $add
+    %t1 = load ptr $other
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load i32 %t2
+    %t4 = load u8 $add
+    branch %t4, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 4, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 9, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t5 = load i32 $cond__1
+    %t6 = binary add i32 %t3, %t5
+    %t7 = load ptr $this
+    %t8 = index i8 [projection=field] %t7, 0
+    store i32 %t6, %t8
+    return void
+}
+alias object _ZN1SC2Ev = @S__S
+alias object _ZN1SC2ERKS_b = @S__S__ov2

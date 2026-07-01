@@ -104,7 +104,8 @@ void MirDumper::dump_instruction(const lowir2cy86::Function& fn,
 	case lowir2cy86::InstrKind::CopyObj:
 		if (ins.b.kind == lowir2cy86::ValueKind::Temp &&
 		    promoted_addr_params_.find(ins.b.text) !=
-		        promoted_addr_params_.end())
+		        promoted_addr_params_.end() &&
+		    promoted_addr_params_.find(ins.b.text)->second != "%ret")
 			break;
 		dump_copyobj(fn, ins);
 		break;
@@ -341,7 +342,8 @@ void MirDumper::simulate_instruction(const lowir2cy86::Function& fn,
 	case lowir2cy86::InstrKind::CopyObj:
 		if (ins.b.kind == lowir2cy86::ValueKind::Temp &&
 		    promoted_addr_params_.find(ins.b.text) !=
-		        promoted_addr_params_.end())
+		        promoted_addr_params_.end() &&
+		    promoted_addr_params_.find(ins.b.text)->second != "%ret")
 			break;
 		if (copyobj_uses_direct_param_loads(ins))
 			break;

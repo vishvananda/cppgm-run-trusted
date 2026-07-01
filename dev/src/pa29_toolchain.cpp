@@ -8,6 +8,9 @@
 
 #include <cstdio>
 #include <fstream>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -18,6 +21,13 @@ using namespace std;
 
 namespace pa29 {
 namespace {
+
+void trim_phase_heap()
+{
+#if defined(__GLIBC__)
+	malloc_trim(0);
+#endif
+}
 
 bool ends_with(const string& value, const string& suffix)
 {
@@ -359,7 +369,7 @@ struct TempFiles
 	~TempFiles()
 	{
 		for (size_t i = 0; i < paths.size(); ++i)
-			remove(paths[i].c_str());
+			unlink(paths[i].c_str());
 	}
 };
 
@@ -386,12 +396,13 @@ void compile_source_to_lowir(const string& srcfile,
 	}
 	const string tmp = objfile + ".lowiropt.tmp";
 	pa14::emit_lowir(vector<string>(1, srcfile), tmp, lowir_options);
+	trim_phase_heap();
 	lowiropt::Options opt_options;
 	opt_options.optimization_level =
 	    options.optimization_level > 2 ? 2 : options.optimization_level;
 	opt_options.outfile = objfile;
 	lowiropt::optimize_files_to_file(vector<string>(1, tmp), opt_options);
-	remove(tmp.c_str());
+	unlink(tmp.c_str());
 }
 
 bool file_exists(const string& path)

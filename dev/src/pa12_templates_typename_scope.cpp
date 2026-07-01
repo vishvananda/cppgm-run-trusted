@@ -58,8 +58,8 @@ TypePtr Parser::substitute_template_type_in_scope(TypePtr type,
 						if (parameter.is_pack)
 						{
 							subst[parameter.name] =
-								pa11::make_template_parameter_type(
-									parameter.name);
+								template_parameter_placeholder_type(
+									parameter);
 							value_subst[parameter.name] = arguments[i];
 							if (arguments[i].kind ==
 							        TemplateArgumentKind::Pack &&

@@ -35,7 +35,9 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 	if (init_record.get() != NULL &&
 	    init_record->kind == pa11::TypeKind::Record &&
 	    pa11::same_type(init_record, record) &&
-	    (init.node.direct_call != NULL || !init.braced_init_list))
+	    (init.node.direct_call != NULL ||
+	     !init.braced_init_list ||
+	     init.category == ValueCategory::PRValue))
 		return;
 	if (record->scope != NULL &&
 	    init.node.direct_call != NULL &&
@@ -122,9 +124,9 @@ void Parser::validate_record_copy_initialization(TypePtr type, const Expr& init)
 			{
 				viable = false;
 			}
-			if (!viable)
-				break;
-		}
+		if (!viable)
+			break;
+	}
 		if (viable)
 			throw runtime_error("explicit constructor in copy initialization");
 	}

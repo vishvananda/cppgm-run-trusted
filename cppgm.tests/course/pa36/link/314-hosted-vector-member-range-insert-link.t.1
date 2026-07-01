@@ -1,0 +1,24 @@
+#include <vector>
+
+template <class Output>
+struct Pipeline {
+  std::vector<unsigned int> pending;
+  std::vector<unsigned int> out;
+
+  void flush()
+  {
+    out.insert(out.end(), pending.begin(), pending.end());
+  }
+};
+
+int main()
+{
+  Pipeline<int> pipeline;
+  pipeline.pending.push_back(4);
+  pipeline.pending.push_back(5);
+  pipeline.flush();
+
+  return pipeline.out.size() == 2 &&
+         pipeline.out[0] == 4 &&
+         pipeline.out[1] == 5 ? 0 : 1;
+}

@@ -1,0 +1,54 @@
+#include <iterator>
+#include <vector>
+
+struct Counted {
+  static int copies;
+  static int moves;
+  int value;
+  Counted() : value(0) {}
+  Counted(const Counted& other) : value(other.value) { ++copies; }
+  Counted(Counted&& other) : value(other.value) { other.value = -1; ++moves; }
+  Counted& operator=(const Counted& other)
+  {
+    value = other.value;
+    ++copies;
+    return *this;
+  }
+  Counted& operator=(Counted&& other)
+  {
+    value = other.value;
+    other.value = -1;
+    ++moves;
+    return *this;
+  }
+};
+
+int Counted::copies = 0;
+int Counted::moves = 0;
+
+struct TokenLike {
+  Counted counted;
+  TokenLike() {}
+  TokenLike(const TokenLike& other) : counted(other.counted) {}
+  TokenLike(TokenLike&& other) : counted(static_cast<Counted&&>(other.counted)) {}
+  TokenLike& operator=(const TokenLike& other)
+  {
+    counted = other.counted;
+    return *this;
+  }
+  TokenLike& operator=(TokenLike&& other)
+  {
+    counted = static_cast<Counted&&>(other.counted);
+    return *this;
+  }
+};
+
+int main()
+{
+  std::vector<TokenLike> a(1);
+  std::vector<TokenLike> b;
+  b.insert(b.end(),
+           std::make_move_iterator(a.begin()),
+           std::make_move_iterator(a.end()));
+  return Counted::copies == 0 && Counted::moves == 1 ? 0 : 10 + Counted::copies * 2 + Counted::moves;
+}

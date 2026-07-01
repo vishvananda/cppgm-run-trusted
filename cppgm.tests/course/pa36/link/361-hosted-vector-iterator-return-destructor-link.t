@@ -1,0 +1,11 @@
+# hosted vector iterator return completes before destructor demand
+#include <vector>
+
+int main()
+{
+  std::vector<int> values;
+  values.push_back(7);
+
+  std::vector<int>::iterator it = values.begin();
+  return *it == 7 ? 0 : 1;
+}

@@ -1,7 +1,57 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 #include "pa12_templates_function_support.h"
 namespace pa14 {
 namespace internal {
+namespace {
+
+bool parse_decimal_integer_literal(const string& text, uint64_t& out)
+{
+	if (text.empty())
+		return false;
+	size_t pos = 0;
+	bool negative = false;
+	if (text[pos] == '-' || text[pos] == '+') {
+		negative = text[pos] == '-';
+		++pos;
+	}
+	if (pos == text.size())
+		return false;
+	uint64_t value = 0;
+	for (; pos < text.size(); ++pos) {
+		char ch = text[pos];
+		if (ch < '0' || ch > '9')
+			return false;
+		value = value * 10 + static_cast<uint64_t>(ch - '0');
+	}
+	out = negative ? uint64_t(0) - value : value;
+	return true;
+}
+
+bool widen_signed_decimal_literal(TypePtr source, const string& text, string& out)
+{
+	TypePtr bare = pa11::strip_cv(strip_for_value(source));
+	if ((bare->kind != TypeKind::Fundamental && bare->kind != TypeKind::Enum) ||
+	    pa11::type_size(bare) >= 8 ||
+	    is_unsigned_type(source))
+		return false;
+	uint64_t raw = 0;
+	if (!parse_decimal_integer_literal(text, raw))
+		return false;
+	unsigned bits = static_cast<unsigned>(pa11::type_size(bare) * 8);
+	uint64_t mask = (uint64_t(1) << bits) - 1;
+	uint64_t value = raw & mask;
+	uint64_t sign = uint64_t(1) << (bits - 1);
+	if ((value & sign) != 0)
+		value |= ~mask;
+	string widened = to_string(static_cast<int64_t>(value));
+	if (widened == text)
+		return false;
+	out = widened;
+	return true;
+}
+
+}  // namespace
 
 TypePtr concrete_conversion_type(TypePtr type, TypePtr fallback)
 {
@@ -942,7 +992,21 @@ if ((!from_valid || !to_valid) && value.type == "ptr") {
 }
 	string dst = scalar_lowir_type(to);
 	string src = scalar_lowir_type(strip_for_value(from));
-	if (dst == "i64" && src != dst && is_unsigned_type(to) && value.text != "" && value.text[0] != '%' && value.text[0] != '$' && value.text[0] != '@' && !is_float_type(from) && !is_float_type(to)) {
+	if (dst == "i64" && src != dst &&
+	    value.text != "" && value.text[0] != '%' &&
+	    value.text[0] != '$' && value.text[0] != '@' &&
+	    !is_float_type(from) && !is_float_type(to) &&
+	    (pa11::is_integral_or_bool_type(preliminary_from) ||
+	     preliminary_from->kind == TypeKind::Enum) &&
+	    (pa11::is_integral_or_bool_type(preliminary_to) ||
+	     preliminary_to->kind == TypeKind::Enum)) {
+		string widened;
+		if (widen_signed_decimal_literal(preliminary_from,
+		                                 value.text,
+		                                 widened))
+			return Value("i64", widened);
+		if (!is_unsigned_type(to))
+			return convert_value(value, from, to);
 		string tmp = fresh_temp();
 		instr(tmp + " = convert " + string(is_unsigned_type(from) ? "zext" : "sext") + " i64 " + src + " " + value.text);
 		return Value("i64", tmp); }
@@ -986,12 +1050,12 @@ void FunctionLowerer::branch_with_unwind_cleanups(const Node& expr, const string
 	--eh_try_depth_;
 	instr("eh_end");
 	if (define_dispatch) {
-		string end = fresh_block("call_unwind_end");
-		terminate("jump ^" + end);
-		active_unwind_dispatch_ = dispatch;
-		start_block(dispatch);
-		emit_unwind_cleanups();
-		terminate("resume");
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = dispatch;
+			active_unwind_cleanup_depth_ = cleanups_.size();
+			start_block(dispatch);
+		emit_shared_unwind_dispatch_body();
 		start_block(end); }
 	terminate_with_pending_temp_cleanups(cond.text, yes, no); }
 Value FunctionLowerer::emit_record_assignment(const Node& expr) {
@@ -1036,12 +1100,12 @@ void FunctionLowerer::finish_assignment_protection(bool wrap,
 	--eh_try_depth_;
 	instr("eh_end");
 	if (define_dispatch) {
-		string end = fresh_block("call_unwind_end");
-		terminate("jump ^" + end);
-		active_unwind_dispatch_ = dispatch;
-		start_block(dispatch);
-		emit_unwind_cleanups();
-		terminate("resume");
+			string end = fresh_block("call_unwind_end");
+			terminate("jump ^" + end);
+			active_unwind_dispatch_ = dispatch;
+			active_unwind_cleanup_depth_ = cleanups_.size();
+			start_block(dispatch);
+		emit_shared_unwind_dispatch_body();
 		start_block(end); } }
 
 Value FunctionLowerer::emit_member_assignment(const Node& expr) {
@@ -1115,8 +1179,25 @@ Value FunctionLowerer::emit_compound_assignment(const Node& expr, TypePtr lhs_ty
 	                                           expr.children[1].type);
 	oldv = convert_binary_value(oldv, expr.children[0].type, arithmetic_type);
 	rhs = convert_value(rhs, expr.children[1].type, arithmetic_type);
-	ETokenType op = expr.op == OP_PLUSASS ? OP_PLUS : expr.op == OP_MINUSASS ? OP_MINUS : expr.op == OP_STARASS ? OP_STAR : expr.op == OP_DIVASS ? OP_DIV : expr.op == OP_MODASS ? OP_MOD : OP_PLUS;
-	string op_name = op == OP_MINUS ? "sub" : op == OP_STAR ? "mul" : op == OP_DIV ? (is_unsigned_type(arithmetic_type) ? "udiv" : "div") : op == OP_MOD ? (is_unsigned_type(arithmetic_type) ? "umod" : "mod") : "add";
+	ETokenType op = expr.op == OP_PLUSASS ? OP_PLUS :
+	                expr.op == OP_MINUSASS ? OP_MINUS :
+	                expr.op == OP_STARASS ? OP_STAR :
+	                expr.op == OP_DIVASS ? OP_DIV :
+	                expr.op == OP_MODASS ? OP_MOD :
+	                expr.op == OP_BANDASS ? OP_AMP :
+	                expr.op == OP_BORASS ? OP_BOR :
+	                expr.op == OP_XORASS ? OP_XOR :
+	                expr.op == OP_LSHIFTASS ? OP_LSHIFT :
+	                expr.op == OP_RSHIFTASS ? OP_RSHIFT : OP_PLUS;
+	string op_name = op == OP_MINUS ? "sub" :
+	                 op == OP_STAR ? "mul" :
+	                 op == OP_DIV ? (is_unsigned_type(arithmetic_type) ? "udiv" : "div") :
+	                 op == OP_MOD ? (is_unsigned_type(arithmetic_type) ? "umod" : "mod") :
+	                 op == OP_AMP ? "and" :
+	                 op == OP_BOR ? "or" :
+	                 op == OP_XOR ? "xor" :
+	                 op == OP_LSHIFT ? "shl" :
+	                 op == OP_RSHIFT ? (is_unsigned_type(arithmetic_type) ? "ushr" : "shr") : "add";
 	string tmp = fresh_temp();
 	instr(tmp + " = binary " + op_name + " " +
 	      scalar_lowir_type(arithmetic_type) + " " + oldv.text + ", " + rhs.text);
@@ -1132,9 +1213,14 @@ Value FunctionLowerer::emit_plain_assignment(const Node& expr, TypePtr lhs_type)
 	Binding* lhs_binding = expr.children[0].binding;
 	map<const Binding*, string>::const_iterator slot_it = lhs_binding != NULL
 		? slots_.find(lhs_binding) : slots_.end();
-	if (starts_with(expr.children[1].line, "call-expression") && slot_it != slots_.end()) {
+	bool lhs_is_reference = lhs_binding != NULL && is_reference(lhs_binding->type);
+	if (starts_with(expr.children[1].line, "call-expression") &&
+	    !is_reference(expr.children[1].type) &&
+	    !lhs_is_reference &&
+	    slot_it != slots_.end()) {
 		call_result_store_slot_ = slot_it->second;
 		call_result_store_type_ = lhs_type;
+		call_result_store_expr_ = &expr.children[1];
 		call_result_store_consumed_ = false; }
 	Value rhs = emit_rvalue(expr.children[1]);
 	if (!call_result_store_consumed_) {
@@ -1145,6 +1231,7 @@ Value FunctionLowerer::emit_plain_assignment(const Node& expr, TypePtr lhs_type)
 		      ", " + addr.text); }
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();
+	call_result_store_expr_ = NULL;
 	call_result_store_consumed_ = false;
 	return rhs; }
 

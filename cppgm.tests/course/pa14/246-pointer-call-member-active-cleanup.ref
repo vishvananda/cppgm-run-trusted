@@ -1,0 +1,146 @@
+function @is_a(%type : ptr [pass=by_address]) -> u8 [binding=strong, object=_Z4is_a1P] {
+  slot $type : obj<8x8>
+  slot $land__1 : i64
+  slot $call__2 : ptr
+  slot $call__3 : ptr
+
+  block ^entry:
+    eh_try ^call_unwind_dispatch_4
+    %t1 = call ptr @P__get(%type)
+    store ptr %t1, $call__2
+    %t2 = load ptr $call__2
+    %t3 = cmp ne ptr %t2, 0
+    eh_end
+    jump ^call_unwind_end_5
+
+  block ^call_unwind_dispatch_4:
+    call void @P___P(%type)
+    resume
+
+  block ^call_unwind_end_5:
+    branch %t3, ^land_rhs_1, ^land_short_2
+
+  block ^land_rhs_1:
+    eh_try ^call_unwind_dispatch_4
+    %t4 = call ptr @P__operator__(%type)
+    store ptr %t4, $call__3
+    %t5 = load ptr $call__3
+    %t6 = index i8 [projection=field] %t5, 0
+    %t7 = load i32 %t6
+    %t8 = cmp eq i32 %t7, 0
+    %t9 = cmp ne i64 %t8, 0
+    store i64 %t9, $land__1
+    eh_end
+    jump ^land_end_3
+
+  block ^land_short_2:
+    store i64 0, $land__1
+    jump ^land_end_3
+
+  block ^land_end_3:
+    %t10 = load i64 $land__1
+    call void @P___P(%type)
+    return u8 %t10
+}
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $t : obj<8x4>
+  slot $p : obj<8x8>
+  slot $cond__1 : i32
+  slot $arg__2 : obj<8x8>
+
+  block ^entry:
+    %t1 = addr $t
+    call void @T__T(%t1)
+    %t2 = addr $p
+    %t3 = addr $t
+    call void @P__P(%t2, %t3)
+    %t4 = addr $arg__2
+    %t5 = addr $p
+    call void @P__P__ov2(%t4, %t5)
+    %t6 = call u8 @is_a(%t4)
+    branch %t6, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t7 = load i32 $cond__1
+    return i32 %t7
+}
+function @T__T(%this : ptr) -> void [binding=weak, object=_ZN1TC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 0, %t2
+    %t3 = load ptr $this
+    %t4 = index i8 [projection=field] %t3, 4
+    store i32 18, %t4
+    return void
+}
+function @P__P(%this : ptr, %q : ptr) -> void [binding=weak, object=_ZN1PC1EP1T] {
+  slot $this : ptr
+  slot $q : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %q, $q
+    %t1 = load ptr $q
+    %t2 = load ptr $this
+    %t3 = index i8 [projection=field] %t2, 0
+    store ptr %t1, %t3
+    return void
+}
+function @P__get(%this : ptr) -> ptr [binding=weak, object=_ZNK1P3getEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load ptr %t2
+    return ptr %t3
+}
+function @P__operator__(%this : ptr) -> ptr [binding=weak, object=_ZNK1PptEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load ptr %t2
+    return ptr %t3
+}
+function @P__P__ov2(%this : ptr, %other : ptr [pass=reference]) -> void [binding=weak, object=_ZN1PC1ERKS_] {
+  slot $this : ptr
+  slot $other : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %other, $other
+    %t1 = load ptr $other
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load ptr %t2
+    %t4 = load ptr $this
+    %t5 = index i8 [projection=field] %t4, 0
+    store ptr %t3, %t5
+    return void
+}
+function @P___P(%this : ptr) -> void [binding=weak, object=_ZN1PD1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    return void
+}
+alias object _ZN1TC2Ev = @T__T
+alias object _ZN1PC2EP1T = @P__P
+alias object _ZN1PC2ERKS_ = @P__P__ov2
+alias object _ZN1PD2Ev = @P___P

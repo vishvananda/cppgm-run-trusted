@@ -68,6 +68,54 @@ bool scope_has_nonstatic_variable(Scope* scope, const string& name)
 	return false;
 }
 
+uint64_t hosted_align_up(uint64_t value, uint64_t align);
+bool hosted_type_size_align(TypePtr type, uint64_t& size, uint64_t& align);
+void sync_hosted_record_fields_from_scope(TypePtr bare);
+void set_hosted_record_layout_preserving_fields(TypePtr bare,
+                                                uint64_t size,
+                                                uint64_t align);
+
+bool hosted_field_duplicate(const vector<Binding*>& fields, Binding* member)
+{
+	for (size_t i = 0; i < fields.size(); ++i)
+		if (fields[i] == member ||
+		    (fields[i] != NULL &&
+		     fields[i]->owner == member->owner &&
+		     fields[i]->name == member->name))
+			return true;
+	return false;
+}
+
+void sync_hosted_shared_fields_from_scope(TypePtr bare)
+{
+	if (bare->scope == NULL)
+		return;
+	vector<Binding*> fields;
+	uint64_t offset = 0;
+	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+	{
+		Binding* member = bare->scope->binding_order[i];
+		if (member == NULL ||
+		    member->kind != BindingKind::Variable ||
+		    member->owner != bare->scope ||
+		    member->is_static_member ||
+		    member->aliased_binding != NULL ||
+		    hosted_field_duplicate(fields, member))
+			continue;
+		uint64_t size = 0;
+		uint64_t align = 0;
+		if (!hosted_type_size_align(member->type, size, align))
+			continue;
+		offset = hosted_align_up(offset, align);
+		member->member_offset = offset;
+		member->bit_offset = 0;
+		member->is_bit_field = false;
+		fields.push_back(member);
+		offset += size;
+	}
+	bare->fields = fields;
+}
+
 void set_scope_variable_offset_by_prefix(Scope* scope,
                                          const string& prefix,
                                          uint64_t offset)
@@ -101,13 +149,14 @@ bool complete_hosted_shared_ptr_layout(TypePtr type)
 	    !scope_has_namespace_named(bare->scope, "std"))
 		return false;
 	string primary = unqualified_template_primary_name(bare);
-	if (primary != "shared_ptr" && primary != "__shared_ptr")
+	if (primary != "shared_ptr" &&
+	    primary != abi_private_name("_shared_ptr") &&
+	    primary != "weak_ptr" &&
+	    primary != "__weak_ptr")
 		return false;
 	bare->complete = true;
-	bare->fields.clear();
-	bare->direct_bases.clear();
-	bare->direct_base_offsets.clear();
-	bare->direct_base_virtuals.clear();
+	sync_hosted_shared_fields_from_scope(bare);
+	bare->direct_base_offsets.assign(bare->direct_bases.size(), 0);
 	bare->virtual_bases.clear();
 	bare->virtual_base_offsets.clear();
 	bare->direct_base_offset = 0;
@@ -120,6 +169,36 @@ bool complete_hosted_shared_ptr_layout(TypePtr type)
 	return true;
 }
 
+bool complete_hosted_initializer_list_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std") ||
+	    unqualified_template_primary_name(bare) != "initializer_list")
+		return false;
+	bare->complete = true;
+	sync_hosted_record_fields_from_scope(bare);
+	bare->direct_base_offsets.assign(bare->direct_bases.size(), 0);
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
+	bare->direct_base_offset = 0;
+	bare->record_size = 16;
+	bare->record_align = 8;
+	bare->nonvirtual_size = 16;
+	bare->nonvirtual_align = 8;
+	bare->layout_valid = true;
+	bare->hosted_layout_synthesized = true;
+	set_scope_variable_offset(bare->scope, "__b", 0);
+	set_scope_variable_offset(bare->scope, "__begin_", 0);
+	set_scope_variable_offset(bare->scope, "first", 0);
+	set_scope_variable_offset(bare->scope, "__n", 8);
+	set_scope_variable_offset(bare->scope, "__size_", 8);
+	set_scope_variable_offset(bare->scope, "count", 8);
+	return true;
+}
+
 bool complete_hosted_hashtable_ebo_helper_layout(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
@@ -127,7 +206,7 @@ bool complete_hosted_hashtable_ebo_helper_layout(TypePtr type)
 	    bare->kind != TypeKind::Record ||
 	    !bare->is_template_specialization ||
 	    !scope_has_namespace_named(bare->scope, "std") ||
-	    unqualified_template_primary_name(bare) != "_Hashtable_ebo_helper")
+	    unqualified_template_primary_name(bare) != abi_private_name("Hashtable_ebo_helper"))
 		return false;
 	bool use_no_unique_storage = true;
 	TypePtr object_type;
@@ -172,6 +251,64 @@ bool complete_hosted_hashtable_ebo_helper_layout(TypePtr type)
 	return true;
 }
 
+bool complete_hosted_shared_ptr_ebo_helper_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std") ||
+	    unqualified_template_primary_name(bare) != abi_private_name("Sp_ebo_helper"))
+		return false;
+	TypePtr object_type;
+	if (bare->template_arguments.size() > 1 &&
+	    bare->template_arguments[1].kind == TemplateInstanceArgumentKind::Type)
+		object_type = bare->template_arguments[1].type;
+	TypePtr object_bare =
+		object_type.get() != NULL ? strip_cv(object_type) : TypePtr();
+	bool use_ebo = object_bare.get() != NULL &&
+	               object_bare->kind == TypeKind::Record &&
+	               !type_uses_object_storage(object_type);
+	if (bare->template_arguments.size() > 2 &&
+	    bare->template_arguments[2].kind == TemplateInstanceArgumentKind::Value &&
+	    !bare->template_arguments[2].dependent)
+		use_ebo = bare->template_arguments[2].value != 0;
+	uint64_t size = 1;
+	uint64_t align = 1;
+	if (object_type.get() != NULL)
+		hosted_type_size_align(object_type, size, align);
+	bare->complete = true;
+	bare->fields.clear();
+	bare->direct_bases.clear();
+	bare->direct_base_offsets.clear();
+	bare->direct_base_virtuals.clear();
+	if (use_ebo && object_bare.get() != NULL &&
+	    object_bare->kind == TypeKind::Record)
+	{
+		bare->direct_bases.push_back(object_bare);
+		bare->direct_base_offsets.push_back(0);
+		bare->direct_base_virtuals.push_back(false);
+		size = max<uint64_t>(uint64_t(1), size);
+	}
+	else
+	{
+		sync_hosted_shared_fields_from_scope(bare);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_tp"), 0);
+	}
+	align = max<uint64_t>(uint64_t(1), align);
+	size = hosted_align_up(max<uint64_t>(uint64_t(1), size), align);
+	bare->virtual_bases.clear();
+	bare->virtual_base_offsets.clear();
+	bare->direct_base_offset = 0;
+	bare->record_size = size;
+	bare->record_align = align;
+	bare->nonvirtual_size = size;
+	bare->nonvirtual_align = align;
+	bare->layout_valid = true;
+	bare->hosted_layout_synthesized = true;
+	return true;
+}
+
 bool complete_hosted_empty_record_layout(TypePtr type, const string& primary)
 {
 	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
@@ -195,6 +332,166 @@ bool complete_hosted_empty_record_layout(TypePtr type, const string& primary)
 	bare->nonvirtual_align = 1;
 	bare->layout_valid = true;
 	bare->hosted_layout_synthesized = true;
+	return true;
+}
+
+bool hosted_instance_argument_dependent(const TemplateInstanceArgument& arg,
+                                        vector<const void*>& seen);
+
+bool hosted_type_dependent(TypePtr type, vector<const void*>& seen)
+{
+	if (type.get() == NULL)
+		return false;
+	type = strip_cv(type);
+	if (find(seen.begin(), seen.end(), type.get()) != seen.end())
+		return false;
+	seen.push_back(type.get());
+	if (type->is_dependent_typename ||
+	    type->kind == TypeKind::TemplateParameter ||
+	    type->kind == TypeKind::TemplateTemplateParameter)
+		return true;
+	if (type->kind == TypeKind::Pointer ||
+	    type->kind == TypeKind::LValueReference ||
+	    type->kind == TypeKind::RValueReference ||
+	    type->kind == TypeKind::Array)
+		return hosted_type_dependent(type->base, seen);
+	if (type->kind == TypeKind::Function)
+	{
+		if (hosted_type_dependent(type->base, seen))
+			return true;
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			if (hosted_type_dependent(type->parameters[i], seen))
+				return true;
+		return false;
+	}
+	if (type->kind == TypeKind::MemberPointer)
+		return hosted_type_dependent(type->member_class, seen) ||
+		       hosted_type_dependent(type->base, seen);
+	for (size_t i = 0; i < type->template_arguments.size(); ++i)
+		if (hosted_instance_argument_dependent(type->template_arguments[i],
+		                                       seen))
+			return true;
+	for (size_t i = 0;
+	     i < type->dependent_typename_template_argument_lists.size();
+	     ++i)
+		for (size_t j = 0;
+		     j < type->dependent_typename_template_argument_lists[i].size();
+		     ++j)
+			if (hosted_instance_argument_dependent(
+				    type->dependent_typename_template_argument_lists[i][j],
+				    seen))
+				return true;
+	return false;
+}
+
+bool hosted_instance_argument_dependent(const TemplateInstanceArgument& arg,
+                                        vector<const void*>& seen)
+{
+	if (arg.dependent ||
+	    (arg.kind != TemplateInstanceArgumentKind::Value &&
+	     !arg.value_name.empty()) ||
+	    !arg.value_owner_template_name.empty() ||
+	    !arg.value_member_name.empty())
+		return true;
+	if ((arg.kind == TemplateInstanceArgumentKind::Type ||
+	     arg.kind == TemplateInstanceArgumentKind::Value) &&
+	    hosted_type_dependent(arg.type, seen))
+		return true;
+	if (arg.kind == TemplateInstanceArgumentKind::Pack)
+		for (size_t i = 0; i < arg.pack.size(); ++i)
+			if (hosted_instance_argument_dependent(arg.pack[i], seen))
+				return true;
+	for (size_t i = 0; i < arg.value_owner_template_arguments.size(); ++i)
+		if (hosted_instance_argument_dependent(
+			    arg.value_owner_template_arguments[i],
+			    seen))
+			return true;
+	return false;
+}
+
+bool hosted_record_has_dependent_arguments(TypePtr bare)
+{
+	vector<const void*> seen;
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		if (hosted_instance_argument_dependent(bare->template_arguments[i],
+		                                       seen))
+			return true;
+	return false;
+}
+
+bool complete_hosted_tuple_family_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary != "tuple" &&
+	    primary != abi_private_name("Tuple_impl") &&
+	    primary != abi_private_name("Head_base"))
+		return false;
+	if (!hosted_record_has_dependent_arguments(bare))
+		return false;
+	set_hosted_record_layout_preserving_fields(bare, 8, 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_head_impl"), 0);
+	return true;
+}
+
+bool complete_hosted_unique_ptr_family_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary != "unique_ptr" &&
+	    primary != abi_private_name("uniq_ptr_impl") &&
+	    primary != abi_private_name("_uniq_ptr_impl") &&
+	    primary != abi_private_name("uniq_ptr_data") &&
+	    primary != abi_private_name("_uniq_ptr_data"))
+		return false;
+	if (!hosted_record_has_dependent_arguments(bare))
+		return false;
+	set_hosted_record_layout_preserving_fields(bare, 16, 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_t"), 0);
+	return true;
+}
+
+bool complete_hosted_rbtree_iterator_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary != abi_private_name("Rb_tree_iterator") &&
+	    primary != abi_private_name("Rb_tree_const_iterator"))
+		return false;
+	set_hosted_record_layout_preserving_fields(bare, 8, 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_node"), 0);
+	return true;
+}
+
+bool complete_hosted_tree_container_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary != "set" && primary != "multiset" &&
+	    primary != "map" && primary != "multimap")
+		return false;
+	set_hosted_record_layout_preserving_fields(bare, 48, 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_t"), 0);
 	return true;
 }
 
@@ -233,11 +530,21 @@ void sync_hosted_record_fields_from_scope(TypePtr bare)
 		Binding* member = bare->scope->binding_order[i];
 		if (member == NULL ||
 		    member->kind != BindingKind::Variable ||
+		    member->owner != bare->scope ||
 		    member->is_static_member ||
 		    member->aliased_binding != NULL)
 			continue;
 		member->bit_offset = 0;
 		member->is_bit_field = false;
+		bool duplicate = false;
+		for (size_t j = 0; j < fields.size(); ++j)
+			if (fields[j] == member ||
+			    (fields[j] != NULL &&
+			     fields[j]->owner == member->owner &&
+			     fields[j]->name == member->name))
+				duplicate = true;
+		if (duplicate)
+			continue;
 		fields.push_back(member);
 	}
 	bare->fields = fields;
@@ -299,10 +606,10 @@ bool complete_hosted_hashtable_layout(TypePtr type)
 	    bare->kind != TypeKind::Record ||
 	    !bare->is_template_specialization ||
 	    !scope_has_namespace_named(bare->scope, "std") ||
-	    unqualified_template_primary_name(bare) != "_Hashtable")
+	    unqualified_template_primary_name(bare) != abi_private_name("Hashtable"))
 		return false;
-	if (!scope_has_nonstatic_variable(bare->scope, "_M_buckets") ||
-	    !scope_has_nonstatic_variable(bare->scope, "_M_bucket_count"))
+	if (!scope_has_nonstatic_variable(bare->scope, abi_private_name("M_buckets")) ||
+	    !scope_has_nonstatic_variable(bare->scope, abi_private_name("M_bucket_count")))
 		return false;
 	bare->complete = true;
 	bare->direct_base_offset = 0;
@@ -315,12 +622,12 @@ bool complete_hosted_hashtable_layout(TypePtr type)
 	bare->nonvirtual_align = 8;
 	bare->layout_valid = true;
 	bare->hosted_layout_synthesized = true;
-	set_scope_variable_offset(bare->scope, "_M_buckets", 0);
-	set_scope_variable_offset(bare->scope, "_M_bucket_count", 8);
-	set_scope_variable_offset(bare->scope, "_M_before_begin", 16);
-	set_scope_variable_offset(bare->scope, "_M_element_count", 24);
-	set_scope_variable_offset(bare->scope, "_M_rehash_policy", 32);
-	set_scope_variable_offset(bare->scope, "_M_single_bucket", 48);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_buckets"), 0);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_bucket_count"), 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_before_begin"), 16);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_element_count"), 24);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_rehash_policy"), 32);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_single_bucket"), 48);
 	return true;
 }
 
@@ -398,6 +705,19 @@ bool complete_hosted_uninit_destroy_guard_layout(TypePtr type)
 		size += 8;
 	size = (size + align - 1) / align * align;
 	complete_hosted_synthesized_record_layout(bare, size, align);
+	return true;
+}
+
+bool complete_hosted_regex_iterator_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    !bare->is_template_specialization ||
+	    !scope_has_namespace_named(bare->scope, "std") ||
+	    unqualified_template_primary_name(bare) != "regex_iterator")
+		return false;
+	complete_hosted_synthesized_record_layout(bare, 64, 8);
 	return true;
 }
 
@@ -526,39 +846,39 @@ bool complete_hosted_rbtree_layout(TypePtr type)
 	    !scope_has_namespace_named(bare->scope, "std"))
 		return false;
 	string primary = unqualified_template_primary_name(bare);
-	if (primary == "_Rb_tree_node_base")
+	if (primary == abi_private_name("Rb_tree_node_base"))
 	{
 		set_hosted_record_layout_preserving_fields(bare, 32, 8);
-		set_scope_variable_offset(bare->scope, "_M_color", 0);
-		set_scope_variable_offset(bare->scope, "_M_parent", 8);
-		set_scope_variable_offset(bare->scope, "_M_left", 16);
-		set_scope_variable_offset(bare->scope, "_M_right", 24);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_color"), 0);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_parent"), 8);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_left"), 16);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_right"), 24);
 		return true;
 	}
-	if (primary == "_Rb_tree_header")
+	if (primary == abi_private_name("Rb_tree_header"))
 	{
 		set_hosted_record_layout_preserving_fields(bare, 40, 8);
-		set_scope_variable_offset(bare->scope, "_M_header", 0);
-		set_scope_variable_offset(bare->scope, "_M_node_count", 32);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_header"), 0);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_node_count"), 32);
 		return true;
 	}
-	if (primary == "_Rb_tree_impl")
+	if (primary == abi_private_name("Rb_tree_impl"))
 	{
 		set_hosted_record_layout_preserving_fields(bare, 48, 8);
-		set_direct_base_offset_by_primary(bare, "_Rb_tree_key_compare", 0);
-		set_direct_base_offset_by_primary(bare, "_Rb_tree_header", 8);
-		set_scope_variable_offset(bare->scope, "_M_key_compare", 0);
-		set_scope_variable_offset(bare->scope, "_M_header", 8);
-		set_scope_variable_offset(bare->scope, "_M_node_count", 40);
+		set_direct_base_offset_by_primary(bare, abi_private_name("Rb_tree_key_compare"), 0);
+		set_direct_base_offset_by_primary(bare, abi_private_name("Rb_tree_header"), 8);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_key_compare"), 0);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_header"), 8);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_node_count"), 40);
 		return true;
 	}
-	if (primary == "_Rb_tree")
+	if (primary == abi_private_name("Rb_tree"))
 	{
 		set_hosted_record_layout_preserving_fields(bare, 48, 8);
-		set_scope_variable_offset(bare->scope, "_M_impl", 0);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_impl"), 0);
 		return true;
 	}
-	if (primary == "_Rb_tree_node")
+	if (primary == abi_private_name("Rb_tree_node"))
 	{
 		uint64_t value_size = 1;
 		uint64_t value_align = 1;
@@ -572,8 +892,8 @@ bool complete_hosted_rbtree_layout(TypePtr type)
 		uint64_t storage_offset = hosted_align_up(uint64_t(32), value_align);
 		uint64_t size = hosted_align_up(storage_offset + value_size, align);
 		set_hosted_record_layout_preserving_fields(bare, size, align);
-		set_scope_variable_offset(bare->scope, "_M_storage", storage_offset);
-		set_scope_variable_offset(bare->scope, "_M_value_field",
+		set_scope_variable_offset(bare->scope, abi_private_name("M_storage"), storage_offset);
+		set_scope_variable_offset(bare->scope, abi_private_name("M_value_field"),
 		                          storage_offset);
 		return true;
 	}
@@ -612,14 +932,39 @@ Binding* anonymous_alias_target(Binding* binding)
 bool complete_hosted_record_layout(TypePtr type)
 {
 	return complete_hosted_shared_ptr_layout(type) ||
+	       complete_hosted_initializer_list_layout(type) ||
 	       complete_hosted_pair_layout(type) ||
+	       complete_hosted_empty_record_layout(type, "integral_constant") ||
+	       complete_hosted_empty_record_layout(type, "__bool_constant") ||
+	       complete_hosted_tuple_family_layout(type) ||
+	       complete_hosted_unique_ptr_family_layout(type) ||
+	       complete_hosted_rbtree_iterator_layout(type) ||
+	       complete_hosted_tree_container_layout(type) ||
 	       complete_hosted_rbtree_layout(type) ||
 	       complete_hosted_hashtable_layout(type) ||
 	       complete_hosted_hashtable_ebo_helper_layout(type) ||
+	       complete_hosted_shared_ptr_ebo_helper_layout(type) ||
 	       complete_hosted_allocator_layout(type) ||
 	       complete_hosted_hashtable_empty_policy_layout(type) ||
 	       complete_hosted_hashtable_alloc_node_layout(type) ||
-	       complete_hosted_uninit_destroy_guard_layout(type);
+	       complete_hosted_uninit_destroy_guard_layout(type) ||
+	       complete_hosted_regex_iterator_layout(type);
+}
+
+bool refresh_hosted_sized_record_layout(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? strip_cv(type) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != TypeKind::Record ||
+	    bare->scope == NULL ||
+	    !scope_has_namespace_named(bare->scope, "std"))
+		return false;
+	string primary = unqualified_template_primary_name(bare);
+	if (primary == "pair")
+		return complete_hosted_pair_layout(bare);
+	if (primary == abi_private_name("Rb_tree_node"))
+		return complete_hosted_rbtree_layout(bare);
+	return false;
 }
 
 void propagate_anonymous_alias_member_offsets(TypePtr type)
@@ -665,7 +1010,7 @@ void adjust_hosted_stream_layout(TypePtr type)
 	}
 	if (layout.stringbuf_offset != static_cast<uint64_t>(-1))
 		set_scope_variable_offset(bare->scope,
-		                          "_M_stringbuf",
+		                          abi_private_name("M_stringbuf"),
 		                          layout.stringbuf_offset);
 }
 
@@ -683,17 +1028,17 @@ void adjust_hosted_basic_string_layout(TypePtr type)
 		if (field->kind != BindingKind::Variable ||
 		    field->is_static_member)
 			continue;
-		if (field->name == "_M_dataplus")
+		if (field->name == abi_private_name("M_dataplus"))
 			field->member_offset = 0;
-		else if (field->name == "_M_string_length")
+		else if (field->name == abi_private_name("M_string_length"))
 			field->member_offset = 8;
 		else if (field->name.find("__anonymous_union_storage__") == 0)
 			field->member_offset = 16;
 	}
-	set_scope_variable_offset(bare->scope, "_M_dataplus", 0);
-	set_scope_variable_offset(bare->scope, "_M_string_length", 8);
-	set_scope_variable_offset(bare->scope, "_M_local_buf", 16);
-	set_scope_variable_offset(bare->scope, "_M_allocated_capacity", 16);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_dataplus"), 0);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_string_length"), 8);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_local_buf"), 16);
+	set_scope_variable_offset(bare->scope, abi_private_name("M_allocated_capacity"), 16);
 	set_scope_variable_offset_by_prefix(bare->scope,
 	                                    "__anonymous_union_storage__",
 	                                    16);
@@ -725,9 +1070,9 @@ bool layout_hosted_basic_string_record(TypePtr type)
 				continue;
 			field->bit_offset = 0;
 			field->is_bit_field = false;
-			if (field->name == "_M_dataplus")
+			if (field->name == abi_private_name("M_dataplus"))
 				field->member_offset = 0;
-			else if (field->name == "_M_string_length")
+			else if (field->name == abi_private_name("M_string_length"))
 				field->member_offset = 8;
 			else if (field->name.find("__anonymous_union_storage__") == 0)
 				field->member_offset = 16;

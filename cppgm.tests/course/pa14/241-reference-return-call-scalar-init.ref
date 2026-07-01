@@ -1,0 +1,48 @@
+function @fill(%box : ptr [pass=reference]) -> void [binding=strong, object=_Z4fillR3Box] {
+  slot $box : ptr
+
+  block ^entry:
+    store ptr %box, $box
+    %t1 = load ptr $box
+    %t2 = index i8 [projection=field] %t1, 0
+    store u32 97, %t2
+    return void
+}
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $box : obj<4x4>
+  slot $cp : u32
+  slot $cond__1 : i32
+
+  block ^entry:
+    %t1 = addr $box
+    %t2 = addr $box
+    call void @fill(%t2)
+    %t3 = addr $box
+    %t4 = call ptr @Box__at(%t3)
+    %t5 = load u32 %t4
+    store u32 %t5, $cp
+    %t6 = load u32 $cp
+    %t7 = cmp eq u32 %t6, 97
+    branch %t7, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 2, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t8 = load i32 $cond__1
+    return i32 %t8
+}
+function @Box__at(%this : ptr) -> ptr [binding=weak, object=_ZN3Box2atEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    return ptr %t2
+}

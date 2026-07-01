@@ -170,6 +170,116 @@ void mark_temp_definitions_for_removal(
 	}
 }
 
+map<string, set<size_t> > temp_use_indices(const Block& block)
+{
+	map<string, set<size_t> > uses;
+	for (size_t i = 0; i < block.instrs.size(); ++i)
+	{
+		string def = defined_temp(block.instrs[i]);
+		vector<string> temps = temps_in_text(block.instrs[i]);
+		for (size_t t = 0; t < temps.size(); ++t)
+			if (temps[t] != def)
+				uses[temps[t]].insert(i);
+	}
+	return uses;
+}
+
+bool all_temp_uses_removed(const string& temp,
+                           const map<string, set<size_t> >& uses,
+                           const set<size_t>& remove)
+{
+	map<string, set<size_t> >::const_iterator found = uses.find(temp);
+	if (found == uses.end())
+		return true;
+	for (set<size_t>::const_iterator it = found->second.begin();
+	     it != found->second.end(); ++it)
+		if (remove.find(*it) == remove.end())
+			return false;
+	return true;
+}
+
+bool dead_virtual_base_projection_definition(
+	const string& text,
+	const vector<uint64_t>& virtual_offsets)
+{
+	if (text.find(" = index i8 [projection=base_subobject] ") ==
+	    string::npos)
+		return false;
+	for (size_t i = 0; i < virtual_offsets.size(); ++i)
+	{
+		string suffix = ", " + to_string(virtual_offsets[i]);
+		if (text.size() >= suffix.size() &&
+		    text.compare(text.size() - suffix.size(),
+		                 suffix.size(),
+		                 suffix) == 0)
+			return true;
+	}
+	return false;
+}
+
+void strip_dead_constructor_base_entry_virtual_base_projections(
+	FunctionOut& base_entry,
+	const vector<uint64_t>& virtual_offsets)
+{
+	if (virtual_offsets.empty())
+		return;
+	for (size_t b = 0; b < base_entry.blocks.size(); ++b)
+	{
+		Block& block = base_entry.blocks[b];
+		map<string, size_t> def_indices;
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+		{
+			string temp = defined_temp(block.instrs[i]);
+			if (!temp.empty())
+				def_indices[temp] = i;
+		}
+		map<string, set<size_t> > uses = temp_use_indices(block);
+		set<size_t> remove;
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+		{
+			string temp = defined_temp(block.instrs[i]);
+			if (!temp.empty() &&
+			    all_temp_uses_removed(temp, uses, remove) &&
+			    dead_virtual_base_projection_definition(
+				    block.instrs[i],
+				    virtual_offsets))
+				remove.insert(i);
+		}
+		bool changed = true;
+		while (changed)
+		{
+			changed = false;
+			set<size_t> next = remove;
+			for (set<size_t>::const_iterator it = remove.begin();
+			     it != remove.end(); ++it)
+			{
+				vector<string> temps = temps_in_text(block.instrs[*it]);
+				for (size_t t = 0; t < temps.size(); ++t)
+				{
+					map<string, size_t>::const_iterator def =
+						def_indices.find(temps[t]);
+					if (def == def_indices.end() ||
+					    next.find(def->second) != next.end() ||
+					    !all_temp_uses_removed(temps[t],
+					                          uses,
+					                          remove))
+						continue;
+					next.insert(def->second);
+					changed = true;
+				}
+			}
+			remove.swap(next);
+		}
+		if (remove.empty())
+			continue;
+		vector<string> kept;
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+			if (remove.find(i) == remove.end())
+				kept.push_back(block.instrs[i]);
+		block.instrs.swap(kept);
+	}
+}
+
 bool lowir_token_char(char ch)
 {
 	return std::isalnum(static_cast<unsigned char>(ch)) ||
@@ -197,6 +307,43 @@ bool replace_lowir_token(string& text,
 		changed = true;
 	}
 	return changed;
+}
+
+void rewrite_lowir_temp_tokens(string& text,
+                               const map<string, string>& replacements)
+{
+	string out;
+	out.reserve(text.size());
+	bool changed = false;
+	for (size_t pos = 0; pos < text.size();)
+	{
+		if (text[pos] == '%' &&
+		    pos + 2 < text.size() &&
+		    text[pos + 1] == 't' &&
+		    isdigit(text[pos + 2]) &&
+		    (pos == 0 || !lowir_token_char(text[pos - 1])))
+		{
+			size_t end = pos + 3;
+			while (end < text.size() && isdigit(text[end]))
+				++end;
+			if (end == text.size() || !lowir_token_char(text[end]))
+			{
+				string token = text.substr(pos, end - pos);
+				map<string, string>::const_iterator found =
+					replacements.find(token);
+				if (found != replacements.end())
+				{
+					out += found->second;
+					pos = end;
+					changed = true;
+					continue;
+				}
+			}
+		}
+		out += text[pos++];
+	}
+	if (changed)
+		text.swap(out);
 }
 
 void apply_constructor_base_entry_arg_rewrites(FunctionOut& base_entry)
@@ -267,24 +414,8 @@ void renumber_function_temps(FunctionOut& fn)
 		}
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
 		for (size_t i = 0; i < fn.blocks[b].instrs.size(); ++i)
-			for (map<string, string>::const_iterator it =
-				     replacements.begin();
-			     it != replacements.end();
-			     ++it)
-				replace_lowir_token(fn.blocks[b].instrs[i],
-				                    it->first,
-				                    "__renumber_tmp_" +
-				                    it->second.substr(2) + "__");
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instrs.size(); ++i)
-			for (map<string, string>::const_iterator it =
-				     replacements.begin();
-			     it != replacements.end();
-			     ++it)
-				replace_lowir_token(fn.blocks[b].instrs[i],
-				                    "__renumber_tmp_" +
-				                    it->second.substr(2) + "__",
-				                    it->second);
+			rewrite_lowir_temp_tokens(fn.blocks[b].instrs[i],
+			                          replacements);
 }
 
 void strip_constructor_base_entry_virtual_base_initializers(
@@ -612,8 +743,15 @@ FunctionOut make_constructor_base_entry(const FunctionOut& lowered,
 		rewrite_constructor_base_entry_vtt_references(base_entry,
 		                                              bare_record);
 	}
-	renumber_function_temps(base_entry);
 	vector<TypePtr> vbases = hidden_virtual_bases_for_record(record);
+	vector<uint64_t> virtual_offsets;
+	for (size_t i = 0; i < vbases.size(); ++i)
+		virtual_offsets.push_back(
+			pa11::record_virtual_base_offset(record, vbases[i]));
+	strip_dead_constructor_base_entry_virtual_base_projections(
+		base_entry,
+		virtual_offsets);
+	renumber_function_temps(base_entry);
 	if (!vbases.empty())
 	{
 		size_t close = base_entry.header.find(") ->");

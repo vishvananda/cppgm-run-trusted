@@ -1,0 +1,55 @@
+declare function @__external_runtime___Unwind_Resume() -> void [return=noreturn, role=eh_resume, linkage=c, binding=strong, object=_Unwind_Resume]
+
+declare function @__external_runtime____gxx_personality_v0() -> void [role=eh_personality, linkage=c, binding=strong, object=__gxx_personality_v0]
+
+global @destroyed : i32 [binding=strong, object=_Z9destroyed] = zero
+
+function @Member___Member(%this : ptr) -> void [binding=weak, object=_ZN6MemberD1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load i32 @destroyed
+    %t2 = binary add i32 %t1, 1
+    store i32 %t2, @destroyed
+    return void
+}
+function @Owner___Owner(%this : ptr) -> void [binding=weak, object=_ZN5OwnerD1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load i32 @destroyed
+    %t2 = binary add i32 %t1, 10
+    store i32 %t2, @destroyed
+    %t3 = load ptr $this
+    %t4 = index i8 [projection=field] %t3, 0
+    call void @Member___Member(%t4)
+    return void
+}
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $owner : obj<1x1>
+  slot $cond__1 : i32
+
+  block ^entry:
+    %t1 = addr $owner
+    %t2 = addr $owner
+    call void @Owner___Owner(%t2)
+    %t3 = load i32 @destroyed
+    %t4 = cmp eq i32 %t3, 11
+    branch %t4, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t5 = load i32 $cond__1
+    return i32 %t5
+}
+alias object _ZN6MemberD2Ev = @Member___Member
+alias object _ZN5OwnerD2Ev = @Owner___Owner

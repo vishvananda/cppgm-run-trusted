@@ -1,0 +1,9 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+  function-definition make_pointer function of () returning pointer to struct Entity
+    compound-statement
+      return-statement
+        literal prvalue pointer to struct Entity 0
+end translation unit

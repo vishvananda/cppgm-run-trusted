@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <vector>
 
 using namespace std;
 
@@ -69,14 +70,20 @@ bool function_has_eh(const Function& fn)
 	return false;
 }
 
-bool direct_call_may_unwind(const Program& program, const Instruction& ins);
+bool direct_call_may_unwind(const Program& program,
+                            const Instruction& ins,
+                            set<string>& visiting);
 
-bool function_may_unwind(const Program& program, const Function& fn)
+bool function_may_unwind(const Program& program,
+                         const Function& fn,
+                         set<string>& visiting)
 {
 	if (has_metadata(fn, "unwind", "no"))
 		return false;
 	if (fn.declaration)
 		return true;
+	if (!visiting.insert(fn.name).second)
+		return false;
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 		{
@@ -84,13 +91,23 @@ bool function_may_unwind(const Program& program, const Function& fn)
 			if (ins.kind == InstrKind::Throw || ins.kind == InstrKind::Resume ||
 			    ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup)
 				return true;
-			if (ins.kind == InstrKind::Call && direct_call_may_unwind(program, ins))
+			if (ins.kind == InstrKind::Call &&
+			    direct_call_may_unwind(program, ins, visiting))
 				return true;
 		}
+	visiting.erase(fn.name);
 	return false;
 }
 
-bool direct_call_may_unwind(const Program& program, const Instruction& ins)
+bool function_may_unwind(const Program& program, const Function& fn)
+{
+	set<string> visiting;
+	return function_may_unwind(program, fn, visiting);
+}
+
+bool direct_call_may_unwind(const Program& program,
+                            const Instruction& ins,
+                            set<string>& visiting)
 {
 	if (ins.kind != InstrKind::Call)
 		return false;
@@ -100,7 +117,7 @@ bool direct_call_may_unwind(const Program& program, const Instruction& ins)
 	    program.function_by_name.find(ins.a.text);
 	if (it == program.function_by_name.end())
 		return true;
-	return function_may_unwind(program, program.functions[it->second]);
+	return function_may_unwind(program, program.functions[it->second], visiting);
 }
 
 void collect_direct_calls(const Function& fn, set<string>& calls)
@@ -172,19 +189,61 @@ bool function_contains_call(const Function& fn)
 	return false;
 }
 
+bool statically_eligible_callee(const Program& program,
+                                const Function& callee,
+                                map<string, bool>& cache)
+{
+	map<string, bool>::const_iterator found = cache.find(callee.name);
+	if (found != cache.end())
+		return found->second;
+	bool eligible = true;
+	if (callee.declaration || function_has_eh(callee))
+		eligible = false;
+	else if (function_is_recursive(program, callee))
+		eligible = false;
+	else if (lowir2cy86::metadata_value(callee.metadata, "prefer_local") != "yes")
+	{
+		eligible = instruction_count(callee) <= 18;
+	}
+	cache[callee.name] = eligible;
+	return eligible;
+}
+
+bool recursive_if_inlined_cached(const Program& program,
+                                 const Function& caller,
+                                 const Function& callee,
+                                 map<pair<string, string>, bool>& cache)
+{
+	pair<string, string> key = make_pair(caller.name, callee.name);
+	map<pair<string, string>, bool>::const_iterator found = cache.find(key);
+	if (found != cache.end())
+		return found->second;
+	bool recursive = recursive_if_inlined(program, caller, callee);
+	cache[key] = recursive;
+	return recursive;
+}
+
+bool function_may_unwind_cached(const Program& program,
+                                const Function& fn,
+                                map<string, bool>& cache)
+{
+	map<string, bool>::const_iterator found = cache.find(fn.name);
+	if (found != cache.end())
+		return found->second;
+	bool may_unwind = function_may_unwind(program, fn);
+	cache[fn.name] = may_unwind;
+	return may_unwind;
+}
+
 bool eligible_callee(const Program& program,
                      const Function& caller,
-                     const Function& callee)
+                     const Function& callee,
+                     map<string, bool>& static_cache,
+                     map<pair<string, string>, bool>& recursive_cache)
 {
-	if (callee.declaration || function_has_eh(callee))
+	if (!statically_eligible_callee(program, callee, static_cache))
 		return false;
-	if (function_is_recursive(program, callee))
-		return false;
-	if (recursive_if_inlined(program, caller, callee))
-		return false;
-	if (lowir2cy86::metadata_value(callee.metadata, "prefer_local") == "yes")
-		return true;
-	return instruction_count(callee) <= 18;
+	return !recursive_if_inlined_cached(program, caller, callee, recursive_cache);
 }
 
 set<string> eh_handler_blocks(const Function& fn)
@@ -346,6 +405,8 @@ int next_inline_index(const Function& fn)
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 			if (fn.blocks[b].instructions[i].has_dest)
 				names.push_back(fn.blocks[b].instructions[i].dest);
+		for (size_t i = 0; i < fn.slots.size(); ++i)
+			names.push_back(fn.slots[i].name);
 		for (size_t n = 0; n < names.size(); ++n)
 		{
 			const string needle = "__o1inl";
@@ -599,7 +660,11 @@ bool inline_call(Function& caller,
                  const Program& program,
                  size_t block_index,
                  size_t ins_index,
-                 int index)
+                 int index,
+                 const set<string>& handlers,
+                 map<string, bool>& static_eligible_cache,
+                 map<pair<string, string>, bool>& recursive_inline_cache,
+                 map<string, bool>& may_unwind_cache)
 {
 	Instruction& call = caller.blocks[block_index].instructions[ins_index];
 	if (call.kind != InstrKind::Call || call.a.kind != ValueKind::Function)
@@ -609,31 +674,79 @@ bool inline_call(Function& caller,
 	if (it == program.function_by_name.end())
 		return false;
 	const Function& callee = program.functions[it->second];
-	if (!eligible_callee(program, caller, callee))
+	if (!eligible_callee(program,
+	                     caller,
+	                     callee,
+	                     static_eligible_cache,
+	                     recursive_inline_cache))
 		return false;
-	set<string> handlers = eh_handler_blocks(caller);
 	if (handlers.count(caller.blocks[block_index].name) != 0)
 		return false;
 	const bool active_eh = active_eh_before(caller.blocks[block_index], ins_index);
-	if (active_eh && function_may_unwind(program, callee))
+	if (active_eh && function_may_unwind_cached(program, callee, may_unwind_cache))
 		return false;
 	const string prefix = "__o1inl" + to_string(index) + "__";
 	if (inline_single_block(caller, callee, block_index, ins_index, prefix))
 		return true;
+	if (active_eh && !has_metadata(callee, "unwind", "no"))
+		return false;
 	return inline_multi_block(caller, callee, block_index, ins_index, prefix,
 	                          active_eh);
 }
 
-bool inline_function_once(Function& fn, const Program& program)
+int cached_next_inline_index(Function& fn, map<string, int>& inline_index_cache)
 {
+	map<string, int>::const_iterator found = inline_index_cache.find(fn.name);
+	if (found != inline_index_cache.end())
+		return found->second;
 	int index = next_inline_index(fn);
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-		{
-			if (inline_call(fn, program, b, i, index))
-				return true;
-		}
-	return false;
+	inline_index_cache[fn.name] = index;
+	return index;
+}
+
+bool inline_function_once(Function& fn,
+                          const Program& program,
+                          map<string, int>& inline_index_cache)
+{
+	bool changed = false;
+	map<string, bool> static_eligible_cache;
+	map<pair<string, string>, bool> recursive_inline_cache;
+	map<string, bool> may_unwind_cache;
+	for (;;)
+	{
+		bool pass = false;
+		int index = -1;
+		set<string> handlers = eh_handler_blocks(fn);
+		for (size_t b = 0; b < fn.blocks.size() && !pass; ++b)
+			for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+			{
+				const Instruction& candidate = fn.blocks[b].instructions[i];
+				if (candidate.kind != InstrKind::Call ||
+				    candidate.a.kind != ValueKind::Function)
+					continue;
+				if (index < 0)
+					index = cached_next_inline_index(fn, inline_index_cache);
+				if (inline_call(fn,
+				                program,
+				                b,
+				                i,
+				                index,
+				                handlers,
+				                static_eligible_cache,
+				                recursive_inline_cache,
+				                may_unwind_cache))
+				{
+					inline_index_cache[fn.name] = index + 1;
+					rebuild_function(fn);
+					pass = true;
+					changed = true;
+					break;
+				}
+			}
+		if (!pass)
+			break;
+	}
+	return changed;
 }
 
 int inline_visit_priority(const Function& fn)
@@ -657,29 +770,57 @@ int inline_visit_priority(const Function& fn)
 	return 5;
 }
 
+string inline_visit_order_key(const Function& fn)
+{
+	return lowir2cy86::metadata_value(fn.metadata, "object");
+}
+
 }  // namespace
 
-bool inline_o1_once(Program& program)
+bool inline_o1_once(Program& program, map<string, int>& inline_index_cache)
 {
-	rebuild_program(program);
 	for (int priority = 0; priority < 7; ++priority)
 	{
 		bool changed = false;
+		vector<size_t> order;
 		for (size_t i = 0; i < program.functions.size(); ++i)
 		{
 			if (program.functions[i].declaration ||
 			    inline_visit_priority(program.functions[i]) != priority)
 				continue;
-			if (inline_function_once(program.functions[i], program))
-			{
+			order.push_back(i);
+		}
+		stable_sort(order.begin(),
+		            order.end(),
+		            [&program](size_t lhs, size_t rhs) {
+			            string lkey = inline_visit_order_key(program.functions[lhs]);
+			            string rkey = inline_visit_order_key(program.functions[rhs]);
+			            if (lkey.empty() && rkey.empty())
+				            return false;
+			            if (lkey.empty() != rkey.empty())
+				            return !lkey.empty();
+			            if (lkey != rkey)
+				            return lkey < rkey;
+			            return program.functions[lhs].name <
+			                   program.functions[rhs].name;
+		            });
+		for (size_t oi = 0; oi < order.size(); ++oi)
+		{
+			if (inline_function_once(program.functions[order[oi]],
+			                         program,
+			                         inline_index_cache))
 				changed = true;
-				rebuild_program(program);
-			}
 		}
 		if (changed)
 			return true;
 	}
 	return false;
+}
+
+bool inline_o1_once(Program& program)
+{
+	map<string, int> inline_index_cache;
+	return inline_o1_once(program, inline_index_cache);
 }
 
 }  // namespace lowiropt

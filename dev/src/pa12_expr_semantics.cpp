@@ -1,30 +1,68 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_templates_instance_support.h"
 #include "pa12_types_support.h"
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <stdexcept>
-using namespace std; namespace pa12 { namespace internal { bool is_pointer(TypePtr type)
+using namespace std; namespace pa12 { namespace internal {
+bool hosted_library_namespace_scope(Scope* scope);
+bool is_pointer(TypePtr type)
 { return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer; } namespace {
-bool same_template_specialization_type(TypePtr left, TypePtr right); void append_normalized_specialization_arguments( vector<pa11::TemplateInstanceArgument>& out, const vector<pa11::TemplateInstanceArgument>& arguments)
+typedef pair<const void*, const void*> TypePair;
+	struct TypePairLess {
+		bool operator()(const TypePair& left, const TypePair& right) const
+		{
+		less<const void*> less_ptr;
+		if (less_ptr(left.first, right.first))
+			return true;
+		if (less_ptr(right.first, left.first))
+			return false;
+			return less_ptr(left.second, right.second);
+		}
+	};
+	bool same_template_specialization_type(TypePtr left, TypePtr right); size_t normalized_specialization_argument_count( const vector<pa11::TemplateInstanceArgument>& arguments)
+{ size_t count = 0; for (size_t i = 0; i < arguments.size(); ++i) count += arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack
+? normalized_specialization_argument_count(arguments[i].pack) : 1; return count; } void append_normalized_specialization_arguments( vector<pa11::TemplateInstanceArgument>& out, const vector<pa11::TemplateInstanceArgument>& arguments)
 { for (size_t i = 0; i < arguments.size(); ++i) { if (arguments[i].kind == pa11::TemplateInstanceArgumentKind::Pack)
 { append_normalized_specialization_arguments(out, arguments[i].pack); continue; }
 out.push_back(arguments[i]); } } bool same_template_specialization_arguments(
 const vector<pa11::TemplateInstanceArgument>& left, const vector<pa11::TemplateInstanceArgument>& right); bool same_template_specialization_argument( const pa11::TemplateInstanceArgument& left,
 const pa11::TemplateInstanceArgument& right) { if (left.kind != right.kind) return false;
-if (left.kind == pa11::TemplateInstanceArgumentKind::Type) return same_template_specialization_type(left.type, right.type); if (left.kind == pa11::TemplateInstanceArgumentKind::Value) return left.dependent == right.dependent &&
+if (left.kind == pa11::TemplateInstanceArgumentKind::Type) {
+	if (pa11::same_type(left.type, right.type))
+		return true;
+	if (left.type.get() == NULL || right.type.get() == NULL)
+		return left.type.get() == right.type.get();
+	if (left.type->kind == pa11::TypeKind::Cv ||
+	    right.type->kind == pa11::TypeKind::Cv)
+		return left.type->kind == right.type->kind &&
+		       left.type->cv == right.type->cv &&
+		       same_template_specialization_type(left.type->base,
+		                                         right.type->base);
+	TypePtr l = pa11::strip_cv(left.type);
+	TypePtr r = pa11::strip_cv(right.type);
+	return l->kind == pa11::TypeKind::Record &&
+	       r->kind == pa11::TypeKind::Record &&
+	       same_template_specialization_type(l, r);
+} if (left.kind == pa11::TemplateInstanceArgumentKind::Value) return left.dependent == right.dependent &&
 left.value_negated == right.value_negated && left.value == right.value && left.value_name == right.value_name && left.value_owner_template_name ==
 right.value_owner_template_name && left.value_member_name == right.value_member_name && same_template_specialization_type(left.type, right.type) && same_template_specialization_arguments(
 left.value_owner_template_arguments, right.value_owner_template_arguments); if (left.kind == pa11::TemplateInstanceArgumentKind::Template) return left.template_name == right.template_name &&
 left.dependent == right.dependent; if (left.pack.size() != right.pack.size()) return false; for (size_t i = 0; i < left.pack.size(); ++i)
 if (!same_template_specialization_argument(left.pack[i], right.pack[i])) return false; return true; }
 bool same_template_specialization_arguments( const vector<pa11::TemplateInstanceArgument>& left, const vector<pa11::TemplateInstanceArgument>& right) {
-vector<pa11::TemplateInstanceArgument> flat_left; vector<pa11::TemplateInstanceArgument> flat_right; append_normalized_specialization_arguments(flat_left, left); append_normalized_specialization_arguments(flat_right, right);
+vector<pa11::TemplateInstanceArgument> flat_left; vector<pa11::TemplateInstanceArgument> flat_right; flat_left.reserve(normalized_specialization_argument_count(left));
+flat_right.reserve(normalized_specialization_argument_count(right)); append_normalized_specialization_arguments(flat_left, left); append_normalized_specialization_arguments(flat_right, right);
 if (flat_left.size() != flat_right.size()) return false; for (size_t i = 0; i < flat_left.size(); ++i) if (!same_template_specialization_argument(flat_left[i], flat_right[i]))
 return false; return true; } bool same_template_specialization_type(TypePtr left, TypePtr right)
-{ if (left.get() == NULL || right.get() == NULL) return left.get() == right.get(); if (pa11::same_type(left, right))
-return true; TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right); return l->kind == pa11::TypeKind::Record &&
-r->kind == pa11::TypeKind::Record && l->is_template_specialization && r->is_template_specialization && !l->template_primary_name.empty() &&
-l->template_primary_name == r->template_primary_name && same_template_specialization_arguments(l->template_arguments, r->template_arguments); }
+{ if (left.get() == NULL || right.get() == NULL) return left.get() == right.get(); if (left.get() == right.get())
+return true; TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right); if (l.get() == r.get())
+return true; if (l->kind == pa11::TypeKind::Record && r->kind == pa11::TypeKind::Record) {
+if (l->scope != NULL && l->scope == r->scope) return true; if (!l->is_template_specialization || !r->is_template_specialization)
+return pa11::same_type(left, right); less<const void*> ptr_less; TypePair key = ptr_less(l.get(), r.get()) ? make_pair(l.get(), r.get()) : make_pair(r.get(), l.get());
+static map<TypePair, bool, TypePairLess> specialization_type_cache; map<TypePair, bool, TypePairLess>::const_iterator cached = specialization_type_cache.find(key); if (cached != specialization_type_cache.end()) return cached->second; bool same = !l->template_primary_name.empty() && l->template_primary_name == r->template_primary_name &&
+same_template_specialization_arguments(l->template_arguments, r->template_arguments); specialization_type_cache[key] = same; return same; } if (pa11::same_type(left, right)) return true; return false; }
 void append_trailing_constructor_defaults(Node& node, Binding* ctor,
                                           Binding* default_source,
                                           const map<Binding*, vector<Expr> >&
@@ -44,184 +82,49 @@ void append_trailing_constructor_defaults(Node& node, Binding* ctor,
 		if (j < defaults->second.size() && defaults->second[j].valid)
 			add_child(node, defaults->second[j].node);
 }
-Binding* find_initializer_list_accessor(Scope* scope,
-                                        const string& name,
-                                        TypePtr fn_type)
+TypePtr conversion_expr_object_type(TypePtr type)
 {
-	map<string, vector<Binding*> >::iterator found = scope->members.find(name);
-	if (found != scope->members.end())
-		for (size_t i = 0; i < found->second.size(); ++i)
-			if (found->second[i]->kind == BindingKind::Function &&
-			    pa11::same_type(found->second[i]->type, fn_type))
-				return found->second[i];
-	return NULL;
+	if (type.get() != NULL &&
+	    (type->kind == pa11::TypeKind::LValueReference ||
+	     type->kind == pa11::TypeKind::RValueReference))
+		return type->base;
+	return type;
 }
-}  // namespace
-bool Parser::is_std_initializer_list_type(TypePtr type,
-                                          TypePtr* element) const
+Expr conversion_function_object_expr(const Expr& selected, Binding* op)
 {
-	if (type.get() == NULL)
-		return false;
-	TypePtr bare = pa11::strip_cv(type);
-	if (bare->kind != pa11::TypeKind::Record ||
-	    !bare->is_template_specialization ||
-	    bare->template_primary_name != "initializer_list")
-		return false;
-	Scope* owner = bare->scope != NULL ? bare->scope->parent : NULL;
-	if (owner == NULL || owner->kind != ScopeKind::Namespace ||
-	    owner->name != "std")
-		return false;
-	if (bare->template_arguments.size() != 1 ||
-	    bare->template_arguments[0].kind !=
-		    pa11::TemplateInstanceArgumentKind::Type)
-		return false;
-	if (element != NULL)
-		*element = bare->template_arguments[0].type;
-	return true;
-}
-
-void Parser::normalize_std_initializer_list_type(TypePtr type)
-{
-	TypePtr element;
-	if (!is_std_initializer_list_type(type, &element))
-		return;
-	TypePtr bare = pa11::strip_cv(type);
-	if (bare->scope == NULL)
-		return;
-	bool has_begin = false;
-	bool has_size = false;
-	for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
-	{
-		Binding* binding = bare->scope->binding_order[i];
-		if (binding->kind != BindingKind::Variable ||
-		    binding->is_static_member)
-			continue;
-		if (binding->name == "__begin_" || binding->name == "first")
-			has_begin = true;
-		if (binding->name == "__size_" || binding->name == "count")
-			has_size = true;
-	}
-	if (!has_begin)
-		add_value(bare->scope,
-		          BindingKind::Variable,
-		          "__begin_",
-		          pa11::make_pointer(pa11::make_cv(element,
-		                                           pa11::CV_CONST)));
-	if (!has_size)
-		add_value(bare->scope,
-		          BindingKind::Variable,
-		          "__size_",
-		          pa11::make_fundamental(FT_UNSIGNED_LONG_INT));
-	TypePtr this_type =
-		pa11::make_pointer(pa11::make_cv(bare, pa11::CV_CONST));
-	TypePtr const_element_ptr =
-		pa11::make_pointer(pa11::make_cv(element, pa11::CV_CONST));
-	vector<TypePtr> params(1, this_type);
-	TypePtr begin_type = pa11::make_function(const_element_ptr, params, false);
-	TypePtr size_type =
-		pa11::make_function(pa11::make_fundamental(FT_UNSIGNED_LONG_INT),
-		                    params,
-		                    false);
-	if (find_initializer_list_accessor(bare->scope, "begin", begin_type) == NULL)
-	{
-		Binding* begin =
-			add_value(bare->scope, BindingKind::Function, "begin", begin_type);
-		begin->is_inline_definition = true;
-		begin->unwind_no = true;
-		function_parameter_names_[begin] = vector<string>(1, "this");
-		begin->function_parameter_names = function_parameter_names_[begin];
-	}
-	if (find_initializer_list_accessor(bare->scope, "end", begin_type) == NULL)
-	{
-		Binding* end =
-			add_value(bare->scope, BindingKind::Function, "end", begin_type);
-		end->is_inline_definition = true;
-		end->unwind_no = true;
-		function_parameter_names_[end] = vector<string>(1, "this");
-		end->function_parameter_names = function_parameter_names_[end];
-	}
-	if (find_initializer_list_accessor(bare->scope, "size", size_type) == NULL)
-	{
-		Binding* size =
-			add_value(bare->scope, BindingKind::Function, "size", size_type);
-		size->is_inline_definition = true;
-		size->unwind_no = true;
-		function_parameter_names_[size] = vector<string>(1, "this");
-		size->function_parameter_names = function_parameter_names_[size];
-	}
-	bare->complete = true;
-	bare->layout_valid = false;
-}
-
-TypePtr Parser::make_std_initializer_list_type(TypePtr element)
-{
-	Binding* std_binding =
-		pa11::lookup_qualified(global_scope(), "std", pa11::LOOKUP_NAMESPACE);
-	Scope* std_scope =
-		std_binding != NULL ? std_binding->target_scope : NULL;
-	TemplateDeclaration* templ =
-		std_scope != NULL ? find_class_template(std_scope, "initializer_list")
-		                  : NULL;
-	if (templ == NULL)
-		throw runtime_error("std::initializer_list is not declared");
-	TemplateArgument arg;
-	arg.kind = TemplateArgumentKind::Type;
-	arg.type = element;
-	vector<TemplateArgument> args;
-	args.push_back(arg);
-	TypePtr list_type = instantiate_class_template(templ, args);
-	normalize_std_initializer_list_type(list_type);
-	return list_type;
-}
-
-Expr Parser::make_initializer_list_expr(const Expr& init, TypePtr target)
-{
-	if (!init.braced_init_list)
-		throw runtime_error("initializer_list requires braced-init-list");
-	TypePtr element;
-	if (target.get() != NULL)
-	{
-		if (!is_std_initializer_list_type(target, &element))
-			throw runtime_error("target is not std::initializer_list");
-		normalize_std_initializer_list_type(target);
-	}
-	else
-	{
-		if (init.node.children.empty())
-			throw runtime_error("empty auto initializer_list");
-		const Node& first = init.node.children[0];
-		element = lvalue_to_rvalue_type(first.type);
-		target = make_std_initializer_list_type(element);
-	}
+	if (op == NULL ||
+	    op->owner == NULL ||
+	    op->owner->kind != ScopeKind::Class)
+		return selected;
+	TypePtr selected_object = conversion_expr_object_type(selected.type);
+	TypePtr selected_record = selected_object.get() != NULL
+		? pa11::strip_cv(selected_object) : TypePtr();
+	TypePtr owner_record = pa11::record_type_for_scope(op->owner);
+	owner_record = owner_record.get() != NULL
+		? pa11::strip_cv(owner_record) : TypePtr();
+	if (selected_record.get() == NULL ||
+	    owner_record.get() == NULL ||
+	    selected_record->kind != pa11::TypeKind::Record ||
+	    owner_record->kind != pa11::TypeKind::Record ||
+	    pa11::same_type(selected_record, owner_record) ||
+	    !record_has_base_type(selected_record, owner_record))
+		return selected;
+	unsigned cv = selected_object->kind == pa11::TypeKind::Cv
+		? selected_object->cv : pa11::CV_NONE;
+	TypePtr object_type = pa11::make_cv(owner_record, cv);
 	Expr out;
 	out.valid = true;
-	out.type = target;
-	out.category = ValueCategory::PRValue;
-	out.braced_init_list = true;
-	out.node = Node("braced-init-list");
-	out.node.type = target;
+	out.type = object_type;
+	out.category = ValueCategory::LValue;
+	out.node = Node("base-subobject-expression lvalue " +
+	                pa11::describe_type(object_type));
+	out.node.type = object_type;
 	out.node.category = out.category;
-	out.node.token_text = "initializer-list";
-	for (size_t i = 0; i < init.node.children.size(); ++i)
-	{
-		Expr child;
-		child.valid = true;
-		child.node = init.node.children[i];
-		child.type = child.node.type;
-		child.category = child.node.category;
-		child.binding = child.node.binding;
-		child.has_constant_value = child.node.has_constant_value;
-		child.constant_value = child.node.constant_value;
-		child.braced_init_list =
-			child.node.line.compare(0, 16, "braced-init-list") == 0;
-		Conversion conv = convert_to(child, element);
-		if (!conv.viable)
-			throw runtime_error("invalid initializer_list element");
-		add_child(out.node, conv.expr.node);
-	}
+	add_child(out.node, selected.node);
 	annotate_expr_node(out);
 	return out;
 }
+}  // namespace
 bool template_declaration_has_body(const vector<Token>& tokens, const TemplateDeclaration* declaration) { if (declaration == NULL || !declaration->has_definition)
 return false; for (size_t i = declaration->decl_begin; i < declaration->decl_end && i < tokens.size(); ++i)
 if (tokens[i].kind == posttoken::TokenKind::Simple && tokens[i].type == OP_LBRACE) return true; return false;
@@ -234,7 +137,7 @@ return direct != NULL &&
 } bool same_template_specialization_record(TypePtr left, TypePtr right) { if (left.get() == NULL || right.get() == NULL)
 return left.get() == right.get(); TypePtr l = pa11::strip_cv(left); TypePtr r = pa11::strip_cv(right); if (l->kind != pa11::TypeKind::Record ||
 r->kind != pa11::TypeKind::Record || !l->is_template_specialization || !r->is_template_specialization) return false;
-return same_template_specialization_type(l, r) || l->name == r->name; } bool record_has_base_type(TypePtr source, TypePtr target) {
+return l->name == r->name || same_template_specialization_type(l, r); } bool record_has_base_type(TypePtr source, TypePtr target) {
 if (source.get() == NULL || target.get() == NULL) return false; TypePtr wanted = pa11::strip_cv(target); TypePtr root = pa11::strip_cv(source); vector<TypePtr> pending = pa11::record_direct_bases(root); vector<TypePtr> seen;
 while (!pending.empty()) { TypePtr cur = pending.back().get() != NULL ? pa11::strip_cv(pending.back()) : TypePtr(); pending.pop_back(); if (cur.get() == NULL || cur->kind != pa11::TypeKind::Record) continue; bool already = false; for (size_t i = 0; i < seen.size(); ++i) if (pa11::same_type(seen[i], cur)) already = true; if (already) continue; seen.push_back(cur); if (pa11::same_type(cur, wanted)) return true; vector<TypePtr> bases = pa11::record_direct_bases(cur); pending.insert(pending.end(), bases.begin(), bases.end()); }
 return false; } bool same_template_specialization_family(TypePtr left, TypePtr right) {
@@ -300,7 +203,7 @@ bool hosted_normal_iterator_arguments(
 	if (bare.get() == NULL ||
 	    bare->kind != pa11::TypeKind::Record ||
 	    !bare->is_template_specialization ||
-	    unqualified_template_primary_name(bare) != "__normal_iterator" ||
+	    unqualified_template_primary_name(bare) != pa11::abi_private_name("_normal_iterator") ||
 	    !scope_has_namespace_named(bare->scope, "__gnu_cxx"))
 		return false;
 	if ((!template_instance_type_argument(bare, 0, iterator) &&
@@ -365,7 +268,7 @@ bool hosted_shared_ptr_arguments(
 	    !scope_has_namespace_named(bare->scope, "std"))
 		return false;
 	string primary = unqualified_template_primary_name(bare);
-	if (primary != "shared_ptr" && primary != "__shared_ptr")
+	if (primary != "shared_ptr" && primary != pa11::abi_private_name("_shared_ptr"))
 		return false;
 	return template_instance_type_argument(bare, 0, element) ||
 	       stored_template_type_argument(bare, stored, 0, element);
@@ -390,8 +293,13 @@ bool hosted_shared_ptr_conversion(
 		return false;
 	return cv_qualification_conversion(source_element, target_element);
 }
+bool record_conversion_target_matches(TypePtr active, TypePtr record)
+{ TypePtr a = active.get() != NULL ? pa11::strip_cv(active) : TypePtr(); TypePtr r = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+if (a.get() == NULL || r.get() == NULL) return a.get() == r.get(); if (a.get() == r.get()) return true;
+if (a->kind == pa11::TypeKind::Record && r->kind == pa11::TypeKind::Record && a->is_template_specialization && r->is_template_specialization && a->name == r->name)
+return true; return pa11::same_type(a, r) || same_template_specialization_record(a, r); }
 bool record_conversion_active(const vector<TypePtr>& active, TypePtr record) {
-for (size_t i = 0; i < active.size(); ++i) if (pa11::same_type(pa11::strip_cv(active[i]), pa11::strip_cv(record)) || same_template_specialization_record(active[i], record))
+for (size_t i = 0; i < active.size(); ++i) if (record_conversion_target_matches(active[i], record))
 return true; return false; } unsigned reference_cv_flags(TypePtr type)
 { return type.get() != NULL && type->kind == pa11::TypeKind::Cv ? type->cv : pa11::CV_NONE; }
 int cv_added_rank(unsigned target, unsigned source) { unsigned added = target & ~source; int rank = 0;
@@ -423,12 +331,26 @@ dst->kind == pa11::TypeKind::Enum) && !scalar_constant_unsigned(src) && scalar_c
 	{
 		if (left.get() == NULL || right.get() == NULL)
 			return left.get() == right.get();
-		if (pa11::same_type(left, right))
+		if (left.get() == right.get())
 			return true;
 		TypePtr l = pa11::strip_cv(left);
 		TypePtr r = pa11::strip_cv(right);
-		if (l->kind == pa11::TypeKind::Record &&
-		    r->kind == pa11::TypeKind::Record)
+		if (l.get() == r.get())
+			return true;
+			if (l->kind == pa11::TypeKind::Record &&
+			    r->kind == pa11::TypeKind::Record &&
+			    l->is_template_specialization &&
+			    r->is_template_specialization &&
+			    l->name == r->name)
+				return true;
+			if (l->kind != r->kind)
+				return false;
+			if (l->kind != pa11::TypeKind::Record)
+				return template_type_key(l) == template_type_key(r);
+			if (pa11::same_type(left, right))
+				return true;
+			if (l->kind == pa11::TypeKind::Record &&
+			    r->kind == pa11::TypeKind::Record)
 			return same_template_specialization_record(l, r);
 		return false;
 	}
@@ -455,10 +377,14 @@ dst->kind == pa11::TypeKind::Enum) && !scalar_constant_unsigned(src) && scalar_c
 		}
 		~ActiveConversionAttempt() { active.pop_back(); }
 	};
-	struct ActiveRecordConversion { vector<TypePtr>& active; ActiveRecordConversion(vector<TypePtr>& a, TypePtr record)
-: active(a) { active.push_back(record); }
-~ActiveRecordConversion() { active.pop_back(); }
-}; bool same_signature_scope_path(Scope* left, Scope* right)
+		struct ActiveRecordConversion { vector<TypePtr>& active; ActiveRecordConversion(vector<TypePtr>& a, TypePtr record)
+	: active(a) { active.push_back(record); }
+	~ActiveRecordConversion() { active.pop_back(); }
+	}; struct ActiveUserDefinedConversion {
+		int& depth;
+		ActiveUserDefinedConversion(int& d) : depth(d) { ++depth; }
+		~ActiveUserDefinedConversion() { --depth; }
+	}; bool same_signature_scope_path(Scope* left, Scope* right)
 { if (left == right) return true; vector<pair<ScopeKind, string> > lpath; vector<pair<ScopeKind, string> > rpath; for (Scope* cur = left; cur != NULL; cur = cur->parent)
 lpath.push_back(make_pair(cur->kind, cur->name)); for (Scope* cur = right; cur != NULL; cur = cur->parent)
 rpath.push_back(make_pair(cur->kind, cur->name)); return lpath == rpath; }
@@ -495,8 +421,23 @@ type_parameter_names); if (left.kind == pa11::TemplateInstanceArgumentKind::Valu
 type_parameter_names)))); if (left.kind == pa11::TemplateInstanceArgumentKind::Template) return left.template_name == right.template_name; if (left.pack.size() != right.pack.size())
 return false; for (size_t i = 0; i < left.pack.size(); ++i) if (!same_template_signature_argument(left.pack[i], right.pack[i],
 type_parameter_names)) return false; return true; }
-bool same_template_signature_type(TypePtr left, TypePtr right) { map<string, string> type_parameter_names; return same_template_signature_type(left, right, type_parameter_names);
-}
+	bool same_template_signature_type(TypePtr left, TypePtr right)
+	{
+		const void* lkey = left.get();
+		const void* rkey = right.get();
+		static map<pair<const void*, const void*>, bool> cache;
+		pair<const void*, const void*> key = make_pair(lkey, rkey);
+		map<pair<const void*, const void*>, bool>::const_iterator cached =
+			cache.find(key);
+		if (cached != cache.end())
+			return cached->second;
+		map<string, string> type_parameter_names;
+		bool result = same_template_signature_type(left,
+		                                           right,
+		                                           type_parameter_names);
+		cache[key] = result;
+		return result;
+	}
 
 bool overload_parameter_cv_shape_matches(TypePtr left,
                                          TypePtr right,
@@ -561,23 +502,93 @@ bool overload_parameter_cv_shape_matches(TypePtr left,
 		return true;
 	}
 }
+pair<const void*, const void*> signature_type_pair_key(TypePtr left,
+                                                       TypePtr right)
+{
+	const void* l = left.get();
+	const void* r = right.get();
+	if (less<const void*>()(r, l))
+		return make_pair(r, l);
+	return make_pair(l, r);
+}
+
+bool cached_signature_same_type(TypePtr left, TypePtr right)
+{
+	static map<pair<const void*, const void*>, bool> cache;
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	pair<const void*, const void*> key =
+		signature_type_pair_key(left, right);
+	map<pair<const void*, const void*>, bool>::const_iterator found =
+		cache.find(key);
+	if (found != cache.end())
+		return found->second;
+	bool value = pa11::same_type(left, right);
+	cache[key] = value;
+	return value;
+}
+
 bool relaxed_signature_parameter_match(TypePtr left, TypePtr right)
 {
-	if (pa11::same_type(left, right))
-		return true;
-	if (!type_structurally_dependent(left) &&
-	    !type_structurally_dependent(right))
-		return false;
-	return overload_parameter_cv_shape_matches(left, right, true) &&
-	       same_template_signature_type(left, right);
+	static map<pair<const void*, const void*>, bool> cache;
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	pair<const void*, const void*> key =
+		signature_type_pair_key(left, right);
+	map<pair<const void*, const void*>, bool>::const_iterator found =
+		cache.find(key);
+	if (found != cache.end())
+		return found->second;
+	bool value = cached_signature_same_type(left, right) ||
+		(overload_parameter_cv_shape_matches(left, right, true) &&
+		 same_template_signature_type(left, right) &&
+		 (type_structurally_dependent(left) ||
+		  type_structurally_dependent(right)));
+	cache[key] = value;
+	return value;
 }
-bool same_function_parameter_signature(TypePtr left, TypePtr right) {
-if (left.get() == NULL || right.get() == NULL || left->kind != pa11::TypeKind::Function || right->kind != pa11::TypeKind::Function) return false;
-if (left->cv != right->cv || left->variadic != right->variadic || left->ref_qualifier != right->ref_qualifier || left->parameters.size() != right->parameters.size()) return false;
-for (size_t i = 0; i < left->parameters.size(); ++i) if (!relaxed_signature_parameter_match(left->parameters[i], right->parameters[i])) return false;
-return true; } Binding* duplicate_function_candidate(const vector<Binding*>& considered, Binding* candidate) {
-for (size_t i = 0; i < considered.size(); ++i) if (considered[i]->name == candidate->name && considered[i]->is_static_member == candidate->is_static_member && (pa11::same_type(considered[i]->type, candidate->type) || same_function_parameter_signature(considered[i]->type, candidate->type))) return considered[i];
-return NULL; } TemplateDeclaration* function_template_origin( const map<Binding*, TemplateDeclaration*>& origins,
+
+bool same_function_parameter_signature(TypePtr left, TypePtr right)
+{
+	static map<pair<const void*, const void*>, bool> cache;
+	if (left.get() == NULL || right.get() == NULL ||
+	    left->kind != pa11::TypeKind::Function ||
+	    right->kind != pa11::TypeKind::Function)
+		return false;
+	pair<const void*, const void*> key =
+		signature_type_pair_key(left, right);
+	map<pair<const void*, const void*>, bool>::const_iterator found =
+		cache.find(key);
+	if (found != cache.end())
+		return found->second;
+	bool value = true;
+	if (left->cv != right->cv ||
+	    left->variadic != right->variadic ||
+	    left->ref_qualifier != right->ref_qualifier ||
+	    left->parameters.size() != right->parameters.size())
+		value = false;
+	for (size_t i = 0; value && i < left->parameters.size(); ++i)
+		if (!relaxed_signature_parameter_match(left->parameters[i],
+		                                       right->parameters[i]))
+			value = false;
+	cache[key] = value;
+	return value;
+}
+
+Binding* duplicate_function_candidate(const vector<Binding*>& considered,
+                                      Binding* candidate)
+{
+	for (size_t i = 0; i < considered.size(); ++i)
+		if (considered[i]->name == candidate->name &&
+		    considered[i]->is_static_member == candidate->is_static_member &&
+		    (cached_signature_same_type(considered[i]->type, candidate->type) ||
+		     same_function_parameter_signature(considered[i]->type,
+		                                       candidate->type)))
+			return considered[i];
+	return NULL;
+}
+
+TemplateDeclaration* function_template_origin( const map<Binding*, TemplateDeclaration*>& origins,
 Binding* binding) { set<Binding*> seen; while (binding != NULL) { if (!seen.insert(binding).second) break; map<Binding*, TemplateDeclaration*>::const_iterator found = origins.find(binding);
 if (found != origins.end()) return found->second; binding = binding->aliased_binding; } return NULL; } bool expr_template_parameter_lists_match(const vector<TemplateParameterInfo>& left, const vector<TemplateParameterInfo>& right)
 { if (left.size() != right.size()) return false; for (size_t i = 0; i < left.size(); ++i)
@@ -641,16 +652,64 @@ forwarding_reference_lvalue_parameter( declaration->generic_function_type->param
 Binding* rhs, const vector<Expr>& args) { TemplateDeclaration* left = function_template_origin(origins, lhs);
 TemplateDeclaration* right = function_template_origin(origins, rhs); if (left == NULL || right == NULL || left == right) return false; int left_penalty = forwarding_reference_lvalue_penalty(left, args);
 int right_penalty = forwarding_reference_lvalue_penalty(right, args); return left_penalty < right_penalty; } Binding* canonical_function_binding(Binding* binding)
-{ set<Binding*> seen; while (binding != NULL && binding->kind == BindingKind::Function && binding->aliased_binding != NULL)
-{ if (!seen.insert(binding).second) break; if (binding->is_inline_definition && !binding->aliased_binding->is_inline_definition && !type_structurally_dependent(binding->type)) break;
-binding = binding->aliased_binding; } return binding; }
+{
+	Binding* seen[32];
+	size_t seen_count = 0;
+	while (binding != NULL &&
+	       binding->kind == BindingKind::Function &&
+	       binding->aliased_binding != NULL)
+	{
+		bool repeated = false;
+		for (size_t i = 0; i < seen_count; ++i)
+			if (seen[i] == binding)
+			{
+				repeated = true;
+				break;
+			}
+		if (repeated || seen_count == 32)
+			break;
+		seen[seen_count++] = binding;
+		if (binding->is_inline_definition &&
+		    !binding->aliased_binding->is_inline_definition &&
+		    !binding->aliased_binding->is_explicit_specialization_member &&
+		    !type_structurally_dependent(binding->type))
+			break;
+		binding = binding->aliased_binding;
+	}
+	return binding;
+}
 void collect_conversion_functions(TypePtr record, set<Scope*>& seen, vector<Binding*>& out) {
 TypePtr bare = pa11::strip_cv(record); if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL || !seen.insert(bare->scope).second)
 return; for (map<string, vector<Binding*> >::const_iterator it = bare->scope->members.begin(); it != bare->scope->members.end();
 ++it) { if (it->first.compare(0, 9, "operator ") != 0) continue;
 out.insert(out.end(), it->second.begin(), it->second.end()); } vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
 for (size_t b = 0; b < direct_bases.size(); ++b) collect_conversion_functions(direct_bases[b], seen, out);
-} Expr make_builtin_constant_call(const vector<Expr>& args) { if (args.size() != 1)
+}
+void Parser::instantiate_conversion_function_template_owners(TypePtr record, set<Scope*>& seen)
+{
+	TypePtr bare = pa11::strip_cv(record);
+	if (bare->kind != pa11::TypeKind::Record ||
+	    bare->scope == NULL ||
+	    !seen.insert(bare->scope).second)
+		return;
+	if (bare->is_template_specialization &&
+	    !type_is_template_dependent(bare))
+		complete_template_record(bare);
+	instantiate_member_function_templates(bare);
+	vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
+	for (size_t i = 0; i < direct_bases.size(); ++i)
+	{
+		TypePtr base = pa11::strip_cv(direct_bases[i]);
+		if (!type_is_template_dependent(base))
+			instantiate_conversion_function_template_owners(base, seen);
+	}
+}
+void Parser::instantiate_conversion_function_template_owners(TypePtr record)
+{
+	set<Scope*> seen;
+	instantiate_conversion_function_template_owners(record, seen);
+}
+Expr make_builtin_constant_call(const vector<Expr>& args) { if (args.size() != 1)
 throw runtime_error("wrong argument count"); Expr out; out.type = pa11::make_fundamental(FT_INT); out.category = ValueCategory::PRValue;
 out.valid = true; const bool constant = args[0].constant_expression; out.node = Node(string("literal prvalue int ") + (constant ? "1" : "0")); out.constant_expression = true;
 out.has_constant_value = true; out.constant_value = constant ? 1 : 0; out.null_pointer_constant = constant ? false : true; out.node.token_text = constant ? "1" : "0";
@@ -659,50 +718,221 @@ annotate_expr_node(out); return out; } void filter_static_class_member_overloads
 { Binding* candidate = callee.overloads[i]; if (candidate->owner != NULL && candidate->owner->kind == ScopeKind::Class)
 { has_class_member = true; if (candidate->is_static_member) static_overloads.push_back(candidate);
 } } if (has_class_member && !static_overloads.empty()) callee.overloads = static_overloads;
-	} bool overload_selection_target_failure(const runtime_error& err) { string message = err.what(); return message == "overloaded function id needs target" || message == "no overloaded function id target" || message == "ambiguous overloaded function id"; }
-Conversion Parser::convert_to(const Expr& expr, TypePtr target) { if (conversion_attempt_active(active_conversion_attempts_, expr.type, target))
-	return Conversion(); ActiveConversionAttempt active_conversion( active_conversion_attempts_, expr.type, target); if (target->kind == pa11::TypeKind::LValueReference ||
-	target->kind == pa11::TypeKind::RValueReference) return convert_reference(expr, target); return convert_value(expr, target); }
-Conversion Parser::convert_reference(const Expr& expr, TypePtr target) { if (expr.braced_init_list && expr.type.get() == NULL && is_std_initializer_list_type(target->base, NULL))
-{ Expr list = make_initializer_list_expr(expr, target->base); return Conversion(true, 1, list); }
+		} bool overload_selection_target_failure(const runtime_error& err) { string message = err.what(); return message == "overloaded function id needs target" || message == "no overloaded function id target" || message == "ambiguous overloaded function id"; }
+bool overload_set_target_type(TypePtr target)
+{
+	TypePtr object = target.get() != NULL ? pa11::strip_cv(target) : TypePtr();
+	if (object.get() == NULL)
+		return false;
+	if (object->kind == pa11::TypeKind::LValueReference ||
+	    object->kind == pa11::TypeKind::RValueReference)
+		object = pa11::strip_cv(object->base);
+	if (object.get() == NULL)
+		return false;
+	if (object->kind == pa11::TypeKind::Function)
+		return true;
+	if (object->kind == pa11::TypeKind::Pointer &&
+	    object->base.get() != NULL &&
+	    pa11::strip_cv(object->base)->kind == pa11::TypeKind::Function)
+		return true;
+	return object->kind == pa11::TypeKind::MemberPointer &&
+	       object->base.get() != NULL &&
+	       pa11::strip_cv(object->base)->kind == pa11::TypeKind::Function;
+}
+
+bool record_has_overload_set_constructor_target(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL ||
+	    bare->kind != pa11::TypeKind::Record ||
+	    bare->scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator found =
+		bare->scope->members.find(bare->scope->name);
+	if (found == bare->scope->members.end())
+		return false;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* ctor = found->second[i];
+		if (ctor->kind != BindingKind::Function ||
+		    ctor->type.get() == NULL ||
+		    ctor->type->kind != pa11::TypeKind::Function ||
+		    ctor->type->parameters.size() < 2)
+			continue;
+		if (overload_set_target_type(ctor->type->parameters[1]))
+			return true;
+	}
+		return false;
+	}
+
+	bool record_template_arguments_include_function_type(TypePtr record)
+	{
+		TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (bare.get() == NULL ||
+		    bare->kind != pa11::TypeKind::Record ||
+		    !bare->is_template_specialization)
+			return false;
+		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		{
+			const pa11::TemplateInstanceArgument& arg =
+				bare->template_arguments[i];
+			if (arg.kind == pa11::TemplateInstanceArgumentKind::Type &&
+			    arg.type.get() != NULL &&
+			    pa11::strip_cv(arg.type)->kind == pa11::TypeKind::Function)
+				return true;
+		}
+		return false;
+	}
+
+	Expr expr_from_braced_reference_child(const Node& child_node)
+	{
+		TypePtr child_type = child_node.type;
+		if (child_type.get() == NULL &&
+		    child_node.direct_call != NULL &&
+		    child_node.direct_call->owner != NULL &&
+		    child_node.direct_call->owner->kind == ScopeKind::Class &&
+		    child_node.direct_call->name == child_node.direct_call->owner->name)
+			child_type = pa11::record_type_for_scope(child_node.direct_call->owner);
+
+		Expr child;
+		if (child_type.get() == NULL)
+			return child;
+		child.valid = true;
+		child.node = child_node;
+		child.type = child_type;
+		child.category = child_node.category;
+		if (child.category != ValueCategory::LValue &&
+		    child.category != ValueCategory::XValue)
+			child.category = ValueCategory::PRValue;
+		child.binding = child_node.binding;
+		child.overloads = child_node.overloads;
+		child.explicit_template_arguments =
+			child_node.explicit_template_arguments;
+		child.has_constant_value = child_node.has_constant_value;
+		child.constant_value = child_node.constant_value;
+		child.braced_init_list =
+			child_node.line.compare(0, 16, "braced-init-list") == 0;
+		return child;
+	}
+				Conversion Parser::convert_to(const Expr& expr, TypePtr target) { if (conversion_attempt_active(active_conversion_attempts_, expr.type, target))
+			return Conversion(); ActiveConversionAttempt active_conversion( active_conversion_attempts_, expr.type, target); if (target->kind == pa11::TypeKind::LValueReference ||
+			target->kind == pa11::TypeKind::RValueReference) return convert_reference(expr, target); return convert_value(expr, target); }
+	Conversion Parser::convert_array_braced_reference_list(const Expr& list, TypePtr array_type)
+	{
+		TypePtr bare_array = pa11::strip_cv(array_type);
+		if (bare_array->kind != pa11::TypeKind::Array)
+			return Conversion();
+		if (!bare_array->unknown_bound &&
+		    list.node.children.size() > bare_array->bound)
+			return Conversion();
+		TypePtr elem = bare_array->base;
+		Expr out;
+		out.valid = true;
+		out.type = array_type;
+		out.category = ValueCategory::PRValue;
+		out.braced_init_list = true;
+		out.node = Node("braced-init-list");
+		out.node.type = array_type;
+		out.node.category = out.category;
+		for (size_t i = 0; i < list.node.children.size(); ++i)
+		{
+			Expr child =
+				expr_from_braced_reference_child(list.node.children[i]);
+			Conversion elem_conv;
+			if (child.braced_init_list &&
+			    pa11::strip_cv(elem)->kind == pa11::TypeKind::Array)
+				elem_conv = convert_array_braced_reference_list(child, elem);
+			else
+				elem_conv = convert_to(child, elem);
+			if (!elem_conv.viable)
+				return Conversion();
+			add_child(out.node, elem_conv.expr.node);
+		}
+		annotate_expr_node(out);
+		return Conversion(true, 0, out);
+	}
+		Conversion Parser::convert_reference(const Expr& expr, TypePtr target) { if (expr.braced_init_list && expr.type.get() == NULL && is_std_initializer_list_type(target->base, NULL))
+	{ Expr list = make_initializer_list_expr(expr, target->base); return Conversion(true, 1, list); }
+	if (expr.braced_init_list && expr.type.get() == NULL &&
+	    expr.node.children.size() == 1)
+	{
+		Expr child = expr_from_braced_reference_child(expr.node.children[0]);
+		if (child.valid)
+		{
+		Conversion direct = convert_to(child, target);
+		if (direct.viable)
+		{
+			if (direct.expr.node.direct_call != NULL)
+			{
+				Binding* ctor = direct.expr.node.direct_call;
+				Expr call;
+				call.valid = true;
+				call.type = target;
+				call.category = ValueCategory::PRValue;
+				call.node = Node("call-expression prvalue " +
+				                 pa11::describe_type(target));
+				call.node.direct_call = ctor;
+				Node callee("callee " + qualified_decl_name(ctor) + " " +
+				            pa11::describe_type(ctor->type));
+				callee.binding = ctor;
+				callee.type = ctor->type;
+				callee.direct_call = ctor;
+				add_child(call.node, callee);
+				for (size_t ci = 0; ci < direct.expr.node.children.size(); ++ci)
+					add_child(call.node, direct.expr.node.children[ci]);
+				annotate_expr_node(call);
+				call.node.direct_call = ctor;
+				return Conversion(true, direct.rank, call);
+			}
+			return direct;
+		}
+	}
+	}
 if (expr.braced_init_list && expr.type.get() == NULL) {
 TypePtr target_object = pa11::strip_cv(target->base); if (target_object->kind == pa11::TypeKind::Record) { complete_template_record(target_object);
-if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion(); vector<Expr> args;
+if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion(); try { Expr temporary = make_constructor_list_init_expr(target_object, expr, false); if (temporary.node.direct_call != NULL) { Binding* ctor = temporary.node.direct_call; Expr call;
+call.valid = true; call.type = target; call.category = ValueCategory::PRValue; call.node = Node("call-expression prvalue " + pa11::describe_type(target)); call.node.direct_call = ctor; Node callee("callee " + qualified_decl_name(ctor) + " " + pa11::describe_type(ctor->type));
+callee.binding = ctor; callee.type = ctor->type; callee.direct_call = ctor; add_child(call.node, callee); for (size_t ci = 0; ci < temporary.node.children.size(); ++ci)
+add_child(call.node, temporary.node.children[ci]); annotate_expr_node(call); call.node.direct_call = ctor; return Conversion(true, 1, call); } return Conversion(true, 1, temporary); }
+catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor") throw; } vector<Expr> args;
 for (size_t i = 0; i < expr.node.children.size(); ++i) { Expr child; child.valid = true;
 child.node = expr.node.children[i]; child.type = child.node.type; child.category = child.node.category; child.binding = child.node.binding;
 child.overloads = child.node.overloads; child.explicit_template_arguments = child.node.explicit_template_arguments;
 child.has_constant_value = child.node.has_constant_value; child.constant_value = child.node.constant_value; child.braced_init_list = child.node.line.compare(0, 16,
 "braced-init-list") == 0; args.push_back(child); } Expr temporary =
-make_constructor_init_expr(target->base, args, false); return Conversion(true, 1, temporary); } if (target_object->kind == pa11::TypeKind::Array)
-{ function<Expr(const Node&)> expr_from_node = [&](const Node& node) { Expr out;
-out.valid = true; out.node = node; out.type = node.type; out.category = node.category;
-out.binding = node.binding; out.has_constant_value = node.has_constant_value; out.constant_value = node.constant_value; out.dependent_value_name = node.dependent_value_name;
-out.overloads = node.overloads; out.explicit_template_arguments = node.explicit_template_arguments;
-out.dependent_value_owner_template_name = node.dependent_value_owner_template_name; out.dependent_value_member_name = node.dependent_value_member_name;
-out.dependent_value_negated = node.dependent_value_negated; out.dependent_value_owner_template_arguments = node.dependent_value_owner_template_arguments; out.braced_init_list =
-node.line.compare(0, 16, "braced-init-list") == 0; return out; }; function<Conversion(const Expr&, TypePtr)> convert_array_list =
-[&](const Expr& list, TypePtr array_type) -> Conversion { TypePtr bare_array = pa11::strip_cv(array_type); if (bare_array->kind != pa11::TypeKind::Array) return Conversion();
-if (!bare_array->unknown_bound && list.node.children.size() > bare_array->bound) return Conversion(); TypePtr elem = bare_array->base;
-Expr out; out.valid = true; out.type = array_type; out.category = ValueCategory::PRValue;
-out.braced_init_list = true; out.node = Node("braced-init-list"); out.node.type = array_type; out.node.category = out.category;
-for (size_t i = 0; i < list.node.children.size(); ++i) { Expr child = expr_from_node(list.node.children[i]); Conversion elem_conv;
-if (child.braced_init_list && pa11::strip_cv(elem)->kind == pa11::TypeKind::Array) elem_conv = convert_array_list(child, elem);
-else elem_conv = convert_to(child, elem); if (!elem_conv.viable) return Conversion();
-add_child(out.node, elem_conv.expr.node); } annotate_expr_node(out); return Conversion(true, 0, out);
-}; if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion();
-Conversion converted = convert_array_list(expr, target->base); if (!converted.viable) return converted; if (target->kind == pa11::TypeKind::LValueReference)
-converted.rank += 1; return converted; } }
-Expr selected; try { selected = select_overload_expr(expr, target); } catch (const runtime_error& err) { if (!expr.overloads.empty() && overload_selection_target_failure(err)) return Conversion(); throw; } if (!type_can_bind_reference(target, selected)) { TypePtr selected_object =
+make_constructor_init_expr(target->base, args, false); if (temporary.node.direct_call != NULL) { Binding* ctor = temporary.node.direct_call; Expr call; call.valid = true; call.type = target; call.category = ValueCategory::PRValue;
+call.node = Node("call-expression prvalue " + pa11::describe_type(target)); call.node.direct_call = ctor; Node callee("callee " + qualified_decl_name(ctor) + " " + pa11::describe_type(ctor->type));
+callee.binding = ctor; callee.type = ctor->type; callee.direct_call = ctor; add_child(call.node, callee); for (size_t ci = 0; ci < temporary.node.children.size(); ++ci)
+add_child(call.node, temporary.node.children[ci]); annotate_expr_node(call); call.node.direct_call = ctor; return Conversion(true, 1, call); } return Conversion(true, 1, temporary); } if (target_object->kind == pa11::TypeKind::Array)
+{ if (target->kind == pa11::TypeKind::LValueReference && !pa11::type_has_const(target->base)) return Conversion();
+Conversion converted = convert_array_braced_reference_list(expr, target->base); if (!converted.viable) return converted; if (target->kind == pa11::TypeKind::LValueReference)
+converted.rank += 1; return converted; } return Conversion(); }
+	Expr selected; try { selected = select_overload_expr(expr, target); } catch (const runtime_error& err) { if (!expr.overloads.empty() && overload_selection_target_failure(err)) {
+	TypePtr target_record = pa11::strip_cv(target->base); if (target->kind == pa11::TypeKind::LValueReference && pa11::type_has_const(target->base) &&
+	target_record->kind == pa11::TypeKind::Record && target_record->scope != NULL &&
+		(record_has_overload_set_constructor_target(target_record) ||
+		 record_template_arguments_include_function_type(target_record)) &&
+		user_defined_conversion_depth_ == 0) { vector<Expr> one_arg; one_arg.push_back(expr);
+	try { ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Expr temporary = make_constructor_init_expr(target->base, one_arg, true); return Conversion(true, 4, temporary);
+		} catch (const runtime_error& ctor_err) { string message = ctor_err.what(); if (message.compare(0, 23, "no matching constructor") != 0 && message != "invalid initializer conversion")
+		throw; } } return Conversion(); } throw; } if (selected.type.get() == NULL) return Conversion(); bool direct_reference_bind = type_can_bind_reference(target, selected); if (!direct_reference_bind) { TypePtr selected_object =
 pa11::strip_cv(expression_object_type(selected.type)); Conversion via_conversion = try_reference_conversion_functions(selected, target); if (via_conversion.viable)
-return via_conversion; bool lvalue_can_convert_to_prvalue = selected_object->kind == pa11::TypeKind::Array || selected_object->kind == pa11::TypeKind::Function;
+return via_conversion; TypePtr target_record = pa11::strip_cv(target->base); if (target->kind == pa11::TypeKind::LValueReference && pa11::type_has_const(target->base) &&
+	target_record->kind == pa11::TypeKind::Record && target_record->scope != NULL && user_defined_conversion_depth_ == 0) { vector<Expr> one_arg; one_arg.push_back(selected);
+try { ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Expr temporary = make_constructor_init_expr(target->base, one_arg, false); return Conversion(true, 4, temporary);
+} catch (const runtime_error& err) { string message = err.what(); if (message != "no matching constructor" && message != "invalid initializer conversion")
+	throw; } } bool lvalue_can_convert_to_prvalue = selected_object->kind == pa11::TypeKind::Array || selected_object->kind == pa11::TypeKind::Function;
 if (target->kind == pa11::TypeKind::RValueReference && (selected.category != ValueCategory::LValue || lvalue_can_convert_to_prvalue)) {
 TypePtr source_object = expression_object_type(selected.type); if ((source_object->cv & ~target->base->cv) != 0) return Conversion(); Conversion conv = convert_value(selected, target->base);
 if (!conv.viable) return Conversion(); Expr converted = conv.expr; converted.type = target->base;
 converted.category = ValueCategory::PRValue; if (!pa11::same_type(expression_object_type(selected.type), target->base)) {
 converted.node = Node("cast-expression prvalue " + pa11::describe_type(target->base)); add_child(converted.node, selected.node); annotate_expr_node(converted);
-} return Conversion(true, conv.rank + 1, converted); } TypePtr record = pa11::strip_cv(target->base);
-if (target->kind == pa11::TypeKind::LValueReference && pa11::type_has_const(target->base) && record->kind == pa11::TypeKind::Record && record->scope != NULL)
-{ Conversion conv = convert_value(selected, target->base); if (conv.viable && type_can_bind_reference(target, conv.expr)) return Conversion(true, conv.rank + 1, conv.expr);
+	} return Conversion(true, conv.rank + 1, converted); } TypePtr record = pa11::strip_cv(target->base);
+		if (target->kind == pa11::TypeKind::LValueReference && pa11::type_has_const(target->base) && record->kind == pa11::TypeKind::Record && record->scope != NULL && user_defined_conversion_depth_ == 0)
+	{
+			Conversion conv = convert_value(selected, target->base);
+			bool value_bind = conv.viable && type_can_bind_reference(target, conv.expr);
+			if (value_bind) return Conversion(true, conv.rank + 1, conv.expr);
 map<string, vector<Binding*> >::const_iterator found = record->scope->members.find(record->scope->name); if (found != record->scope->members.end()) {
 for (size_t i = 0; i < found->second.size(); ++i) { Binding* ctor = found->second[i]; if (function_template_placeholders_.find(ctor) !=
 function_template_placeholders_.end()) { Expr this_arg; this_arg.valid = true;
@@ -712,10 +942,11 @@ deduction_args.push_back(selected); map<Binding*, vector<TemplateArgument> > exp
 explicit_args, deduction_args); if (ctor == NULL) continue;
 } if (ctor->kind != BindingKind::Function || ctor->is_explicit ||
 ctor->type.get() == NULL || ctor->type->kind != pa11::TypeKind::Function ||
-ctor->type->parameters.size() < 2 ||
-!constructor_accepts_argument_count(ctor, 1))
-continue; TypePtr ctor_param = ctor->type->parameters[1]; if (pa11::is_reference_type(ctor_param) && pa11::same_type(pa11::strip_cv(ctor_param->base),
-record)) continue; Conversion arg = convert_to(selected, ctor_param);
+	ctor->type->parameters.size() < 2 ||
+	!constructor_accepts_argument_count(ctor, 1))
+		continue; TypePtr ctor_param = ctor->type->parameters[1]; if (pa11::is_reference_type(ctor_param) && pa11::same_type(pa11::strip_cv(ctor_param->base),
+	record)) continue; if (!selected.overloads.empty() && !overload_set_target_type(ctor_param)) continue;
+	ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Conversion arg = convert_to(selected, ctor_param);
 if (!arg.viable) continue; Binding* selected_ctor = ctor; ctor = canonical_function_binding(ctor);
 if (unevaluated_expression_depth_ == 0) { map<Binding*, TemplateDeclaration*>::iterator template_it = function_template_placeholders_.find(ctor);
 map<Binding*, vector<TemplateArgument> >::iterator args_it = function_template_specialization_arguments_.find(ctor); if (template_it == function_template_placeholders_.end() && selected_ctor != ctor)
@@ -742,7 +973,7 @@ if (rank < 1000000) rank += qualification_conversion_rank(target->base, source_o
 { if (pa11::same_type(source_object, target->base)) rank = 0; else if (types_reference_compatible(target->base, source_object))
 rank = qualification_conversion_rank(target->base, source_object); else rank = 1;
 } if (target->kind == pa11::TypeKind::RValueReference && selected.category != ValueCategory::LValue && pa11::same_type(source_object, target->base))
-rank = 0; else if (target->kind == pa11::TypeKind::LValueReference && selected.category != ValueCategory::LValue) rank += 1;
+rank = 0; else if (target->kind == pa11::TypeKind::LValueReference && selected.category != ValueCategory::LValue) { TypePtr source_bare = pa11::strip_cv(source_object); TypePtr target_bare = pa11::strip_cv(target->base); if (!pa11::same_type(source_bare, target_bare) && !same_template_specialization_record(source_bare, target_bare) && !same_named_record_signature_type(source_bare, target_bare)) rank += 1; }
 if (selected.category == ValueCategory::PRValue) { TypePtr source_object = pa11::strip_cv(expression_object_type(selected.type));
 if (source_object->kind == pa11::TypeKind::Record) ensure_default_destructor( source_object, !pa11::record_direct_bases(source_object).empty());
 } return Conversion(true, rank, selected); } Binding* Parser::instantiate_conversion_function_template_candidate(Binding* op,
@@ -793,11 +1024,11 @@ if (instantiated != NULL && unevaluated_expression_depth_ == 0) {
 }
 return instantiated;
 } catch (const runtime_error&) { return NULL;
-} } bool Parser::conversion_function_template_candidate(Binding* op) const {
-map<Binding*, TemplateDeclaration*>::const_iterator found = function_template_placeholders_.find(op); return found != function_template_placeholders_.end() && !found->second->class_template_member;
-} Conversion Parser::try_reference_conversion_functions(const Expr& selected, TypePtr target) {
-TypePtr selected_object = pa11::strip_cv(expression_object_type(selected.type)); if (selected_object->kind != pa11::TypeKind::Record || selected_object->scope == NULL)
-return Conversion(); if (!type_is_template_dependent(selected_object)) instantiate_member_function_templates(selected_object); Conversion best;
+	} } bool Parser::conversion_function_template_candidate(Binding* op) const {
+	map<Binding*, TemplateDeclaration*>::const_iterator found = function_template_placeholders_.find(op); return found != function_template_placeholders_.end() && !found->second->class_template_member;
+	} Conversion Parser::try_reference_conversion_functions(const Expr& selected, TypePtr target) {
+	TypePtr selected_object = pa11::strip_cv(expression_object_type(selected.type)); if (selected_object->kind != pa11::TypeKind::Record || selected_object->scope == NULL)
+return Conversion(); if (user_defined_conversion_depth_ != 0) return Conversion(); if (!type_is_template_dependent(selected_object)) instantiate_conversion_function_template_owners(selected_object); Conversion best;
 bool best_template = false; vector<Binding*> conversions; set<Scope*> seen; collect_conversion_functions(selected_object, seen, conversions);
 for (size_t i = 0; i < conversions.size(); ++i) if (conversions[i]->owner != NULL && conversions[i]->owner->kind == ScopeKind::Class) mark_template_specialization_demanded(
 pa11::record_type_for_scope(conversions[i]->owner)); TypePtr desired_conversion = target; if (desired_conversion->kind == pa11::TypeKind::LValueReference || desired_conversion->kind == pa11::TypeKind::RValueReference)
@@ -811,8 +1042,9 @@ instantiate_conversion_function_template_candidate( conversions[i], target); if 
 continue; op_template = op_template || conversion_function_template_candidate(op); if (op->kind != BindingKind::Function ||
 op->type->kind != pa11::TypeKind::Function || op->type->parameters.size() != 1) continue; if (pa11::same_type(pa11::strip_cv(op->type->base),
 selected_object)) continue; try {
-Expr member = make_member_expr(selected, op->name, "."); member.overloads.clear(); member.overloads.push_back(op); member.binding = op;
-member.type = op->type; Expr call = make_call_expr(member, vector<Expr>()); Conversion tail = convert_reference(call, target); if (!tail.viable)
+	Expr object = conversion_function_object_expr(selected, op);
+	Expr member = make_member_expr(object, op->name, "."); member.overloads.clear(); member.overloads.push_back(op); member.binding = op;
+	member.type = op->type; Expr call = make_call_expr(member, vector<Expr>()); ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Conversion tail = convert_reference(call, target); if (!tail.viable)
 continue; tail.rank += 2; if (!best.viable || tail.rank < best.rank ||
 (tail.rank == best.rank && best_template && !op_template)) { best = tail; best_template = op_template;
 } else if (best.viable && tail.rank == best.rank && best_template == op_template)
@@ -820,8 +1052,34 @@ throw runtime_error("ambiguous conversion function"); } catch (const runtime_err
 } } return best; }
 Conversion Parser::convert_value(const Expr& expr, TypePtr target) { try { TypePtr resolved_target = substitute_template_type(target); if (resolved_target.get() != NULL) target = resolved_target; } catch (const runtime_error&) { } TypePtr target_for_resolution = pa11::strip_cv(target); if (target_for_resolution->kind == pa11::TypeKind::Pointer) { TypePtr pointee = target_for_resolution->base.get() != NULL ? pa11::strip_cv(target_for_resolution->base) : TypePtr(); if (pointee.get() != NULL && pointee->is_dependent_typename) { TypePtr resolved_pointee = resolve_dependent_typename_type(pointee); if (resolved_pointee.get() != NULL) target = pa11::make_pointer(resolved_pointee); } } if (expr.braced_init_list && expr.type.get() == NULL && is_std_initializer_list_type(target, NULL))
 { Expr list = make_initializer_list_expr(expr, target); return Conversion(true, 0, list); }
-TypePtr dst = pa11::strip_top_level_cv(target); TypePtr dst_bare = pa11::strip_cv(dst); Expr selected; try { selected = (!expr.overloads.empty() && dst_bare->kind == pa11::TypeKind::Record) ? expr : select_overload_expr(expr, target); } catch (const runtime_error& err) { if (!expr.overloads.empty() && overload_selection_target_failure(err)) return Conversion(); throw; }
-Binding* selected_template_binding =
+TypePtr dst = pa11::strip_top_level_cv(target); TypePtr dst_bare = pa11::strip_cv(dst); if (expr.braced_init_list && expr.type.get() == NULL && dst_bare->kind == pa11::TypeKind::Record) { complete_template_record(dst_bare);
+try { Expr constructed = make_constructor_list_init_expr(dst_bare, expr, false); return Conversion(true, 1, constructed); }
+catch (const runtime_error& err) { if (string(err.what()) != "no matching constructor") throw; } vector<Expr> args; for (size_t i = 0; i < expr.node.children.size(); ++i) { Expr child; child.valid = true;
+child.node = expr.node.children[i]; child.type = child.node.type; child.category = child.node.category; child.binding = child.node.binding;
+child.overloads = child.node.overloads; child.explicit_template_arguments = child.node.explicit_template_arguments;
+child.has_constant_value = child.node.has_constant_value; child.constant_value = child.node.constant_value; child.braced_init_list = child.node.line.compare(0, 16,
+"braced-init-list") == 0; args.push_back(child); }
+try { Expr constructed = make_constructor_init_expr(target, args, false); return Conversion(true, 1, constructed); }
+catch (const runtime_error&) { return Conversion(); } }
+if (expr.braced_init_list &&
+    expr.type.get() != NULL &&
+    expr.node.direct_call == NULL &&
+    expr.node.children.empty() &&
+    dst_bare->kind == pa11::TypeKind::Record &&
+    pa11::same_type(pa11::strip_cv(expr.type), dst_bare))
+{
+	try
+	{
+		vector<Expr> args;
+		Expr constructed = make_constructor_init_expr(target, args, false);
+		return Conversion(true, 0, constructed);
+	}
+	catch (const runtime_error&)
+	{
+	}
+}
+	Expr selected; try { selected = (!expr.overloads.empty() && dst_bare->kind == pa11::TypeKind::Record) ? expr : select_overload_expr(expr, target); } catch (const runtime_error& err) { if (!expr.overloads.empty() && overload_selection_target_failure(err)) return Conversion(); throw; }
+	Binding* selected_template_binding =
 	selected.binding != NULL &&
 	function_template_placeholders_.find(selected.binding) !=
 		function_template_placeholders_.end()
@@ -831,9 +1089,9 @@ Binding* selected_template_binding =
 	  function_template_placeholders_.find(
 		  selected.binding->aliased_binding) !=
 		  function_template_placeholders_.end()
-	  ? selected.binding->aliased_binding
-	  : NULL;
-if (selected_template_binding != NULL &&
+		  ? selected.binding->aliased_binding
+		  : NULL;
+	if (selected_template_binding != NULL &&
     selected.overloads.empty() &&
     dst_bare->kind == pa11::TypeKind::Pointer &&
     dst_bare->base.get() != NULL &&
@@ -872,16 +1130,22 @@ if (selected_template_binding != NULL &&
 		}
 	}
 }
+if (selected.type.get() == NULL)
+	return Conversion();
 TypePtr src = lvalue_to_rvalue_type(selected.type);
 if (selected.binding != NULL && selected.binding->kind == BindingKind::Function &&
 dst_bare->kind == pa11::TypeKind::Pointer && dst_bare->base.get() != NULL && dst_bare->base->kind == pa11::TypeKind::Function && unevaluated_expression_depth_ == 0)
 { parse_pending_function_body(selected.binding); parse_pending_member_body(selected.binding); ensure_function_body_extra_node(selected.binding); }
-if (pa11::same_type(src, dst) || same_template_specialization_record(src, dst)) { TypePtr src_same_record = pa11::strip_cv(src);
+if (pa11::same_type(src, dst) || same_template_specialization_type(src, dst)) { TypePtr src_same_record = pa11::strip_cv(src);
 TypePtr dst_same_record = pa11::strip_cv(dst); if (src_same_record->kind == pa11::TypeKind::Record && dst_same_record->kind == pa11::TypeKind::Record && (selected.category == ValueCategory::LValue ||
 selected.category == ValueCategory::XValue)) { Binding* ctor = ensure_copy_move_constructor(dst_same_record,
 selected.category == ValueCategory::XValue); if (unevaluated_expression_depth_ == 0) parse_pending_member_body(ctor);
 } return Conversion(true, 0, selected); } TypePtr src_record = pa11::strip_cv(src);
-TypePtr dst_record = pa11::strip_cv(dst); if (dst_bare->kind == pa11::TypeKind::Pointer) { TypePtr dst_pointee = dst_bare->base.get() != NULL ? pa11::strip_cv(dst_bare->base) : TypePtr(); TypePtr src_bare = pa11::strip_cv(src); if (dst_pointee.get() != NULL && dst_pointee->is_dependent_typename && src_bare->kind == pa11::TypeKind::Pointer) { Expr converted = selected; converted.type = dst; converted.category = ValueCategory::PRValue; converted.node = Node("cast-expression prvalue " + pa11::describe_type(dst)); add_child(converted.node, selected.node); annotate_expr_node(converted); return Conversion(true, 4, converted); } } if (type_is_template_dependent(src) &&
+TypePtr dst_record = pa11::strip_cv(dst); if (dst_record->kind == pa11::TypeKind::Record &&
+dst_record->scope == NULL && !type_is_template_dependent(dst_record)) {
+	mark_template_specialization_demanded(dst_record);
+	complete_template_record(dst_record);
+} if (dst_bare->kind == pa11::TypeKind::Pointer) { TypePtr dst_pointee = dst_bare->base.get() != NULL ? pa11::strip_cv(dst_bare->base) : TypePtr(); TypePtr src_bare = pa11::strip_cv(src); if (dst_pointee.get() != NULL && dst_pointee->is_dependent_typename && src_bare->kind == pa11::TypeKind::Pointer) { Expr converted = selected; converted.type = dst; converted.category = ValueCategory::PRValue; converted.node = Node("cast-expression prvalue " + pa11::describe_type(dst)); add_child(converted.node, selected.node); annotate_expr_node(converted); return Conversion(true, 4, converted); } } if (type_is_template_dependent(src) &&
 dst_record->kind != pa11::TypeKind::Record)
 {
 	Expr converted = selected;
@@ -940,6 +1204,25 @@ if (hosted_compatibility_ &&
 	annotate_expr_node(converted);
 	return Conversion(true, 2, converted);
 }
+if (dst_record->scope != NULL && user_defined_conversion_depth_ == 0)
+{
+	vector<Expr> one_arg;
+	one_arg.push_back(selected);
+	try
+	{
+		ActiveUserDefinedConversion user_conversion(
+			user_defined_conversion_depth_);
+		Expr constructed = make_constructor_init_expr(dst, one_arg, true);
+		return Conversion(true, 4, constructed);
+	}
+	catch (const runtime_error& err)
+	{
+		string message = err.what();
+		if (message != "no matching constructor" &&
+		    message != "invalid initializer conversion")
+			throw;
+	}
+}
 } if (selected.null_pointer_constant && is_pointer(dst)) { selected.type = dst;
 selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " 0"); selected.constant_expression = true; selected.has_constant_value = false; selected.node.token_text = "0";
 annotate_expr_node(selected); return Conversion(true, 2, selected); } if (selected.null_pointer_constant &&
@@ -950,14 +1233,14 @@ pa11::strip_cv(dst)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(dst)-
 selected.node = Node("literal prvalue nullptr_t 0"); selected.constant_expression = true; selected.has_constant_value = true; selected.constant_value = 0;
 selected.node.token_text = "0"; annotate_expr_node(selected); return Conversion(true, 2, selected); }
 if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(src)->fundamental == FT_NULLPTR_T && is_pointer(dst)) return Conversion(true, 2, selected); if (pa11::strip_cv(src)->kind == pa11::TypeKind::Fundamental && pa11::strip_cv(src)->fundamental == FT_NULLPTR_T && dst_bare->kind == pa11::TypeKind::MemberPointer) { selected.type = dst; selected.node = Node("literal prvalue " + pa11::describe_type(dst) + " nullptr"); selected.node.token_text = "nullptr"; annotate_expr_node(selected); return Conversion(true, 2, selected); } int rank = scalar_conversion_rank(selected.type, dst);
-if (rank < 1000000) { if (selected.has_constant_value) {
-selected.constant_value = convert_scalar_constant_value(src, dst, selected.constant_value);
-selected.node.has_constant_value = true; selected.node.constant_value = selected.constant_value; selected.node.token_text = to_string(selected.constant_value); }
-return Conversion(true, rank, selected); } if (dst_record->kind == pa11::TypeKind::Record && dst_record->scope != NULL)
-{ mark_template_specialization_demanded(dst_record); if (!type_is_template_dependent(dst_record)) {
-complete_template_record(dst_record); instantiate_member_function_templates(dst_record); } if (record_conversion_active(active_record_conversion_targets_,
-dst_record)) return Conversion(); ActiveRecordConversion active_conversion( active_record_conversion_targets_,
-dst_record); Conversion best; Binding* best_ctor = NULL; Expr best_arg;
+	if (rank < 1000000) { if (selected.has_constant_value) {
+	selected.constant_value = convert_scalar_constant_value(src, dst, selected.constant_value);
+	selected.node.has_constant_value = true; selected.node.constant_value = selected.constant_value; selected.node.token_text = to_string(selected.constant_value); }
+	return Conversion(true, rank, selected); } if (dst_record->kind == pa11::TypeKind::Record && dst_record->scope != NULL && user_defined_conversion_depth_ == 0)
+	{ mark_template_specialization_demanded(dst_record); if (!type_is_template_dependent(dst_record)) {
+	complete_template_record(dst_record); if (hosted_compatibility_ && hosted_library_namespace_scope(dst_record->scope)) { vector<Expr> ctor_args; ctor_args.push_back(selected); prepare_constructor_template_candidates(dst_record, ctor_args); } else instantiate_member_function_templates(dst_record); } if (record_conversion_active(active_record_conversion_targets_,
+	dst_record)) return Conversion(); ActiveRecordConversion active_conversion( active_record_conversion_targets_,
+	dst_record); ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Conversion best; Binding* best_ctor = NULL; Expr best_arg;
 bool ambiguous = false; vector<Binding*> considered; map<string, vector<Binding*> >::const_iterator found = dst_record->scope->members.find(dst_record->scope->name);
 if (found != dst_record->scope->members.end()) { for (size_t i = 0; i < found->second.size(); ++i) {
 Binding* ctor = found->second[i]; if (function_template_placeholders_.find(ctor) != function_template_placeholders_.end()) {
@@ -971,9 +1254,10 @@ ctor->type->parameters.size() < 2 ||
 !constructor_accepts_argument_count(ctor, 1)) continue; bool duplicate = false;
 for (size_t j = 0; j < considered.size(); ++j) if (pa11::same_type(considered[j]->type, ctor->type)) { if (!(ctor->is_inline_definition &&
 !considered[j]->is_inline_definition)) duplicate = true; } if (duplicate)
-continue; considered.push_back(ctor); TypePtr param = ctor->type->parameters[1]; if (pa11::is_reference_type(param) &&
-(pa11::same_type(pa11::strip_cv(param->base), dst_record) || same_template_specialization_record(param->base, dst_record)))
-continue; Conversion arg = convert_to(selected, param); if (!arg.viable) continue;
+	continue; considered.push_back(ctor); TypePtr param = ctor->type->parameters[1]; if (pa11::is_reference_type(param) &&
+	(pa11::same_type(pa11::strip_cv(param->base), dst_record) || same_template_specialization_type(param->base, dst_record)))
+	continue; if (!selected.overloads.empty() && !overload_set_target_type(param)) continue;
+	Conversion arg = convert_to(selected, param); if (!arg.viable) continue;
 if (!best.viable || arg.rank < best.rank) { best = arg; best_ctor = ctor;
 best_arg = arg.expr; ambiguous = false; } else if (best.viable && arg.rank == best.rank)
 ambiguous = true; } } if (best.viable && !ambiguous)
@@ -993,9 +1277,9 @@ constructed.copy_initialization = true; constructed.node = Node("braced-init-lis
 constructed.node.direct_call = best_ctor; add_child(constructed.node, best_arg.node);
 append_trailing_constructor_defaults(constructed.node, best_ctor,
                                      selected_ctor, default_arguments_);
-annotate_expr_node(constructed); return Conversion(true, best.rank + 3, constructed);
-} } if (src_record->kind == pa11::TypeKind::Record && src_record->scope != NULL) {
-if (!type_is_template_dependent(src_record)) instantiate_member_function_templates(src_record); Conversion best; bool best_template = false;
+	annotate_expr_node(constructed); return Conversion(true, best.rank + 3, constructed);
+	} } if (src_record->kind == pa11::TypeKind::Record && src_record->scope != NULL && user_defined_conversion_depth_ == 0) {
+if (!type_is_template_dependent(src_record)) instantiate_conversion_function_template_owners(src_record); Conversion best; bool best_template = false;
 vector<Binding*> conversions; set<Scope*> seen; collect_conversion_functions(src_record, seen, conversions); for (size_t i = 0; i < conversions.size(); ++i)
 if (conversions[i]->owner != NULL && conversions[i]->owner->kind == ScopeKind::Class) mark_template_specialization_demanded( pa11::record_type_for_scope(conversions[i]->owner));
 bool exact_nontemplate_conversion = false; for (size_t i = 0; i < conversions.size(); ++i) { Binding* candidate = conversions[i];
@@ -1007,9 +1291,9 @@ continue; Binding* op = instantiate_conversion_function_template_candidate( conv
 dst); if (op == NULL) continue; op_template =
 op_template || conversion_function_template_candidate(op); if (op->kind != BindingKind::Function || op->type->kind != pa11::TypeKind::Function || op->type->parameters.size() != 1)
 continue; if (pa11::same_type(pa11::strip_cv(op->type->base), src_record)) continue;
-try { Expr member = make_member_expr(selected, op->name, "."); member.overloads.clear();
-member.overloads.push_back(op); member.binding = op; member.type = op->type; Expr call = make_call_expr(member, vector<Expr>());
-Conversion tail = convert_value(call, dst); if (!tail.viable) continue; tail.rank += 2;
+	try { Expr object = conversion_function_object_expr(selected, op); Expr member = make_member_expr(object, op->name, "."); member.overloads.clear();
+	member.overloads.push_back(op); member.binding = op; member.type = op->type; Expr call = make_call_expr(member, vector<Expr>());
+	ActiveUserDefinedConversion user_conversion(user_defined_conversion_depth_); Conversion tail = convert_value(call, dst); if (!tail.viable) continue; tail.rank += 2;
 if (!best.viable || tail.rank < best.rank || (tail.rank == best.rank && best_template && !op_template)) {
 best = tail; best_template = op_template; } else if (best.viable &&
 tail.rank == best.rank && best_template == op_template) throw runtime_error("ambiguous conversion function"); }

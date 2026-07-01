@@ -7,6 +7,63 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+namespace {
+
+bool template_id_followed_by_call(const vector<Token>& tokens, size_t pos)
+{
+	int angle_depth = 0;
+	int paren_depth = 0;
+	int bracket_depth = 0;
+	int brace_depth = 0;
+	for (; pos < tokens.size(); ++pos)
+	{
+		const Token& tok = tokens[pos];
+		if (tok.kind != posttoken::TokenKind::Simple)
+			continue;
+		if (tok.type == OP_LPAREN)
+			++paren_depth;
+		else if (tok.type == OP_RPAREN)
+		{
+			if (paren_depth > 0)
+				--paren_depth;
+		}
+		else if (tok.type == OP_LSQUARE)
+			++bracket_depth;
+		else if (tok.type == OP_RSQUARE)
+		{
+			if (bracket_depth > 0)
+				--bracket_depth;
+		}
+		else if (tok.type == OP_LBRACE)
+			++brace_depth;
+		else if (tok.type == OP_RBRACE)
+		{
+			if (brace_depth > 0)
+				--brace_depth;
+		}
+		else if (paren_depth == 0 &&
+		         bracket_depth == 0 &&
+		         brace_depth == 0 &&
+		         tok.type == OP_LT)
+			++angle_depth;
+		else if (paren_depth == 0 &&
+		         bracket_depth == 0 &&
+		         brace_depth == 0 &&
+		         tok.type == OP_GT)
+		{
+			--angle_depth;
+			if (angle_depth == 0)
+				return pos + 1 < tokens.size() &&
+				       tokens[pos + 1].kind == posttoken::TokenKind::Simple &&
+				       tokens[pos + 1].type == OP_LPAREN;
+			if (angle_depth < 0)
+				return false;
+		}
+	}
+	return false;
+}
+
+}  // namespace
 
 Expr Parser::parse_postfix_expression()
 {
@@ -35,6 +92,13 @@ Expr Parser::parse_direct_call_postfix_expression()
 	}
 	if (!at(OP_LPAREN))
 	{
+		if (replaying_dependent_decltype_ &&
+		    at(OP_LT) &&
+		    template_id_followed_by_call(tokens_, pos_))
+			{
+				--direct_template_call_depth_;
+				throw runtime_error("name not found: " + name.spelling);
+			}
 		--direct_template_call_depth_;
 		pos_ = direct_call_save;
 		return parse_postfix_suffixes(parse_primary_expression());

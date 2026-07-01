@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 #include "pa12_templates_function_support.h"
 
 namespace pa14 {
@@ -45,22 +46,52 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 			const Node& member_expr = expr.children[0];
 			TypePtr object_record =
 				pa11::strip_cv(object_type(member_expr.children[0].type));
-			string slot =
-				fresh_aux_slot("tmpobj", scalar_lowir_type(object_record));
-			string object_addr_name = fresh_temp();
-			instr(object_addr_name + " = addr $" + slot);
-			Value object_addr("ptr", object_addr_name);
-			function<Value()> object_addr_for = [object_addr]() {
-				return object_addr;
-			};
-			lower_object_init(object_addr_for,
-			                  object_record,
-			                  member_expr.children[0]);
-			dispatch = active_unwind_dispatch_.empty()
-				? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
-			define_dispatch = active_unwind_dispatch_.empty();
-			instr("eh_try ^" + dispatch);
-			++eh_try_depth_;
+			TypePtr object_value =
+				pa11::strip_cv(strip_for_value(member_expr.children[0].type));
+			Value object_addr;
+			bool started_protection = false;
+			if (object_value.get() != NULL &&
+			    object_value->kind == TypeKind::Pointer)
+			{
+				object_record = object_value->base.get() != NULL
+					? pa11::strip_cv(object_value->base) : TypePtr();
+				dispatch = active_unwind_dispatch_.empty()
+					? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+				define_dispatch = active_unwind_dispatch_.empty();
+				instr("eh_try ^" + dispatch);
+				++eh_try_depth_;
+				started_protection = true;
+				object_addr = emit_rvalue(member_expr.children[0]);
+				if (!object_addr.text.empty() &&
+				    (object_addr.text[0] == '$' || object_addr.text[0] == '@'))
+				{
+					string loaded = fresh_temp();
+					instr(loaded + " = load ptr " + object_addr.text);
+					object_addr = Value("ptr", loaded);
+				}
+			}
+			else
+			{
+				string slot =
+					fresh_aux_slot("tmpobj", scalar_lowir_type(object_record));
+				string object_addr_name = fresh_temp();
+				instr(object_addr_name + " = addr $" + slot);
+				object_addr = Value("ptr", object_addr_name);
+				function<Value()> object_addr_for = [object_addr]() {
+					return object_addr;
+				};
+				lower_object_init(object_addr_for,
+				                  object_record,
+				                  member_expr.children[0]);
+			}
+			if (!started_protection)
+			{
+				dispatch = active_unwind_dispatch_.empty()
+					? fresh_block("call_unwind_dispatch") : active_unwind_dispatch_;
+				define_dispatch = active_unwind_dispatch_.empty();
+				instr("eh_try ^" + dispatch);
+				++eh_try_depth_;
+			}
 			Binding* member = member_expr.binding;
 			TypePtr owner_record = pa11::record_type_for_scope(member->owner);
 			Value projected_base = object_addr;
@@ -158,9 +189,9 @@ Value FunctionLowerer::emit_binary(const Node& expr)
 			string end = fresh_block("call_unwind_end");
 			terminate("jump ^" + end);
 			active_unwind_dispatch_ = dispatch;
+			active_unwind_cleanup_depth_ = cleanups_.size();
 			start_block(dispatch);
-			emit_unwind_cleanups();
-			terminate("resume");
+			emit_shared_unwind_dispatch_body();
 			start_block(end); } }
 	return Value(cmp ? "u8" : scalar_lowir_type(op_type), tmp);
 }

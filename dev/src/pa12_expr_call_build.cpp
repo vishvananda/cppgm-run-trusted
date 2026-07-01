@@ -1,4 +1,5 @@
 #include "pa12_expr_semantics_support.h"
+#include "pa12_templates_function_support.h"
 #include "pa12_types_support.h"
 
 #include <algorithm>
@@ -41,6 +42,19 @@ uint64_t byte_swap_value(uint64_t value, unsigned bits)
 		out |= (value >> (i * 8)) & 0xffu;
 	}
 	return out;
+}
+
+bool bound_id_constructor_call(const Expr& callee, Binding* direct, TypePtr& record)
+{
+	if (direct == NULL ||
+	    direct->owner == NULL ||
+	    direct->owner->kind != ScopeKind::Class ||
+	    direct->name != direct->owner->name ||
+	    callee.node.line.compare(0, 13, "id-expression") != 0)
+		return false;
+	record = pa11::record_type_for_scope(direct->owner);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	return record.get() != NULL && record->kind == pa11::TypeKind::Record;
 }
 
 bool builtin_bit_count_name(const string& name)
@@ -157,20 +171,63 @@ bool scope_is_namespace_named(Scope* scope, const string& name)
 	return false;
 }
 
-bool hosted_std_forwarding_cast(const Binding* binding)
+bool hosted_std_forwarding_function(const Binding* binding)
 {
 	if (binding == NULL ||
 	    binding->owner == NULL ||
 	    binding->owner->kind != ScopeKind::Namespace ||
 	    binding->owner->name != "std" ||
-	    (binding->name != "move" && binding->name != "forward") ||
+	    (binding->name != "move" && binding->name != "forward"))
+		return false;
+	return true;
+}
+
+bool reference_result_type(TypePtr result)
+{
+	return result.get() != NULL &&
+	       (result->kind == pa11::TypeKind::LValueReference ||
+	        result->kind == pa11::TypeKind::RValueReference);
+}
+
+bool hosted_std_forwarding_cast(const Binding* binding, TypePtr result)
+{
+	if (!hosted_std_forwarding_function(binding))
+		return false;
+	if (reference_result_type(result))
+		return true;
+	if (binding == NULL ||
 	    binding->type.get() == NULL ||
 	    binding->type->kind != pa11::TypeKind::Function ||
 	    binding->type->base.get() == NULL)
 		return false;
-	TypePtr result = binding->type->base;
-	return result->kind == pa11::TypeKind::LValueReference ||
-	       result->kind == pa11::TypeKind::RValueReference;
+	return reference_result_type(binding->type->base);
+}
+
+bool hosted_std_pair_record(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL || bare->kind != pa11::TypeKind::Record)
+		return false;
+	string primary = bare->template_primary_name.empty()
+		? bare->name : bare->template_primary_name;
+	size_t pos = primary.rfind("::");
+	if (pos != string::npos)
+		primary = primary.substr(pos + 2);
+	return primary == "pair" &&
+	       scope_is_namespace_named(bare->scope, "std");
+}
+
+bool hosted_std_make_pair_call(const Binding* binding, TypePtr result)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Namespace &&
+	       binding->owner->name == "std" &&
+	       binding->name == "make_pair" &&
+	       binding->type.get() != NULL &&
+	       binding->type->kind == pa11::TypeKind::Function &&
+	       binding->type->parameters.size() == 2 &&
+	       hosted_std_pair_record(result);
 }
 
 bool hosted_std_tuple_record(TypePtr type)
@@ -776,8 +833,22 @@ bool Parser::call_is_dependent_template_call(const Expr& callee,
                                              const vector<Expr>& args)
 {
 	for (size_t i = 0; i < args.size(); ++i)
-		if (args[i].overloads.empty() && type_is_template_dependent(args[i].type))
-			return true;
+	{
+			if (!args[i].overloads.empty() ||
+			    !type_is_template_dependent(args[i].type) ||
+			    (!type_structurally_dependent(args[i].type) &&
+			     substituted_type_is_valid(args[i].type)))
+				continue;
+		TypePtr bare = args[i].type.get() != NULL
+			? pa11::strip_cv(args[i].type) : TypePtr();
+		if (bare.get() != NULL &&
+		    bare->kind == pa11::TypeKind::Record &&
+		    bare->scope != NULL &&
+		    !bare->is_dependent_typename &&
+		    !type_structurally_dependent(args[i].type))
+			continue;
+		return true;
+	}
 	for (map<Binding*, vector<TemplateArgument> >::const_iterator it =
 		     callee.explicit_template_arguments.begin();
 	     it != callee.explicit_template_arguments.end();
@@ -803,78 +874,209 @@ Binding* Parser::resolve_call_direct_binding(const Expr& callee,
 	if (callee.binding != NULL &&
 	    callee.binding->kind == BindingKind::Function)
 	{
+		Binding* alias = callee.binding->aliased_binding;
+		bool has_template_family = false;
+		if (callee.binding->owner != NULL)
+		{
+			map<Scope*, map<string, vector<TemplateDeclaration*> > >::const_iterator sit =
+				function_templates_.find(callee.binding->owner);
+			if (sit != function_templates_.end())
+			{
+				map<string, vector<TemplateDeclaration*> >::const_iterator nit =
+					sit->second.find(callee.binding->name);
+				has_template_family =
+					nit != sit->second.end() && !nit->second.empty();
+			}
+		}
+		bool template_binding =
+			function_template_placeholders_.find(callee.binding) !=
+				function_template_placeholders_.end() ||
+			function_template_specialization_arguments_.find(callee.binding) !=
+				function_template_specialization_arguments_.end() ||
+			!callee.binding->function_specialization_symbol.empty() ||
+			(alias != NULL &&
+			 (function_template_placeholders_.find(alias) !=
+				  function_template_placeholders_.end() ||
+			  function_template_specialization_arguments_.find(alias) !=
+				  function_template_specialization_arguments_.end() ||
+			  !alias->function_specialization_symbol.empty()));
+		if (template_binding || has_template_family ||
+		    !callee.explicit_template_arguments.empty())
+		{
+			vector<Binding*> overloads;
+			if (callee.binding->owner != NULL)
+			{
+				map<string, vector<Binding*> >::const_iterator found =
+					callee.binding->owner->members.find(callee.binding->name);
+				if (found != callee.binding->owner->members.end())
+					for (size_t i = 0; i < found->second.size(); ++i)
+						if (found->second[i] != NULL &&
+						    found->second[i]->kind == BindingKind::Function)
+							overloads.push_back(found->second[i]);
+			}
+			if (overloads.empty())
+				overloads.push_back(callee.binding);
+			return resolve_call_candidate(overloads, args,
+			                              callee.explicit_template_arguments,
+			                              converted);
+		}
 		converted = args;
 		return callee.binding;
 	}
 	return NULL;
 }
 
-Expr Parser::finish_bound_call_expr(const Expr& callee,
-                                    Binding* direct,
-                                    const vector<Expr>& converted)
-		{
-			if (deleted_functions_.find(direct) != deleted_functions_.end())
-				throw runtime_error("call to deleted function");
-			if (hosted_compatibility_ &&
-		    converted.size() == 1 &&
-		    hosted_std_forwarding_cast(direct))
-			return make_cast_expr(direct->type->base, "", converted[0]);
-			bool defer_hosted_body = defer_hosted_function_body(direct);
-	if (unevaluated_expression_depth_ == 0 && !defer_hosted_body)
+void Parser::adjust_forwarding_call_result(Binding* direct,
+                                           const vector<Expr>& converted,
+                                           TypePtr& result_type)
+{
+	if (!hosted_compatibility_ ||
+	    direct == NULL ||
+	    direct->owner == NULL ||
+	    direct->owner->kind != ScopeKind::Namespace ||
+	    direct->owner->name != "std")
+		return;
+	if ((direct->name == "move" || direct->name == "forward") &&
+	    converted.size() == 1)
 	{
-		parse_pending_function_body(direct);
-		parse_pending_member_body(direct);
+		if (direct->name == "move")
+		{
+			result_type = pa11::make_rvalue_reference(
+				expression_object_type(converted[0].type));
+			return;
+		}
+		map<Binding*, vector<TemplateArgument> >::const_iterator found_args =
+			function_template_specialization_arguments_.find(direct);
+		if (found_args != function_template_specialization_arguments_.end() &&
+		    !found_args->second.empty() &&
+		    found_args->second[0].kind == TemplateArgumentKind::Type &&
+		    found_args->second[0].type.get() != NULL)
+		{
+			TypePtr forwarded = found_args->second[0].type;
+			if (forwarded->kind == pa11::TypeKind::LValueReference ||
+			    forwarded->kind == pa11::TypeKind::RValueReference)
+				result_type = forwarded;
+			else
+				result_type = pa11::make_rvalue_reference(forwarded);
+			return;
+		}
 	}
-	Expr out;
-	out.type = direct->type->base;
-	if (hosted_compatibility_ &&
-		    direct->name == "forward_as_tuple" &&
-		    direct->owner != NULL &&
-		    direct->owner->kind == ScopeKind::Namespace &&
-		    direct->owner->name == "std" &&
-		    type_structurally_dependent(out.type))
+	if (direct->name != "forward_as_tuple")
+		return;
+	if (type_structurally_dependent(result_type))
 	{
 		map<Binding*, vector<TemplateArgument> >::const_iterator found_args =
 			function_template_specialization_arguments_.find(direct);
 		if (found_args != function_template_specialization_arguments_.end() &&
 		    found_args->second.size() == 1 &&
 		    found_args->second[0].kind == TemplateArgumentKind::Pack)
+		{
+			vector<TemplateArgument> tuple_args;
+			const vector<TemplateArgument>& pack = found_args->second[0].pack;
+			bool concrete_tuple_args = true;
+			for (size_t i = 0; i < pack.size(); ++i)
 			{
-				vector<TemplateArgument> tuple_args;
-				const vector<TemplateArgument>& pack = found_args->second[0].pack;
-				bool concrete_tuple_args = true;
-				for (size_t i = 0; i < pack.size(); ++i)
-				{
-					if (pack[i].kind != TemplateArgumentKind::Type)
-						break;
-					TypePtr elem = pack[i].type;
-					TypePtr bare = elem.get() != NULL
-						? pa11::strip_cv(elem) : TypePtr();
-					TypePtr ref =
-						bare.get() != NULL &&
-						bare->kind == pa11::TypeKind::LValueReference
-						? elem : pa11::make_rvalue_reference(elem);
-					if (type_structurally_dependent(ref))
-						concrete_tuple_args = false;
-					tuple_args.push_back(TemplateArgument::type_arg(ref));
-				}
-				if (concrete_tuple_args &&
-				    tuple_args.size() == pack.size())
-				{
-					TemplateDeclaration* tuple_template =
-						find_class_template(direct->owner, "tuple");
-					if (tuple_template != NULL)
-						out.type = instantiate_class_template(tuple_template,
-						                                      tuple_args);
-				}
+				if (pack[i].kind != TemplateArgumentKind::Type)
+					break;
+				TypePtr elem = pack[i].type;
+				TypePtr bare = elem.get() != NULL
+					? pa11::strip_cv(elem) : TypePtr();
+				TypePtr ref =
+					bare.get() != NULL &&
+					bare->kind == pa11::TypeKind::LValueReference
+					? elem : pa11::make_rvalue_reference(elem);
+				if (type_structurally_dependent(ref))
+					concrete_tuple_args = false;
+				tuple_args.push_back(TemplateArgument::type_arg(ref));
+			}
+			if (concrete_tuple_args && tuple_args.size() == pack.size())
+			{
+				TemplateDeclaration* tuple_template =
+					find_class_template(direct->owner, "tuple");
+				if (tuple_template != NULL)
+					result_type = instantiate_class_template(tuple_template,
+					                                        tuple_args);
 			}
 		}
+	}
+	complete_hosted_reference_tuple_layout(result_type, converted.size());
+}
+
+bool Parser::direct_call_suppresses_prvalue_cleanup(Binding* direct) const
+{
+	return hosted_compatibility_ &&
+	       direct != NULL &&
+	       direct->name == "forward_as_tuple" &&
+	       direct->owner != NULL &&
+	       direct->owner->kind == ScopeKind::Namespace &&
+	       direct->owner->name == "std";
+}
+
+Expr Parser::finish_bound_call_expr(const Expr& callee,
+                                    Binding* direct,
+                                    const vector<Expr>& converted)
+{
+	if (deleted_functions_.find(direct) != deleted_functions_.end())
+		throw runtime_error("call to deleted function");
+	bool defer_hosted_body = defer_hosted_function_body(direct);
+	if (unevaluated_expression_depth_ == 0 && !defer_hosted_body)
+	{
+		parse_pending_function_body(direct);
+		parse_pending_member_body(direct);
+		if (function_template_candidate_instantiation_depth_ == 0 &&
+		    direct->owner != NULL &&
+		    direct->owner->kind == ScopeKind::Class &&
+		    direct->name == direct->owner->name &&
+		    function_bodies_.find(direct) == function_bodies_.end())
+		{
+			Binding* probes[2] = { direct, direct->aliased_binding };
+			for (size_t i = 0; i < 2; ++i)
+			{
+				Binding* probe = probes[i];
+				if (probe == NULL)
+					continue;
+				if (function_bodies_.find(probe) != function_bodies_.end())
+					break;
+				map<Binding*, TemplateDeclaration*>::const_iterator templ =
+					function_template_placeholders_.find(probe);
+				map<Binding*, vector<TemplateArgument> >::const_iterator args =
+					function_template_specialization_arguments_.find(probe);
+				if (templ == function_template_placeholders_.end() ||
+				    args == function_template_specialization_arguments_.end() ||
+				    templ->second == NULL ||
+				    !templ->second->constructor_template ||
+				    !templ->second->has_definition)
+					continue;
+				try
+				{
+					Binding* instantiated =
+						instantiate_function_template(templ->second,
+						                              args->second);
+					if (instantiated != NULL)
+					{
+						parse_pending_function_body(instantiated);
+						parse_pending_member_body(instantiated);
+					}
+				}
+				catch (const runtime_error&)
+				{
+				}
+				break;
+			}
+		}
+	}
+	TypePtr result_type = direct->type->base;
+	adjust_forwarding_call_result(direct, converted, result_type);
 	if (hosted_compatibility_ &&
-	    direct->name == "forward_as_tuple" &&
-	    direct->owner != NULL &&
-	    direct->owner->kind == ScopeKind::Namespace &&
-	    direct->owner->name == "std")
-		complete_hosted_reference_tuple_layout(out.type, converted.size());
+	    converted.size() == 1 &&
+	    hosted_std_forwarding_cast(direct, result_type))
+		return make_cast_expr(result_type, "", converted[0]);
+	if (hosted_compatibility_ &&
+	    converted.size() == 2 &&
+	    hosted_std_make_pair_call(direct, result_type))
+		return make_constructor_init_expr(result_type, converted, false);
+	Expr out;
+	out.type = result_type;
 	out.category = call_category(out.type);
 	out.node = Node("call-expression " + value_category_name(out.category) +
 	                " " + pa11::describe_type(out.type));
@@ -893,14 +1095,9 @@ Expr Parser::finish_bound_call_expr(const Expr& callee,
 	add_child(out.node, callee_node);
 	for (size_t i = 0; i < converted.size(); ++i)
 		add_child(out.node, converted[i].node);
-	bool hosted_forward_as_tuple_result =
-		hosted_compatibility_ &&
-		direct->name == "forward_as_tuple" &&
-		direct->owner != NULL &&
-		direct->owner->kind == ScopeKind::Namespace &&
-		direct->owner->name == "std";
+	bool suppress_cleanup = direct_call_suppresses_prvalue_cleanup(direct);
 	if (unevaluated_expression_depth_ == 0 &&
-	    !hosted_forward_as_tuple_result &&
+	    !suppress_cleanup &&
 	    out.category == ValueCategory::PRValue &&
 	    pa11::strip_cv(out.type)->kind == pa11::TypeKind::Record &&
 	    !type_is_template_dependent(out.type))
@@ -1000,6 +1197,9 @@ Expr Parser::make_call_expr(Expr callee, vector<Expr> args)
 		return make_dependent_call_expr(callee, args);
 	vector<Expr> converted;
 	Binding* direct = resolve_call_direct_binding(callee, args, converted);
+	TypePtr constructor_record;
+	if (bound_id_constructor_call(callee, direct, constructor_record))
+		return make_constructor_init_expr(constructor_record, args, false);
 	if (direct != NULL)
 		return finish_bound_call_expr(callee, direct, converted);
 	return finish_indirect_call_expr(callee, args, converted);

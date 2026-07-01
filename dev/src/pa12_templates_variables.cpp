@@ -55,9 +55,10 @@ Binding* Parser::instantiate_variable_template(
 			{
 				if (selected_declaration->parameters[i].is_pack)
 				{
+					const TemplateParameterInfo& parameter =
+						selected_declaration->parameters[i];
 					subst[selected_declaration->parameters[i].name] =
-						pa11::make_template_parameter_type(
-							selected_declaration->parameters[i].name);
+						template_parameter_placeholder_type(parameter);
 					value_subst[selected_declaration->parameters[i].name] =
 						selected_args[i];
 				}

@@ -44,26 +44,29 @@ void stamp_template_member_function_symbol(Binding* binding);
 bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 {
 	if (current_scope()->kind == ScopeKind::Class ||
-	    !at_identifier() || !lookahead(OP_COLON2, 1))
+	    !(at(OP_COLON2) || at_identifier()))
+	{
 		return false;
+	}
 	size_t save = pos_;
-	string class_name = consume_identifier();
-	expect(OP_COLON2);
-	if (!consume(OP_COMPL) || !at_identifier()) {
+	Scope* class_scope = NULL;
+	try {
+		class_scope = parse_nested_name_specifier(NULL);
+	} catch (const exception&) {
+		pos_ = save;
+		return false; }
+	if (class_scope == NULL ||
+	    class_scope->kind != ScopeKind::Class ||
+	    !consume(OP_COMPL) || !at_identifier()) {
 		pos_ = save;
 		return false; }
 	string dtor_type_name = consume_identifier();
 	if (!at(OP_LPAREN)) {
 		pos_ = save;
 		return false; }
-	Binding* class_binding =
-		pa11::lookup_unqualified(current_scope(),
-		                         class_name,
-		                         pa11::LOOKUP_QUALIFIER);
-	Scope* class_scope = resolve_qualifier(class_binding);
 	if (class_scope == NULL ||
 	    class_scope->kind != ScopeKind::Class ||
-	    dtor_type_name != class_scope->name) {
+	    !constructor_name_matches_scope(class_scope, dtor_type_name)) {
 		pos_ = save;
 		return false; }
 	TypePtr class_type = pa11::record_type_for_scope(class_scope);
@@ -98,6 +101,7 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 	                                      fn_params,
 	                                      false);
 	string dtor_name = "~" + class_scope->name;
+	discard_implicit_default_destructor(class_type);
 	Binding* dtor = NULL;
 	map<string, vector<Binding*> >::iterator existing_dtors =
 		class_scope->members.find(dtor_name);
@@ -156,7 +160,8 @@ bool Parser::parse_qualified_destructor_definition(Node& out, bool emit_node)
 		else
 			extra_lowir_nodes_.push_back(fn);
 		return true; }
-	if (dtor->is_inline_definition) {
+	if (dtor->is_inline_definition &&
+	    !(force_new_function_binding_ && active_class_instantiations_.empty())) {
 		PendingFunctionBody pending;
 		pending.function = dtor;
 		pending.node = fn;
@@ -237,6 +242,7 @@ bool Parser::parse_destructor_like_member()
 	TypePtr fn_type = pa11::make_function(pa11::make_fundamental(FT_VOID),
 	                                      fn_params,
 	                                      false);
+	discard_implicit_default_destructor(class_type);
 	Binding* dtor = add_value(class_scope,
 	                          BindingKind::Function,
 	                          dtor_name,

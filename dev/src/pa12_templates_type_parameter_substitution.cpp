@@ -15,10 +15,126 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
+const size_t kTemplateDependentTypeCacheLimit = 65536;
+
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_cache_template_argument_identity(
+	const TemplateArgument& argument,
+	int depth);
+size_t dependent_type_structural_hash(TypePtr type, int depth);
+
+namespace {
+
+bool replayable_dependent_value_instance_argument(
+	const pa11::TemplateInstanceArgument& argument)
+{
+	if (argument.kind == pa11::TemplateInstanceArgumentKind::Value &&
+	    argument.dependent &&
+	    argument.value_expr_end > argument.value_expr_begin)
+		return true;
+	for (size_t i = 0; i < argument.value_owner_template_arguments.size(); ++i)
+		if (replayable_dependent_value_instance_argument(
+			    argument.value_owner_template_arguments[i]))
+			return true;
+	for (size_t i = 0; i < argument.pack.size(); ++i)
+		if (replayable_dependent_value_instance_argument(argument.pack[i]))
+			return true;
+	return false;
+}
+
+bool replayable_dependent_value_argument(const TemplateArgument& argument)
+{
+	if (argument.kind == TemplateArgumentKind::Value &&
+	    argument.dependent &&
+	    argument.value_expr_end > argument.value_expr_begin)
+		return true;
+	for (size_t i = 0; i < argument.value_owner_template_arguments.size(); ++i)
+		if (replayable_dependent_value_instance_argument(
+			    argument.value_owner_template_arguments[i]))
+			return true;
+	for (size_t i = 0; i < argument.pack.size(); ++i)
+		if (replayable_dependent_value_argument(argument.pack[i]))
+			return true;
+	return false;
+}
+
+bool type_has_replayable_dependent_value(
+	TypePtr type,
+	const map<const void*, vector<TemplateArgument> >& record_arguments)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return false;
+	map<const void*, vector<TemplateArgument> >::const_iterator args =
+		record_arguments.find(bare.get());
+	if (args != record_arguments.end())
+		for (size_t i = 0; i < args->second.size(); ++i)
+			if (replayable_dependent_value_argument(args->second[i]))
+				return true;
+	for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+		if (replayable_dependent_value_instance_argument(
+			    bare->template_arguments[i]))
+			return true;
+	for (size_t i = 0; i < bare->dependent_typename_template_argument_lists.size();
+	     ++i)
+		for (size_t j = 0;
+		     j < bare->dependent_typename_template_argument_lists[i].size();
+		     ++j)
+			if (replayable_dependent_value_instance_argument(
+				    bare->dependent_typename_template_argument_lists[i][j]))
+				return true;
+	return false;
+}
+
+}  // namespace
+
 bool Parser::type_is_template_dependent(TypePtr type) const
 {
-	return template_type_has_template_parameter(type,
-	                                           record_template_arguments_);
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() == NULL)
+		return false;
+	if (bare->kind == pa11::TypeKind::Fundamental ||
+	    bare->kind == pa11::TypeKind::Enum)
+		return false;
+	size_t cache_key = dependent_cache_hash_combine(
+		0x7d3,
+		reinterpret_cast<uintptr_t>(bare.get()));
+	cache_key = dependent_cache_hash_combine(
+		cache_key,
+		dependent_type_structural_hash(bare, 0));
+	cache_key = dependent_cache_hash_combine(cache_key,
+	                                         record_template_arguments_.size());
+	if (bare.get() != NULL)
+	{
+		map<const void*, vector<TemplateArgument> >::const_iterator args =
+			record_template_arguments_.find(bare.get());
+		if (args != record_template_arguments_.end())
+		{
+			cache_key = dependent_cache_hash_combine(cache_key,
+			                                         args->second.size());
+			for (size_t i = 0; i < args->second.size(); ++i)
+				cache_key = dependent_cache_hash_combine(
+					cache_key,
+					dependent_cache_template_argument_identity(
+						args->second[i],
+						0));
+		}
+	}
+	map<size_t, bool>::const_iterator cached =
+		template_dependent_type_cache_.find(cache_key);
+	if (cached != template_dependent_type_cache_.end())
+		return cached->second;
+	bool dependent =
+		template_type_has_template_parameter(type,
+		                                     record_template_arguments_) ||
+		type_has_replayable_dependent_value(type,
+		                                    record_template_arguments_);
+	template_dependent_type_cache_[cache_key] = dependent;
+	if (template_dependent_type_cache_.size() >
+	    kTemplateDependentTypeCacheLimit)
+		template_dependent_type_cache_.clear();
+	return dependent;
 }
 
 TypePtr Parser::substitute_template_type_parameter(TypePtr type,
@@ -376,9 +492,8 @@ TypePtr Parser::substitute_template_type_parameter(TypePtr type,
 		{
 			bool needs_substitution = false;
 			for (size_t i = 0; i < source_args->size(); ++i)
-				if (template_argument_has_template_parameter(
-					    (*source_args)[i],
-					    record_template_arguments_))
+				if (template_argument_dependent_cached(
+					    (*source_args)[i]))
 					needs_substitution = true;
 			if (needs_substitution)
 			{

@@ -1,0 +1,43 @@
+# hosted vector member template keeps concrete owner
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Type
+{
+  int value;
+
+  explicit Type(int v) : value(v) {}
+};
+
+typedef std::shared_ptr<Type> TypePtr;
+
+enum ScopeKind
+{
+  ScopeClass = 7
+};
+
+int main()
+{
+  std::vector<std::pair<ScopeKind, std::string> > names;
+  std::vector<std::pair<TypePtr, TypePtr> > conversions;
+
+  names.push_back(std::make_pair(ScopeClass, std::string("class")));
+
+  TypePtr left(new Type(3));
+  TypePtr right(new Type(4));
+  conversions.push_back(std::make_pair(left, right));
+
+  if (names.size() != 1 || conversions.size() != 1)
+    return 1;
+  if (names[0].first != ScopeClass || names[0].second != "class")
+    return 2;
+  if (conversions[0].first.get() == 0 ||
+      conversions[0].second.get() == 0)
+    return 3;
+  if (conversions[0].first->value != 3 ||
+      conversions[0].second->value != 4)
+    return 4;
+  return 0;
+}

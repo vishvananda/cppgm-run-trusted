@@ -1,0 +1,11 @@
+function @refload(%p : ptr [pass=reference]) -> ptr [binding=strong, prefer_local=yes] {
+  block ^entry:
+    %v = load ptr %p
+    return ptr %v
+}
+function @main() -> ptr {
+  block ^entry:
+    %z = copy ptr 0
+    %__o1inl0__v = load ptr %z
+    return ptr %__o1inl0__v
+}

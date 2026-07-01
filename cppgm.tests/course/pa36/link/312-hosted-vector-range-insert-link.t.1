@@ -1,0 +1,12 @@
+#include <vector>
+
+int main()
+{
+  std::vector<unsigned int> left;
+  left.push_back(1);
+  std::vector<unsigned int> right;
+  right.push_back(2);
+  right.push_back(3);
+  left.insert(left.end(), right.begin(), right.end());
+  return left.size() == 3 && left[0] == 1 && left[1] == 2 && left[2] == 3 ? 0 : 1;
+}

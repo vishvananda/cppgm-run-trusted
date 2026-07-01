@@ -1,0 +1,61 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $comp : obj<4x4>
+  slot $cond__1 : i32
+  slot $argobj__2 : obj<4x4>
+
+  block ^entry:
+    %t1 = addr $comp
+    %t2 = addr $comp
+    %t3 = index i8 [projection=field] %t2, 0
+    store i32 37, %t3
+    %t4 = addr $argobj__2
+    %t5 = addr $comp
+    copyobj 4x4 %t5, %t4
+    %t6 = call i32 @adjust_like($argobj__2)
+    %t7 = cmp eq i32 %t6, 42
+    branch %t7, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t8 = load i32 $cond__1
+    return i32 %t8
+}
+function @adjust_like(%comp : obj<4x4>) -> i32 [binding=weak, object=_Z11adjust_likeIiEi12IterCompIterIT_E] {
+  slot $comp : obj<4x4>
+  slot $converted : obj<4x4>
+
+  block ^entry:
+    %t1 = addr $comp
+    copyobj 4x4 %comp, %t1
+    %t2 = addr $converted
+    %t3 = addr $comp
+    call void @IterCompVal_int___IterCompVal(%t2, %t3)
+    %t4 = addr $converted
+    %t5 = index i8 [projection=field] %t4, 0
+    %t6 = load i32 %t5
+    return i32 %t6
+}
+function @IterCompVal_int___IterCompVal(%this : ptr, %other : ptr [pass=reference]) -> void [binding=weak, object=_ZN11IterCompValIiEC1EO12IterCompIterIiE] {
+  slot $this : ptr
+  slot $other : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %other, $other
+    %t1 = load ptr $other
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load i32 %t2
+    %t4 = binary add i32 %t3, 5
+    %t5 = load ptr $this
+    %t6 = index i8 [projection=field] %t5, 0
+    store i32 %t4, %t6
+    return void
+}
+alias object _ZN11IterCompValIiEC2EO12IterCompIterIiE = @IterCompVal_int___IterCompVal

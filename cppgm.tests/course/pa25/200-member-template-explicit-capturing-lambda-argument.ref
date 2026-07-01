@@ -1,0 +1,63 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $c : obj<4x4>
+
+  block ^entry:
+    %t1 = addr $c
+    call void @C__C(%t1)
+    %t2 = addr $c
+    %t3 = call i32 @C__run(%t2)
+    %t4 = binary sub i32 %t3, 7
+    return i32 %t4
+}
+function @C__C(%this : ptr) -> void [binding=weak, object=_ZN1CC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 5, %t2
+    return void
+}
+function @C__run(%this : ptr) -> i32 [binding=weak, object=_ZN1C3runEv] {
+  slot $this : ptr
+  slot $arg__1 : obj<8x8>
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = addr $arg__1
+    %t3 = load ptr $this
+    store ptr %t3, %t2
+    %t4 = call i32 @C__call(%t1, %t2)
+    return i32 %t4
+}
+function @C__call(%this : ptr, %f : ptr [pass=reference]) -> i32 [binding=weak, object=_ZN1C4callIiZNS_3runEvEUliE_EET_RKT0_] {
+  slot $this : ptr
+  slot $f : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %f, $f
+    %t1 = load ptr $f
+    %t2 = call i32 @C____lambda_C__run_t54_60__operator__(%t1, 2)
+    return i32 %t2
+}
+function @C____lambda_C__run_t54_60__operator__(%this : ptr, %x : i32) -> i32 [binding=weak, object=_ZZN1C3runEvENKUliE_clEi] {
+  slot $this : ptr
+  slot $x : i32
+
+  block ^entry:
+    store ptr %this, $this
+    store i32 %x, $x
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load ptr %t2
+    %t4 = index i8 [projection=base_subobject] %t3, 0
+    %t5 = index i8 [projection=field] %t4, 0
+    %t6 = load i32 %t5
+    %t7 = load i32 $x
+    %t8 = binary add i32 %t6, %t7
+    return i32 %t8
+}
+alias object _ZN1CC2Ev = @C__C

@@ -385,15 +385,16 @@ TypePtr adjust_parameter_type(TypePtr type)
 
 TypePtr strip_top_level_cv(TypePtr type)
 {
-	if (type->kind == TypeKind::Cv)
-		return type->base;
+	Type* raw = type.get();
+	if (raw != NULL && raw->kind == TypeKind::Cv)
+		return raw->base;
 	return type;
 }
 
 TypePtr strip_cv(TypePtr type)
 {
-	while (type->kind == TypeKind::Cv)
-		type = type->base;
+	while (type.get() != NULL && type.get()->kind == TypeKind::Cv)
+		type = type.get()->base;
 	return type;
 }
 
@@ -409,21 +410,27 @@ bool type_has_const(const TypePtr& type)
 bool is_void_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
-	return bare->kind == TypeKind::Fundamental && bare->fundamental == FT_VOID;
+	Type* raw = bare.get();
+	return raw != NULL &&
+	       raw->kind == TypeKind::Fundamental &&
+	       raw->fundamental == FT_VOID;
 }
 
 bool is_reference_type(const TypePtr& type)
 {
-	return type->kind == TypeKind::LValueReference ||
-	       type->kind == TypeKind::RValueReference;
+	Type* raw = type.get();
+	return raw != NULL &&
+	       (raw->kind == TypeKind::LValueReference ||
+	        raw->kind == TypeKind::RValueReference);
 }
 
 bool is_integral_or_bool_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
-	if (bare->kind != TypeKind::Fundamental)
+	Type* raw = bare.get();
+	if (raw == NULL || raw->kind != TypeKind::Fundamental)
 		return false;
-	switch (bare->fundamental)
+	switch (raw->fundamental)
 	{
 	case FT_SIGNED_CHAR:
 	case FT_SHORT_INT:
@@ -451,10 +458,12 @@ bool is_integral_or_bool_type(const TypePtr& type)
 bool is_floating_type(const TypePtr& type)
 {
 	TypePtr bare = strip_cv(type);
-	return bare->kind == TypeKind::Fundamental &&
-	       (bare->fundamental == FT_FLOAT ||
-	        bare->fundamental == FT_DOUBLE ||
-	        bare->fundamental == FT_LONG_DOUBLE);
+	Type* raw = bare.get();
+	return raw != NULL &&
+	       raw->kind == TypeKind::Fundamental &&
+	       (raw->fundamental == FT_FLOAT ||
+	        raw->fundamental == FT_DOUBLE ||
+	        raw->fundamental == FT_LONG_DOUBLE);
 }
 
 bool same_type(const TypePtr& left, const TypePtr& right)

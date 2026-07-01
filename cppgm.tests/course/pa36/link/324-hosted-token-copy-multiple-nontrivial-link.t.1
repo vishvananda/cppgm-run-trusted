@@ -1,0 +1,42 @@
+#include <set>
+#include <string>
+#include <vector>
+
+struct Token {
+  int kind;
+  std::string text;
+  std::set<std::string> unavailable;
+  bool active_paste;
+  std::string source_file;
+  int source_line;
+  int source_column;
+
+  Token() : kind(0), active_paste(false), source_line(0), source_column(0) {}
+  Token(int k, const std::string& value)
+      : kind(k), text(value), active_paste(false),
+        source_line(0), source_column(0) {}
+};
+
+int main()
+{
+  std::vector<Token> tokens;
+  tokens.push_back(Token(1, "define"));
+  tokens.push_back(Token(2, "second"));
+  tokens[0].unavailable.insert("name");
+  tokens[0].source_file = "input.cpp";
+
+  {
+    std::vector<Token> copy;
+    copy.push_back(tokens[0]);
+  }
+
+  if (!(tokens[0].text == "define"))
+    return 1;
+  if (!(tokens[1].text == "second"))
+    return 2;
+  if (tokens[0].unavailable.count("name") != 1)
+    return 3;
+  if (!(tokens[0].source_file == "input.cpp"))
+    return 4;
+  return 0;
+}

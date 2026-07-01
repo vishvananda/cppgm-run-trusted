@@ -16,6 +16,16 @@ using namespace std;
 
 namespace pa11 {
 
+inline string abi_private_name(const char* tail)
+{
+	return string("_") + tail;
+}
+
+inline string abi_private_member_prefix()
+{
+	return abi_private_name("M_");
+}
+
 enum CvFlags
 {
 	CV_NONE = 0,
@@ -127,9 +137,10 @@ struct Type
 	vector<bool> direct_base_virtuals;
 	vector<TypePtr> virtual_bases;
 	vector<uint64_t> virtual_base_offsets;
-	bool layout_valid;
-	bool hosted_layout_synthesized;
-	bool is_polymorphic;
+		bool layout_valid;
+		bool hosted_layout_synthesized;
+		bool template_record_shallow_complete;
+		bool is_polymorphic;
 	bool introduces_vptr;
 	bool is_final_record;
 	vector<VirtualTableEntry> virtual_entries;

@@ -1,0 +1,22 @@
+#include <map>
+#include <string>
+
+int* pick(int* value)
+{
+  return value;
+}
+
+int main()
+{
+  std::map<std::string, int*> values;
+  int x = 7;
+  int*& slot = values["x"];
+  if (slot != 0)
+    return 1;
+  slot = pick(&x);
+  if (values["x"] != &x)
+    return 2;
+  if (*slot != 7)
+    return 3;
+  return 0;
+}

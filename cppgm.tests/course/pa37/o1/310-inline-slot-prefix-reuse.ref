@@ -1,0 +1,21 @@
+declare function @sink(%p : ptr) -> void [binding=strong, unwind=no]
+
+function @wrap(%p : ptr) -> ptr [binding=strong, prefer_local=yes] {
+  slot $__it : ptr
+
+  block ^entry:
+    store ptr %p, $__it
+    call void @sink($__it)
+    return ptr %p
+}
+function @main(%a : ptr, %b : ptr) -> ptr {
+  slot $__o1inl0____it : ptr
+  slot $__o1inl1____it : ptr
+
+  block ^entry:
+    store ptr %a, $__o1inl0____it
+    call void @sink($__o1inl0____it)
+    store ptr %b, $__o1inl1____it
+    call void @sink($__o1inl1____it)
+    return ptr %b
+}

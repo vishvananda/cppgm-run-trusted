@@ -1,0 +1,35 @@
+#include <map>
+#include <set>
+#include <string>
+
+struct Binding
+{
+  int value;
+  explicit Binding(int v) : value(v) {}
+};
+
+int main()
+{
+  std::map<std::string, std::set<Binding*> > named;
+  Binding first(3);
+  Binding second(5);
+
+  named["body"].insert(&first);
+  named["body"].insert(&second);
+
+  if (named["body"].size() != 2)
+    return 1;
+  if (named["body"].count(&first) != 1)
+    return 2;
+  if (named["body"].count(&second) != 1)
+    return 3;
+
+  int sum = 0;
+  const std::set<Binding*>& bucket = named["body"];
+  for (std::set<Binding*>::const_iterator it = bucket.begin();
+       it != bucket.end();
+       ++it)
+    sum += (*it)->value;
+
+  return sum == 8 ? 0 : 4;
+}

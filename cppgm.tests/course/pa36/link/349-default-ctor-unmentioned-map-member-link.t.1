@@ -1,0 +1,54 @@
+#include <map>
+#include <string>
+#include <vector>
+
+struct Node
+{
+  std::string line;
+  std::vector<Node> children;
+  Node() {}
+  explicit Node(const std::string& text) : line(text) {}
+};
+
+struct TemplateDeclaration
+{
+  std::string name;
+  explicit TemplateDeclaration(const std::string& n) : name(n) {}
+};
+
+struct ParserLike
+{
+  std::vector<bool> private_access;
+  Node root;
+  bool hosted;
+  std::map<void*, std::map<std::string, TemplateDeclaration*> > class_templates;
+
+  ParserLike()
+    : root("translation-unit"),
+      hosted(true)
+  {
+  }
+
+  void register_class_template(void* owner, TemplateDeclaration* declaration)
+  {
+    class_templates[owner][declaration->name] = declaration;
+  }
+};
+
+int main()
+{
+  ParserLike parser;
+  TemplateDeclaration first("basic_string");
+  TemplateDeclaration second("allocator");
+
+  parser.register_class_template(0, &first);
+  parser.register_class_template(0, &second);
+
+  if (parser.class_templates[0].size() != 2)
+    return 1;
+  if (parser.class_templates[0]["basic_string"] != &first)
+    return 2;
+  if (parser.class_templates[0]["allocator"] != &second)
+    return 3;
+  return 0;
+}

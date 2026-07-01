@@ -1,0 +1,80 @@
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace std;
+
+struct TokenLike
+{
+  string text;
+  set<string> unavailable;
+};
+
+struct StreamLike
+{
+  virtual void note_source_location(int line, int column)
+  {
+    (void)line;
+    (void)column;
+  }
+
+  virtual void emit_whitespace_sequence() = 0;
+  virtual void emit_new_line() = 0;
+  virtual void emit_identifier(const string& data) = 0;
+  virtual void emit_eof() = 0;
+
+  virtual ~StreamLike() {}
+};
+
+struct CollectorLike : StreamLike
+{
+  vector<TokenLike> tokens;
+  string source_file;
+  int pending_line;
+  int pending_column;
+
+  CollectorLike() : pending_line(0), pending_column(0) {}
+
+  void emit_whitespace_sequence();
+  void emit_new_line();
+  void emit_identifier(const string& data);
+  void emit_eof();
+};
+
+void CollectorLike::emit_whitespace_sequence() {}
+void CollectorLike::emit_new_line() {}
+void CollectorLike::emit_identifier(const string& data)
+{
+  TokenLike token;
+  token.text = data;
+  tokens.push_back(token);
+}
+void CollectorLike::emit_eof() {}
+
+int main()
+{
+  CollectorLike collector;
+  collector.emit_identifier("define");
+  TokenLike token;
+  token.text = "define";
+  token.unavailable.insert(token.text);
+  string value = "define";
+  if (!(value == "define"))
+    return 1;
+  if (value == "undef")
+    return 2;
+  if (value != "define")
+    return 3;
+  if (!(value != "undef"))
+    return 4;
+  vector<string> values;
+  values.push_back(value);
+  if (values[0] != "define")
+    return 5;
+  if (!(values[0] != "undef"))
+    return 6;
+  return 0;
+}

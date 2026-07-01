@@ -1,0 +1,73 @@
+declare function @__external_runtime___Unwind_Resume() -> void [return=noreturn, role=eh_resume, linkage=c, binding=strong, object=_Unwind_Resume]
+declare function @__external_runtime____cxa_begin_catch(%arg0 : ptr) -> ptr [role=eh_begin_catch, linkage=c, binding=strong, object=__cxa_begin_catch]
+declare function @__external_runtime____cxa_end_catch() -> void [role=eh_end_catch, linkage=c, binding=strong, object=__cxa_end_catch]
+declare function @__external_runtime____gxx_personality_v0() -> void [role=eh_personality, linkage=c, binding=strong, object=__gxx_personality_v0]
+declare function @Guard___Guard(%arg0 : ptr) -> void [binding=strong, object=_ZN5GuardD1Ev]
+declare function @cond() -> u8 [binding=strong, object=_Z4condv]
+declare function @may_throw() -> void [binding=strong, object=_Z9may_throwv]
+
+global @sink : i32 [binding=strong, object=_Z4sink] = zero
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $g : obj<1x1>
+
+  block ^entry:
+    %t1 = call u8 @cond()
+    branch %t1, ^if_then_1, ^if_else_2
+
+  block ^if_then_1:
+    %t2 = addr $g
+    eh_try ^call_unwind_dispatch_4
+    call void @may_throw()
+    eh_end
+    jump ^call_unwind_end_5
+
+  block ^call_unwind_dispatch_4:
+    %t3 = addr $g
+    call void @Guard___Guard(%t3)
+    resume
+
+  block ^call_unwind_end_5:
+    %t4 = addr $g
+    call void @Guard___Guard(%t4)
+    jump ^if_end_3
+
+  block ^if_else_2:
+    jump ^if_end_3
+
+  block ^if_end_3:
+    eh_try ^catch_dispatch_6
+    call void @may_throw()
+    eh_end
+    jump ^try_end_8
+
+  block ^catch_dispatch_6:
+    eh_catch_all, 1
+    jump ^catch_entry_7
+
+  block ^catch_entry_7:
+    %t5 = exception ptr
+    %t6 = exception_selector i32
+    %t7 = cmp eq i32 %t6, 1
+    branch %t7, ^catch_body_9, ^catch_next_10
+
+  block ^catch_body_9:
+    %t8 = call ptr @__external_runtime____cxa_begin_catch(%t5)
+    eh_cleanup ^catch_cleanup_11
+    store i32 1, @sink
+    eh_end
+    call void @__external_runtime____cxa_end_catch()
+    jump ^try_end_8
+
+  block ^catch_cleanup_11:
+    call void @__external_runtime____cxa_end_catch()
+    eh_end
+    resume
+
+  block ^catch_next_10:
+    resume
+
+  block ^try_end_8:
+    %t9 = load i32 @sink
+    return i32 %t9
+}

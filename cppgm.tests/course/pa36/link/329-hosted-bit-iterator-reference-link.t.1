@@ -1,0 +1,15 @@
+#include <bits/stl_bvector.h>
+
+int main()
+{
+  std::_Bit_type word = 0;
+  std::_Bit_iterator it(&word, 1);
+  *it = true;
+  if (word != 2)
+    return 1;
+  ++it;
+  *it = true;
+  if (word != 6)
+    return 2;
+  return 0;
+}

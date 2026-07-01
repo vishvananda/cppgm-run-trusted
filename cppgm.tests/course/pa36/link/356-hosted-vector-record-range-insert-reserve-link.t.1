@@ -1,0 +1,31 @@
+#include <vector>
+
+struct Item {
+  int value;
+  Item() : value(0) {}
+  Item(int v) : value(v) {}
+};
+
+int main()
+{
+  std::vector<Item> left;
+  left.reserve(8);
+  left.push_back(Item(1));
+  Item* before = &left[0];
+  unsigned long cap = left.capacity();
+
+  std::vector<Item> right;
+  right.push_back(Item(2));
+  right.push_back(Item(3));
+  left.insert(left.end(), right.begin(), right.end());
+
+  if (left.capacity() != cap)
+    return 10;
+  if (&left[0] != before)
+    return 20;
+  if (left.size() != 3)
+    return 30;
+  if (left[0].value != 1 || left[1].value != 2 || left[2].value != 3)
+    return 40;
+  return 0;
+}

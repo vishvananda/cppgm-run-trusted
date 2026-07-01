@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace std;
@@ -101,10 +102,10 @@ void write_native_file(const lowir2cy86::Program& program,
 	}
 	catch (...)
 	{
-		remove(tmp.c_str());
+		unlink(tmp.c_str());
 		throw;
 	}
-	remove(tmp.c_str());
+	unlink(tmp.c_str());
 }
 
 }  // namespace lowir2native

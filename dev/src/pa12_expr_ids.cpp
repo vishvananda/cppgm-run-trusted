@@ -123,6 +123,16 @@ bool template_arguments_have_dependent_template_value(
 			return true;
 	return false;
 }
+bool binding_set_all_functions(const vector<Binding*>& bindings)
+{
+	if (bindings.empty())
+		return false;
+	for (size_t i = 0; i < bindings.size(); ++i)
+		if (bindings[i] == NULL ||
+		    bindings[i]->kind != BindingKind::Function)
+			return false;
+	return true;
+}
 pa11::TemplateInstanceArgument id_template_instance_argument( const TemplateArgument& argument) {
 if (argument.pack_expansion && argument.kind != TemplateArgumentKind::Pack) { TemplateArgument element = argument; element.pack_expansion = false;
 vector<pa11::TemplateInstanceArgument> pack; pack.push_back(id_template_instance_argument(element)); return pa11::TemplateInstanceArgument::pack_arg(pack); }
@@ -503,14 +513,16 @@ Expr member = make_member_expr(this_expr, binding->name, "->"); if (binding->kin
 for (size_t i = 0; i < member.overloads.size(); ++i) { map<Binding*, vector<TemplateArgument> >::const_iterator eit = explicit_template_arguments->find(member.overloads[i]);
 if (eit != explicit_template_arguments->end()) member.explicit_template_arguments[member.overloads[i]] = eit->second; }
 } return member; } return Expr();
-} void Parser::synthesize_default_assignment_lookup(const QualifiedName& name, vector<Binding*>& found) {
+}
+void Parser::synthesize_default_assignment_lookup(const QualifiedName& name, vector<Binding*>& found) {
 if (!found.empty() || !name.qualified || name.qualifier == NULL || name.qualifier->kind != ScopeKind::Class ||
 name.name != "operator=") return; TypePtr record = pa11::record_type_for_scope(name.qualifier); if (record.get() == NULL)
 return; vector<TypePtr> params; params.push_back(pa11::make_pointer(record)); params.push_back(
 pa11::make_lvalue_reference(pa11::make_cv(record, pa11::CV_CONST))); TypePtr fn_type = pa11::make_function(pa11::make_lvalue_reference(record), params,
 false); Binding* op = add_value(name.qualifier, BindingKind::Function, "operator=",
 fn_type); op->is_generated_copy_move_assignment = true; op->is_inline_definition = true; found.push_back(op);
-} Expr Parser::make_missing_id_expr(const QualifiedName& name) { Binding* this_binding =
+}
+Expr Parser::make_missing_id_expr(const QualifiedName& name) { Binding* this_binding =
 pa11::lookup_unqualified(current_scope(), "this", pa11::LOOKUP_PARAMETER); Binding* active = active_functions_.empty() ? NULL : active_functions_.back(); Scope* active_class = active != NULL && active->owner != NULL &&
 active->owner->kind == ScopeKind::Class ? active->owner : NULL; if (!name.qualified && this_binding != NULL && active_class != NULL) { vector<Binding*> members =
 lookup_qualified_set(active_class, name.name, pa11::LOOKUP_VALUE); if (!members.empty()) { Expr member =
@@ -529,26 +541,42 @@ continue; vector<Binding*> members = lookup_qualified_set(record->scope, name.na
 pa11::LOOKUP_VALUE); if (members.empty()) continue; Expr member =
 make_implicit_member_id_expr(name, members, members[0], enclosing_this);
 if (member.valid) return member; } }
-} if (!name.qualified &&
-current_scope()->kind == ScopeKind::Class &&
-	(validating_template_definition_ ||
-	 active_class_instantiation_dependent() ||
-	 !template_type_substitutions_.empty() ||
-	 !template_value_substitutions_.empty())) {
-	TypePtr owner = pa11::record_type_for_scope(current_scope());
-	owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
-	Expr out;
-	out.valid = true;
-	out.type = pa11::make_dependent_typename_type(
-		current_scope()->name + "::" + name.name,
-		true,
-		false,
-		false);
+	} Scope* dependent_member_owner = NULL; if (!name.qualified) {
+		if (current_scope()->kind == ScopeKind::Class)
+			dependent_member_owner = current_scope();
+		else if (active_class != NULL) {
+			TypePtr active_owner = pa11::record_type_for_scope(active_class);
+			active_owner = active_owner.get() != NULL ? pa11::strip_cv(active_owner) : TypePtr();
+			for (size_t i = 0; i < active_class_instantiations_.size(); ++i) {
+				TypePtr active_type = active_class_instantiations_[i].type.get() != NULL ?
+					pa11::strip_cv(active_class_instantiations_[i].type) : TypePtr();
+				if (active_type.get() != NULL && active_type.get() == active_owner.get() &&
+				    !active_type->complete) {
+					dependent_member_owner = active_class;
+					break;
+				}
+			}
+		}
+	} if (dependent_member_owner != NULL &&
+		(validating_template_definition_ ||
+		 active_class_instantiation_dependent() ||
+		 !active_class_instantiations_.empty() ||
+		 !template_type_substitutions_.empty() ||
+		 !template_value_substitutions_.empty())) {
+		TypePtr owner = pa11::record_type_for_scope(dependent_member_owner);
+		owner = owner.get() != NULL ? pa11::strip_cv(owner) : TypePtr();
+		Expr out;
+		out.valid = true;
+		out.type = pa11::make_dependent_typename_type(
+			dependent_member_owner->name + "::" + name.name,
+			true,
+			false,
+			false);
 	out.category = ValueCategory::LValue;
-	out.dependent_value_name = name.name;
-	out.dependent_value_owner_template_name =
-		owner.get() != NULL && !owner->template_primary_name.empty()
-		? owner->template_primary_name : current_scope()->name;
+		out.dependent_value_name = name.name;
+		out.dependent_value_owner_template_name =
+			owner.get() != NULL && !owner->template_primary_name.empty()
+			? owner->template_primary_name : dependent_member_owner->name;
 	out.dependent_value_member_name = name.name;
 	if (owner.get() != NULL && !owner->template_arguments.empty())
 		out.dependent_value_owner_template_arguments =
@@ -585,8 +613,8 @@ if (member_pos != string::npos) { string owner_name = name.spelling.substr(0, me
 if (template_pos != string::npos) owner_name = owner_name.substr(0, template_pos); size_t nested_pos = owner_name.rfind("::"); if (nested_pos != string::npos)
 	owner_name = owner_name.substr(nested_pos + 2); Expr out; out.valid = true; out.type = pa11::make_fundamental(FT_INT);
 	out.category = ValueCategory::PRValue; out.dependent_value_name = name.spelling; out.dependent_value_owner_template_name = owner_name; out.dependent_value_member_name = name.name;
-	out.node = Node("id-expression prvalue " + pa11::describe_type(out.type) + " " + name.spelling); annotate_expr_node(out);
-		return out; } } throw runtime_error("name not found: " + name.spelling); }
+		out.node = Node("id-expression prvalue " + pa11::describe_type(out.type) + " " + name.spelling); annotate_expr_node(out);
+			return out; } } throw runtime_error("name not found: " + name.spelling); }
 Expr Parser::make_aliased_member_variable_id_expr(Binding* binding) { Binding* storage = binding->aliased_binding; Expr out;
 out.valid = true; out.binding = binding; out.type = binding->type; out.category = ValueCategory::LValue;
 out.node = Node("member-expression lvalue " + pa11::describe_type(out.type) + " " + binding->name); TypePtr storage_type = expression_object_type(storage->type); Node storage_node(
@@ -880,13 +908,16 @@ vector<Binding*> Parser::resolve_id_expr_bindings(
 	vector<Binding*> found = resolve_name_set(lookup_name, pa11::LOOKUP_VALUE);
 	if (!lookup_name.has_template_arguments)
 	{
-		vector<TemplateDeclaration*> templates =
-			find_function_templates(lookup_name);
-		for (size_t i = 0; i < templates.size(); ++i)
-			if (templates[i]->placeholder != NULL &&
-			    find(found.begin(), found.end(),
-			         templates[i]->placeholder) == found.end())
-				found.push_back(templates[i]->placeholder);
+		if (found.empty() || binding_set_all_functions(found))
+		{
+			vector<TemplateDeclaration*> templates =
+				find_function_templates(lookup_name);
+			for (size_t i = 0; i < templates.size(); ++i)
+				if (templates[i]->placeholder != NULL &&
+				    find(found.begin(), found.end(),
+				         templates[i]->placeholder) == found.end())
+					found.push_back(templates[i]->placeholder);
+		}
 		return found;
 	}
 	vector<TemplateDeclaration*> templates = find_function_templates(lookup_name);
@@ -1314,9 +1345,9 @@ if (name.qualified && name.qualifier != NULL)
 		dependent.node.token_text = name.spelling;
 		annotate_expr_node(dependent);
 		return dependent;
-	}
-	out.binding = binding;
-	TypePtr resolved_binding_type = binding->type;
+		}
+		out.binding = binding;
+		TypePtr resolved_binding_type = binding->type;
 	if (binding->kind != BindingKind::Function &&
 	    (!template_type_substitutions_.empty() ||
 	     !template_value_substitutions_.empty()))

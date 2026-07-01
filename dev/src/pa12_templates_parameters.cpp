@@ -162,40 +162,41 @@ vector<TemplateParameterInfo> Parser::parse_template_parameter_clause()
 	{
 		TemplateParameterInfo parameter = parse_template_parameter_info();
 		parameters.push_back(parameter);
-		if (!parameter.name.empty() &&
-		    parameter.kind == TemplateParameterKind::Type)
+		TemplateParameterInfo& stored_parameter = parameters.back();
+		if (!stored_parameter.name.empty() &&
+		    stored_parameter.kind == TemplateParameterKind::Type)
 		{
-			template_type_substitutions_.back()[parameter.name] =
-				pa11::make_template_parameter_type(parameter.name);
-			if (parameter.is_pack)
+			template_type_substitutions_.back()[stored_parameter.name] =
+				template_parameter_placeholder_type(stored_parameter);
+			if (stored_parameter.is_pack)
 				template_type_parameter_packs_.back().insert(
-					parameter.name);
+					stored_parameter.name);
 		}
-		else if (!parameter.name.empty() &&
-		         parameter.kind == TemplateParameterKind::NonType)
+		else if (!stored_parameter.name.empty() &&
+		         stored_parameter.kind == TemplateParameterKind::NonType)
 		{
 			TemplateArgument arg =
 				TemplateArgument::dependent_value_arg(
-					parameter.type.get() != NULL
-					? parameter.type
+					stored_parameter.type.get() != NULL
+					? stored_parameter.type
 					: pa11::make_fundamental(FT_INT));
-			arg.value_name = parameter.name;
-			if (parameter.is_pack)
+			arg.value_name = stored_parameter.name;
+			if (stored_parameter.is_pack)
 			{
 				vector<TemplateArgument> pack;
 				pack.push_back(arg);
-				template_value_substitutions_.back()[parameter.name] =
+				template_value_substitutions_.back()[stored_parameter.name] =
 					TemplateArgument::pack_arg(pack);
 			}
 			else
-				template_value_substitutions_.back()[parameter.name] = arg;
+				template_value_substitutions_.back()[stored_parameter.name] = arg;
 		}
-		else if (!parameter.name.empty() &&
-		         parameter.kind == TemplateParameterKind::TemplateTemplate)
+		else if (!stored_parameter.name.empty() &&
+		         stored_parameter.kind == TemplateParameterKind::TemplateTemplate)
 		{
 			TemplateArgument arg = TemplateArgument::template_arg(NULL);
-			arg.value_name = parameter.name;
-			template_value_substitutions_.back()[parameter.name] = arg;
+			arg.value_name = stored_parameter.name;
+			template_value_substitutions_.back()[stored_parameter.name] = arg;
 		}
 		if (!consume(OP_COMMA))
 			break;

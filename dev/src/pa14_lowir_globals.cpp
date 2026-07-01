@@ -37,13 +37,14 @@ bool record_has_destructor(TypePtr type)
 		if (found != bare->scope->members.end())
 			return true;
 	}
-	pa11::layout_record_type(bare);
+	vector<Binding*> members;
+	append_assignment_dependency_members(bare, members);
 	vector<TypePtr> bases = pa11::record_direct_bases(bare);
 	for (size_t i = 0; i < bases.size(); ++i)
 		if (record_has_destructor(bases[i]))
 			return true;
-	for (size_t i = 0; i < bare->fields.size(); ++i)
-		if (record_has_destructor(bare->fields[i]->type))
+	for (size_t i = 0; i < members.size(); ++i)
+		if (record_has_destructor(members[i]->type))
 			return true;
 	return false;
 }
@@ -312,6 +313,10 @@ void emit_static_constant_member_globals(ProgramLowerer& program, TypePtr bare)
 		    !member->has_constant)
 			continue;
 		TypePtr member_bare = pa11::strip_cv(strip_for_value(member->type));
+		if (member->is_constexpr &&
+		    member_bare->kind != TypeKind::Array &&
+		    member_bare->kind != TypeKind::Record)
+			continue;
 		if (member_bare->kind == TypeKind::Array ||
 		    member_bare->kind == TypeKind::Record)
 			continue;

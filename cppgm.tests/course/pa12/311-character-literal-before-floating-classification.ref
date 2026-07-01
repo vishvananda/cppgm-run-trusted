@@ -1,0 +1,14 @@
+1 translation units
+start translation unit 1
+translation-unit
+  function-definition f function of (int) returning int
+    parameter c int
+    compound-statement
+      return-statement
+        conditional-expression prvalue int
+          binary-expression prvalue bool OP_EQ:==
+            id-expression lvalue int c
+            literal prvalue char '.'
+          literal prvalue int 1
+          literal prvalue int 0
+end translation unit

@@ -1,0 +1,12 @@
+extern unsigned short get_source();
+extern unsigned int poison();
+
+int main()
+{
+  unsigned short source = get_source();
+  unsigned int before = poison();
+  unsigned int widened = source;
+  if (before != 0x12340000u)
+    return 2;
+  return widened == 1u ? 0 : 1;
+}

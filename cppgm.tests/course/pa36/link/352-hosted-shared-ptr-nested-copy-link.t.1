@@ -1,0 +1,58 @@
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+struct Type
+{
+  int value;
+  explicit Type(int v) : value(v) {}
+};
+
+typedef std::shared_ptr<Type> TypePtr;
+
+struct Declaration
+{
+  std::vector<std::map<std::string, TypePtr> > outer;
+};
+
+struct ParserLike
+{
+  std::vector<std::map<std::string, TypePtr> > substitutions;
+  std::vector<Declaration> declarations;
+
+  void register_one()
+  {
+    TypePtr value = std::make_shared<Type>(7);
+    std::map<std::string, TypePtr> params;
+    params["T"] = value;
+    substitutions.push_back(params);
+
+    Declaration declaration;
+    declaration.outer = substitutions;
+    declarations.push_back(declaration);
+
+    std::vector<std::map<std::string, TypePtr> > save = substitutions;
+    substitutions.push_back(std::map<std::string, TypePtr>());
+    substitutions = save;
+  }
+};
+
+int main()
+{
+  ParserLike parser;
+  parser.register_one();
+
+  if (parser.declarations.size() != 1)
+    return 1;
+  if (parser.declarations[0].outer.size() != 1)
+    return 2;
+  if (parser.declarations[0].outer[0]["T"]->value != 7)
+    return 3;
+  parser.register_one();
+  if (parser.declarations.size() != 2)
+    return 4;
+  if (parser.declarations[1].outer[0]["T"]->value != 7)
+    return 5;
+  return 0;
+}

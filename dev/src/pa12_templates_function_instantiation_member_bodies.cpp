@@ -413,12 +413,12 @@ void FunctionTemplateInstantiationEngine::parse_or_queue_pending_body(
 		if (parsed)
 			return;
 		if (binding->owner != NULL)
-			p.pending_member_bodies_[binding->owner].push_back(pending);
+			p.append_pending_member_body(binding->owner, pending);
 		else
-			p.pending_function_bodies_[binding] = pending;
+			p.store_pending_function_body(pending);
 	}
 	else if (binding->owner != NULL)
-		p.pending_member_bodies_[binding->owner].push_back(pending);
+		p.append_pending_member_body(binding->owner, pending);
 }
 
 }  // namespace internal

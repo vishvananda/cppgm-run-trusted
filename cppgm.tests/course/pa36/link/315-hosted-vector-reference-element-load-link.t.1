@@ -1,0 +1,16 @@
+#include <vector>
+
+bool fill(std::vector<unsigned int>& values)
+{
+  values.push_back(0x61);
+  return true;
+}
+
+int main()
+{
+  std::vector<unsigned int> values;
+  if (!fill(values) || values.size() != 1)
+    return 1;
+  unsigned int cp = values[0];
+  return cp == 0x61 ? 0 : 2;
+}

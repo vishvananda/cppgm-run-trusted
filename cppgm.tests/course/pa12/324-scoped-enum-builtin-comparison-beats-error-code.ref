@@ -1,0 +1,22 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+    function-declaration std::operator== function of (lvalue-reference to const struct std::error_code, lvalue-reference to const struct std::error_code) returning bool
+  function-definition f function of (enum class TypeKind) returning bool
+    parameter kind enum class TypeKind
+    compound-statement
+      return-statement
+        binary-expression prvalue bool OP_EQ:==
+          id-expression lvalue enum class TypeKind kind
+          literal prvalue enum class TypeKind 0
+  function-definition main function of () returning int
+    compound-statement
+      return-statement
+        conditional-expression prvalue int
+          call-expression prvalue bool
+            callee f function of (enum class TypeKind) returning bool
+            literal prvalue enum class TypeKind 0
+          literal prvalue int 0
+          literal prvalue int 1
+end translation unit

@@ -11,16 +11,28 @@
 #include "tool_help_text.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace std;
 
 namespace {
+
+void trim_phase_heap()
+{
+#if defined(__GLIBC__)
+  malloc_trim(0);
+#endif
+}
 
 enum class EmitMode
 {
@@ -730,11 +742,13 @@ int run_emit_lowir_mode(const vector<string> & args)
   else {
     const string tmp = outfile + ".lowiropt.tmp";
     pa14::emit_lowir(srcfiles, tmp, options);
+    trim_phase_heap();
     lowiropt::Options opt_options;
     opt_options.optimization_level = optimization_level;
+    opt_options.prune_unreachable_weak = false;
     opt_options.outfile = outfile;
     lowiropt::optimize_files_to_file(vector<string>(1, tmp), opt_options);
-    remove(tmp.c_str());
+    unlink(tmp.c_str());
   }
   return EXIT_SUCCESS;
 }

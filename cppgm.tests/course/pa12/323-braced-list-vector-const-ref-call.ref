@@ -1,0 +1,28 @@
+1 translation units
+start translation unit 1
+translation-unit
+  function-declaration Vec::Vec function of (pointer to struct Vec, int) returning void
+  function-definition Vec::Vec function of (pointer to struct Vec, int) returning void
+    parameter this pointer to struct Vec
+    parameter value int
+    compound-statement
+      expression-statement
+        cast-expression prvalue void OP_LPAREN:
+          id-expression lvalue int value
+  function-definition accepts_value function of (lvalue-reference to const struct Vec) returning bool
+    parameter value lvalue-reference to const struct Vec
+    compound-statement
+      expression-statement
+        cast-expression prvalue void OP_LPAREN:
+          id-expression lvalue const struct Vec value
+      return-statement
+        literal prvalue bool KW_TRUE:true
+  function-definition test function of () returning bool
+    compound-statement
+      return-statement
+        call-expression prvalue bool
+          callee accepts_value function of (lvalue-reference to const struct Vec) returning bool
+          call-expression prvalue lvalue-reference to const struct Vec
+            callee Vec::Vec function of (pointer to struct Vec, int) returning void
+            literal prvalue int 1
+end translation unit

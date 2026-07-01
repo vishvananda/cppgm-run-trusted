@@ -1,0 +1,55 @@
+#include <algorithm>
+#include <map>
+#include <string>
+#include <vector>
+
+struct Function
+{
+  std::string name;
+};
+
+std::string body_name(std::string name)
+{
+  if (!name.empty() && (name[0] == '@' || name[0] == '%'))
+    name = name.substr(1);
+  return name;
+}
+
+std::string function_class_key(const Function& fn)
+{
+  std::string name = body_name(fn.name);
+  size_t pos = name.find("__");
+  return pos == std::string::npos ? name : name.substr(0, pos);
+}
+
+int weak_class_order(const Function& fn,
+                     const std::map<std::string, int>& class_order)
+{
+  std::map<std::string, int>::const_iterator it =
+    class_order.find(function_class_key(fn));
+  return it == class_order.end() ? 1000000 : it->second;
+}
+
+int main()
+{
+  std::map<std::string, int> class_order;
+  class_order["A"] = 1;
+  class_order["B"] = 0;
+
+  std::vector<Function> functions;
+  Function a;
+  a.name = "@A__foo";
+  functions.push_back(a);
+  Function b;
+  b.name = "@B__foo";
+  functions.push_back(b);
+
+  std::stable_sort(functions.begin(),
+                   functions.end(),
+                   [&class_order](const Function& x, const Function& y) {
+                     return weak_class_order(x, class_order) <
+                            weak_class_order(y, class_order);
+                   });
+
+  return functions[0].name == "@B__foo" ? 0 : 1;
+}

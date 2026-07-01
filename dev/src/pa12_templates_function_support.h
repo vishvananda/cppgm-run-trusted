@@ -13,6 +13,11 @@ std::string generated_pack_parameter_name(const std::string& pack_name);
 bool function_parameter_pack_name(TemplateDeclaration* declaration,
                                   TypePtr pattern,
                                   std::string& name);
+bool function_parameter_pack_name(
+	TemplateDeclaration* declaration,
+	TypePtr pattern,
+	std::string& name,
+	std::map<const void*, std::pair<bool, std::string> >* cache);
 bool match_or_deduce_value_argument(
 	const TemplateArgument& pattern,
 	const TemplateArgument& actual,

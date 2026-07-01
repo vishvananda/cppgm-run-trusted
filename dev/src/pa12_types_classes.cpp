@@ -8,6 +8,8 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+bool hosted_library_namespace_scope(Scope* scope);
+
 TypePtr Parser::parse_class_specifier()
 {
 	const size_t start_index = pos_;
@@ -104,10 +106,13 @@ TypePtr Parser::parse_class_specifier()
 		qualified_owner = parse_nested_name_specifier(NULL);
 	if (at_identifier())
 		name = consume_identifier();
-	bool active_template_class =
-		!active_class_instantiations_.empty() &&
-		active_class_instantiations_.back().declaration != NULL &&
-		active_class_instantiations_.back().declaration->name == name;
+		bool active_template_class =
+			!active_class_instantiations_.empty() &&
+			active_class_instantiations_.back().declaration != NULL &&
+			active_class_instantiations_.back().declaration->name == name;
+		bool shallow_template_completion =
+			active_template_class &&
+			shallow_template_record_completion_depth_ != 0;
 	if (at(OP_LT))
 	{
 		if (active_template_class)
@@ -242,13 +247,15 @@ TypePtr Parser::parse_class_specifier()
 				parsing_base_specifier_ = save_parsing_base;
 				throw;
 			}
-			parsing_base_specifier_ = save_parsing_base;
-			if (!parsed_base)
-				throw runtime_error("invalid base class");
+				parsing_base_specifier_ = save_parsing_base;
+				if (!parsed_base)
+				{
+					throw runtime_error("invalid base class");
+				}
 			bool pack_expansion_base = consume(OP_DOTS);
-			if (parsed_direct_base.get() != NULL)
-			{
-				if (pack_expansion_base)
+				if (parsed_direct_base.get() != NULL)
+				{
+					if (pack_expansion_base)
 				{
 					TemplateArgument base_arg =
 						TemplateArgument::type_arg(parsed_direct_base);
@@ -311,17 +318,19 @@ TypePtr Parser::parse_class_specifier()
 				{
 				}
 			}
-			if (i == 0)
-				direct_base = candidate;
-		}
+				if (i == 0)
+					direct_base = candidate;
+			}
 		for (size_t i = 0; i < direct_bases.size(); ++i)
 		{
 			TypePtr base_bare = direct_bases[i].get() != NULL
 				? pa11::strip_cv(direct_bases[i]) : TypePtr();
-			if (base_bare.get() != NULL &&
-			    base_bare->kind != pa11::TypeKind::Record &&
-			    base_bare->kind != pa11::TypeKind::TemplateParameter)
-				throw runtime_error("invalid base class");
+				if (base_bare.get() != NULL &&
+				    base_bare->kind != pa11::TypeKind::Record &&
+				    base_bare->kind != pa11::TypeKind::TemplateParameter)
+				{
+					throw runtime_error("invalid base class");
+				}
 		}
 	}
 	Scope* class_scope = NULL;
@@ -361,6 +370,8 @@ TypePtr Parser::parse_class_specifier()
 			qualified_owner == NULL &&
 			owner->kind != ScopeKind::Namespace &&
 			owner->kind != ScopeKind::Class;
+		if (named_local_record)
+			++local_record_declaration_counter_;
 		Binding* existing = qualified_owner != NULL
 			? pa11::lookup_qualified(qualified_owner,
 			                         name,
@@ -391,7 +402,8 @@ TypePtr Parser::parse_class_specifier()
 			                  true,
 			                  class_scope);
 			if (named_local_record)
-				type->name = make_local_type_name(name + "__local_type");
+				type->name = name + "__local_type" +
+				             to_string(start_index);
 			type->scope = class_scope;
 		}
 	}
@@ -443,11 +455,13 @@ TypePtr Parser::parse_class_specifier()
 		type->record_forced_align = forced_align;
 		type->layout_valid = false;
 	}
-	expect(OP_LBRACE);
-	scopes_.push_back(class_scope);
-	parse_class_body(class_scope, key == KW_CLASS);
-	scopes_.pop_back();
-	expect(OP_RBRACE);
+		expect(OP_LBRACE);
+		scopes_.push_back(class_scope);
+		active_class_body_scopes_.push_back(class_scope);
+		parse_class_body(class_scope, key == KW_CLASS);
+		active_class_body_scopes_.pop_back();
+		scopes_.pop_back();
+		expect(OP_RBRACE);
 	if (active_template_class && class_scope != NULL)
 	{
 		const string type_prefix = "__anonymous_union_type__";
@@ -479,58 +493,136 @@ TypePtr Parser::parse_class_specifier()
 			inject_anonymous_union_members(anonymous->scope, storage);
 		}
 	}
-	for (size_t i = 0; class_scope != NULL &&
-	     i < class_scope->binding_order.size(); ++i)
-	{
-		Binding* field = class_scope->binding_order[i];
-		if (field->kind != BindingKind::Variable ||
-		    field->is_static_member ||
-		    field->aliased_binding != NULL)
-			continue;
-		field->type = substitute_template_type(field->type);
-		TypePtr field_type = field->type;
-		field_type = field_type.get() != NULL
-			? pa11::strip_cv(field_type) : TypePtr();
-		while (field_type.get() != NULL &&
-		       field_type->kind == pa11::TypeKind::Array)
-			field_type = pa11::strip_cv(field_type->base);
-		if (field_type.get() != NULL &&
-		    field_type->kind == pa11::TypeKind::Record)
-			complete_template_record(field_type);
+		if (!shallow_template_completion)
+		{
+			bool hosted_synthesized_layout = false;
+			if (hosted_compatibility_ &&
+			    active_template_class &&
+			    class_scope != NULL &&
+			    hosted_library_namespace_scope(class_scope))
+			{
+				try
+				{
+					pa11::layout_record_type(type);
+					hosted_synthesized_layout =
+						type->hosted_layout_synthesized &&
+						type->layout_valid;
+				}
+				catch (const runtime_error&)
+				{
+				}
+			}
+			if (!hosted_synthesized_layout)
+			{
+				for (size_t i = 0; class_scope != NULL &&
+			     i < class_scope->binding_order.size(); ++i)
+			{
+				Binding* field = class_scope->binding_order[i];
+				if (field->kind != BindingKind::Variable ||
+				    field->is_static_member ||
+				    field->aliased_binding != NULL)
+					continue;
+				field->type = substitute_template_type(field->type);
+				TypePtr field_type = field->type;
+				field_type = field_type.get() != NULL
+					? pa11::strip_cv(field_type) : TypePtr();
+				while (field_type.get() != NULL &&
+				       field_type->kind == pa11::TypeKind::Array)
+					field_type = pa11::strip_cv(field_type->base);
+				if (field_type.get() != NULL &&
+				    field_type->kind == pa11::TypeKind::Record)
+					complete_template_record(field_type);
+			}
+			for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
+				if (extra_lowir_nodes_[i].binding != NULL &&
+				    extra_lowir_nodes_[i].binding->owner == class_scope)
+					resolve_pending_member_initializers(class_scope,
+					                                    extra_lowir_nodes_[i]);
+			for (size_t i = 0; i < type->direct_bases.size(); ++i)
+			{
+				TypePtr direct_base_bare =
+					type->direct_bases[i].get() != NULL
+					? pa11::strip_cv(type->direct_bases[i]) : TypePtr();
+				if (direct_base_bare.get() != NULL &&
+				    direct_base_bare->kind == pa11::TypeKind::Record &&
+				    direct_base_bare.get() != type.get() &&
+				    !type_is_template_dependent(direct_base_bare))
+				{
+					complete_template_record(direct_base_bare);
+				}
+			}
+			try
+			{
+				if (!defer_dependent_base_layout &&
+				    !type_is_template_dependent(type) &&
+				    !type_structurally_dependent(type))
+					pa11::layout_record_type(type);
+			}
+			catch (const runtime_error& err)
+			{
+				if ((string(err.what()) != "incomplete class type" &&
+				     string(err.what()) != "incomplete object type" &&
+				     string(err.what()) != "incomplete array type") ||
+				    active_class_instantiations_.empty())
+					throw;
+			}
+				if (class_scope != NULL &&
+				    type.get() != NULL &&
+				    !type_is_template_dependent(type) &&
+				    !type_structurally_dependent(type))
+				{
+				vector<Binding*> members = class_scope->binding_order;
+				for (size_t i = 0; i < members.size(); ++i)
+				{
+					Binding* function = members[i];
+					if (function == NULL ||
+					    function->kind != BindingKind::Function ||
+					    function->type.get() == NULL ||
+					    !function->is_defaulted ||
+					    function->name != "operator=" ||
+					    function->type->kind != pa11::TypeKind::Function ||
+					    function->type->parameters.size() != 2 ||
+					    !pa11::is_reference_type(function->type->parameters[1]))
+						continue;
+					try
+					{
+						ensure_copy_move_assignment(
+							type,
+							function->type->parameters[1]->kind ==
+								pa11::TypeKind::RValueReference);
+					}
+					catch (const runtime_error& err)
+					{
+						if ((string(err.what()) != "incomplete class type" &&
+						     string(err.what()) != "incomplete object type" &&
+						     string(err.what()) != "incomplete array type") ||
+						    active_class_instantiations_.empty())
+							throw;
+						}
+					}
+				}
+				if (type.get() != NULL &&
+				    generated_dtors_.find(type.get()) != generated_dtors_.end() &&
+				    completed_generated_dtors_.find(type.get()) ==
+					    completed_generated_dtors_.end())
+				{
+					try
+					{
+						ensure_default_destructor(type);
+					}
+					catch (const runtime_error& err)
+					{
+						if ((string(err.what()) != "incomplete class type" &&
+						     string(err.what()) != "incomplete object type" &&
+						     string(err.what()) != "incomplete array type") ||
+						    active_class_instantiations_.empty())
+							throw;
+					}
+				}
+				}
+			}
+		return type;
 	}
-	for (size_t i = 0; i < extra_lowir_nodes_.size(); ++i)
-		if (extra_lowir_nodes_[i].binding != NULL &&
-		    extra_lowir_nodes_[i].binding->owner == class_scope)
-			resolve_pending_member_initializers(class_scope,
-			                                    extra_lowir_nodes_[i]);
-	for (size_t i = 0; i < type->direct_bases.size(); ++i)
-	{
-		TypePtr direct_base_bare =
-			type->direct_bases[i].get() != NULL
-			? pa11::strip_cv(type->direct_bases[i]) : TypePtr();
-		if (direct_base_bare.get() != NULL &&
-		    direct_base_bare->kind == pa11::TypeKind::Record &&
-		    direct_base_bare.get() != type.get() &&
-		    !type_is_template_dependent(direct_base_bare))
-			complete_template_record(direct_base_bare);
-	}
-	try
-	{
-		if (!defer_dependent_base_layout &&
-		    !type_is_template_dependent(type) &&
-		    !type_structurally_dependent(type))
-			pa11::layout_record_type(type);
-	}
-	catch (const runtime_error& err)
-	{
-		if ((string(err.what()) != "incomplete class type" &&
-		     string(err.what()) != "incomplete object type" &&
-		     string(err.what()) != "incomplete array type") ||
-		    active_class_instantiations_.empty())
-			throw;
-	}
-	return type;
-}
 
 void Parser::parse_class_body(Scope* class_scope, bool default_private)
 {
@@ -583,6 +675,9 @@ void Parser::parse_class_body(Scope* class_scope, bool default_private)
 			continue;
 		}
 		if (parse_friend_declaration())
+			continue;
+		if ((at(OP_COMPL) || (at(KW_VIRTUAL) && lookahead(OP_COMPL, 1))) &&
+		    parse_destructor_like_member())
 			continue;
 		Node ignored;
 		size_t save = pos_;

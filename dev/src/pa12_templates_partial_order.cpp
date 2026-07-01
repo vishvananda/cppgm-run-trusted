@@ -191,32 +191,133 @@ int cv_qualified_direct_parameter_score(
 	return score;
 }
 
-int fixed_template_argument_score(const vector<TemplateArgument>& pattern)
+int fixed_template_argument_score(
+	const TemplateArgument& argument,
+	const map<const void*, vector<TemplateArgument> >& record_arguments);
+
+TemplateArgument fixed_template_argument_from_instance_argument(
+	const pa11::TemplateInstanceArgument& argument)
+{
+	vector<pa11::TemplateInstanceArgument> arguments;
+	arguments.push_back(argument);
+	vector<TemplateArgument> converted =
+		match_template_arguments_from_instance_arguments(arguments);
+	return converted.empty() ? TemplateArgument() : converted[0];
+}
+
+int fixed_template_type_score(
+	TypePtr type,
+	const map<const void*, vector<TemplateArgument> >& record_arguments)
+{
+	if (type.get() == NULL)
+		return 0;
+	type = pa11::strip_cv(type);
+	if (type->kind == pa11::TypeKind::TemplateParameter)
+	{
+		if (!type->is_dependent_typename &&
+		    pa11::is_deducible_template_parameter_type(type))
+			return 0;
+		int score = 0;
+		for (size_t i = 0; i < type->template_arguments.size(); ++i)
+			score += fixed_template_argument_score(
+				fixed_template_argument_from_instance_argument(
+					type->template_arguments[i]),
+				record_arguments);
+		return score;
+	}
+	if (type->kind == pa11::TypeKind::Pointer ||
+	    type->kind == pa11::TypeKind::LValueReference ||
+	    type->kind == pa11::TypeKind::RValueReference ||
+	    type->kind == pa11::TypeKind::Array)
+		return fixed_template_type_score(type->base, record_arguments);
+	if (type->kind == pa11::TypeKind::Function)
+	{
+		int score = fixed_template_type_score(type->base,
+		                                      record_arguments);
+		for (size_t i = 0; i < type->parameters.size(); ++i)
+			score += fixed_template_type_score(type->parameters[i],
+			                                   record_arguments);
+		return score;
+	}
+	if (type->kind == pa11::TypeKind::MemberPointer)
+		return fixed_template_type_score(type->member_class,
+		                                 record_arguments) +
+		       fixed_template_type_score(type->base,
+		                                 record_arguments);
+	if (type->is_template_specialization ||
+	    type->dependent_typename_template_id ||
+	    !type->template_arguments.empty())
+	{
+		int score = 0;
+		map<const void*, vector<TemplateArgument> >::const_iterator stored =
+			record_arguments.find(type.get());
+		if (stored != record_arguments.end())
+		{
+			for (size_t i = 0; i < stored->second.size(); ++i)
+				score += fixed_template_argument_score(
+					stored->second[i],
+					record_arguments);
+			return score;
+		}
+		for (size_t i = 0; i < type->template_arguments.size(); ++i)
+			score += fixed_template_argument_score(
+				fixed_template_argument_from_instance_argument(
+					type->template_arguments[i]),
+				record_arguments);
+		return score;
+	}
+	return 1;
+}
+
+int fixed_template_argument_score(
+	const TemplateArgument& argument,
+	const map<const void*, vector<TemplateArgument> >& record_arguments)
+{
+	string pack_name;
+	if (argument.pack_expansion ||
+	    pack_argument_parameter_name(argument, pack_name))
+		return 0;
+	if (argument.kind == TemplateArgumentKind::Type)
+	{
+		if (argument.type.get() != NULL &&
+		    deducible_template_parameter_type(argument.type))
+			return 0;
+		return fixed_template_type_score(argument.type,
+		                                 record_arguments);
+	}
+	if (argument.kind == TemplateArgumentKind::Value)
+	{
+		if (argument.dependent &&
+		    !argument.value_name.empty() &&
+		    argument.value_expr_begin == argument.value_expr_end &&
+		    argument.value_owner_template_name.empty() &&
+		    argument.value_member_name.empty())
+			return 0;
+		return 1 + fixed_template_type_score(argument.type,
+		                                     record_arguments);
+	}
+	if (argument.kind == TemplateArgumentKind::Template)
+	{
+		if (argument.template_declaration == NULL &&
+		    !argument.value_name.empty())
+			return 0;
+		return 1;
+	}
+	int score = 0;
+	for (size_t i = 0; i < argument.pack.size(); ++i)
+		score += fixed_template_argument_score(argument.pack[i],
+		                                       record_arguments);
+	return score;
+}
+
+int fixed_template_argument_score(
+	const vector<TemplateArgument>& pattern,
+	const map<const void*, vector<TemplateArgument> >& record_arguments)
 {
 	int score = 0;
 	for (size_t i = 0; i < pattern.size(); ++i)
-	{
-		string pack_name;
-		if (pattern[i].pack_expansion ||
-		    pack_argument_parameter_name(pattern[i], pack_name))
-			continue;
-		if (pattern[i].kind == TemplateArgumentKind::Type &&
-		    pattern[i].type.get() != NULL &&
-		    deducible_template_parameter_type(pattern[i].type))
-			continue;
-		if (pattern[i].kind == TemplateArgumentKind::Value &&
-		    pattern[i].dependent &&
-		    !pattern[i].value_name.empty() &&
-		    pattern[i].value_expr_begin == pattern[i].value_expr_end &&
-		    pattern[i].value_owner_template_name.empty() &&
-		    pattern[i].value_member_name.empty())
-			continue;
-		if (pattern[i].kind == TemplateArgumentKind::Template &&
-		    pattern[i].template_declaration == NULL &&
-		    !pattern[i].value_name.empty())
-			continue;
-		++score;
-	}
+		score += fixed_template_argument_score(pattern[i],
+		                                       record_arguments);
 	return score;
 }
 
@@ -586,7 +687,12 @@ bool match_class_specialization(TemplateDeclaration* primary,
 			if (found == deduced.end())
 				return false;
 		}
-		selected_args.push_back(found->second);
+		TemplateArgument selected = found->second;
+		if (!specialization->parameters[i].is_pack &&
+		    selected.kind == TemplateArgumentKind::Pack &&
+		    selected.pack.size() == 1)
+			selected = selected.pack[0];
+		selected_args.push_back(selected);
 	}
 	return true;
 }
@@ -650,9 +756,11 @@ bool class_specialization_more_specialized(
 		if (left_pack_penalty != right_pack_penalty)
 			return left_pack_penalty < right_pack_penalty;
 		int left_fixed = fixed_template_argument_score(
-			left->class_specialization_pattern);
+			left->class_specialization_pattern,
+			record_arguments);
 		int right_fixed = fixed_template_argument_score(
-			right->class_specialization_pattern);
+			right->class_specialization_pattern,
+			record_arguments);
 		if (left_fixed != right_fixed)
 			return left_fixed > right_fixed;
 		int left_cv = cv_qualified_direct_parameter_score(
@@ -688,9 +796,11 @@ bool class_specialization_more_specialized(
 	if (left_pack_penalty != right_pack_penalty)
 		return left_pack_penalty < right_pack_penalty;
 	int left_fixed = fixed_template_argument_score(
-		left->class_specialization_pattern);
+		left->class_specialization_pattern,
+		record_arguments);
 	int right_fixed = fixed_template_argument_score(
-		right->class_specialization_pattern);
+		right->class_specialization_pattern,
+		record_arguments);
 	if (left_fixed != right_fixed)
 		return left_fixed > right_fixed;
 	int left_cv = cv_qualified_direct_parameter_score(

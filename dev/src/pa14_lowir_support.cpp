@@ -1,7 +1,9 @@
 #include "pa14_lowir_internal.h"
 #include "pa12_templates_function_support.h"
 #include "pa12_types_support.h"
+#include <algorithm>
 #include <cctype>
+#include <iomanip>
 namespace pa14 { namespace internal { bool starts_with(const string& text, const string& prefix) {
 return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0; } TypePtr object_type(TypePtr type)
 { if (type->kind == TypeKind::LValueReference || type->kind == TypeKind::RValueReference) return type->base;
@@ -44,10 +46,17 @@ size_t args = primary.find('<');
 if (args != string::npos) primary = primary.substr(0, args);
 size_t scope_pos = primary.rfind("::");
 if (scope_pos != string::npos) primary = primary.substr(scope_pos + 2);
-if (primary != "shared_ptr" && primary != "__shared_ptr") return false;
+if (primary != "shared_ptr" && primary != pa11::abi_private_name("_shared_ptr")) return false;
 for (Scope* scope = bare->scope; scope != NULL; scope = scope->parent)
 	if (scope->kind == ScopeKind::Namespace && scope->name == "std")
 		return true;
+return false;
+} bool hosted_unresolved_integral_typedef(TypePtr type, string* lowir)
+{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(object_type(type)) : TypePtr();
+if (bare.get() == NULL || !bare->is_dependent_typename) return false; string name = bare->name;
+size_t pos = name.rfind("::"); string member = pos == string::npos ? name : name.substr(pos + 2);
+if (member == "size_type") { if (lowir != NULL) *lowir = "i64"; return true; }
+if (member == "difference_type") { if (lowir != NULL) *lowir = "i64"; return true; }
 return false;
 } string scalar_lowir_type(TypePtr type) {
 TypePtr bare = pa11::strip_cv(object_type(type)); if (is_reference(type)) return "ptr"; if (bare->kind == TypeKind::Pointer ||
@@ -57,6 +66,7 @@ return pa11::strip_cv(bare->base)->kind == TypeKind::Function ? "i128" : "i64"; 
 return out.str(); } if (bare->kind == TypeKind::Enum) {
 switch (pa11::type_size(bare)) { case 1: return "i8"; case 2: return "i16";
 case 4: return "i32"; default: return "i64"; } }
+string hosted_lowir; if (hosted_unresolved_integral_typedef(type, &hosted_lowir)) return hosted_lowir;
 if (bare->kind != TypeKind::Fundamental) throw runtime_error("unsupported PA14 type: " + pa11::describe_type(bare)); switch (bare->fundamental) {
 case FT_BOOL: return "u8"; case FT_CHAR: case FT_SIGNED_CHAR: return "i8"; case FT_UNSIGNED_CHAR: return "u8"; case FT_SHORT_INT: return "i16";
 case FT_UNSIGNED_SHORT_INT: return "u16"; case FT_INT: return "i32"; case FT_UNSIGNED_INT: return "u32"; case FT_LONG_INT:
@@ -87,12 +97,23 @@ binding->type->parameters.size() < 2) return false; TypePtr param = binding->typ
 return false; TypePtr param_record = pa11::strip_cv(param->base); TypePtr target_record = pa11::strip_cv(record); return pa11::same_type(param_record, target_record);
 } bool is_move_constructor(const Binding* binding, TypePtr record) { if (!is_copy_or_move_constructor(binding, record))
 return false; return binding->type->parameters[1]->kind == TypeKind::RValueReference; } bool type_has_user_copy_move_or_destructor(TypePtr type);
+bool function_template_specialization_binding(const Binding* binding)
+{
+	string symbol = binding != NULL
+		? binding->function_specialization_symbol : string();
+	if (symbol.empty() &&
+	    binding != NULL &&
+	    binding->aliased_binding != NULL)
+		symbol = binding->aliased_binding->function_specialization_symbol;
+	return symbol.find("C1I") != string::npos ||
+	       symbol.find("C2I") != string::npos;
+}
 bool type_has_abi_indirect_special_member(TypePtr type); bool defaulted_member_affects_call_abi(const Binding* binding) { if (binding->owner == NULL || binding->owner->kind != ScopeKind::Class)
 return binding->is_inline_definition; TypePtr record = pa11::record_type_for_scope(binding->owner); if (record.get() == NULL) return binding->is_inline_definition;
 	TypePtr bare = pa11::strip_cv(record); if (bare->tag == "union") return true; pa11::layout_record_type(bare);
 	vector<TypePtr> bases = pa11::record_direct_bases(bare); for (size_t i = 0; i < bases.size(); ++i)
-	if (type_has_abi_indirect_special_member(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
-	if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
+if (type_has_abi_indirect_special_member(bases[i])) return true; for (size_t i = 0; i < bare->fields.size(); ++i)
+if (type_has_abi_indirect_special_member(bare->fields[i]->type)) return true; return false; }
 bool record_declares_or_inherits_virtual_base(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -147,7 +168,7 @@ bool hosted_fpos_direct_call_abi(TypePtr type)
 	return unqualified_record_primary(bare) == "fpos";
 }
 bool special_member_affects_call_abi(const Binding* binding) { if (binding->is_generated_copy_move_constructor || binding->is_generated_default_destructor)
-return false; if (!binding->is_defaulted) return true; return defaulted_member_affects_call_abi(binding);
+return false; if (function_template_specialization_binding(binding)) return false; if (!binding->is_defaulted) return true; return defaulted_member_affects_call_abi(binding);
 } bool record_has_user_copy_move_or_destructor(TypePtr type) { TypePtr bare = pa11::strip_cv(type);
 if (bare->kind != TypeKind::Record || bare->scope == NULL) return false; if (bare->tag == "union") return true;
 map<string, vector<Binding*> >::const_iterator ctors = bare->scope->members.find(bare->scope->name); if (ctors != bare->scope->members.end()) {
@@ -282,7 +303,198 @@ string lowir_source_symbol_base(const Binding* binding)
 {
 	return source_symbol_base_impl(binding, false);
 }
-string global_object_symbol(const Binding* binding) { if (binding == NULL) return string();
+bool binding_owner_is_std_namespace(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Namespace &&
+	       binding->owner->name == "std";
+}
+
+bool binding_owner_is_hosted_stream_namespace(const Binding* binding)
+{
+	return binding != NULL &&
+	       binding->owner != NULL &&
+	       binding->owner->kind == ScopeKind::Namespace &&
+	       (binding->owner->name == "std" ||
+	        binding->owner->name == "__gnu_cxx");
+}
+
+bool type_is_hosted_external_stream(TypePtr type)
+{
+	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
+	if (bare.get() != NULL &&
+	    (bare->kind == TypeKind::LValueReference ||
+	     bare->kind == TypeKind::RValueReference))
+		bare = pa11::strip_cv(bare->base);
+	return record_uses_hosted_external_stream_vtable(bare);
+}
+
+bool hosted_std_endl_stream_char(TypePtr stream, EFundamentalType& ch)
+{
+	TypePtr record = stream.get() != NULL ? pa11::strip_cv(stream) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return false;
+	string primary = record->template_primary_name.empty()
+		? record->name : record->template_primary_name;
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	size_t scope = primary.rfind("::");
+	if (scope != string::npos)
+		primary = primary.substr(scope + 2);
+	if (primary == "ostream")
+	{
+		ch = FT_CHAR;
+		return true;
+	}
+	if (primary != "basic_ostream")
+		return false;
+	if (record->template_arguments.empty() ||
+	    record->template_arguments[0].kind !=
+		    pa11::TemplateInstanceArgumentKind::Type)
+	{
+		ch = FT_CHAR;
+		return true;
+	}
+	TypePtr arg = pa11::strip_cv(record->template_arguments[0].type);
+	if (arg.get() == NULL || arg->kind != TypeKind::Fundamental)
+	{
+		ch = FT_CHAR;
+		return true;
+	}
+	ch = arg->fundamental;
+	return true;
+}
+
+string hosted_std_endl_object_symbol(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->kind != BindingKind::Function ||
+	    binding->name != "endl" ||
+	    !binding_owner_is_std_namespace(binding) ||
+	    !binding->function_specialization_symbol.empty() ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 1)
+		return string();
+	TypePtr param = pa11::strip_cv(binding->type->parameters[0]);
+	if (param.get() == NULL || param->kind != TypeKind::LValueReference)
+		return string();
+	EFundamentalType ch = FT_CHAR;
+	if (!hosted_std_endl_stream_char(param->base, ch))
+		return string();
+	if (ch == FT_CHAR)
+		return "_ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_";
+	if (ch == FT_WCHAR_T)
+		return "_ZSt4endlIwSt11char_traitsIwEERSt13basic_ostreamIT_T0_ES6_";
+	return string();
+}
+
+struct CachedGlobalObjectSymbol
+{
+	const void* type;
+	const Binding* alias;
+	const void* alias_type;
+	const Binding* local_owner;
+	const void* local_owner_type;
+	string asm_label;
+	string specialization;
+	string alias_specialization;
+	string owner_specialization;
+	string owner_alias_specialization;
+	string local_static_discriminator;
+	string language_linkage;
+	bool is_local_static;
+	string symbol;
+};
+
+CachedGlobalObjectSymbol global_object_symbol_cache_entry(
+	const Binding* binding,
+	const string& symbol)
+{
+	CachedGlobalObjectSymbol entry;
+	entry.type = binding != NULL ? binding->type.get() : NULL;
+	entry.alias = binding != NULL ? binding->aliased_binding : NULL;
+	entry.alias_type = entry.alias != NULL ? entry.alias->type.get() : NULL;
+	entry.local_owner =
+		binding != NULL ? binding->local_static_function_owner : NULL;
+	entry.local_owner_type =
+		entry.local_owner != NULL ? entry.local_owner->type.get() : NULL;
+	entry.asm_label = binding != NULL ? binding->asm_label : string();
+	entry.specialization =
+		binding != NULL ? binding->function_specialization_symbol : string();
+	entry.alias_specialization =
+		entry.alias != NULL ? entry.alias->function_specialization_symbol
+		                    : string();
+	entry.owner_specialization =
+		entry.local_owner != NULL
+		? entry.local_owner->function_specialization_symbol : string();
+	entry.owner_alias_specialization =
+		entry.local_owner != NULL &&
+		entry.local_owner->aliased_binding != NULL
+		? entry.local_owner->aliased_binding->function_specialization_symbol
+		: string();
+	entry.local_static_discriminator =
+		binding != NULL ? binding->local_static_discriminator : string();
+	entry.language_linkage =
+		binding != NULL ? binding->language_linkage : string();
+	entry.is_local_static =
+		binding != NULL && binding->is_local_static;
+	entry.symbol = symbol;
+	return entry;
+}
+
+bool global_object_symbol_cache_matches(const CachedGlobalObjectSymbol& entry,
+                                        const Binding* binding)
+{
+	const Binding* alias =
+		binding != NULL ? binding->aliased_binding : NULL;
+	const Binding* local_owner =
+		binding != NULL ? binding->local_static_function_owner : NULL;
+	const Binding* local_owner_alias =
+		local_owner != NULL ? local_owner->aliased_binding : NULL;
+	return entry.type == (binding != NULL ? binding->type.get() : NULL) &&
+	       entry.alias == alias &&
+	       entry.alias_type == (alias != NULL ? alias->type.get() : NULL) &&
+	       entry.local_owner == local_owner &&
+	       entry.local_owner_type ==
+		       (local_owner != NULL ? local_owner->type.get() : NULL) &&
+	       (binding != NULL ? entry.asm_label == binding->asm_label
+	                        : entry.asm_label.empty()) &&
+	       (binding != NULL
+	        ? entry.specialization == binding->function_specialization_symbol
+	        : entry.specialization.empty()) &&
+	       (alias != NULL
+	        ? entry.alias_specialization ==
+			  alias->function_specialization_symbol
+	        : entry.alias_specialization.empty()) &&
+	       (local_owner != NULL
+	        ? entry.owner_specialization ==
+			  local_owner->function_specialization_symbol
+	        : entry.owner_specialization.empty()) &&
+	       (local_owner_alias != NULL
+	        ? entry.owner_alias_specialization ==
+			  local_owner_alias->function_specialization_symbol
+	        : entry.owner_alias_specialization.empty()) &&
+	       (binding != NULL
+	        ? entry.local_static_discriminator ==
+			  binding->local_static_discriminator
+	        : entry.local_static_discriminator.empty()) &&
+	       (binding != NULL ? entry.language_linkage ==
+				  binding->language_linkage
+	                        : entry.language_linkage.empty()) &&
+	       entry.is_local_static ==
+		       (binding != NULL && binding->is_local_static);
+}
+
+map<const Binding*, CachedGlobalObjectSymbol>& global_object_symbol_cache()
+{
+	static map<const Binding*, CachedGlobalObjectSymbol> cache;
+	return cache;
+}
+
+string compute_global_object_symbol(const Binding* binding) { if (binding == NULL) return string();
 if (!binding->asm_label.empty()) return binding->asm_label;
 if (binding->language_linkage == "c") return binding->name; if (binding->is_local_static) {
 const Binding* owner = binding->local_static_function_owner; if (owner != NULL) {
@@ -292,15 +504,64 @@ owner->function_specialization_symbol; string leaf = abi_source_name(binding->na
 if (!binding->local_static_discriminator.empty()) leaf += abi_source_name(binding->local_static_discriminator);
 return "_ZZ" + fn.substr(2) + "E" + leaf; } }
 	if (binding->kind == BindingKind::Function &&
+	    binding->owner != NULL &&
+	    binding->owner->kind == ScopeKind::Class &&
+	    binding->name == binding->owner->name &&
+	    binding->type.get() != NULL &&
+	    binding->type->kind == TypeKind::Function &&
+	    binding->type->parameters.size() == 1) {
+		TypePtr record = pa11::record_type_for_scope(binding->owner);
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		if (record.get() != NULL &&
+		    record->kind == TypeKind::Record &&
+		    record->is_template_specialization)
+			return pa12::internal::abi_binding_symbol(
+				binding, map<string, size_t>());
+	}
+	if (binding->kind == BindingKind::Function &&
 	    !binding->function_specialization_symbol.empty())
 		return binding->function_specialization_symbol;
+	if (binding->kind == BindingKind::Function &&
+	    binding->function_specialization_symbol.empty() &&
+	    binding->aliased_binding != NULL &&
+	    !binding->aliased_binding->function_specialization_symbol.empty())
+		return binding->aliased_binding->function_specialization_symbol;
+	if (binding->kind == BindingKind::Function)
+	{
+		string hosted_symbol = hosted_std_endl_object_symbol(binding);
+		if (!hosted_symbol.empty())
+			return hosted_symbol;
+	}
 	if (binding->kind != BindingKind::Function &&
 	    (binding->owner == NULL ||
 	     (binding->owner->kind == ScopeKind::Namespace &&
 	      binding->owner->name.empty())))
 		return "_Z" + abi_source_name(binding->name);
 	return pa12::internal::abi_binding_symbol(binding, map<string, size_t>());
-	} bool binding_has_internal_linkage(const Binding* binding) { if (binding == NULL) return false;
+}
+
+string global_object_symbol(const Binding* binding)
+{
+	if (binding == NULL)
+		return string();
+	map<const Binding*, CachedGlobalObjectSymbol>& cache =
+		global_object_symbol_cache();
+	map<const Binding*, CachedGlobalObjectSymbol>::const_iterator found =
+		cache.find(binding);
+	if (found != cache.end() &&
+	    global_object_symbol_cache_matches(found->second, binding))
+		return found->second.symbol;
+	string symbol = compute_global_object_symbol(binding);
+	cache[binding] = global_object_symbol_cache_entry(binding, symbol);
+	return symbol;
+}
+
+void clear_global_object_symbol_cache()
+{
+	global_object_symbol_cache().clear();
+}
+
+bool binding_has_internal_linkage(const Binding* binding) { if (binding == NULL) return false;
 if (binding->is_local_static || binding->is_namespace_static) return true;
 if (binding->kind == BindingKind::Variable &&
     binding->language_linkage != "c" &&
@@ -328,6 +589,80 @@ return NULL; } bool record_is_template_specialization(TypePtr record)
 record->is_template_specialization; } bool binding_has_template_specialization_context(const Binding* binding) {
 if (binding == NULL) return false; for (Scope* scope = binding->owner; scope != NULL; scope = scope->parent) if (scope->kind == ScopeKind::Class &&
 record_is_template_specialization(pa11::record_type_for_scope(scope))) return true; return false; }
+bool binding_has_function_template_specialization_symbol(const Binding* binding) {
+return binding != NULL && (!binding->function_specialization_symbol.empty() ||
+(binding->aliased_binding != NULL && !binding->aliased_binding->function_specialization_symbol.empty())); }
+bool hosted_basic_string_record_for_external(TypePtr record)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL ||
+	    record->kind != TypeKind::Record ||
+	    !record->is_template_specialization)
+		return false;
+	string primary = record->template_primary_name.empty()
+		? record->name : record->template_primary_name;
+	size_t args = primary.find('<');
+	if (args != string::npos)
+		primary = primary.substr(0, args);
+	size_t scope_pos = primary.rfind("::");
+	if (scope_pos != string::npos)
+		primary = primary.substr(scope_pos + 2);
+	if (primary != "basic_string")
+		return false;
+	bool in_std = false;
+	for (Scope* scope = record->scope; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+			in_std = true;
+	if (!in_std ||
+	    record->template_arguments.empty() ||
+	    record->template_arguments[0].kind != pa11::TemplateInstanceArgumentKind::Type)
+		return false;
+	TypePtr char_type = pa11::strip_cv(record->template_arguments[0].type);
+	return char_type.get() != NULL &&
+	       char_type->kind == TypeKind::Fundamental &&
+	       char_type->fundamental == FT_CHAR;
+}
+bool hosted_basic_string_same_record_parameter(const Binding* binding,
+                                               TypePtr record)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 2)
+		return false;
+	TypePtr param = binding->type->parameters[1];
+	if (!is_reference(param))
+		return false;
+	TypePtr source = pa11::strip_cv(param->base);
+	return source.get() != NULL &&
+	       source->kind == TypeKind::Record &&
+	       pa11::same_type(source, pa11::strip_cv(record));
+}
+bool hosted_basic_string_exported_noarg_member(const Binding* binding)
+{
+	if (binding == NULL ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 1)
+		return false;
+	return binding->name == "size";
+}
+bool hosted_basic_string_external_member(const Binding* binding)
+{
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (!hosted_basic_string_record_for_external(record))
+		return false;
+	if (is_class_destructor_binding(binding))
+		return true;
+	if (is_class_constructor_binding(binding))
+		return hosted_basic_string_same_record_parameter(binding, record);
+	if (binding != NULL && binding->name == "operator=")
+		return hosted_basic_string_same_record_parameter(binding, record);
+	if (hosted_basic_string_exported_noarg_member(binding))
+		return true;
+	return false;
+}
 string template_static_member_primary_name(const Binding* binding) { TypePtr record = class_record_for_member(binding); record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 if (record.get() == NULL || record->kind != TypeKind::Record) return string(); if (!record->template_primary_name.empty()) return record->template_primary_name;
 if (record->scope != NULL) return record->scope->name; return record->name; }
@@ -475,7 +810,15 @@ string hosted_stream_primary_name(TypePtr record)
 
 bool is_hosted_stream_primary(const string& primary)
 {
-	return primary == "ios" ||
+	return primary == "locale" ||
+	       primary == "facet" ||
+	       primary == "id" ||
+	       primary == "__use_cache" ||
+	       primary == "__numpunct_cache" ||
+	       primary == "__timepunct_cache" ||
+	       primary == "__moneypunct_cache" ||
+	       primary == "__codecvt_abstract_base" ||
+	       primary == "ios" ||
 	       primary == "istream" ||
 	       primary == "ostream" ||
 	       primary == "iostream" ||
@@ -508,15 +851,75 @@ bool is_hosted_stream_primary(const string& primary)
 	       primary == "moneypunct_byname" ||
 	       primary == "messages";
 }
+
+bool is_hosted_stream_private_primary(const string& primary)
+{
+	return primary == "locale" ||
+	       primary == "facet" ||
+	       primary == "id" ||
+	       primary == "__use_cache" ||
+	       primary == "__numpunct_cache" ||
+	       primary == "__timepunct_cache" ||
+	       primary == "__moneypunct_cache" ||
+	       primary == "__codecvt_abstract_base";
+}
+
+bool record_scope_has_std_namespace(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL)
+		return false;
+	for (Scope* scope = bare->scope; scope != NULL; scope = scope->parent)
+		if (scope->kind == ScopeKind::Namespace && scope->name == "std")
+			return true;
+	return false;
+}
+
+bool is_hosted_exception_primary(const string& primary)
+{
+	return primary == "exception" ||
+	       primary == "bad_exception" ||
+	       primary == "logic_error" ||
+	       primary == "domain_error" ||
+	       primary == "invalid_argument" ||
+	       primary == "length_error" ||
+	       primary == "out_of_range" ||
+	       primary == "runtime_error" ||
+	       primary == "range_error" ||
+	       primary == "overflow_error" ||
+	       primary == "underflow_error" ||
+	       primary == "bad_alloc" ||
+	       primary == "bad_array_new_length" ||
+	       primary == "bad_cast" ||
+	       primary == "bad_typeid" ||
+	       primary == "bad_function_call" ||
+	       primary == "failure";
+}
 }  // namespace
 
 bool record_uses_hosted_external_stream_vtable(TypePtr record)
 {
 	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	return bare.get() != NULL &&
-	       bare->kind == TypeKind::Record &&
-	       bare->is_extern_template_instantiation &&
-	       is_hosted_stream_primary(hosted_stream_primary_name(bare));
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return false;
+	string primary = hosted_stream_primary_name(bare);
+	if (record_scope_has_std_namespace(bare) &&
+	    is_hosted_stream_primary(primary) &&
+	    (is_hosted_stream_private_primary(primary) ||
+	     bare->is_extern_template_instantiation ||
+	     bare->is_polymorphic))
+		return true;
+	return record_scope_has_std_namespace(bare) &&
+	       is_hosted_exception_primary(primary);
+}
+
+bool hosted_exception_record(TypePtr record)
+{
+	TypePtr bare = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (bare.get() == NULL || bare->kind != TypeKind::Record)
+		return false;
+	return record_scope_has_std_namespace(bare) &&
+	       is_hosted_exception_primary(hosted_stream_primary_name(bare));
 }
 
 bool hosted_external_stream_function_binding(const Binding* binding)
@@ -524,7 +927,16 @@ bool hosted_external_stream_function_binding(const Binding* binding)
 	if (binding == NULL)
 		return false;
 	TypePtr record = class_record_for_member(binding);
-	return record_uses_hosted_external_stream_vtable(record);
+	if (record_uses_hosted_external_stream_vtable(record))
+		return true;
+	if (!binding_owner_is_hosted_stream_namespace(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return false;
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+		if (type_is_hosted_external_stream(binding->type->parameters[i]))
+			return true;
+	return type_is_hosted_external_stream(binding->type->base);
 }
 
 uint64_t vtable_address_point_offset(TypePtr record)
@@ -754,7 +1166,8 @@ return "__rtti_" + template_record_global_symbol_part(bare); return "__rtti_" + 
 : binding->function_specialization_symbol + " "; return base + " " + specialization + string(binding->is_static_member ? "static " : "nonstatic ") + "refqual=" + to_string(binding->ref_qualifier) + " " +
 pa11::describe_type(binding->type); } bool function_template_specialization_binding_for_symbol( const Binding* binding)
 { return binding != NULL && (!binding->function_specialization_symbol.empty() || (binding->aliased_binding != NULL &&
-!binding->aliased_binding->function_specialization_symbol.empty())); } bool member_pointer_adapter_overload_for_symbol(const Binding* current, const Binding* candidate) {
+!binding->aliased_binding->function_specialization_symbol.empty())); } bool type_contains_template_symbol_pattern(TypePtr type);
+bool member_pointer_adapter_overload_for_symbol(const Binding* current, const Binding* candidate) {
 if (current == NULL || candidate == NULL || current == candidate ||
 current->type.get() == NULL || candidate->type.get() == NULL ||
 current->type->kind != TypeKind::Function || candidate->type->kind != TypeKind::Function ||
@@ -765,7 +1178,88 @@ TypePtr cur = pa11::strip_cv(object_type(current->type->parameters[i]));
 TypePtr cand = pa11::strip_cv(object_type(candidate->type->parameters[i]));
 if (cur.get() != NULL && cand.get() != NULL && cur->kind == TypeKind::MemberPointer &&
 cand->kind == TypeKind::Record && !is_reference(candidate->type->parameters[i])) return true; }
-return false; } string template_family_name_for_symbol(TypePtr record) {
+return false; } bool class_member_overload_symbol_candidate(const Binding* binding, const string& base)
+{
+return binding != NULL && binding->kind == BindingKind::Function &&
+binding->owner != NULL && binding->owner->kind == ScopeKind::Class &&
+!base.empty() && base[0] != '<' &&
+!is_class_constructor_binding(binding) &&
+!is_class_destructor_binding(binding) &&
+!binding->is_generated_copy_move_assignment &&
+!type_contains_template_symbol_pattern(binding->type) &&
+source_symbol_base(binding) == base;
+	} void reserve_deterministic_function_symbol(ProgramLowerer& program,
+	                                             const Binding* binding,
+	                                             const string& base)
+{
+string key = function_symbol_key(binding, base);
+if (program.function_symbols.find(key) != program.function_symbols.end())
+	return;
+string object = global_object_symbol(binding);
+if (!object.empty()) {
+map<string, string>::const_iterator object_symbol =
+	program.function_symbols_by_object.find(object);
+if (object_symbol != program.function_symbols_by_object.end()) {
+program.function_symbols[key] = object_symbol->second;
+program.symbols[binding] = object_symbol->second;
+return;
+} }
+int& count = program.used_symbols[base];
+++count;
+string name = base;
+if (count > 1) name += "__ov" + to_string(count);
+program.function_symbols[key] = name;
+program.symbols[binding] = name;
+if (!object.empty()) program.function_symbols_by_object[object] = name;
+	} string class_member_overload_order_key(const Binding* binding,
+	                                         const string& base)
+	{
+	string object = global_object_symbol(binding);
+	return object + "\n" + function_symbol_key(binding, base);
+		} struct ClassMemberOverloadCandidate
+		{
+		Binding* binding;
+		string key;
+		}; void sort_class_member_overload_candidates(vector<ClassMemberOverloadCandidate>& candidates)
+		{
+		for (size_t i = 1; i < candidates.size(); ++i) {
+		ClassMemberOverloadCandidate value = candidates[i];
+		size_t j = i;
+		while (j > 0 && value.key < candidates[j - 1].key) {
+		candidates[j] = candidates[j - 1];
+		--j;
+		}
+		candidates[j] = value;
+		}
+		} void reserve_class_member_overload_symbols(ProgramLowerer& program,
+		                                             const Binding* binding,
+		                                             const string& base)
+	{
+	if (!class_member_overload_symbol_candidate(binding, base))
+		return;
+map<string, vector<Binding*> >::const_iterator overloads =
+	binding->owner->members.find(binding->name);
+if (overloads == binding->owner->members.end())
+	return;
+	if (program.reserved_class_member_overload_symbol_bases.count(base) != 0)
+		return;
+	program.reserved_class_member_overload_symbol_bases.insert(base);
+	vector<ClassMemberOverloadCandidate> candidates;
+	for (size_t i = 0; i < overloads->second.size(); ++i) {
+		Binding* prior = overloads->second[i];
+		if (!class_member_overload_symbol_candidate(prior, base))
+			continue;
+		ClassMemberOverloadCandidate candidate;
+		candidate.binding = prior;
+		candidate.key = class_member_overload_order_key(prior, base);
+		candidates.push_back(candidate);
+	}
+	sort_class_member_overload_candidates(candidates);
+	for (size_t i = 0; i < candidates.size(); ++i) {
+		Binding* prior = candidates[i].binding;
+		reserve_deterministic_function_symbol(program, prior, base);
+	}
+	} string template_family_name_for_symbol(TypePtr record) {
 record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr(); if (record.get() == NULL || record->kind != TypeKind::Record) return ""; return record->template_primary_name.empty()
 ? record->name : record->template_primary_name; } bool template_argument_pattern_matches( const pa11::TemplateInstanceArgument& pattern,
 const pa11::TemplateInstanceArgument& actual); bool template_parameter_pattern_matches(TypePtr pattern, TypePtr actual) { pattern = pattern.get() != NULL ? pa11::strip_cv(pattern) : TypePtr();
@@ -829,6 +1323,19 @@ host_object_lowering &&
 (binding->aliased_binding->function_specialization_symbol.empty() ||
  binding->aliased_binding->function_specialization_symbol != binding->function_specialization_symbol);
 if (!binding_has_body && alias_has_body && !explicit_specialization_symbol) binding = binding->aliased_binding; }
+if (host_object_lowering &&
+    binding != NULL &&
+    binding->kind == BindingKind::Function) {
+const Binding* map_base_alias = hosted_map_base_lvalue_operator_index_alias(binding);
+if (map_base_alias != NULL) {
+string alias_name = symbol_for(map_base_alias);
+symbols[binding] = alias_name;
+string base = source_symbol_base(binding);
+function_symbols[function_symbol_key(binding, base)] = alias_name;
+string object = global_object_symbol(binding);
+if (!object.empty()) function_symbols_by_object[object] = alias_name;
+return alias_name;
+} }
 map<const Binding*, string>::const_iterator found = symbols.find(binding); if (found != symbols.end()) {
 if (host_object_lowering &&
     binding->kind == BindingKind::Function && !binding->function_specialization_symbol.empty() && found->second != binding->function_specialization_symbol) {
@@ -840,7 +1347,10 @@ if (binding->kind == BindingKind::Function) { string object = global_object_symb
 map<string, string>::const_iterator oit = function_symbols_by_object.find(object); if (oit != function_symbols_by_object.end()) { symbols[binding] = oit->second; return oit->second; } }
 string key = function_symbol_key(binding, base); map<string, string>::const_iterator fit = function_symbols.find(key);
 if (fit != function_symbols.end()) { symbols[binding] = fit->second; return fit->second;
-} if (function_template_specialization_binding_for_symbol(binding) && used_symbols[base] == 0 && binding->owner != NULL) {
+	} reserve_class_member_overload_symbols(*this, binding, base);
+	{ map<string, string>::const_iterator reserved = function_symbols.find(key);
+	if (reserved != function_symbols.end()) { symbols[binding] = reserved->second; return reserved->second; } }
+	if (function_template_specialization_binding_for_symbol(binding) && used_symbols[base] == 0 && binding->owner != NULL) {
 map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
 if (overloads != binding->owner->members.end()) for (size_t i = 0; i < overloads->second.size(); ++i) { Binding* candidate = overloads->second[i];
 if (candidate == binding || candidate->kind != BindingKind::Function || source_symbol_base(candidate) != base ||
@@ -879,7 +1389,8 @@ if (overloads != binding->owner->members.end()) { for (size_t i = 0; i < overloa
 if (prior->kind != BindingKind::Function || source_symbol_base(prior) != base || function_template_specialization_binding_for_symbol(prior) || type_contains_template_symbol_pattern(prior->type)) continue; string prior_key = function_symbol_key(prior, base);
 if (function_symbols.find(prior_key) == function_symbols.end()) { int& prior_count = used_symbols[base]; ++prior_count; string prior_name = base; if (prior_count > 1)
 prior_name += "__ov" + to_string(prior_count); function_symbols[prior_key] = prior_name; symbols[prior] = prior_name; } if (prior == binding || prior->aliased_binding == binding || binding->aliased_binding == prior) break; }
-map<string, string>::const_iterator reserved = function_symbols.find(key); if (reserved != function_symbols.end()) { symbols[binding] = reserved->second; return reserved->second; } } } if (binding->is_generated_copy_move_constructor && used_symbols[base] == 0 && binding->owner != NULL &&
+map<string, string>::const_iterator reserved = function_symbols.find(key); if (reserved != function_symbols.end()) { symbols[binding] = reserved->second; return reserved->second; } } }
+	if (binding->is_generated_copy_move_constructor && used_symbols[base] == 0 && binding->owner != NULL &&
 binding->owner->kind == ScopeKind::Class && binding->name == binding->owner->name) { TypePtr owner_record =
 pa11::record_type_for_scope(binding->owner); owner_record = owner_record.get() != NULL ? pa11::strip_cv(owner_record) : TypePtr(); if (owner_record.get() != NULL &&
 owner_record->kind == TypeKind::Record && record_declares_or_inherits_virtual_base(owner_record)) { map<string, vector<Binding*> >::const_iterator overloads = binding->owner->members.find(binding->name);
@@ -927,8 +1438,22 @@ return code_points; } string string_literal_lowir_type(const string& text) {
 StringLiteralInfo info; if (!AnalyzeStringLiteral(text, info) || !info.ud_suffix.empty()) throw runtime_error("invalid string literal"); switch (info.type)
 { case FT_CHAR16_T: return "i16"; case FT_WCHAR_T:
 case FT_CHAR32_T: return "i32"; default: return "i8";
-} } string ProgramLowerer::string_symbol(const string& token_text) {
-map<string, string>::const_iterator found = string_literals.find(token_text); if (found != string_literals.end()) return found->second; string name = "__strlit__" + to_string(string_literals.size() + 1);
+} } namespace {
+string stable_string_literal_symbol(const string& token_text)
+{
+	uint64_t hash = 1469598103934665603ULL;
+	for (size_t i = 0; i < token_text.size(); ++i)
+	{
+		hash ^= static_cast<unsigned char>(token_text[i]);
+		hash *= 1099511628211ULL;
+	}
+	ostringstream out;
+	out << "__strlit_h" << hex << hash << "_n" << dec << token_text.size();
+	return out.str();
+}
+}
+string ProgramLowerer::string_symbol(const string& token_text) {
+map<string, string>::const_iterator found = string_literals.find(token_text); if (found != string_literals.end()) return found->second; string name = host_object_lowering ? stable_string_literal_symbol(token_text) : "__strlit__" + to_string(string_literals.size() + 1);
 string_literals[token_text] = name; string_literal_types[name] = string_literal_lowir_type(token_text); string_defs.push_back(make_pair(name, decode_string_literal(token_text))); return name;
 }
 }  // namespace internal

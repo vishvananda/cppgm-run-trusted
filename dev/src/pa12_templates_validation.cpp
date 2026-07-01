@@ -93,6 +93,7 @@ struct TemplateValidationState
 	vector<set<string> > template_type_parameter_packs;
 	vector<ActiveClassInstantiation> active_class_instantiations;
 	int local_type_counter;
+	int local_record_declaration_counter;
 	int range_for_counter;
 	bool force_new_function_binding;
 	bool defer_function_template_bodies;
@@ -110,6 +111,8 @@ struct TemplateValidationState
 	set<const void*> generated_copy_assignments;
 	set<const void*> generated_move_assignments;
 	set<const void*> generated_dtors;
+	set<const void*> active_generated_dtors;
+	set<const void*> completed_generated_dtors;
 	map<Binding*, Node> default_member_initializers;
 	map<Binding*, vector<Expr> > default_arguments;
 	map<Binding*, vector<string> > function_parameter_names;
@@ -193,6 +196,7 @@ void TemplateValidationState::save_core(Parser& parser,
 	template_type_parameter_packs = parser.template_type_parameter_packs_;
 	active_class_instantiations = parser.active_class_instantiations_;
 	local_type_counter = parser.local_type_counter_;
+	local_record_declaration_counter = parser.local_record_declaration_counter_;
 	range_for_counter = parser.range_for_counter_;
 	force_new_function_binding = parser.force_new_function_binding_;
 	defer_function_template_bodies = parser.defer_function_template_bodies_;
@@ -230,6 +234,8 @@ void TemplateValidationState::save_generated(Parser& parser)
 	generated_copy_assignments = parser.generated_copy_assignments_;
 	generated_move_assignments = parser.generated_move_assignments_;
 	generated_dtors = parser.generated_dtors_;
+	active_generated_dtors = parser.active_generated_dtors_;
+	completed_generated_dtors = parser.completed_generated_dtors_;
 }
 
 void TemplateValidationState::save_semantic_tables(Parser& parser)
@@ -304,6 +310,8 @@ void TemplateValidationState::restore_core(Parser& parser)
 	parser.generated_nodes_ = generated_nodes;
 	parser.extra_lowir_nodes_ = extra_lowir_nodes;
 	parser.local_type_counter_ = local_type_counter;
+	parser.local_record_declaration_counter_ =
+		local_record_declaration_counter;
 	parser.range_for_counter_ = range_for_counter;
 	parser.force_new_function_binding_ = force_new_function_binding;
 	parser.defer_function_template_bodies_ = defer_function_template_bodies;
@@ -342,6 +350,8 @@ void TemplateValidationState::restore_generated(Parser& parser)
 	parser.generated_copy_assignments_ = generated_copy_assignments;
 	parser.generated_move_assignments_ = generated_move_assignments;
 	parser.generated_dtors_ = generated_dtors;
+	parser.active_generated_dtors_ = active_generated_dtors;
+	parser.completed_generated_dtors_ = completed_generated_dtors;
 }
 
 void TemplateValidationState::restore_semantic_tables(Parser& parser)
@@ -355,10 +365,22 @@ void TemplateValidationState::restore_semantic_tables(Parser& parser)
 	parser.enum_owner_scopes_ = enum_owner_scopes;
 	parser.record_owner_scopes_ = record_owner_scopes;
 	parser.class_friend_functions_ = class_friend_functions;
+	++parser.class_friend_function_generation_;
+	parser.recovered_friend_binding_scans_.clear();
 	parser.class_friend_classes_ = class_friend_classes;
 	parser.pending_member_bodies_ = pending_member_bodies;
+	parser.rebuild_pending_member_body_name_index();
 	parser.pending_function_bodies_ = pending_function_bodies;
+	parser.rebuild_pending_function_body_name_index();
+	parser.pending_function_body_equivalents_.clear();
+	parser.direct_lookup_cache_.clear();
+	parser.qualified_lookup_cache_.clear();
+	parser.function_template_origin_cache_.clear();
+	parser.function_template_redirect_cache_.clear();
+	parser.function_template_lookup_cache_.clear();
+	parser.constructor_arg_count_cache_.clear();
 	parser.function_bodies_ = function_bodies;
+	parser.note_function_bodies_changed();
 	parser.deferred_nested_member_body_scopes_ =
 		deferred_nested_member_body_scopes;
 	parser.defaulted_move_assignments_ = defaulted_move_assignments;
@@ -382,8 +404,10 @@ void TemplateValidationState::restore_template_tables(
 	parser.function_template_placeholders_ = function_template_placeholders;
 	parser.function_template_specialization_arguments_ =
 		function_template_specialization_arguments;
+	parser.recovered_function_template_declarations_.clear();
 	parser.record_template_declarations_ = record_template_declarations;
 	parser.record_template_arguments_ = record_template_arguments;
+	parser.template_dependent_type_cache_.clear();
 	parser.candidate_only_class_template_specializations_ =
 		candidate_only_class_template_specializations;
 	parser.demanded_class_template_specializations_ =
@@ -410,13 +434,16 @@ void Parser::validate_class_template_definition(TemplateDeclaration* declaration
 	vector<TemplateArgument> args;
 	for (size_t i = 0; i < declaration->parameters.size(); ++i)
 	{
-		string name = declaration->parameters[i].name;
+		const TemplateParameterInfo& parameter = declaration->parameters[i];
+		string name = parameter.name;
 		if (name.empty())
 			name = "__template_param" + to_string(i);
-		if (declaration->parameters[i].kind == TemplateParameterKind::Type)
+		if (parameter.kind == TemplateParameterKind::Type)
 		{
-			TypePtr param = pa11::make_template_parameter_type(name);
-			if (declaration->parameters[i].is_pack)
+			TypePtr param = parameter.name.empty()
+				? pa11::make_template_parameter_type(name)
+				: template_parameter_placeholder_type(parameter);
+			if (parameter.is_pack)
 			{
 				vector<TemplateArgument> pack;
 				pack.push_back(TemplateArgument::type_arg(param));
@@ -599,7 +626,9 @@ void Parser::validate_function_template_definition(TemplateDeclaration* declarat
 			name = "__template_param" + to_string(i);
 		if (parameter.kind == TemplateParameterKind::Type)
 		{
-			TypePtr param = pa11::make_template_parameter_type(name);
+			TypePtr param = parameter.name.empty()
+				? pa11::make_template_parameter_type(name)
+				: template_parameter_placeholder_type(parameter);
 			if (parameter.is_pack)
 			{
 				vector<TemplateArgument> pack;

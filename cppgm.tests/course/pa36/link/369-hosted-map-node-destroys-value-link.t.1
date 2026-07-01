@@ -1,0 +1,35 @@
+#include <map>
+
+int live;
+
+struct Tracked
+{
+  Tracked()
+  {
+    live = live + 1;
+  }
+
+  Tracked(const Tracked&)
+  {
+    live = live + 1;
+  }
+
+  ~Tracked()
+  {
+    live = live - 1;
+  }
+
+  Tracked& operator=(const Tracked&)
+  {
+    return *this;
+  }
+};
+
+int main()
+{
+  {
+    std::map<int, Tracked> values;
+    values[1] = Tracked();
+  }
+  return live == 0 ? 0 : 1;
+}

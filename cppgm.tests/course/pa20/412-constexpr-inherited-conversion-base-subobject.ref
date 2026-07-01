@@ -1,0 +1,9 @@
+global @value : u8 [binding=internal, object=_Z5value] = 1
+global @s [binding=strong, object=_Z1s] = {
+  zero 1
+}
+
+function @__cppgm_init() -> void [role=init, binding=internal] {
+  block ^entry:
+    return void
+}

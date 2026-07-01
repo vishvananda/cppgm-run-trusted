@@ -1,0 +1,7 @@
+#include "201-initializer-list-member-param-object.shared.h"
+
+int main()
+{
+	CourseInitializerListMember value;
+	return value.total({1, 2, 3}) == 6 ? 0 : 1;
+}

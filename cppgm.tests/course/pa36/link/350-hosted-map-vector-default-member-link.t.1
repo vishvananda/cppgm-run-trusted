@@ -1,0 +1,47 @@
+#include <map>
+#include <string>
+#include <vector>
+
+struct Entity
+{
+  int value;
+  explicit Entity(int v) : value(v) {}
+};
+
+struct NamespaceLike
+{
+  std::string name;
+  std::vector<Entity*> order;
+  std::map<std::string, std::vector<Entity*> > members;
+
+  explicit NamespaceLike(const std::string& n)
+    : name(n)
+  {
+  }
+
+  void add(const std::string& key, Entity* entity)
+  {
+    order.push_back(entity);
+    members[key].push_back(entity);
+  }
+};
+
+int main()
+{
+  NamespaceLike ns("");
+  Entity first(1);
+  Entity second(2);
+
+  ns.add("main", &first);
+  ns.add("main", &second);
+
+  if (ns.order.size() != 2)
+    return 1;
+  if (ns.order[0] != &first || ns.order[1] != &second)
+    return 2;
+  if (ns.members["main"].size() != 2)
+    return 3;
+  if (ns.members["main"][0] != &first || ns.members["main"][1] != &second)
+    return 4;
+  return 0;
+}

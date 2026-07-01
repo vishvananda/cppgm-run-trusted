@@ -301,10 +301,26 @@ specs.friend_decl && current_scope()->kind == ScopeKind::Class ? current_scope()
 if (friend_class_scope != NULL && qname.qualifier == NULL) target = nearest_namespace_scope(friend_class_scope); bool auto_function_declarator = specs.auto_decl && declarator_declares_function_type(declarator);
 TypePtr type = specs.auto_decl && init != NULL && !auto_function_declarator ? deduce_auto_declared_type(base, declarator, init) : apply_declarator(declarator, auto_function_declarator ?
 pa11::make_cv(pa11::make_fundamental(FT_INT), specs.cv) : base); if (specs.auto_decl && type->kind != pa11::TypeKind::Function && !function_definition) type =
-deduce_auto_variable_type(type, init); if (specs.typedef_decl) {
-apply_typedef_linkage_name(type, declarator, qname);
-if (type.get() != NULL && type->is_dependent_typename) { TypePtr resolved = resolve_dependent_typename_type(type); if (resolved.get() != NULL && resolved != type) type = substitute_template_type(resolved); }
-Binding* alias = add_alias(target, qname.name, type); add_child(out, Node("type-alias " + qname.name + " " + pa11::describe_type(alias->type))); return alias; } if (specs.constexpr_decl &&
+	deduce_auto_variable_type(type, init); if (specs.typedef_decl) {
+	apply_typedef_linkage_name(type, declarator, qname);
+	if (type.get() != NULL && type->is_dependent_typename) {
+		TypePtr resolved = resolve_dependent_typename_type(type);
+		if (resolved.get() != NULL && resolved != type)
+			type = substitute_template_type(resolved);
+		else if (type->dependent_typename_decltype &&
+		         (!template_type_substitutions_.empty() ||
+		          !template_value_substitutions_.empty() ||
+		          function_template_candidate_instantiation_depth_ != 0))
+		{
+			try {
+				TypePtr substituted = substitute_template_type(type);
+				if (substituted.get() != NULL)
+					type = substituted;
+			} catch (const runtime_error&) {
+			}
+		}
+	}
+	Binding* alias = add_alias(target, qname.name, type); add_child(out, Node("type-alias " + qname.name + " " + pa11::describe_type(alias->type))); return alias; } if (specs.constexpr_decl &&
 !pa11::is_reference_type(type) && type->kind != pa11::TypeKind::Function) type = pa11::make_cv(type, pa11::CV_CONST); if (init != NULL && type->kind == pa11::TypeKind::Array && type->unknown_bound) { uint64_t elements = 0;
 if (string_literal_initializes_array(type, *init, &elements)) type = pa11::make_array(type->base, false, elements); else if (init->braced_init_list && init->node.children.size() == 1) { Expr child;
 child.valid = true; child.node = init->node.children[0]; child.type = child.node.type; child.category = child.node.category; if (string_literal_initializes_array(type, child, &elements)) type =
@@ -326,8 +342,8 @@ if (candidate->kind == BindingKind::Variable) { bool same_variable = candidate->
 	if ((target->kind == ScopeKind::Namespace || target->kind == ScopeKind::Class) && (qname.qualifier != NULL || target->kind == ScopeKind::Namespace)) { Binding* existing =
 	pa11::find_owned_binding(target, qname.name, BindingKind::Variable); if (existing != NULL && (pa11::same_type(existing->type, type) || array_redeclaration_compatible(existing->type, type))) { variable = existing;
 	type = existing->type; } } if (variable == NULL && target->kind != ScopeKind::Namespace && target->kind != ScopeKind::Class) { map<string, vector<Binding*> >::iterator found = target->members.find(qname.name); if (found != target->members.end()) for (size_t i = 0; i < found->second.size(); ++i) { Binding* existing = found->second[i]; if (existing->kind == BindingKind::Variable && provisional_initializer_bindings_.count(existing) != 0 && pa11::same_type(existing->type, type)) { variable = existing; break; } } } if (variable == NULL) variable = add_value(target, BindingKind::Variable, qname.name, type); else provisional_initializer_bindings_.erase(variable); { string asm_label = declarator_asm_label(declarator); if (!asm_label.empty()) variable->asm_label = asm_label; } if (target->kind == ScopeKind::Class && pa11::is_reference_type(pa11::strip_cv(type)))
-	variable->is_reference_member = true; if (target->kind == ScopeKind::Class && specs.no_unique_address_decl)
-	variable->is_no_unique_address = true; return finish_variable_declaration(specs, target, variable, qname, type, init, out); }
+		variable->is_reference_member = true; if (target->kind == ScopeKind::Class && specs.no_unique_address_decl)
+		variable->is_no_unique_address = true; return finish_variable_declaration(specs, target, variable, qname, type, init, out); }
 
 }  // namespace internal
 }  // namespace pa12

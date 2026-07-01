@@ -1,0 +1,31 @@
+#include <vector>
+
+int main()
+{
+  std::vector<bool> bits;
+  bits.push_back(true);
+  if (bits.size() != 1)
+    return 20;
+  if (bits.capacity() < 2)
+    return 21;
+  bits.push_back(false);
+  if (bits.size() != 2)
+    return 22;
+  bits.push_back(true);
+
+  if (bits.size() == 0)
+    return 10;
+  if (bits.size() == 1)
+    return 11;
+  if (bits.size() == 2)
+    return 12;
+  if (bits.size() != 3)
+    return 1;
+  if (!bits[0])
+    return 2;
+  if (bits[1])
+    return 3;
+  if (!bits[2])
+    return 4;
+  return 0;
+}

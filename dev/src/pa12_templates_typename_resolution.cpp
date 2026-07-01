@@ -10,7 +10,14 @@
 using namespace std;
 namespace pa12 {
 namespace internal {
-TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_type_argument_hash(const TemplateArgument& argument,
+                                    int depth);
+size_t dependent_type_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_type_cache_string_hash(const string& value);
+size_t dependent_type_structural_hash(TypePtr type, int depth);
+
+TypePtr Parser::resolve_dependent_typename_type_uncached(TypePtr type) const
 {
 	if (type.get() == NULL ||
 	    !type->is_dependent_typename)
@@ -965,6 +972,60 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 				return apply_internal_type_transform(root_name,
 				                                     arguments[0].type);
 			if (hosted_compatibility_ &&
+			    root_name == "iterator_traits" &&
+			    parts.size() > first_type_part + 1 &&
+			    arguments.size() == 1 &&
+			    arguments[0].kind == TemplateArgumentKind::Type &&
+			    !template_argument_has_template_parameter(
+				    arguments[0],
+				    record_template_arguments_))
+			{
+				TemplateDeclaration* traits =
+					const_cast<Parser*>(this)->find_class_template(
+						NULL,
+						"iterator_traits");
+				if (traits != NULL)
+				{
+					vector<TemplateArgument> trait_args;
+					trait_args.push_back(arguments[0]);
+					TypePtr traits_type =
+						const_cast<Parser*>(this)->
+							instantiate_class_template(
+								traits,
+								trait_args);
+					TypePtr traits_record =
+						traits_type.get() != NULL
+						? pa11::strip_cv(traits_type) : TypePtr();
+					if (traits_record.get() != NULL &&
+					    traits_record->kind == pa11::TypeKind::Record &&
+					    traits_record->scope != NULL)
+					{
+						try
+						{
+							const_cast<Parser*>(this)->
+								complete_template_record(traits_record);
+						}
+						catch (const runtime_error&)
+						{
+						}
+						TypePtr member = lookup_type_member(
+							traits_record->scope,
+							parts[first_type_part + 1]);
+						if (member.get() != NULL &&
+						    parts.size() == first_type_part + 2)
+							return member;
+						if (member.get() != NULL)
+						{
+							TypePtr resolved = resolve_type_suffix(
+								member,
+								first_type_part + 2);
+							if (resolved.get() != NULL)
+								return resolved;
+						}
+					}
+				}
+			}
+			if (hosted_compatibility_ &&
 			    root_name == "__iter_category_t" &&
 			    parts.size() == first_type_part + 1 &&
 			    arguments.size() == 1 &&
@@ -1194,8 +1255,19 @@ TypePtr Parser::resolve_dependent_typename_type(TypePtr type) const
 						arguments);
 				resolved_type_scope = NULL;
 			}
-			if (resolved.get() != NULL && resolved->is_dependent_typename)
-				resolved = substitute_template_type(resolved);
+				if (resolved.get() != NULL && resolved->is_dependent_typename)
+				{
+					bool same_dependent_alias =
+						resolved->name == type->name &&
+						resolved->template_primary_name ==
+							type->template_primary_name &&
+						resolved->template_arguments.size() ==
+							type->template_arguments.size() &&
+						resolved->dependent_typename_template_argument_lists.size() ==
+							type->dependent_typename_template_argument_lists.size();
+					if (!same_dependent_alias)
+						resolved = substitute_template_type(resolved);
+				}
 			if (resolved.get() != NULL &&
 			    resolved->is_dependent_typename &&
 			    parts.size() > first_type_part + 1)

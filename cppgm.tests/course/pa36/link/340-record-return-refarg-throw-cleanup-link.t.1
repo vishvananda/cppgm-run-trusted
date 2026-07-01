@@ -1,0 +1,44 @@
+int bad_destroy = 0;
+
+struct Value {
+  void* self;
+  Value();
+  Value(Value&&);
+  ~Value();
+  Value& operator=(Value&&);
+};
+
+Value::Value() : self(this) {}
+Value::Value(Value&&) : self(this) {}
+Value::~Value()
+{
+  if (self != this)
+    bad_destroy = 1;
+}
+
+Value& Value::operator=(Value&&)
+{
+  return *this;
+}
+
+Value make_value(bool ok)
+{
+  if (!ok)
+    throw 1;
+  return Value();
+}
+
+struct Holder {
+  Value value;
+};
+
+int main()
+{
+  Holder holder;
+  try {
+    holder.value = make_value(false);
+  } catch (...) {
+    return bad_destroy ? 1 : 0;
+  }
+  return 2;
+}

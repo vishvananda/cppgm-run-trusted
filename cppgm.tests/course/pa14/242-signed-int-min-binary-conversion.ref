@@ -1,0 +1,30 @@
+function @below_int_min(%value : i64) -> i32 [binding=strong, object=_Z13below_int_minl] {
+  slot $value : i64
+  slot $cond__1 : i32
+
+  block ^entry:
+    store i64 %value, $value
+    %t1 = load i64 $value
+    %t2 = unary neg i32 2147483647
+    %t3 = binary sub i32 %t2, 1
+    %t4 = convert sext i64 i32 %t3
+    %t5 = cmp lt i64 %t1, %t4
+    branch %t5, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t6 = load i32 $cond__1
+    return i32 %t6
+}
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  block ^entry:
+    %t1 = call i32 @below_int_min(0)
+    return i32 %t1
+}

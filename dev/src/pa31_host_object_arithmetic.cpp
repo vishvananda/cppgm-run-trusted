@@ -3,6 +3,34 @@
 namespace pa31 {
 namespace host {
 
+void FuncGen::extend_integer_register(const Type& src,
+                                      const Type& dst,
+                                      int reg,
+                                      bool sign_extend)
+{
+	if (!lowir2cy86::is_integer_type(src) ||
+	    !lowir2cy86::is_integer_type(dst) ||
+	    width_for(dst) <= width_for(src))
+		return;
+	const bool to64 = width_for(dst) == 64;
+	if (sign_extend)
+	{
+		if (width_for(src) == 8)
+			x.movsx8(reg, reg, to64);
+		else if (width_for(src) == 16)
+			x.movsx16(reg, reg, to64);
+		else if (width_for(src) == 32 && to64)
+			x.movsxd32(reg, reg);
+	}
+	else
+	{
+		if (width_for(src) == 8)
+			x.movzx8(reg, reg);
+		else if (width_for(src) == 16)
+			x.movzx16(reg, reg);
+	}
+}
+
 bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)
 {
 	if (ins.kind == InstrKind::Binary)
@@ -130,9 +158,39 @@ bool FuncGen::emit_arithmetic_instruction(const Instruction& ins)
 		x.sse_rr(0xf3, 0x5a, 0, 0);
 		store_float_temp(ins.dest, ins.type, 0);
 	}
+	else if (ins.op == "fptrunc" &&
+	         lowir2cy86::is_f80_type(ins.src_type) &&
+	         lowir2cy86::is_float_type(ins.type) &&
+	         !lowir2cy86::is_f80_type(ins.type))
+	{
+		load_f80_value_to_x87(ins.a);
+		x.x87_fstp_float(frame_mem(fn.temp_offsets.find(ins.dest)->second),
+		                  ins.type.bits);
+	}
+	else if ((ins.op == "fptosi" || ins.op == "fptoui") &&
+	         lowir2cy86::is_f80_type(ins.src_type) &&
+	         lowir2cy86::is_integer_type(ins.type) &&
+	         ins.type.bits <= 64)
+	{
+		const size_t off = fn.temp_offsets.find(ins.dest)->second;
+		const int fist_width = ins.type.bits == 8 ? 16 : width_for(ins.type);
+		x.sub_rsp(16);
+		Mem saved_cw(RSP, 0);
+		Mem trunc_cw(RSP, 8);
+		x.x87_fnstcw(saved_cw);
+		x.mov_imm(32, RAX, 0x0f7f);
+		x.mov_mr(16, trunc_cw, RAX);
+		x.x87_fldcw(trunc_cw);
+		load_f80_value_to_x87(ins.a);
+		x.x87_fistp(frame_mem(off), fist_width);
+		x.x87_fldcw(saved_cw);
+		x.add_rsp(16);
+	}
 	else
 	{
-		load_value(ins.a, ins.type, RAX);
+		load_value(ins.a, ins.src_type, RAX);
+		extend_integer_register(ins.src_type, ins.type, RAX,
+		                        ins.op == "sext");
 		store_temp(ins.dest, ins.type, RAX);
 	}
 	return true;

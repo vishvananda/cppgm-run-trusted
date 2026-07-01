@@ -1,0 +1,24 @@
+#include <string>
+#include <vector>
+
+std::vector<std::string> split_tab_fields(const std::string& line)
+{
+  std::vector<std::string> fields;
+  std::size_t start = 0;
+  while (true)
+  {
+    std::size_t tab = line.find('\t', start);
+    if (tab == std::string::npos)
+    {
+      fields.push_back(line.substr(start));
+      return fields;
+    }
+    fields.push_back(line.substr(start, tab - start));
+    start = tab + 1;
+  }
+}
+
+int main()
+{
+  return split_tab_fields("a\tb").size() == 2 ? 0 : 1;
+}

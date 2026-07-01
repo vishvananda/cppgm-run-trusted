@@ -130,6 +130,37 @@ bool same_function_template_signature_type(TypePtr left, TypePtr right)
 	}
 }
 
+bool replacement_template_signature_component_compatible(TypePtr left,
+                                                        TypePtr right)
+{
+	return same_function_template_signature_type(left, right) ||
+	       type_structurally_dependent(left) ||
+	       type_structurally_dependent(right);
+}
+
+bool replacement_member_function_template_signature_compatible(TypePtr left,
+                                                              TypePtr right)
+{
+	if (left.get() == NULL || right.get() == NULL)
+		return left.get() == right.get();
+	if (left->kind != pa11::TypeKind::Function ||
+	    right->kind != pa11::TypeKind::Function)
+		return replacement_template_signature_component_compatible(left,
+		                                                           right);
+	if (left->cv != right->cv ||
+	    left->variadic != right->variadic ||
+	    left->parameters.size() != right->parameters.size() ||
+	    !replacement_template_signature_component_compatible(left->base,
+	                                                         right->base))
+		return false;
+	for (size_t i = 0; i < left->parameters.size(); ++i)
+		if (!replacement_template_signature_component_compatible(
+			    left->parameters[i],
+			    right->parameters[i]))
+			return false;
+	return true;
+}
+
 TypePtr member_function_pointer_type(Binding* binding)
 {
 	if (binding == NULL ||
@@ -242,10 +273,10 @@ TemplateDeclaration* Parser::replacement_member_function_template_definition(
 				 declaration->class_template_member &&
 				 replacement->class_template_member &&
 				 same_template_parameters &&
-				 (same_arity ||
-				  template_declaration_has_body(
-					  declaration_tokens_,
-					  replacement)));
+				 same_arity &&
+				 replacement_member_function_template_signature_compatible(
+					 replacement->generic_function_type,
+					 declaration->generic_function_type));
 			if (replacement == declaration ||
 			    !template_declaration_has_body(declaration_tokens_,
 			                                   replacement) ||
@@ -347,6 +378,15 @@ TemplateDeclaration* Parser::replacement_function_template_definition(
 {
 	if (declaration == NULL)
 		return declaration;
+	pair<TemplateDeclaration*, pair<size_t, size_t> > cache_key =
+		make_pair(declaration,
+		          make_pair(member_function_template_generation_,
+		                    template_declarations_.size()));
+	map<pair<TemplateDeclaration*, pair<size_t, size_t> >,
+	    TemplateDeclaration*>::iterator cached =
+		replacement_function_template_definition_cache_.find(cache_key);
+	if (cached != replacement_function_template_definition_cache_.end())
+		return cached->second;
 	bool declaration_has_body =
 		template_declaration_has_body(declaration_tokens_, declaration);
 	TypePtr owner_record = replacement_owner_record(declaration);
@@ -356,11 +396,13 @@ TemplateDeclaration* Parser::replacement_function_template_definition(
 			owner_record,
 			replacement_owner_template(owner_record),
 			declaration_has_body);
-	return member != NULL
+	TemplateDeclaration* replacement = member != NULL
 		? member
 		: replacement_free_function_template_definition(
 			declaration,
 			declaration_has_body);
+	replacement_function_template_definition_cache_[cache_key] = replacement;
+	return replacement;
 }
 
 void collect_owner_template_context(
@@ -403,7 +445,7 @@ void collect_owner_template_context(
 			if (parameter.is_pack)
 			{
 				owner_subst[parameter.name] =
-					pa11::make_template_parameter_type(parameter.name);
+					template_parameter_placeholder_type(parameter);
 				owner_value_subst[parameter.name] = owner_arg;
 				owner_pack_subst.insert(parameter.name);
 			}
@@ -492,8 +534,15 @@ Binding* Parser::instantiate_target_overload_candidate(
 		function_template_placeholders_.find(candidate);
 	Binding* placeholder = candidate->aliased_binding != NULL
 		? candidate->aliased_binding : candidate;
-	if (template_it == function_template_placeholders_.end() ||
-	    template_it->second->placeholder != placeholder)
+	if (template_it == function_template_placeholders_.end())
+		return candidate;
+	bool has_specialization_args =
+		function_template_specialization_arguments_.find(candidate) !=
+			function_template_specialization_arguments_.end() ||
+		function_template_specialization_arguments_.find(placeholder) !=
+			function_template_specialization_arguments_.end();
+	if (template_it->second->placeholder != placeholder &&
+	    has_specialization_args)
 		return candidate;
 
 	TemplateDeclaration* declaration =
@@ -762,7 +811,7 @@ void Parser::ensure_copy_move_constructor_for_single_arg(
 	     !same_template_specialization_record(arg_record, record) &&
 	     record_base_distance(arg_record, record) >= 1000000))
 		return;
-	if (args[0].category == ValueCategory::XValue)
+	if (args[0].category != ValueCategory::LValue)
 		ensure_copy_move_constructor(record, true);
 	ensure_copy_move_constructor(record, false);
 }
@@ -822,13 +871,24 @@ void Parser::prepare_member_call(Expr& callee, vector<Expr>& args)
 				if (object_record_bare.get() != NULL &&
 				    this_record.get() != NULL &&
 				    object_record_bare->kind == pa11::TypeKind::Record &&
-				    this_record->kind == pa11::TypeKind::Record &&
-				    !pa11::same_type(object_record_bare, this_record) &&
-				    !same_template_specialization_record(object_record_bare,
-				                                         this_record) &&
-				    record_base_distance(object_record_bare, this_record) >=
-					    1000000)
-					continue;
+				    this_record->kind == pa11::TypeKind::Record)
+				{
+					bool same_primary_specialization =
+						object_record_bare->is_template_specialization &&
+						this_record->is_template_specialization &&
+						!object_record_bare->template_primary_name.empty() &&
+						object_record_bare->template_primary_name ==
+							this_record->template_primary_name;
+					bool object_matches =
+						pa11::same_type(object_record_bare, this_record) ||
+						(!same_primary_specialization &&
+						 same_template_specialization_record(object_record_bare,
+						                                     this_record)) ||
+						record_base_distance(object_record_bare, this_record) <
+							1000000;
+					if (!object_matches)
+						continue;
+				}
 				if (this_object.get() != NULL &&
 				    object_type.get() != NULL &&
 				    pa11::type_has_const(object_type) &&

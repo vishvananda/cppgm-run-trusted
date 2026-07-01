@@ -1,0 +1,16 @@
+#include <set>
+#include <string>
+
+int main()
+{
+  std::set<std::string> names;
+  names.insert("name");
+  {
+    std::set<std::string> copy = names;
+    if (copy.count("name") != 1)
+      return 1;
+  }
+  if (names.count("name") != 1)
+    return 2;
+  return 0;
+}

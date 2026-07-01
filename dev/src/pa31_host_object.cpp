@@ -513,6 +513,10 @@ void FuncGen::copy_f80_value_to_address(const Value& src, int reg)
 	}
 	void FuncGen::imported_global_address(const string& name, int reg)
 	{
+		imported_symbol_address(name, reg);
+	}
+	void FuncGen::imported_symbol_address(const string& name, int reg)
+	{
 		x.mov_rm(64, reg, Mem(RIP, 0));
 		unit.obj.reloc(text, x.pos() - 4, target_symbol(unit.program, name),
 		               R_X86_64_GOTPCREL, -4);
@@ -534,10 +538,10 @@ void FuncGen::copy_f80_value_to_address(const Value& src, int reg)
 				x.movzx8(reg, reg);
 			return;
 			}
-			if (unit.is_imported_global(v.text))
+			if (unit.is_imported_symbol_address(v.text))
 			{
 				const int addr_reg = reg == R11 ? R10 : R11;
-				imported_global_address(v.text, addr_reg);
+				imported_symbol_address(v.text, addr_reg);
 				x.mov_rm(width_for(target), reg, Mem(addr_reg, 0));
 				if (width_for(target) == 8)
 					x.movzx8(reg, reg);
@@ -596,9 +600,9 @@ void FuncGen::load_float_value(const Value& v, const Type& target, int xmm)
 				tls_address(v.text, RAX);
 				mem = Mem(RAX, 0);
 			}
-			else if (unit.is_imported_global(v.text))
+			else if (unit.is_imported_symbol_address(v.text))
 			{
-				imported_global_address(v.text, R11);
+				imported_symbol_address(v.text, R11);
 				mem = Mem(R11, 0);
 			}
 			else
@@ -650,10 +654,10 @@ void FuncGen::store_value(const Value& dst, const Type& type, int reg)
 			x.mov_mr(width_for(type), Mem(R11, 0), value_reg);
 				return;
 			}
-			if (unit.is_imported_global(dst.text))
+			if (unit.is_imported_symbol_address(dst.text))
 			{
 				const int addr_reg = reg == R11 ? R10 : R11;
-				imported_global_address(dst.text, addr_reg);
+				imported_symbol_address(dst.text, addr_reg);
 				x.mov_mr(width_for(type), Mem(addr_reg, 0), reg);
 				return;
 			}
@@ -686,9 +690,9 @@ void FuncGen::store_float_value(const Value& dst, const Type& type, int xmm)
 				tls_address(dst.text, RAX);
 				mem = Mem(RAX, 0);
 			}
-			else if (unit.is_imported_global(dst.text))
+			else if (unit.is_imported_symbol_address(dst.text))
 			{
-				imported_global_address(dst.text, R11);
+				imported_symbol_address(dst.text, R11);
 				mem = Mem(R11, 0);
 			}
 			else
@@ -728,9 +732,9 @@ void FuncGen::storage_address(const Value& v, int reg)
 				tls_address(v.text, reg);
 				return;
 			}
-			if (unit.is_imported_global(v.text))
+			if (unit.is_imported_symbol_address(v.text))
 			{
-				imported_global_address(v.text, reg);
+				imported_symbol_address(v.text, reg);
 				return;
 			}
 			x.lea(reg, Mem(RIP, 0));
@@ -759,9 +763,9 @@ void FuncGen::value_storage_address(const Value& v, int reg)
 				tls_address(v.text, reg);
 				return;
 			}
-			if (unit.is_imported_global(v.text))
+			if (unit.is_imported_symbol_address(v.text))
 			{
-				imported_global_address(v.text, reg);
+				imported_symbol_address(v.text, reg);
 				return;
 			}
 			x.lea(reg, Mem(RIP, 0));
@@ -836,12 +840,39 @@ void zero_bytes(X86& x, const Mem& base, size_t bytes)
 		pos += static_cast<size_t>(w / 8);
 	}
 }
-void FuncGen::save_landing_registers()
+void FuncGen::save_landing_registers(const string& block)
 {
 	if (!has_eh)
 		return;
 	x.mov_mr(64, frame_mem(exc_off), RAX);
 	x.mov_mr(64, frame_mem(sel_off), RDX);
+	map<string, vector<CatchInfo> >::const_iterator found =
+		catches.find(block);
+	if (found == catches.end())
+		return;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		const CatchInfo& c = found->second[i];
+		if (c.exception_spec)
+			continue;
+		if (c.raw_selector == 0 || c.raw_selector == c.selector)
+			continue;
+		x.mov_imm(64, R10,
+		          static_cast<uint64_t>(
+		              static_cast<int64_t>(c.raw_selector)));
+		x.cmp(64, RDX, R10);
+		const size_t jump = x.pos();
+		x.u8(0x75);
+		x.u8(0);
+		const size_t body = x.pos();
+		x.mov_imm(64, R11,
+		          static_cast<uint64_t>(
+		              static_cast<int64_t>(c.selector)));
+		x.mov_mr(64, frame_mem(sel_off), R11);
+		const size_t end = x.pos();
+		text.bytes.data[jump + 1] =
+			static_cast<unsigned char>(end - body);
+	}
 }
 void emit_rel_jump(X86& x, vector<Patch>& patches, uint8_t kind, const string& target)
 {
@@ -858,6 +889,15 @@ void emit_rel_jump(X86& x, vector<Patch>& patches, uint8_t kind, const string& t
 	p.at = at;
 	p.target = target;
 	patches.push_back(p);
+}
+bool jump_targets_next_block(const Function& fn,
+                             const string& block,
+                             const string& target)
+{
+	for (size_t i = 0; i + 1 < fn.blocks.size(); ++i)
+		if (fn.blocks[i].name == block)
+			return fn.blocks[i + 1].name == target;
+	return false;
 }
 	void FuncGen::emit_branch(const Instruction& ins)
 	{
@@ -1022,10 +1062,16 @@ bool FuncGen::emit_store_instruction(const Instruction& ins)
 	}
 	return true;
 }
-bool FuncGen::emit_index_instruction(const Instruction& ins)
-{
-	load_value(ins.a, lowir2cy86::parse_type_text("ptr"), RAX);
-	load_value(ins.b, lowir2cy86::parse_type_text("i64"), R10);
+	bool FuncGen::emit_index_instruction(const Instruction& ins)
+	{
+		if (ins.a.kind == ValueKind::Global)
+			storage_address(ins.a, RAX);
+		else if ((ins.a.kind == ValueKind::Slot || ins.a.kind == ValueKind::Temp) &&
+		         lowir2cy86::is_obj_type(value_type(ins.a)))
+			value_storage_address(ins.a, RAX);
+		else
+			load_value(ins.a, lowir2cy86::parse_type_text("ptr"), RAX);
+		load_value(ins.b, lowir2cy86::parse_type_text("i64"), R10);
 	if (ins.op == "array_element" && ins.type.size > 1)
 		x.imul_imm(R10, static_cast<int32_t>(ins.type.size));
 	x.binary(0x01, 64, RAX, R10);
@@ -1175,37 +1221,16 @@ bool FuncGen::emit_eh_instruction(const Instruction& ins, const string& block)
 		if (!ins.target.empty())
 		{
 			EhRange r; r.start = x.pos(); r.target = ins.target;
-			active_ranges.push_back(r); landing_blocks.insert(ins.target);
-			if (ins.kind == InstrKind::EhCleanup)
-				cleanup_blocks.insert(ins.target);
+			active_ranges.push_back(r);
 		}
-		else if (ins.kind == InstrKind::EhCleanup)
-			cleanup_action_blocks.insert(block);
 		return true;
 	}
 	if (ins.kind == InstrKind::EhCatch)
-	{
-		CatchInfo c; c.type_symbol = target_symbol(unit.program, ins.a.text);
-		c.selector = ins.order_a; catches[block].push_back(c);
 		return true;
-	}
 	if (ins.kind == InstrKind::EhCatchAll)
-	{
-		CatchInfo c; c.selector = ins.order_a; c.catch_all = true;
-		catches[block].push_back(c);
 		return true;
-	}
 	if (ins.kind == InstrKind::EhFilter)
-	{
-		CatchInfo c;
-		c.selector = ins.order_a;
-		c.exception_spec = true;
-		for (size_t i = 0; i < ins.args.size(); ++i)
-			c.exception_spec_types.push_back(
-				target_symbol(unit.program, ins.args[i].text));
-		catches[block].push_back(c);
 		return true;
-	}
 	if (ins.kind == InstrKind::EhEnd)
 	{
 		if (!active_ranges.empty())
@@ -1237,10 +1262,15 @@ bool FuncGen::emit_eh_instruction(const Instruction& ins, const string& block)
 	x.u8(0x0f); x.u8(0x0b);
 	return true;
 }
-bool FuncGen::emit_control_instruction(const Instruction& ins)
+bool FuncGen::emit_control_instruction(const Instruction& ins,
+                                       const string& block)
 {
 	if (ins.kind == InstrKind::Jump)
+	{
+		if (jump_targets_next_block(fn, block, ins.target))
+			return true;
 		emit_rel_jump(x, jumps, 0, ins.target);
+	}
 	else if (ins.kind == InstrKind::Branch)
 		emit_branch(ins);
 	else if (ins.kind == InstrKind::Switch)
@@ -1257,7 +1287,7 @@ void FuncGen::emit_instruction(const Instruction& ins, const string& block)
 	    emit_arithmetic_instruction(ins) ||
 	    emit_protected_instruction(ins) ||
 	    emit_eh_instruction(ins, block) ||
-	    emit_control_instruction(ins))
+	    emit_control_instruction(ins, block))
 		return;
 	throw runtime_error("unsupported LowIR instruction for host object");
 }
@@ -1355,6 +1385,9 @@ void FuncGen::emit(FunctionInfo& info)
 				has_eh = true;
 			else if (fn.blocks[b].instructions[i].kind == InstrKind::VaStart)
 				has_va_start = true;
+	if (has_eh)
+		analyze_eh_regions();
+	info.emit_fde = has_eh || metadata(fn.metadata, "unwind") != "no";
 	frame_size = fn.stack_size;
 	if (has_eh)
 	{
@@ -1384,9 +1417,18 @@ void FuncGen::emit(FunctionInfo& info)
 		emit_param_store(x, fn, i, reg, fp, stack);
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
 	{
+		map<string, vector<EhRange> >::const_iterator entry =
+			block_entry_ranges.find(fn.blocks[b].name);
+		if (entry != block_entry_ranges.end())
+			active_ranges = entry->second;
+		else
+			active_ranges.clear();
 		block_offsets[fn.blocks[b].name] = x.pos() - base;
 		if (landing_blocks.count(fn.blocks[b].name))
-			save_landing_registers();
+		{
+			active_ranges.clear();
+			save_landing_registers(fn.blocks[b].name);
+		}
 		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 			emit_instruction(fn.blocks[b].instructions[i], fn.blocks[b].name);
 	}
@@ -1397,12 +1439,18 @@ void FuncGen::emit(FunctionInfo& info)
 }
 	void Unit::emit_functions()
 	{
+		obj.text();
+		obj.data();
+		obj.gcc_except_table();
+		obj.eh_frame();
 		for (size_t i = 0; i < program.functions.size(); ++i)
 		{
 		const Function& fn = program.functions[i];
 		if (fn.declaration)
 			continue;
 		if (prunes_function(fn.name))
+			continue;
+		if (aliases_noop_constructor_to_complete_entry(fn))
 			continue;
 		FunctionInfo info;
 		FuncGen gen(*this, fn);
@@ -1423,32 +1471,6 @@ void FuncGen::emit(FunctionInfo& info)
 			const size_t off = sec.bytes.pos();
 			sec.bytes.u64(0);
 			obj.reloc(sec, off, target_symbol(program, fn.name), R_X86_64_64, 0);
-		}
-	}
-	const Symbol* find_emitted_symbol(const ObjectFile& obj, const string& name)
-	{
-		for (size_t i = 0; i < obj.symbols.size(); ++i)
-			if (obj.symbols[i].name == name)
-				return &obj.symbols[i];
-		return NULL;
-	}
-	void Unit::emit_aliases()
-	{
-		for (size_t i = 0; i < program.aliases.size(); ++i)
-		{
-			const string target = target_symbol(program, program.aliases[i].target);
-			const Symbol* sym = find_emitted_symbol(obj, target);
-			if ((sym == NULL || !sym->defined) &&
-			    prunes_function(program.aliases[i].target))
-				continue;
-			if (sym == NULL || !sym->defined)
-				throw runtime_error("object alias target not defined");
-			obj.symbol(program.aliases[i].object,
-			           sym->bind,
-			           sym->type,
-			           sym->section,
-			           sym->value,
-			           sym->size);
 		}
 	}
 }  // namespace host

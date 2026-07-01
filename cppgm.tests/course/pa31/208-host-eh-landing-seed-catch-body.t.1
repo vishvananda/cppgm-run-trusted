@@ -1,0 +1,35 @@
+int state;
+
+void throw_value(int value)
+{
+  throw value;
+}
+
+int run(int flag)
+{
+  try {
+    throw_value(1);
+  } catch(int) {
+    try {
+      if(flag) {
+        state += 10;
+      } else {
+        state += 20;
+      }
+      throw_value(7);
+      return 30;
+    } catch(int value) {
+      return state == 10 && value == 7 ? 0 : 2;
+    }
+  }
+  return 3;
+}
+
+int main()
+{
+  try {
+    return run(1);
+  } catch(int) {
+    return 4;
+  }
+}

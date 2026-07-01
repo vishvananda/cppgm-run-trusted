@@ -1,0 +1,7 @@
+#include <string>
+
+int main()
+{
+  std::string text = "u8\"a\"";
+  return text.compare(0, 3, "u8\"") == 0 ? 0 : 1;
+}

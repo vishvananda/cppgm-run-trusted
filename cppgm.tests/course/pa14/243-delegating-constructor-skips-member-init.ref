@@ -1,0 +1,35 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $s : obj<4x4>
+
+  block ^entry:
+    %t1 = addr $s
+    call void @S__S__ov2(%t1)
+    %t2 = addr $s
+    %t3 = index i8 [projection=field] %t2, 0
+    %t4 = load i32 %t3
+    return i32 %t4
+}
+function @S__S__ov2(%this : ptr) -> void [binding=weak, object=_ZN1SC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    call void @S__S(%t1, 7)
+    return void
+}
+function @S__S(%this : ptr, %v : i32) -> void [binding=weak, object=_ZN1SC1Ei] {
+  slot $this : ptr
+  slot $v : i32
+
+  block ^entry:
+    store ptr %this, $this
+    store i32 %v, $v
+    %t1 = load i32 $v
+    %t2 = load ptr $this
+    %t3 = index i8 [projection=field] %t2, 0
+    store i32 %t1, %t3
+    return void
+}
+alias object _ZN1SC2Ev = @S__S__ov2
+alias object _ZN1SC2Ei = @S__S

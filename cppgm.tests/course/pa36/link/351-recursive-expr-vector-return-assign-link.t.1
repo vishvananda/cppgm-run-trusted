@@ -1,0 +1,88 @@
+#include <map>
+#include <string>
+#include <vector>
+
+struct Binding {};
+struct TemplateArgument
+{
+  int value;
+  TemplateArgument() : value(0) {}
+  explicit TemplateArgument(int v) : value(v) {}
+};
+
+struct Expr
+{
+  std::string text;
+  std::vector<Binding*> overloads;
+  std::map<Binding*, std::vector<TemplateArgument> > explicit_args;
+  bool pack_expansion;
+  std::vector<Expr> pack;
+  bool valid;
+
+  Expr()
+    : pack_expansion(false),
+      valid(false)
+  {
+  }
+
+  explicit Expr(const std::string& s)
+    : text(s),
+      pack_expansion(false),
+      valid(true)
+  {
+  }
+};
+
+static Expr make_expr()
+{
+  Binding b;
+  Expr out("root");
+  out.overloads.push_back(&b);
+  out.explicit_args[&b].push_back(TemplateArgument(7));
+  out.pack.push_back(Expr("child"));
+  out.pack[0].pack.push_back(Expr("leaf"));
+  return out;
+}
+
+static int check_expr(const Expr& expr)
+{
+  if (!expr.valid)
+    return 1;
+  if (!(expr.text == "root"))
+    return 2;
+  if (expr.overloads.size() != 1)
+    return 3;
+  if (expr.explicit_args.size() != 1)
+    return 4;
+  if (expr.explicit_args.begin()->second.size() != 1)
+    return 5;
+  if (expr.explicit_args.begin()->second[0].value != 7)
+    return 6;
+  if (expr.pack.size() != 1)
+    return 7;
+  if (!(expr.pack[0].text == "child"))
+    return 8;
+  if (expr.pack[0].pack.size() != 1)
+    return 9;
+  if (!(expr.pack[0].pack[0].text == "leaf"))
+    return 10;
+  return 0;
+}
+
+int main()
+{
+  Expr inner;
+  inner = make_expr();
+  int check = check_expr(inner);
+  if (check != 0)
+    return check;
+
+  Expr other;
+  other = inner;
+  inner.text = "changed";
+  inner.pack[0].text = "changed child";
+  check = check_expr(other);
+  if (check != 0)
+    return 20 + check;
+  return 0;
+}

@@ -1,0 +1,18 @@
+int main()
+{
+  int stage = 0;
+  try {
+    throw 1L;
+  } catch(...) {
+    stage = 1;
+  }
+
+  try {
+    throw 7;
+  } catch(int value) {
+    return stage == 1 && value == 7 ? 0 : 2;
+  } catch(...) {
+    return 3;
+  }
+  return 4;
+}

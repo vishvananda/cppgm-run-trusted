@@ -1,16 +1,20 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 #include "pa12_templates_function_support.h"
-
 #include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <set>
-
 namespace pa14 {
 namespace internal {
 
-namespace {
+bool output_references_function(const ProgramLowerer& program,
+                                const string& name,
+                                size_t self_index);
+bool output_references_function_uncached(const ProgramLowerer& program,
+                                         const string& name,
+                                         size_t self_index);
 
+namespace {
 bool extern_template_class_binding(const Binding* binding)
 {
 	if (binding == NULL)
@@ -28,7 +32,6 @@ bool extern_template_class_binding(const Binding* binding)
 	}
 	return false;
 }
-
 bool inline_local_static_binding(const Binding* binding)
 {
 	return binding != NULL &&
@@ -36,7 +39,6 @@ bool inline_local_static_binding(const Binding* binding)
 	       binding->local_static_function_owner != NULL &&
 	       binding->local_static_function_owner->is_inline_definition;
 }
-
 string unqualified_template_primary(TypePtr type)
 {
 	TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr();
@@ -52,53 +54,15 @@ string unqualified_template_primary(TypePtr type)
 		primary = primary.substr(scope + 2);
 	return primary;
 }
-
-bool hosted_stream_template_primary(const string& primary)
-{
-	return primary == "ios" ||
-	       primary == "istream" ||
-	       primary == "ostream" ||
-	       primary == "iostream" ||
-	       primary == "basic_ios" ||
-	       primary == "basic_istream" ||
-	       primary == "basic_ostream" ||
-	       primary == "basic_iostream" ||
-	       primary == "basic_streambuf" ||
-	       primary == "basic_filebuf" ||
-	       primary == "basic_ifstream" ||
-	       primary == "basic_ofstream" ||
-	       primary == "basic_fstream" ||
-	       primary == "basic_stringbuf" ||
-	       primary == "basic_istringstream" ||
-	       primary == "basic_ostringstream" ||
-	       primary == "basic_stringstream" ||
-	       primary == "ctype" ||
-	       primary == "ctype_byname" ||
-	       primary == "codecvt" ||
-	       primary == "codecvt_byname" ||
-	       primary == "num_get" ||
-	       primary == "num_put" ||
-	       primary == "numpunct" ||
-	       primary == "numpunct_byname" ||
-	       primary == "time_get" ||
-	       primary == "time_put" ||
-	       primary == "money_get" ||
-	       primary == "money_put" ||
-	       primary == "moneypunct" ||
-	       primary == "moneypunct_byname" ||
-	       primary == "messages";
-}
-
-bool record_is_in_std_namespace(TypePtr record)
-{
-	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
-	Scope* scope = record.get() != NULL ? record->scope : NULL;
-	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
-		if (cur->kind == ScopeKind::Namespace && cur->name == "std")
-			return true;
-	return false;
-}
-
+	bool record_is_in_std_namespace(TypePtr record)
+	{
+		record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+		Scope* scope = record.get() != NULL ? record->scope : NULL;
+		for (Scope* cur = scope; cur != NULL; cur = cur->parent)
+			if (cur->kind == ScopeKind::Namespace && cur->name == "std")
+				return true;
+		return false;
+	}
 bool extern_template_class_external_binding(const Binding* binding)
 {
 	TypePtr record = class_record_for_member(binding);
@@ -109,16 +73,17 @@ bool extern_template_class_external_binding(const Binding* binding)
 		unqualified_template_primary(record) == "basic_string" &&
 		record_is_in_std_namespace(record);
 	if (hosted_string)
-		return is_class_constructor_binding(binding) ||
-		       is_class_destructor_binding(binding) ||
-		       binding->name == "operator=";
+		return hosted_basic_string_external_member(binding) ||
+		       (!binding_has_function_template_specialization_symbol(binding) &&
+		       (is_class_constructor_binding(binding) ||
+		        is_class_destructor_binding(binding) ||
+		        binding->name == "operator="));
 	if (!extern_template_class_binding(binding))
 		return false;
 	if (!record_uses_hosted_external_stream_vtable(record))
 		return false;
 	return true;
 }
-
 bool generated_empty_constructor_binding(const Binding* binding)
 {
 	return binding != NULL &&
@@ -129,7 +94,6 @@ bool generated_empty_constructor_binding(const Binding* binding)
 	       binding->type->kind == TypeKind::Function &&
 	       binding->type->parameters.size() == 1;
 }
-
 bool declaration_synthesizable_noop_constructor(const Binding* binding)
 {
 	if (binding == NULL ||
@@ -156,10 +120,80 @@ bool declaration_synthesizable_noop_constructor(const Binding* binding)
 		primary == "allocator" &&
 		(binding->type->parameters.size() == 1 ||
 		 binding->type->parameters.size() == 2);
-	if (!hosted_allocator_ctor)
+	bool hosted_exception_default_ctor =
+		binding->type->parameters.size() == 1 &&
+		hosted_exception_record(record);
+	if (!hosted_allocator_ctor && !hosted_exception_default_ctor)
 		return false;
-	return !record->is_polymorphic &&
-	       pa11::record_virtual_bases(record).empty();
+	return hosted_exception_default_ctor ||
+	       (!record->is_polymorphic &&
+	        pa11::record_virtual_bases(record).empty() &&
+	        pa11::record_direct_bases(record).empty());
+}
+
+string lowir_name_after_at(const string& text)
+{
+	size_t at = text.find('@');
+	if (at == string::npos)
+		return text;
+	size_t end = at + 1;
+	while (end < text.size())
+	{
+		char ch = text[end];
+		if (ch == '(' || ch == ' ' || ch == '[' || ch == ':' ||
+		    ch == '=' || ch == '\n')
+			break;
+		++end;
+	}
+	return text.substr(at + 1, end - at - 1);
+}
+
+string lowir_metadata_value(const string& text, const string& key)
+{
+	string needle = key + "=";
+	size_t pos = text.find(needle);
+	if (pos == string::npos)
+		return "";
+	pos += needle.size();
+	size_t end = pos;
+	while (end < text.size() &&
+	       text[end] != ',' &&
+	       text[end] != ']' &&
+	       text[end] != '\n')
+		++end;
+	return text.substr(pos, end - pos);
+}
+
+string hosted_output_sort_key(const string& text)
+{
+	string object = lowir_metadata_value(text, "object");
+	if (!object.empty())
+		return "0:" + object;
+	return "1:" + lowir_name_after_at(text);
+}
+
+bool hosted_output_text_less(const string& left, const string& right)
+{
+	string lkey = hosted_output_sort_key(left);
+	string rkey = hosted_output_sort_key(right);
+	if (lkey != rkey)
+		return lkey < rkey;
+	return left < right;
+}
+
+bool hosted_function_index_less(const ProgramLowerer& program,
+                                size_t left,
+                                size_t right)
+{
+	const FunctionOut& lfn = program.functions[left];
+	const FunctionOut& rfn = program.functions[right];
+	string lkey = hosted_output_sort_key(lfn.header);
+	string rkey = hosted_output_sort_key(rfn.header);
+	if (lkey != rkey)
+		return lkey < rkey;
+	if (lfn.name != rfn.name)
+		return lfn.name < rfn.name;
+	return left < right;
 }
 
 void emit_empty_this_function(ProgramLowerer& program,
@@ -200,7 +234,6 @@ void emit_empty_this_function(ProgramLowerer& program,
 		lowered.header.replace(pos, from.size(), to);
 	program.functions.push_back(lowered);
 }
-
 bool demand_builtin_declaration(ProgramLowerer& program,
                                 const Binding* binding,
                                 const string& name)
@@ -326,11 +359,13 @@ bool demand_builtin_declaration(ProgramLowerer& program,
 	program.declares.push_back(declaration);
 	return true;
 }
-
 bool demand_generated_empty_constructor(ProgramLowerer& program,
                                         const Binding* binding,
                                         const string& name)
 {
+	if (program.host_object_lowering &&
+	    hosted_external_stream_function_binding(binding))
+		return false;
 	if (!generated_empty_constructor_binding(binding))
 		return false;
 	if (binding->is_generated_default_constructor &&
@@ -346,11 +381,156 @@ bool demand_generated_empty_constructor(ProgramLowerer& program,
 	program.emit_generated_empty_constructor(binding, name);
 	return true;
 }
-
+	bool demand_generated_storage_copy_constructor(ProgramLowerer& program,
+	                                               const Binding* binding,
+	                                               const string& name)
+	{
+		if (!lowir_synthesizable_defaulted_storage_copy_constructor(binding))
+		return false;
+	if (!program.defined_functions.insert(name).second)
+		return true;
+	Node node = lowir_make_defaulted_storage_copy_constructor_node(binding);
+	FunctionLowerer lowerer(program, node);
+	FunctionOut lowered = lowerer.lower();
+	lowered.name = name;
+		program.functions.push_back(lowered);
+		return true;
+	}
+	string hosted_exception_base_entry_object(const Binding* binding)
+	{
+		string object = global_object_symbol(binding);
+		size_t dtor = object.rfind("D1E");
+		if (dtor != string::npos)
+			object.replace(dtor, 3, "D2E");
+		return object;
+	}
+	void emit_hosted_exception_empty_void_function(ProgramLowerer& program,
+	                                              const Binding* binding,
+	                                              const string& name,
+	                                              const string& object)
+	{
+		if (!program.defined_functions.insert(name).second)
+			return;
+		FunctionOut out;
+		out.binding = binding;
+		out.name = name;
+		out.header = "function @" + name + "(%this : ptr) -> void [binding=weak";
+		if (!object.empty())
+			out.header += ", object=" + object;
+		out.header += "]";
+		out.slots.push_back("  slot $this : ptr");
+		Block block("entry");
+		block.instrs.push_back("    store ptr %this, $this");
+		block.instrs.push_back("    return void");
+		block.terminated = true;
+		out.blocks.push_back(block);
+		program.functions.push_back(out);
+	}
+	bool demand_hosted_exception_destructor(ProgramLowerer& program,
+	                                        const Binding* binding)
+	{
+		if (!program.native_lowering ||
+		    program.host_object_lowering ||
+		    !is_class_destructor_binding(binding) ||
+		    !hosted_exception_record(class_record_for_member(binding)))
+			return false;
+		emit_hosted_exception_empty_void_function(
+			program,
+			binding,
+			program.symbol_for(binding),
+			global_object_symbol(binding));
+		emit_hosted_exception_empty_void_function(
+			program,
+			binding,
+			program.destructor_symbol_for(binding, true),
+			hosted_exception_base_entry_object(binding));
+		return true;
+	}
+	bool demand_hosted_exception_what(ProgramLowerer& program,
+	                                  const Binding* binding,
+	                                  const string& name)
+	{
+		if (!program.native_lowering ||
+		    program.host_object_lowering ||
+		    binding == NULL ||
+		    binding->name != "what" ||
+		    binding->type.get() == NULL ||
+		    binding->type->kind != TypeKind::Function ||
+		    binding->type->parameters.size() != 1 ||
+		    scalar_lowir_type(binding->type->base) != "ptr" ||
+		    !hosted_exception_record(class_record_for_member(binding)))
+			return false;
+		if (!program.defined_functions.insert(name).second)
+			return true;
+		FunctionOut out;
+		out.binding = binding;
+		out.name = name;
+		out.header = "function @" + name + "(%this : ptr) -> ptr [binding=weak";
+		string object = global_object_symbol(binding);
+		if (!object.empty())
+			out.header += ", object=" + object;
+		out.header += "]";
+		Block block("entry");
+		string text = program.string_symbol("\"std::exception\"");
+		block.instrs.push_back("    %t1 = addr @" + text);
+		block.instrs.push_back("    return ptr %t1");
+		block.terminated = true;
+		out.blocks.push_back(block);
+		program.functions.push_back(out);
+		return true;
+	}
+	bool demand_hosted_exception_member(ProgramLowerer& program,
+	                                    const Binding* binding,
+	                                    const string& name)
+	{
+		return demand_hosted_exception_destructor(program, binding) ||
+		       demand_hosted_exception_what(program, binding, name);
+	}
+	bool demand_hosted_vector_range_insert(ProgramLowerer& program,
+	                                       const Binding* binding)
+	{
+	if (!lowir_synthesizable_hosted_vector_range_insert(binding))
+		return false;
+	if (program.synthetic_inline_definitions.find(binding) ==
+	    program.synthetic_inline_definitions.end() &&
+	    program.inline_definitions.find(binding) == program.inline_definitions.end())
+	{
+		program.synthetic_inline_definitions[binding] =
+			lowir_make_hosted_vector_range_insert_node(binding);
+		rank_inline_definition(program, binding);
+		program.inline_definitions[binding] =
+			&program.synthetic_inline_definitions[binding];
+	}
+	program.demanded_inline_complete_entries.insert(binding);
+	program.insert_pending_inline_definition(binding);
+	return true;
+}
+bool demand_hosted_inline_body(ProgramLowerer& program,
+                               const Binding* binding)
+{
+	if (!lowir_synthesizable_hosted_inline_body(binding))
+		return false;
+	if (program.synthetic_inline_definitions.find(binding) ==
+	    program.synthetic_inline_definitions.end() &&
+	    program.inline_definitions.find(binding) ==
+		    program.inline_definitions.end())
+	{
+		program.synthetic_inline_definitions[binding] =
+			lowir_make_hosted_inline_body_node(binding);
+		rank_inline_definition(program, binding);
+		program.inline_definitions[binding] =
+			&program.synthetic_inline_definitions[binding];
+	}
+	program.demanded_inline_complete_entries.insert(binding);
+	program.insert_pending_inline_definition(binding);
+	return true;
+}
 string ordinary_function_declaration(ProgramLowerer& program,
                                      const Binding* binding,
                                      const string& name)
 {
+	if (!pa12::internal::substituted_type_is_valid(binding->type))
+		return string();
 	bool indirect_result =
 		pa11::strip_cv(binding->type->base)->kind == TypeKind::Record &&
 		record_return_by_address(binding->type->base);
@@ -429,7 +609,6 @@ string ordinary_function_declaration(ProgramLowerer& program,
 	out << metadata_suffix(metadata);
 	return out.str();
 }
-
 string lifecycle_base_entry_declaration(ProgramLowerer& program,
                                         const Binding* binding,
                                         const string& name)
@@ -475,7 +654,6 @@ string lifecycle_base_entry_declaration(ProgramLowerer& program,
 	}
 	return declaration;
 }
-
 void write_function_out(ostream& out, const FunctionOut& fn)
 {
 	out << fn.header << " {\n";
@@ -493,47 +671,6 @@ void write_function_out(ostream& out, const FunctionOut& fn)
 	}
 	out << "}";
 }
-
-bool lowir_symbol_char(char ch)
-{
-	return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
-}
-
-bool text_references_symbol(const string& text, const string& name)
-{
-	string needle = "@" + name;
-	size_t pos = 0;
-	while ((pos = text.find(needle, pos)) != string::npos)
-	{
-		size_t after = pos + needle.size();
-		if (after == text.size() || !lowir_symbol_char(text[after]))
-			return true;
-		pos = after;
-	}
-	return false;
-}
-
-bool output_references_function(const ProgramLowerer& program,
-                                const string& name,
-                                size_t self_index)
-{
-	for (size_t i = 0; i < program.globals.size(); ++i)
-		if (text_references_symbol(program.globals[i], name))
-			return true;
-	for (size_t i = 0; i < program.functions.size(); ++i)
-	{
-		if (i == self_index)
-			continue;
-		const FunctionOut& fn = program.functions[i];
-		for (size_t b = 0; b < fn.blocks.size(); ++b)
-			for (size_t j = 0; j < fn.blocks[b].instrs.size(); ++j)
-				if (text_references_symbol(fn.blocks[b].instrs[j],
-				                           name))
-					return true;
-	}
-	return false;
-}
-
 bool output_uses_record_as_base(const ProgramLowerer& program,
                                 TypePtr base_record)
 {
@@ -554,7 +691,6 @@ bool output_uses_record_as_base(const ProgramLowerer& program,
 	}
 	return false;
 }
-
 bool output_uses_record_as_virtual_base(const ProgramLowerer& program,
                                         TypePtr base_record)
 {
@@ -582,7 +718,6 @@ bool output_uses_record_as_virtual_base(const ProgramLowerer& program,
 	}
 	return false;
 }
-
 bool output_uses_record_as_base_of_virtual_record(
 	const ProgramLowerer& program,
 	TypePtr base_record)
@@ -605,7 +740,6 @@ bool output_uses_record_as_base_of_virtual_record(
 	}
 	return false;
 }
-
 bool record_has_field_subobject(TypePtr record, TypePtr field_record)
 {
 	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
@@ -650,7 +784,6 @@ bool record_has_field_subobject(TypePtr record, TypePtr field_record)
 	}
 	return false;
 }
-
 bool output_uses_record_as_field(const ProgramLowerer& program,
                                  TypePtr field_record)
 {
@@ -666,7 +799,6 @@ bool output_uses_record_as_field(const ProgramLowerer& program,
 	}
 	return false;
 }
-
 bool skip_unreferenced_base_entry(const ProgramLowerer& program,
                                   size_t function_index)
 {
@@ -717,9 +849,8 @@ bool skip_unreferenced_base_entry(const ProgramLowerer& program,
 	       fn.binding != NULL &&
 	       fn.header.find("binding=weak") != string::npos &&
 	       !preserve_base_constructor &&
-	       !output_references_function(program, name, function_index);
+	       !output_references_function_uncached(program, name, function_index);
 }
-
 bool output_has_function_named(const ProgramLowerer& program,
                                const string& name)
 {
@@ -728,7 +859,6 @@ bool output_has_function_named(const ProgramLowerer& program,
 			return true;
 	return false;
 }
-
 bool constructor_base_entry_only_binding(const ProgramLowerer& program,
                                          const Binding* binding)
 {
@@ -755,7 +885,6 @@ bool constructor_base_entry_only_binding(const ProgramLowerer& program,
 	}
 	return false;
 }
-
 bool binding_owned_by_namespace(const Binding* binding,
                                 const string& namespace_name)
 {
@@ -767,7 +896,6 @@ bool binding_owned_by_namespace(const Binding* binding,
 			return true;
 	return false;
 }
-
 bool base_only_constructor_complete_entry_required(const Binding* binding)
 {
 	if (!is_class_constructor_binding(binding) ||
@@ -809,7 +937,6 @@ bool base_only_constructor_complete_entry_required(const Binding* binding)
 	}
 	return !has_record_parameter || has_reference_record_parameter;
 }
-
 bool skip_unreferenced_complete_lifecycle_entry(
 	const ProgramLowerer& program,
 	size_t function_index)
@@ -856,7 +983,6 @@ bool skip_unreferenced_complete_lifecycle_entry(
 	return output_has_function_named(program, base_name) &&
 	       output_references_function(program, base_name, function_index);
 }
-
 string function_object_symbol(const string& header)
 {
 	size_t pos = header.find("object=");
@@ -870,7 +996,6 @@ string function_object_symbol(const string& header)
 		++end;
 	return header.substr(pos, end - pos);
 }
-
 string complete_lifecycle_alias_object(const FunctionOut& fn)
 {
 	if (fn.name.find("__base_entry") != string::npos ||
@@ -891,7 +1016,6 @@ string complete_lifecycle_alias_object(const FunctionOut& fn)
 	alias.replace(pos, from.size(), to);
 	return alias == object ? string() : alias;
 }
-
 bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
                                            size_t function_index)
 {
@@ -901,12 +1025,11 @@ bool skip_unreferenced_generated_copy_move(const ProgramLowerer& program,
 	TypePtr record = class_record_for_member(fn.binding);
 	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 	return fn.binding != NULL &&
-	       fn.binding->is_generated_copy_move_constructor &&
+	       (fn.binding->is_generated_copy_move_constructor ||
+	        fn.binding->is_generated_copy_move_assignment) &&
 	       record.get() != NULL &&
-	       record->is_polymorphic &&
 	       !output_references_function(program, fn.name, function_index);
 }
-
 string function_header_symbol(const FunctionOut& fn)
 {
 	size_t at = fn.header.find('@');
@@ -915,7 +1038,81 @@ string function_header_symbol(const FunctionOut& fn)
 		return fn.name;
 	return fn.header.substr(at + 1, lp - at - 1);
 }
-
+bool hosted_aligned_membuf_accessor_symbol(const string& symbol)
+{
+	return symbol.find("N9__gnu_cxx16__aligned_membufI") != string::npos &&
+	       (symbol.find("6_M_ptrEv") != string::npos ||
+	        symbol.find("7_M_addrEv") != string::npos);
+}
+bool hosted_allocator_copy_constructor_symbol(const string& symbol)
+{
+	return (symbol.find("_ZNSaI") == 0 &&
+	        (symbol.find("EC1ERKS_") != string::npos ||
+	         symbol.find("EC2ERKS_") != string::npos)) ||
+	       (symbol.find("_ZNSt15__new_allocatorI") == 0 &&
+	        (symbol.find("EC1ERKS0_") != string::npos ||
+	         symbol.find("EC2ERKS0_") != string::npos));
+}
+bool hosted_allocator_copy_constructor_binding(const Binding* binding)
+{
+	if (!is_class_constructor_binding(binding) ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function ||
+	    binding->type->parameters.size() != 2 ||
+	    binding->type->parameters[1].get() == NULL ||
+	    binding->type->parameters[1]->kind != TypeKind::LValueReference ||
+	    !binding_owned_by_namespace(binding, "std"))
+		return false;
+	TypePtr record = class_record_for_member(binding);
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return false;
+	string primary = unqualified_template_primary(record);
+	if (primary != "allocator" && primary != "__new_allocator")
+		return false;
+	TypePtr param = pa11::strip_cv(binding->type->parameters[1]->base);
+	return pa11::same_type(record, param);
+}
+bool skip_unreferenced_trivial_hosted_weak_body(
+	const ProgramLowerer& program,
+	size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
+	const FunctionOut& fn = program.functions[function_index];
+	if (!program.host_object_lowering ||
+	    fn.header.find("binding=weak") == string::npos)
+		return false;
+	string symbol = function_header_symbol(fn);
+	if (output_references_function(program, symbol, function_index))
+		return false;
+	string object = function_object_symbol(fn.header);
+	if (!object.empty() &&
+	    object != symbol &&
+	    output_references_function(program, object, function_index))
+		return false;
+	return hosted_aligned_membuf_accessor_symbol(symbol) ||
+	       hosted_aligned_membuf_accessor_symbol(object) ||
+	       hosted_allocator_copy_constructor_symbol(symbol) ||
+	       hosted_allocator_copy_constructor_symbol(object) ||
+	       hosted_allocator_copy_constructor_binding(fn.binding);
+}
+bool record_has_reference_member_for_output(TypePtr record)
+{
+	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
+	if (record.get() == NULL || record->kind != TypeKind::Record)
+		return false;
+	pa11::layout_record_type(record);
+	vector<TypePtr> bases = pa11::record_direct_bases(record);
+	for (size_t i = 0; i < bases.size(); ++i)
+		if (record_has_reference_member_for_output(bases[i]))
+			return true;
+	for (size_t i = 0; i < record->fields.size(); ++i)
+		if (pa11::is_reference_type(record->fields[i]->type) ||
+		    record->fields[i]->is_reference_member)
+			return true;
+	return false;
+}
 bool skip_unreferenced_inline_defaulted_copy_move(
 	const ProgramLowerer& program,
 	size_t function_index)
@@ -938,24 +1135,21 @@ bool skip_unreferenced_inline_defaulted_copy_move(
 	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
 	if (record.get() == NULL || record->kind != TypeKind::Record)
 		return false;
-	pa11::layout_record_type(record);
-	bool has_reference_member = false;
-	for (size_t i = 0; i < record->fields.size(); ++i)
-		if (pa11::is_reference_type(record->fields[i]->type) ||
-		    record->fields[i]->is_reference_member)
-			has_reference_member = true;
-	if (!fn.binding->is_generated_copy_move_constructor &&
-	    !has_reference_member)
+	bool reference_member = record_has_reference_member_for_output(record);
+	bool explicit_template_default =
+		!fn.binding->is_generated_copy_move_constructor &&
+		binding_has_template_specialization_context(fn.binding) &&
+		binding_has_function_template_specialization_symbol(fn.binding);
+	if (explicit_template_default && !reference_member)
 		return false;
 	string symbol = function_header_symbol(fn);
 	return !output_references_function(program, symbol, function_index);
 }
-
-	bool skip_unreferenced_generated_noop_default(const ProgramLowerer& program,
-	                                              size_t function_index)
-	{
-		if (function_index >= program.functions.size())
-			return false;
+bool skip_unreferenced_generated_noop_default(const ProgramLowerer& program,
+                                              size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
 	const FunctionOut& fn = program.functions[function_index];
 	string symbol = function_header_symbol(fn);
 	bool referenced = output_references_function(program,
@@ -1003,16 +1197,43 @@ bool skip_unreferenced_inline_defaulted_copy_move(
 			        (fn.binding->is_noop_destructor ||
 			         fn.binding->is_cleanup_only_destructor));
 		}
-
+bool skip_unreferenced_weak_inline_body(const ProgramLowerer& program,
+                                        size_t function_index)
+{
+	if (function_index >= program.functions.size())
+		return false;
+	const FunctionOut& fn = program.functions[function_index];
+	if (fn.binding == NULL ||
+	    !program.host_object_lowering ||
+	    fn.header.find("binding=weak") == string::npos)
+		return false;
+	if (!hosted_library_binding(fn.binding) ||
+	    !hosted_library_body_candidate(fn.binding))
+		return false;
+	if (is_class_constructor_binding(fn.binding) ||
+	    is_class_destructor_binding(fn.binding))
+		return false;
+	string symbol = function_header_symbol(fn);
+	if (output_references_function(program, symbol, function_index))
+		return false;
+	string object = function_object_symbol(fn.header);
+	return object.empty() ||
+	       object == symbol ||
+	       !output_references_function(program, object, function_index);
+}
 }  // namespace
-
 void ProgramLowerer::emit_generated_empty_constructor(const Binding* binding,
                                                       const string& name)
 {
-	if (defined_functions.insert(name).second)
-		emit_empty_this_function(*this, name, binding);
+	if (output_has_function_named(*this, name))
+	{
+		defined_functions.insert(name);
+		return;
+	}
+	if (!defined_functions.insert(name).second)
+		return;
+	emit_empty_this_function(*this, name, binding);
 }
-
 void ProgramLowerer::demand_function_declaration(const Binding* binding)
 {
 	if (binding == NULL)
@@ -1020,61 +1241,52 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	if (binding->kind == BindingKind::Function &&
 	    binding->aliased_binding != NULL)
 	{
-		bool binding_has_body =
-			inline_definitions.find(binding) != inline_definitions.end() ||
-			synthetic_inline_definitions.find(binding) !=
-				synthetic_inline_definitions.end();
-		bool alias_has_body =
-			inline_definitions.find(binding->aliased_binding) !=
-				inline_definitions.end() ||
-			synthetic_inline_definitions.find(binding->aliased_binding) !=
-				synthetic_inline_definitions.end();
-		bool explicit_specialization_symbol =
-			host_object_lowering &&
-			!binding->function_specialization_symbol.empty() &&
-			(binding->aliased_binding->function_specialization_symbol.empty() ||
-			 binding->aliased_binding->function_specialization_symbol !=
-				 binding->function_specialization_symbol);
+		bool binding_has_body = inline_definitions.find(binding) != inline_definitions.end() || synthetic_inline_definitions.find(binding) != synthetic_inline_definitions.end();
+		bool alias_has_body = inline_definitions.find(binding->aliased_binding) != inline_definitions.end() || synthetic_inline_definitions.find(binding->aliased_binding) != synthetic_inline_definitions.end();
+		bool explicit_specialization_symbol = host_object_lowering && !binding->function_specialization_symbol.empty() &&
+			(binding->aliased_binding->function_specialization_symbol.empty() || binding->aliased_binding->function_specialization_symbol != binding->function_specialization_symbol);
 		if (!binding_has_body &&
 		    !explicit_specialization_symbol &&
 		    (binding->aliased_binding->is_inline_definition ||
 		     alias_has_body))
 			binding = binding->aliased_binding;
 	}
-	if (inline_definitions.find(binding) == inline_definitions.end() &&
-	    synthetic_inline_definitions.find(binding) ==
-		    synthetic_inline_definitions.end())
-	{
+		if (inline_definitions.find(binding) == inline_definitions.end() &&
+		    synthetic_inline_definitions.find(binding) ==
+			    synthetic_inline_definitions.end())
+		{
 		string wanted_name = symbol_for(binding);
 		string wanted_object = global_object_symbol(binding);
-		for (map<const Binding*, const Node*>::const_iterator it =
-			     inline_definitions.begin();
-		     it != inline_definitions.end();
-		     ++it)
+		const Binding* inline_match =
+			inline_alias_lookup_binding(*this,
+			                            wanted_name,
+			                            wanted_object);
+		if (inline_match != NULL)
 		{
-			string candidate_object = global_object_symbol(it->first);
-			if (it->first == NULL ||
-			    it->first->kind != BindingKind::Function ||
-			    (symbol_for(it->first) != wanted_name &&
-			     (wanted_object.empty() ||
-			      candidate_object.empty() ||
-			      candidate_object != wanted_object)))
-				continue;
-			if (it->first != binding)
-				symbols[binding] = symbol_for(it->first);
-			binding = it->first;
-			break;
+			if (inline_match != binding)
+				symbols[binding] = symbol_for(inline_match);
+			binding = inline_match;
 		}
-	}
-	if (binding->is_inline_definition)
-	{
-		if (!extern_template_class_external_binding(binding))
+		}
+		string hosted_name = symbol_for(binding);
+		if (!pa12::internal::substituted_type_is_valid(binding->type))
+			return;
+		if (demand_hosted_exception_member(*this, binding, hosted_name))
+			return;
+		if (binding->is_inline_definition)
+		{
+			if (!binding->is_extern_template_instantiation &&
+			    !extern_template_class_external_binding(binding) &&
+			    (!host_object_lowering ||
+			     !hosted_external_stream_function_binding(binding)))
 			demand_inline_function(binding, true);
 		string name = symbol_for(binding);
 		if (defined_functions.find(name) != defined_functions.end() ||
 		    declared_functions.find(name) != declared_functions.end())
 			return;
 		if (demand_builtin_declaration(*this, binding, name))
+			return;
+		if (demand_generated_storage_copy_constructor(*this, binding, name))
 			return;
 		if (declaration_synthesizable_noop_constructor(binding))
 		{
@@ -1092,6 +1304,12 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 		return;
 	}
 	string name = symbol_for(binding);
+	if (!pa12::internal::substituted_type_is_valid(binding->type))
+		return;
+	if (demand_hosted_inline_body(*this, binding))
+		return;
+	if (demand_hosted_vector_range_insert(*this, binding))
+		return;
 	if (defined_functions.find(name) != defined_functions.end() ||
 	    declared_functions.find(name) != declared_functions.end())
 		return;
@@ -1102,6 +1320,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	if (found == function_declarations_by_binding.end())
 	{
 		if (demand_generated_empty_constructor(*this, binding, name))
+			return;
+		if (demand_generated_storage_copy_constructor(*this, binding, name))
 			return;
 		if (declaration_synthesizable_noop_constructor(binding))
 		{
@@ -1114,6 +1334,8 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	}
 	if (demand_generated_empty_constructor(*this, binding, name))
 		return;
+	if (demand_generated_storage_copy_constructor(*this, binding, name))
+		return;
 	if (declaration_synthesizable_noop_constructor(binding))
 	{
 		emit_generated_empty_constructor(binding, name);
@@ -1122,7 +1344,6 @@ void ProgramLowerer::demand_function_declaration(const Binding* binding)
 	declared_functions.insert(name);
 	declares.push_back(ordinary_function_declaration(*this, binding, name));
 }
-
 void ProgramLowerer::demand_lifecycle_base_entry_declaration(
 	const Binding* binding)
 {
@@ -1133,6 +1354,8 @@ void ProgramLowerer::demand_lifecycle_base_entry_declaration(
 	string name = is_class_constructor_binding(binding)
 		? constructor_symbol_for(binding, true)
 		: destructor_symbol_for(binding, true);
+	if (demand_hosted_exception_member(*this, binding, name))
+		return;
 	if (defined_functions.find(name) != defined_functions.end() ||
 	    declared_functions.find(name) != declared_functions.end())
 		return;
@@ -1144,169 +1367,90 @@ void ProgramLowerer::demand_lifecycle_base_entry_declaration(
 	declares.push_back(
 		lifecycle_base_entry_declaration(*this, binding, name));
 }
-
-
-
-void ProgramLowerer::emit_global_lifecycle_functions()
-{
-	TypePtr void_type = pa11::make_fundamental(FT_VOID);
-	TypePtr fn_type = pa11::make_function(void_type, vector<TypePtr>(), false);
-	for (size_t i = 0; i < thread_local_init_variables.size(); ++i)
-	{
-		const Node& var = thread_local_init_variables[i];
-		if (var.binding == NULL)
-			continue;
-		bool inline_local_static = inline_local_static_binding(var.binding);
-		string guard = symbol_for(var.binding) + "__tls_guard";
-		ensure_thread_local_wrapper(guard);
-		vector<string> guard_metadata;
-		guard_metadata.push_back("storage=thread_local");
-		if (inline_local_static)
-			guard_metadata.push_back("binding=weak");
-		globals.push_back("global @" + guard + " : i64 " +
-		                  metadata_suffix(guard_metadata) + " = zero");
-		synthetic_bindings.push_back(unique_ptr<Binding>(
-			new Binding(BindingKind::Function,
-			            symbol_for(var.binding) + "__tls_init",
-			            NULL)));
-		Binding* binding = synthetic_bindings.back().get();
-		binding->type = fn_type;
-		if (inline_local_static)
-			binding->is_inline_definition = true;
-		Node fn("function-definition " + binding->name + " " +
-		        pa11::describe_type(fn_type));
-		fn.binding = binding;
-		fn.type = fn_type;
-		Node body("compound-statement");
-		Node action("thread-local-init-variable");
-		action.token_text = guard;
-		pa12::internal::add_child(action, var);
-		pa12::internal::add_child(body, action);
-		pa12::internal::add_child(fn, body);
-		string name = symbol_for(binding);
-		defined_functions.insert(name);
-		FunctionLowerer lowerer(*this, fn);
-		functions.push_back(lowerer.lower());
-		emit_pending_inline_definitions();
-	}
-	if (!global_init_variables.empty())
-	{
-		synthetic_bindings.push_back(unique_ptr<Binding>(
-			new Binding(BindingKind::Function, "__cppgm_init", NULL)));
-		Binding* binding = synthetic_bindings.back().get();
-		binding->type = fn_type;
-		Node fn("function-definition __cppgm_init " +
-		        pa11::describe_type(fn_type));
-		fn.binding = binding;
-		fn.type = fn_type;
-		Node body("compound-statement");
-		for (size_t i = 0; i < global_init_variables.size(); ++i)
-		{
-			Node action("global-init-variable");
-			pa12::internal::add_child(action, global_init_variables[i]);
-			pa12::internal::add_child(body, action);
-		}
-		pa12::internal::add_child(fn, body);
-		string name = symbol_for(binding);
-		defined_functions.insert(name);
-		FunctionLowerer lowerer(*this, fn);
-		functions.push_back(lowerer.lower());
-		emit_pending_inline_definitions();
-	}
-	if (!global_fini_variables.empty())
-	{
-		synthetic_bindings.push_back(unique_ptr<Binding>(
-			new Binding(BindingKind::Function, "__cppgm_fini", NULL)));
-		Binding* binding = synthetic_bindings.back().get();
-		binding->type = fn_type;
-		Node fn("function-definition __cppgm_fini " +
-		        pa11::describe_type(fn_type));
-		fn.binding = binding;
-		fn.type = fn_type;
-		Node body("compound-statement");
-		for (size_t n = 0; n < global_fini_variables.size(); ++n)
-		{
-			size_t i = global_fini_variables.size() - 1 - n;
-			Node action("global-fini-variable");
-			pa12::internal::add_child(action, global_fini_variables[i]);
-			pa12::internal::add_child(body, action);
-		}
-		pa12::internal::add_child(fn, body);
-		string name = symbol_for(binding);
-		defined_functions.insert(name);
-		FunctionLowerer lowerer(*this, fn);
-		functions.push_back(lowerer.lower());
-		emit_pending_inline_definitions();
-	}
-}
-
 void ProgramLowerer::collect_translation_unit(const Node& root)
 {
 	for (size_t i = 0; i < root.children.size(); ++i)
 		collect_node(root.children[i]);
 	emit_pending_inline_definitions();
 }
-
 void ProgramLowerer::write(const string& outfile) const
 {
 	ofstream out(outfile.c_str());
 	if (!out)
 		throw runtime_error("cannot open output file");
-	for (size_t i = 0; i < declares.size(); ++i)
+	vector<string> ordered_declares = declares;
+	if (host_object_lowering)
+		sort(ordered_declares.begin(),
+		     ordered_declares.end(),
+		     hosted_output_text_less);
+	for (size_t i = 0; i < ordered_declares.size(); ++i)
 	{
-		size_t at = declares[i].find('@');
-		size_t lp = declares[i].find('(', at);
+		size_t at = ordered_declares[i].find('@');
+		size_t lp = ordered_declares[i].find('(', at);
 		string name = (at == string::npos || lp == string::npos)
-			? "" : declares[i].substr(at + 1, lp - at - 1);
+			? "" : ordered_declares[i].substr(at + 1, lp - at - 1);
 		if (defined_functions.find(name) == defined_functions.end())
-			out << declares[i] << "\n\n";
+			out << ordered_declares[i] << "\n\n";
 	}
-	for (size_t i = 0; i < string_defs.size(); ++i)
+	vector<pair<string, vector<uint32_t> > > ordered_string_defs =
+		string_defs;
+	if (host_object_lowering)
+		sort(ordered_string_defs.begin(), ordered_string_defs.end());
+	for (size_t i = 0; i < ordered_string_defs.size(); ++i)
 	{
-		out << "global @" << string_defs[i].first << " [binding=internal] = {\n";
+		out << "global @" << ordered_string_defs[i].first
+		    << " [binding=internal] = {\n";
 		map<string, string>::const_iterator type =
-			string_literal_types.find(string_defs[i].first);
+			string_literal_types.find(ordered_string_defs[i].first);
 		string item_type = type == string_literal_types.end()
 			? "i8" : type->second;
-		for (size_t j = 0; j < string_defs[i].second.size(); ++j)
-			out << "  " << item_type << " " << string_defs[i].second[j] << "\n";
+		for (size_t j = 0; j < ordered_string_defs[i].second.size(); ++j)
+			out << "  " << item_type << " "
+			    << ordered_string_defs[i].second[j] << "\n";
 		out << "}\n\n";
 	}
-	for (size_t i = 0; i < global_declares.size(); ++i)
+	vector<string> ordered_global_declares = global_declares;
+	if (host_object_lowering)
+		sort(ordered_global_declares.begin(),
+		     ordered_global_declares.end(),
+		     hosted_output_text_less);
+	for (size_t i = 0; i < ordered_global_declares.size(); ++i)
 	{
-		size_t at = global_declares[i].find('@');
-		size_t end = global_declares[i].find_first_of(" [", at);
+		size_t at = ordered_global_declares[i].find('@');
+		size_t end = ordered_global_declares[i].find_first_of(" [", at);
 		string name = (at == string::npos || end == string::npos)
-			? "" : global_declares[i].substr(at + 1, end - at - 1);
+			? "" : ordered_global_declares[i].substr(at + 1, end - at - 1);
 		if (defined_globals.find(name) == defined_globals.end())
-			out << global_declares[i] << "\n\n";
+			out << ordered_global_declares[i] << "\n\n";
 	}
-	for (size_t i = 0; i < globals.size(); ++i)
-		out << globals[i] << "\n\n";
+	vector<string> ordered_globals = globals;
+	if (host_object_lowering)
+		sort(ordered_globals.begin(),
+		     ordered_globals.end(),
+		     hosted_output_text_less);
+	for (size_t i = 0; i < ordered_globals.size(); ++i)
+		out << ordered_globals[i] << "\n\n";
 	vector<size_t> function_order = ordered_function_indices(*this);
+	if (host_object_lowering)
+		sort(function_order.begin(),
+		     function_order.end(),
+		     [this](size_t left, size_t right) {
+			     return hosted_function_index_less(*this, left, right);
+		     });
 	bool wrote_function = false;
 	vector<string> object_aliases;
 	set<string> emitted_object_aliases;
-	for (size_t order_i = 0; order_i < function_order.size(); ++order_i)
-	{
-		if (skip_unreferenced_base_entry(*this, function_order[order_i]))
-			continue;
-			if (skip_unreferenced_complete_lifecycle_entry(
-				    *this,
-				    function_order[order_i]))
-				continue;
-			if (skip_unreferenced_generated_copy_move(*this,
-			                                          function_order[order_i]))
-				continue;
-			if (skip_unreferenced_inline_defaulted_copy_move(
-				    *this,
-				    function_order[order_i]))
-				continue;
-			if (skip_unreferenced_generated_noop_default(*this,
-			                                             function_order[order_i]))
-				continue;
-		if (wrote_function)
-			out << "\n";
+		for (size_t order_i = 0; order_i < function_order.size(); ++order_i)
+		{
+				if (skip_unreferenced_base_entry(*this, function_order[order_i])) continue;
+				if (skip_unreferenced_complete_lifecycle_entry(*this, function_order[order_i])) continue;
+					if (skip_unreferenced_generated_copy_move(*this, function_order[order_i])) continue;
+					if (skip_unreferenced_inline_defaulted_copy_move(*this, function_order[order_i])) continue;
+					if (skip_unreferenced_generated_noop_default(*this, function_order[order_i])) continue;
+					if (skip_unreferenced_trivial_hosted_weak_body(*this, function_order[order_i])) continue;
+					if (skip_unreferenced_weak_inline_body(*this, function_order[order_i])) continue;
+			if (wrote_function)
+				out << "\n";
 		const FunctionOut& fn = functions[function_order[order_i]];
 		write_function_out(out, fn);
 		string alias = complete_lifecycle_alias_object(fn);
@@ -1341,7 +1485,5 @@ void ProgramLowerer::write(const string& outfile) const
 		out << "}\n";
 	}
 }
-
-
 }  // namespace internal
 }  // namespace pa14

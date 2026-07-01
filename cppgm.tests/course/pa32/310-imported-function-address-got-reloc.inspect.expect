@@ -1,0 +1,2 @@
+relocation_class_canonical 1 imported_data_got _Z11imported_fni
+absent_relocation_class_canonical 1 data_pcrel _Z11imported_fni

@@ -1,0 +1,47 @@
+#include <string>
+#include <vector>
+
+struct Scope
+{
+  int value;
+  explicit Scope(int v) : value(v) {}
+};
+
+static std::vector<std::string> copy_names(const std::vector<std::string>& in)
+{
+  std::vector<std::string> copy = in;
+  return copy;
+}
+
+static int copy_scope_sum(const std::vector<Scope*>& in)
+{
+  std::vector<Scope*> copy = in;
+  if (copy.size() != in.size())
+    return -100;
+  int sum = 0;
+  for (std::vector<Scope*>::size_type i = 0; i < copy.size(); ++i)
+    sum += copy[i]->value;
+  return sum;
+}
+
+int main()
+{
+  std::vector<std::string> names;
+  names.push_back("alpha");
+  names.push_back("beta");
+  std::vector<std::string> copied_names = copy_names(names);
+  if (copied_names.size() != 2 || !(copied_names[0] == "alpha"))
+    return 1;
+
+  Scope first(7);
+  Scope second(11);
+  std::vector<Scope*> scopes;
+  scopes.push_back(&first);
+  scopes.push_back(&second);
+  int sum = copy_scope_sum(scopes);
+  if (sum != 18)
+    return 2;
+  if (scopes[0] != &first || scopes[1] != &second)
+    return 3;
+  return 0;
+}

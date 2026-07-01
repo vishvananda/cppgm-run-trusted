@@ -1,0 +1,16 @@
+#include <tuple>
+#include <utility>
+#include <vector>
+
+int main() {
+  int key = 17;
+  std::pair<void* const, std::vector<int> > p(
+      std::piecewise_construct,
+      std::forward_as_tuple(&key),
+      std::tuple<>());
+  p.second.push_back(3);
+  if (p.first != &key) return 1;
+  if (p.second.size() != 1) return 2;
+  if (p.second[0] != 3) return 3;
+  return 0;
+}

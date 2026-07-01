@@ -1,0 +1,70 @@
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $s : obj<4x4>
+  slot $r : obj<8x8>
+  slot $candidate : ptr
+  slot $selected : ptr
+  slot $condaddr__1 : ptr
+  slot $cond__2 : i32
+
+  block ^entry:
+    %t1 = addr $s
+    %t2 = addr $s
+    %t3 = index i8 [projection=field] %t2, 0
+    store i32 3, %t3
+    %t4 = addr $r
+    %t5 = addr $s
+    call void @R__R(%t4, %t5)
+    store ptr 0, $candidate
+    %t6 = load ptr $candidate
+    branch %t6, ^condaddr_then_1, ^condaddr_else_2
+
+  block ^condaddr_then_1:
+    %t7 = load ptr $candidate
+    store ptr %t7, $condaddr__1
+    jump ^condaddr_end_3
+
+  block ^condaddr_else_2:
+    %t8 = addr $r
+    %t9 = index i8 [projection=reference_field] %t8, 0
+    %t10 = load ptr %t9
+    store ptr %t10, $condaddr__1
+    jump ^condaddr_end_3
+
+  block ^condaddr_end_3:
+    %t11 = load ptr $condaddr__1
+    store ptr %t11, $selected
+    %t12 = load ptr $selected
+    %t13 = index i8 [projection=field] %t12, 0
+    store i32 9, %t13
+    %t14 = addr $s
+    %t15 = index i8 [projection=field] %t14, 0
+    %t16 = load i32 %t15
+    %t17 = cmp eq i32 %t16, 9
+    branch %t17, ^cond_then_4, ^cond_else_5
+
+  block ^cond_then_4:
+    store i32 0, $cond__2
+    jump ^cond_end_6
+
+  block ^cond_else_5:
+    store i32 1, $cond__2
+    jump ^cond_end_6
+
+  block ^cond_end_6:
+    %t18 = load i32 $cond__2
+    return i32 %t18
+}
+function @R__R(%this : ptr, %value : ptr [pass=reference]) -> void [binding=weak, object=_ZN1RC1ER1S] {
+  slot $this : ptr
+  slot $value : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %value, $value
+    %t1 = load ptr $value
+    %t2 = load ptr $this
+    %t3 = index i8 [projection=field] %t2, 0
+    store ptr %t1, %t3
+    return void
+}
+alias object _ZN1RC2ER1S = @R__R

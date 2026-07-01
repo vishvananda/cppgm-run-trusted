@@ -1,0 +1,17 @@
+#include <string>
+#include <tuple>
+#include <utility>
+
+int main()
+{
+  std::string key = "TABSIZE";
+  std::pair<const std::string, int> value(std::piecewise_construct,
+                                          std::tuple<const std::string&>(key),
+                                          std::tuple<>());
+
+  if (!(value.first == "TABSIZE"))
+    return 1;
+  if (value.second != 0)
+    return 2;
+  return 0;
+}

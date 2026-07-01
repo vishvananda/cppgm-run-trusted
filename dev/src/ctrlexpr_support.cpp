@@ -358,17 +358,18 @@ class Parser
 {
 public:
 	Parser(const vector<Token>& tokens, const ctrlexpr::DefinedPredicate& is_defined)
-		: tokens_(tokens), pos_(0), is_defined_(is_defined) {}
+		: tokens_(tokens), token_count_(tokens.size()), pos_(0),
+		  is_defined_(is_defined) {}
 
 	bool parse(ExprValue& out)
 	{
-		return parse_controlling(true, out) && pos_ == tokens_.size() && out.active;
+		return parse_controlling(true, out) && pos_ == token_count_ && out.active;
 	}
 
 private:
 	bool at(ETokenType type) const
 	{
-		return pos_ < tokens_.size() &&
+		return pos_ < token_count_ &&
 			tokens_[pos_].kind == TokenKind::Simple &&
 			tokens_[pos_].simple == type;
 	}
@@ -383,7 +384,7 @@ private:
 
 	bool parse_identifier_operand(string& source)
 	{
-		if (pos_ >= tokens_.size())
+		if (pos_ >= token_count_)
 			return false;
 		if (!tokens_[pos_].from_identifier &&
 		    !is_identifier_like_operator_name(tokens_[pos_].source))
@@ -411,7 +412,7 @@ private:
 
 	bool parse_primary(bool active, ExprValue& out)
 	{
-		if (pos_ >= tokens_.size() || tokens_[pos_].kind == TokenKind::Invalid)
+		if (pos_ >= token_count_ || tokens_[pos_].kind == TokenKind::Invalid)
 			return false;
 		if (tokens_[pos_].kind == TokenKind::Literal)
 		{
@@ -626,6 +627,7 @@ private:
 	}
 
 	const vector<Token>& tokens_;
+	size_t token_count_;
 	size_t pos_;
 	ctrlexpr::DefinedPredicate is_defined_;
 };

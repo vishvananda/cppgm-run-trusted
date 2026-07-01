@@ -1,0 +1,28 @@
+#include <vector>
+
+struct Item
+{
+  int value;
+  Item() : value(0) {}
+  explicit Item(int v) : value(v) {}
+};
+
+int main()
+{
+  std::vector<Item> items;
+  items.push_back(Item(1));
+  items.push_back(Item(2));
+
+  typedef std::vector<Item>::const_iterator Iter;
+  std::vector<Iter> iterators;
+  iterators.push_back(items.begin());
+  iterators.push_back(items.end());
+
+  std::vector<Iter> copy;
+  copy.insert(copy.end(), iterators.begin(), iterators.end());
+  if (copy.size() != 2)
+    return 1;
+  if (copy[0] == copy[1])
+    return 2;
+  return (*copy[0]).value == 1 ? 0 : 3;
+}

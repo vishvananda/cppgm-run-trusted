@@ -10,80 +10,6 @@ namespace pa12 {
 namespace internal {
 namespace {
 
-bool seen_insert(set<Scope*>& seen, Scope* scope)
-{
-	return scope != NULL && seen.insert(scope).second;
-}
-
-void append_unique(vector<Binding*>& out, Binding* binding)
-{
-	if (binding == NULL)
-		return;
-	if (find(out.begin(), out.end(), binding) == out.end())
-		out.push_back(binding);
-}
-
-bool scope_contains(Scope* ancestor, Scope* scope)
-{
-	for (Scope* cur = scope; cur != NULL; cur = cur->parent)
-		if (cur == ancestor)
-			return true;
-	return false;
-}
-
-void append_unique_scope(vector<Scope*>& out, Scope* scope)
-{
-	if (scope == NULL)
-		return;
-	if (find(out.begin(), out.end(), scope) == out.end())
-		out.push_back(scope);
-}
-
-void collect_direct_in_scope(Scope* scope,
-                             const string& name,
-                             int mask,
-                             vector<Binding*>& out)
-{
-	if (scope == NULL)
-		return;
-	map<string, vector<Binding*> >::iterator it = scope->members.find(name);
-	if (it == scope->members.end())
-		return;
-	for (size_t i = 0; i < it->second.size(); ++i)
-	{
-		if (!pa11::binding_matches(it->second[i], mask) ||
-		    it->second[i]->is_hidden_friend)
-			continue;
-		append_unique(out, it->second[i]);
-	}
-}
-
-void collect_in_scope(Scope* scope,
-                      const string& name,
-                      int mask,
-                      set<Scope*>& seen,
-                      vector<Binding*>& out)
-{
-	if (!seen_insert(seen, scope))
-		return;
-	collect_direct_in_scope(scope, name, mask, out);
-	for (size_t i = 0; i < scope->using_directives.size(); ++i)
-		collect_in_scope(scope->using_directives[i], name, mask, seen, out);
-	if (!out.empty())
-		return;
-	TypePtr record = pa11::record_type_for_scope(scope);
-	vector<TypePtr> bases = record.get() != NULL
-		? pa11::record_direct_bases(record) : vector<TypePtr>();
-	for (size_t i = 0; i < bases.size(); ++i)
-	{
-		TypePtr base = bases[i].get() != NULL
-			? pa11::strip_cv(bases[i]) : TypePtr();
-		if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-		    base->scope != NULL)
-			collect_in_scope(base->scope, name, mask, seen, out);
-	}
-}
-
 bool type_is_floating(TypePtr type)
 {
 	TypePtr bare = pa11::strip_cv(type);
@@ -721,13 +647,17 @@ Binding* Parser::add_function_binding(Scope* scope,
 		for (size_t i = 0; i < it->second.size(); ++i)
 		{
 			Binding* binding = it->second[i];
-			if (binding->kind == BindingKind::Function &&
-			    pa11::same_type(binding->type, type))
-			{
-				if (!hidden_friend)
-					binding->is_hidden_friend = false;
-				return binding;
-			}
+				if (binding->kind == BindingKind::Function &&
+				    pa11::same_type(binding->type, type))
+				{
+					if (!hidden_friend && binding->is_hidden_friend)
+					{
+						binding->is_hidden_friend = false;
+						direct_lookup_cache_.clear();
+						qualified_lookup_cache_.clear();
+					}
+					return binding;
+				}
 		}
 	}
 	Binding* binding = add_value(scope, BindingKind::Function, name, type);
@@ -739,7 +669,11 @@ void Parser::add_friend_function(Scope* class_scope, Binding* function)
 {
 	vector<Binding*>& friends = class_friend_functions_[class_scope];
 	if (find(friends.begin(), friends.end(), function) == friends.end())
+	{
 		friends.push_back(function);
+		++class_friend_function_generation_;
+		recovered_friend_binding_scans_.clear();
+	}
 }
 
 void Parser::add_friend_class(Scope* class_scope, TypePtr type)
@@ -800,144 +734,6 @@ TypePtr Parser::add_enum(Scope* scope,
 	binding->target_scope = enum_scope;
 	enum_owner_scopes_[type.get()] = scope;
 	return type;
-}
-
-Scope* Parser::resolve_qualifier(Binding* binding)
-{
-	return pa11::binding_qualifier_scope(binding);
-}
-
-vector<Binding*> Parser::lookup_qualified_set(Scope* scope,
-                                              const string& name,
-                                              int mask)
-{
-	TypePtr lookup_record = pa11::record_type_for_scope(scope);
-	if (lookup_record.get() != NULL)
-	{
-		TypePtr bare_lookup = pa11::strip_cv(lookup_record);
-		if (bare_lookup->kind == pa11::TypeKind::Record &&
-		    !type_is_template_dependent(bare_lookup))
-			complete_template_record(bare_lookup);
-	}
-	for (TypePtr cur = lookup_record.get() != NULL
-	     ? pa11::strip_cv(lookup_record) : TypePtr();
-	     cur.get() != NULL &&
-	     cur->kind == pa11::TypeKind::Record &&
-	     cur->base.get() != NULL;)
-	{
-		bool skip_dependent_lookup =
-			record_dependent_base_lookup_skips_.count(cur.get()) != 0;
-		TypePtr raw_base = cur->base.get() != NULL
-			? pa11::strip_cv(cur->base) : TypePtr();
-		for (int resolve_depth = 0;
-		     raw_base.get() != NULL &&
-		     raw_base->is_dependent_typename &&
-		     resolve_depth < 8;
-		     ++resolve_depth)
-		{
-			try
-			{
-				TypePtr resolved = resolve_dependent_typename_type(raw_base);
-				if (resolved.get() == NULL)
-					resolved = substitute_template_type(raw_base);
-				if (resolved.get() == NULL ||
-				    resolved.get() == raw_base.get())
-					break;
-				if (resolved.get() != NULL)
-					cur->base = resolved;
-				raw_base = cur->base.get() != NULL
-					? pa11::strip_cv(cur->base) : TypePtr();
-			}
-			catch (const runtime_error&)
-			{
-				break;
-			}
-		}
-		TypePtr base = pa11::strip_cv(cur->base);
-		if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
-			break;
-		if (skip_dependent_lookup && type_is_template_dependent(base))
-			break;
-		if (!type_is_template_dependent(base))
-			record_dependent_base_lookup_skips_.erase(cur.get());
-		complete_template_record(base);
-		cur = base;
-	}
-	vector<Binding*> out;
-	set<Scope*> seen;
-	collect_in_scope(scope, name, mask, seen, out);
-	return out;
-}
-
-vector<Binding*> Parser::lookup_unqualified_set(Scope* start,
-                                                const string& name,
-                                                int mask)
-{
-	pair<pair<Scope*, string>, int> cache_key =
-		make_pair(make_pair(start, name), mask);
-	size_t cache_generation = pa11::binding_generation();
-	map<pair<pair<Scope*, string>, int>,
-	    pair<size_t, vector<Binding*> > >::const_iterator cached =
-		unqualified_lookup_cache_.find(cache_key);
-	if (cached != unqualified_lookup_cache_.end() &&
-	    cached->second.first == cache_generation)
-		return cached->second.second;
-	vector<Scope*> deferred_using_directives;
-	for (Scope* scope = start; scope != NULL; scope = scope->parent)
-	{
-		for (size_t i = 0; i < scope->using_directives.size(); ++i)
-			append_unique_scope(deferred_using_directives,
-			                    scope->using_directives[i]);
-		vector<Binding*> direct;
-		collect_direct_in_scope(scope, name, mask, direct);
-		for (size_t i = 0; i < deferred_using_directives.size(); ++i)
-		{
-			if (!scope_contains(scope, deferred_using_directives[i]))
-				continue;
-			set<Scope*> seen;
-			collect_in_scope(deferred_using_directives[i],
-			                 name,
-			                 mask,
-			                 seen,
-			                 direct);
-		}
-		if (!direct.empty())
-		{
-			unqualified_lookup_cache_[cache_key] =
-				make_pair(pa11::binding_generation(), direct);
-			return direct;
-		}
-		TypePtr record = pa11::record_type_for_scope(scope);
-		vector<TypePtr> bases = record.get() != NULL
-			? pa11::record_direct_bases(record) : vector<TypePtr>();
-		vector<Binding*> base_found;
-			for (size_t b = 0; b < bases.size(); ++b)
-			{
-				TypePtr base = bases[b].get() != NULL
-					? pa11::strip_cv(bases[b]) : TypePtr();
-				bool skip_dependent_base_lookup =
-					record_skips_dependent_base_unqualified_lookup(record) &&
-					(mask & pa11::LOOKUP_VALUE) != 0;
-				if (base.get() != NULL && base->kind == pa11::TypeKind::Record &&
-				    base->scope != NULL &&
-				    !skip_dependent_base_lookup)
-				{
-				complete_template_record(base);
-				set<Scope*> seen;
-				collect_in_scope(base->scope, name, mask, seen, base_found);
-			}
-		}
-		if (!base_found.empty())
-		{
-			unqualified_lookup_cache_[cache_key] =
-				make_pair(pa11::binding_generation(), base_found);
-			return base_found;
-		}
-	}
-	vector<Binding*> empty;
-	unqualified_lookup_cache_[cache_key] =
-		make_pair(pa11::binding_generation(), empty);
-	return empty;
 }
 
 bool Parser::record_skips_dependent_base_unqualified_lookup(
@@ -1062,8 +858,16 @@ int Parser::record_base_distance(TypePtr source, TypePtr target) const
 	vector<TypePtr> pending;
 	vector<TypePtr> seen;
 	TypePtr s = pa11::strip_cv(source);
-	if (s.get() != NULL)
-		pending.push_back(s);
+	if (s.get() == NULL || s->kind != pa11::TypeKind::Record)
+		return 1000000;
+	pair<const void*, const void*> key =
+		make_pair(static_cast<const void*>(s.get()),
+		          static_cast<const void*>(t.get()));
+	map<pair<const void*, const void*>, int>::const_iterator cached =
+		record_base_distance_cache_.find(key);
+	if (cached != record_base_distance_cache_.end())
+		return cached->second;
+	pending.push_back(s);
 	while (!pending.empty())
 	{
 		TypePtr cur = pa11::strip_cv(pending.back());
@@ -1089,7 +893,9 @@ int Parser::record_base_distance(TypePtr source, TypePtr target) const
 		for (size_t i = 0; i < bases.size(); ++i)
 			pending.push_back(bases[i]);
 	}
-	return record_base_distance_impl(source, target);
+	int distance = record_base_distance_impl(source, target);
+	record_base_distance_cache_[key] = distance;
+	return distance;
 }
 
 bool Parser::active_function_matches(Binding* function) const
@@ -1181,16 +987,28 @@ bool Parser::active_context_has_class_access(Scope* class_scope) const
 	for (size_t i = 0; i < cit->second.size(); ++i)
 	{
 		TypePtr friend_type = pa11::strip_cv(cit->second[i]);
-		if (friend_type->kind == pa11::TypeKind::Record &&
-		    (friend_type->scope == active_class ||
-		     (active_type.get() != NULL &&
-		      active_type->kind == pa11::TypeKind::Record &&
-		      (pa11::same_type(friend_type, active_type) ||
-		       same_template_specialization_record(friend_type,
-		                                           active_type) ||
-		       same_template_record_family(friend_type,
-		                                   active_type)))))
-			return true;
+		if (friend_type->kind != pa11::TypeKind::Record)
+			continue;
+		for (Scope* candidate = active_class;
+		     candidate != NULL;
+		     candidate = candidate->parent)
+		{
+			if (candidate->kind != ScopeKind::Class)
+				continue;
+			if (friend_type->scope == candidate)
+				return true;
+			active_type = pa11::record_type_for_scope(candidate);
+			active_type = active_type.get() != NULL
+				? pa11::strip_cv(active_type) : TypePtr();
+			if (active_type.get() != NULL &&
+			    active_type->kind == pa11::TypeKind::Record &&
+			    (pa11::same_type(friend_type, active_type) ||
+			     same_template_specialization_record(friend_type,
+			                                         active_type) ||
+			     same_template_record_family(friend_type,
+			                                 active_type)))
+				return true;
+		}
 	}
 	return false;
 }
@@ -1215,6 +1033,8 @@ bool Parser::member_access_allowed(Binding* member, TypePtr object_record) const
 
 bool Parser::type_can_bind_reference(TypePtr target, const Expr& expr) const
 {
+	if (target.get() == NULL || expr.type.get() == NULL)
+		return false;
 	TypePtr source = expression_object_type(expr.type);
 	if (target->kind == pa11::TypeKind::LValueReference)
 	{

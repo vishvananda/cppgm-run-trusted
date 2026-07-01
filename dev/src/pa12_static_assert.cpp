@@ -6,6 +6,9 @@ using namespace std;
 
 namespace pa12 {
 namespace internal {
+
+bool hosted_library_namespace_scope(Scope* scope);
+
 namespace {
 
 bool constexpr_value_truth(const ConstexprValue& value, uint64_t& out)
@@ -76,18 +79,39 @@ bool static_assert_integral_constant_value(
 
 }  // namespace
 
-void Parser::parse_static_assert_declaration()
+bool Parser::skip_hosted_static_assert_evaluation() const
 {
-	expect(KW_STATIC_ASSERT);
-	expect(OP_LPAREN);
-	bool dependent_context = false;
+	if (!hosted_compatibility_)
+		return false;
+	return hosted_library_namespace_scope(current_scope());
+}
+
+void Parser::skip_static_assert_remainder()
+{
+	int paren = 0;
+	while (!at_eof())
+	{
+		if (paren == 0 && at(OP_RPAREN))
+			break;
+		if (at(OP_LPAREN))
+			++paren;
+		else if (at(OP_RPAREN))
+			--paren;
+		++pos_;
+	}
+	expect(OP_RPAREN);
+	expect(OP_SEMICOLON);
+}
+
+bool Parser::static_assert_dependent_context() const
+{
 	for (size_t i = 0; i < template_type_substitutions_.size(); ++i)
 		for (map<string, TypePtr>::const_iterator it =
 			     template_type_substitutions_[i].begin();
 		     it != template_type_substitutions_[i].end();
 		     ++it)
 			if (type_is_template_dependent(it->second))
-				dependent_context = true;
+				return true;
 	for (size_t i = 0; i < template_value_substitutions_.size(); ++i)
 		for (map<string, TemplateArgument>::const_iterator it =
 			     template_value_substitutions_[i].begin();
@@ -95,7 +119,41 @@ void Parser::parse_static_assert_declaration()
 		     ++it)
 			if (it->second.dependent ||
 			    type_is_template_dependent(it->second.type))
-				dependent_context = true;
+				return true;
+	return false;
+}
+
+void Parser::resolve_static_assert_dependent_value(Expr& condition)
+{
+	if (condition.dependent_value_name.empty())
+		return;
+	TemplateArgument arg =
+		TemplateArgument::dependent_value_arg(condition.type);
+	arg.value_name = condition.dependent_value_name;
+	arg.value_owner_template_name =
+		condition.dependent_value_owner_template_name;
+	arg.value_member_name = condition.dependent_value_member_name;
+	arg.value_negated = condition.dependent_value_negated;
+	arg.value_owner_template_arguments =
+		condition.dependent_value_owner_template_arguments;
+	TemplateArgument resolved = substitute_template_argument(arg);
+	if (resolved.kind == TemplateArgumentKind::Value && !resolved.dependent)
+	{
+		condition.has_constant_value = true;
+		condition.constant_value = resolved.value;
+	}
+}
+
+void Parser::parse_static_assert_declaration()
+{
+	expect(KW_STATIC_ASSERT);
+	expect(OP_LPAREN);
+	if (skip_hosted_static_assert_evaluation())
+	{
+		skip_static_assert_remainder();
+		return;
+	}
+	bool dependent_context = static_assert_dependent_context();
 	size_t condition_begin = pos_;
 	Expr condition;
 	int saved_constexpr_value_depth = constexpr_value_expression_depth_;
@@ -109,24 +167,12 @@ void Parser::parse_static_assert_declaration()
 	{
 		constexpr_value_expression_depth_ = saved_constexpr_value_depth;
 		if (!dependent_context)
-			throw;
-		pos_ = condition_begin;
-		int paren = 0;
-		while (!at_eof())
-		{
-			if (paren == 0 && at(OP_RPAREN))
-				break;
-			if (at(OP_LPAREN))
-				++paren;
-			else if (at(OP_RPAREN))
-				--paren;
-			++pos_;
+				throw;
+			pos_ = condition_begin;
+			skip_static_assert_remainder();
+			return;
 		}
-		expect(OP_RPAREN);
-		expect(OP_SEMICOLON);
-		return;
-	}
-		string message;
+	string message;
 	if (consume(OP_COMMA))
 	{
 		if (!at_literal())
@@ -134,48 +180,30 @@ void Parser::parse_static_assert_declaration()
 		message = current().source;
 		++pos_;
 	}
-		expect(OP_RPAREN);
-		expect(OP_SEMICOLON);
-		bool hosted_integral_constant_condition = false;
-		uint64_t hosted_integral_constant_value = 0;
-		if (hosted_compatibility_ &&
-		    static_assert_integral_constant_value(
-			    condition.type,
-			    record_template_arguments_,
-			    hosted_integral_constant_value))
-			hosted_integral_constant_condition = true;
-		if (!condition.dependent_value_name.empty())
-	{
-		TemplateArgument arg =
-			TemplateArgument::dependent_value_arg(condition.type);
-		arg.value_name = condition.dependent_value_name;
-		arg.value_owner_template_name =
-			condition.dependent_value_owner_template_name;
-		arg.value_member_name = condition.dependent_value_member_name;
-		arg.value_negated = condition.dependent_value_negated;
-		arg.value_owner_template_arguments =
-			condition.dependent_value_owner_template_arguments;
-		TemplateArgument resolved = substitute_template_argument(arg);
-		if (resolved.kind == TemplateArgumentKind::Value &&
-		    !resolved.dependent)
-		{
-			condition.has_constant_value = true;
-			condition.constant_value = resolved.value;
-		}
-	}
+	expect(OP_RPAREN);
+	expect(OP_SEMICOLON);
+	bool hosted_integral_constant_condition = false;
+	uint64_t hosted_integral_constant_value = 0;
+	if (hosted_compatibility_ &&
+	    static_assert_integral_constant_value(
+		    condition.type,
+		    record_template_arguments_,
+		    hosted_integral_constant_value))
+		hosted_integral_constant_condition = true;
+	resolve_static_assert_dependent_value(condition);
 	try
 	{
 		Conversion conv = convert_to(condition, pa11::make_fundamental(FT_BOOL));
-			if (conv.viable)
-				condition = conv.expr;
-			if (hosted_integral_constant_condition &&
-			    !condition.has_constant_value)
-			{
-				condition.has_constant_value = true;
-				condition.constant_value =
-					hosted_integral_constant_value != 0 ? 1 : 0;
-			}
+		if (conv.viable)
+			condition = conv.expr;
+		if (hosted_integral_constant_condition &&
+		    !condition.has_constant_value)
+		{
+			condition.has_constant_value = true;
+			condition.constant_value =
+				hosted_integral_constant_value != 0 ? 1 : 0;
 		}
+	}
 	catch (const runtime_error&)
 	{
 		if (dependent_context)
@@ -193,11 +221,11 @@ void Parser::parse_static_assert_declaration()
 		}
 	}
 	if (!condition.has_constant_value)
-		{
-			if (dependent_context)
-				return;
-			throw runtime_error("static_assert condition is not constant");
-		}
+	{
+		if (dependent_context)
+			return;
+		throw runtime_error("static_assert condition is not constant");
+	}
 	if (condition.constant_value == 0)
 	{
 		if (dependent_context)

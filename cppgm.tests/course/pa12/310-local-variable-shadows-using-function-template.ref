@@ -1,0 +1,30 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition N
+  function-definition f function of () returning int
+    compound-statement
+      simple-declaration
+        variable next int
+          literal prvalue int 0
+      expression-statement
+        assignment-expression lvalue int OP_ASS:=
+          id-expression lvalue int next
+          literal prvalue int 1
+      return-statement
+        id-expression lvalue int next
+  function-definition g function of (int) returning int
+    parameter pos int
+    compound-statement
+      simple-declaration
+        variable count int
+          literal prvalue int 0
+      return-statement
+        binary-expression prvalue bool OP_LAND:&&
+          binary-expression prvalue bool OP_LT:<
+            id-expression lvalue int count
+            literal prvalue int 3
+          binary-expression prvalue bool OP_LT:<
+            id-expression lvalue int pos
+            literal prvalue int 5
+end translation unit

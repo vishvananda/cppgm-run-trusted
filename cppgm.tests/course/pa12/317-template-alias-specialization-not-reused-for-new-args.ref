@@ -1,0 +1,9 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+  function-declaration get_int function of () returning rvalue-reference to int
+  function-declaration get_long function of () returning rvalue-reference to long int
+  type-alias A rvalue-reference to int
+  type-alias B rvalue-reference to long int
+end translation unit

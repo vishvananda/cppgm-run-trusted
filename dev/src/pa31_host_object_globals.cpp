@@ -1,5 +1,7 @@
 #include "pa31_host_object_internal.h"
 
+#include "lowir2cy86_emit_helpers.h"
+
 using namespace std;
 
 namespace pa31 {
@@ -54,7 +56,7 @@ void Unit::emit_globals()
 		Section& sec = tls ? obj.tdata()
 		                    : weak ? obj.comdat_data(sym, readonly)
 		                    : (readonly ? obj.rodata() : obj.data());
-		const size_t align = g.has_type ? g.type.align : 1;
+		const size_t align = lowir2cy86::native_global_alignment(g);
 		sec.bytes.align(align);
 		const size_t off = sec.bytes.pos();
 		if (g.init.kind == "zero")
@@ -97,6 +99,16 @@ void Unit::emit_globals()
 		       program.globals[git->second].declaration &&
 		       metadata(program.globals[git->second].metadata, "storage") !=
 		       "thread_local";
+	}
+	bool Unit::is_imported_function(const string& name) const
+	{
+		map<string, size_t>::const_iterator fit = program.function_by_name.find(name);
+		return fit != program.function_by_name.end() &&
+		       program.functions[fit->second].declaration;
+	}
+	bool Unit::is_imported_symbol_address(const string& name) const
+	{
+		return is_imported_global(name) || is_imported_function(name);
 	}
 	string Unit::tls_wrapper_for_global(const string& name) const
 	{

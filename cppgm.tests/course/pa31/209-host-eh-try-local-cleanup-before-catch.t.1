@@ -1,0 +1,30 @@
+int depth = 0;
+
+struct Guard
+{
+  Guard() { ++depth; }
+  ~Guard() { --depth; }
+};
+
+void fail()
+{
+  throw 1;
+}
+
+void attempt()
+{
+  try
+  {
+    Guard guard;
+    fail();
+  }
+  catch (...)
+  {
+  }
+}
+
+int main()
+{
+  attempt();
+  return depth;
+}

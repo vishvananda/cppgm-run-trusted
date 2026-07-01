@@ -1,0 +1,17 @@
+function @zcaller(%x : i64) -> i64 {
+  block ^entry:
+    %__o1inl0____o1inl0__v = binary add i64 %x, 1
+    %__o1inl0__w = binary mul i64 %__o1inl0____o1inl0__v, 2
+    return i64 %__o1inl0__w
+}
+function @mcallee(%x : i64) -> i64 [binding=strong, prefer_local=yes] {
+  block ^entry:
+    %__o1inl0__v = binary add i64 %x, 1
+    %w = binary mul i64 %__o1inl0__v, 2
+    return i64 %w
+}
+function @aleaf(%x : i64) -> i64 [binding=strong, prefer_local=yes] {
+  block ^entry:
+    %v = binary add i64 %x, 1
+    return i64 %v
+}

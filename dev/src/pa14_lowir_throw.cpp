@@ -1,5 +1,5 @@
 #include "pa14_lowir_internal.h"
-
+#include "pa14_lowir_function_internal.h"
 #include <sstream>
 
 namespace pa14 {
@@ -191,6 +191,8 @@ Value FunctionLowerer::emit_throw(const Node& expr)
 {
 	if (expr.children.empty())
 	{
+		emit_pending_temp_cleanups();
+		emit_rethrow_object_cleanups();
 		ensure_rethrow_runtime_declaration();
 		emit_rethrow();
 		return Value("void", "");
@@ -224,8 +226,9 @@ Value FunctionLowerer::emit_throw(const Node& expr)
 		{
 			string end = fresh_block("call_unwind_end");
 			terminate("jump ^" + end);
-				active_unwind_dispatch_ = dispatch;
-				start_block(dispatch);
+			active_unwind_dispatch_ = dispatch;
+			active_unwind_cleanup_depth_ = cleanups_.size();
+			start_block(dispatch);
 				emit_active_catch_clauses();
 				if (program_.native_lowering || !active_catches_.empty())
 					instr("eh_cleanup");

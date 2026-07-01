@@ -27,10 +27,11 @@ struct AbiSubstitutionContext
 	const std::vector<Token>* expression_tokens;
 	const std::vector<std::string>* function_parameter_names;
 	std::vector<std::string> substitutions;
+	std::map<std::string, size_t> substitution_indices;
 	std::map<std::string, size_t> substitution_aliases;
 	std::map<std::string, size_t> semantic_type_substitutions;
 	std::vector<Scope*> dependent_typename_scope_prefix;
-	std::vector<const void*> active_type_encodings;
+	std::vector<size_t> active_type_encodings;
 	size_t function_template_argument_substitution_floor;
 	bool use_actual_template_parameter_types;
 	bool suppress_dependent_typename_marker;

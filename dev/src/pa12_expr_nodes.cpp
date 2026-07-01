@@ -7,6 +7,27 @@ bool type_is_floating(TypePtr type) { TypePtr bare = pa11::strip_cv(type); retur
 (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool type_is_arithmetic(TypePtr type) { return pa11::is_integral_or_bool_type(type) || type_is_floating(type); }
 bool type_is_pointer(TypePtr type) { return pa11::strip_cv(type)->kind == pa11::TypeKind::Pointer; }
+bool concrete_binary_dependency_type(TypePtr type)
+{
+	if (type.get() == NULL)
+		return false;
+	TypePtr bare = pa11::strip_cv(type);
+	while (bare.get() != NULL &&
+	       (bare->kind == pa11::TypeKind::Pointer ||
+	        bare->kind == pa11::TypeKind::LValueReference ||
+	        bare->kind == pa11::TypeKind::RValueReference ||
+	        bare->kind == pa11::TypeKind::Array))
+		bare = pa11::strip_cv(bare->base);
+	if (bare.get() == NULL)
+		return false;
+	if (bare->kind == pa11::TypeKind::Fundamental ||
+	    bare->kind == pa11::TypeKind::Enum)
+		return true;
+	return bare->kind == pa11::TypeKind::Record &&
+	       bare->scope != NULL &&
+	       !bare->is_dependent_typename &&
+	       !type_structurally_dependent(type);
+}
 bool string_ends_with(const string& text, const string& suffix)
 {
 	return text.size() >= suffix.size() &&
@@ -417,9 +438,9 @@ out.category = ValueCategory::LValue; out.valid = true; out.builtin_constant_p =
 	{ params.push_back(pa11::make_fundamental(FT_UNSIGNED_LONG_INT)); result = void_ptr; } else if (name.name == "__builtin_va_start")
 	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_va_end")
 	{ params.push_back(void_ptr); result = pa11::make_fundamental(FT_VOID); } else if (name.name == "__builtin_bswap16")
-	{ result = pa11::make_fundamental(FT_UNSIGNED_SHORT_INT); } else if (name.name == "__builtin_bswap32")
-	{ result = pa11::make_fundamental(FT_UNSIGNED_INT); } else if (name.name == "__builtin_bswap64")
-	{ result = pa11::make_fundamental(FT_UNSIGNED_LONG_LONG_INT); } else if (name.name == "__builtin_complex")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_SHORT_INT); params.push_back(result); } else if (name.name == "__builtin_bswap32")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_INT); params.push_back(result); } else if (name.name == "__builtin_bswap64")
+	{ result = pa11::make_fundamental(FT_UNSIGNED_LONG_LONG_INT); params.push_back(result); } else if (name.name == "__builtin_complex")
 	{ result = pa11::make_fundamental(FT_LONG_DOUBLE); } else if (name.name == "__builtin_clz" || name.name == "__builtin_clzl" || name.name == "__builtin_clzll" || name.name == "__builtin_clzg" || name.name == "__builtin_ctz" || name.name == "__builtin_ctzl" || name.name == "__builtin_ctzll" || name.name == "__builtin_popcount" || name.name == "__builtin_popcountl" || name.name == "__builtin_popcountll" || name.name == "__builtin_popcountg")
 	{ result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_flt_rounds" || name.name == "__builtin_fpclassify")
 	{ result = pa11::make_fundamental(FT_INT); } else if (name.name == "__builtin_prefetch" || name.name == "__builtin_operator_delete")
@@ -583,10 +604,17 @@ if (op == OP_EQ || op == OP_NE) {
 			  rhs.binding,
 			  function_template_placeholders_,
 			  function_template_specialization_arguments_)));
-		if ((type_is_template_dependent(lhs.type) ||
-		     type_is_template_dependent(rhs.type) ||
-		     type_structurally_dependent(lhs.type) ||
-		     type_structurally_dependent(rhs.type)) &&
+		bool lhs_dependent =
+			type_is_template_dependent(lhs.type) ||
+			type_structurally_dependent(lhs.type);
+		bool rhs_dependent =
+			type_is_template_dependent(rhs.type) ||
+			type_structurally_dependent(rhs.type);
+		if (lhs_dependent && concrete_binary_dependency_type(lhs.type))
+			lhs_dependent = false;
+		if (rhs_dependent && concrete_binary_dependency_type(rhs.type))
+			rhs_dependent = false;
+		if ((lhs_dependent || rhs_dependent) &&
 		    !function_template_operator_operand)
 	{
 		TypePtr type =
@@ -845,7 +873,12 @@ continue; if (pointer_conversion_viable(arg, param)) continue; return false;
 const string& text, const Expr& lhs, const Expr& rhs, Expr& out)
 { if (op != OP_EQ && op != OP_NE && op != OP_LT && op != OP_GT && op != OP_LE && op != OP_GE) return false;
 const Expr* record_side = NULL; const Expr* other_side = NULL; bool record_on_left = false; TypePtr left = pa11::strip_cv(expression_object_type(lhs.type));
-TypePtr right = pa11::strip_cv(expression_object_type(rhs.type)); if (left->kind == pa11::TypeKind::Record) { record_side = &lhs;
+TypePtr right = pa11::strip_cv(expression_object_type(rhs.type)); if (left->kind == pa11::TypeKind::Enum && right->kind == pa11::TypeKind::Enum && pa11::same_type(left, right))
+{ out.type = pa11::make_fundamental(FT_BOOL); out.category = ValueCategory::PRValue; out.valid = true;
+out.constant_expression = lhs.constant_expression && rhs.constant_expression;
+out.node = Node("binary-expression prvalue bool " + op_leaf(op, text)); add_child(out.node, lhs.node); add_child(out.node, rhs.node);
+out.node.has_op = true; out.node.op = op; out.node.token_text = text; annotate_expr_node(out); return true; }
+if (left->kind == pa11::TypeKind::Record) { record_side = &lhs;
 other_side = &rhs; record_on_left = true; } else if (right->kind == pa11::TypeKind::Record)
 { record_side = &rhs; other_side = &lhs; record_on_left = false;
 } else return false; TypePtr record = pa11::strip_cv(expression_object_type(record_side->type));
@@ -869,10 +902,12 @@ out.node.has_op = true; out.node.op = op; out.node.token_text = text; annotate_e
 return true; } catch (const runtime_error&) {
 throw; } } }
 return false; } void Parser::collect_associated_hidden_friends(TypePtr type, const string& name,
-set<Scope*>& seen, vector<Binding*>& out) const { if (type.get() == NULL)
+set<Scope*>& seen, vector<Binding*>& out) { if (type.get() == NULL)
 return; TypePtr object = expression_object_type(type); TypePtr bare = pa11::strip_cv(object); if (bare->kind == pa11::TypeKind::Pointer ||
 bare->kind == pa11::TypeKind::Array) { collect_associated_hidden_friends(bare->base, name, seen, out); return;
-} if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL) return; if (!seen.insert(bare->scope).second)
+} if (bare->kind != pa11::TypeKind::Record) return; if (bare->is_template_specialization &&
+!type_is_template_dependent(bare) && !bare->complete) complete_template_record(bare);
+if (bare->scope == NULL) return; if (!seen.insert(bare->scope).second)
 return; map<Scope*, vector<Binding*> >::const_iterator found = class_friend_functions_.find(bare->scope); if (found != class_friend_functions_.end())
 { for (size_t i = 0; i < found->second.size(); ++i) { Binding* binding = found->second[i];
 if (!binding->is_hidden_friend) continue; if (binding->name != name) continue; if (find(out.begin(), out.end(), binding) == out.end()) out.push_back(binding);
@@ -981,7 +1016,28 @@ Expr rhs) { TypePtr lhs_type = expression_object_type(lhs.type); TypePtr lhs_bar
 	Expr overloaded = make_overloaded_compound_assignment_expr(op, text, lhs,
 	rhs, lhs_bare); if (overloaded.valid) return overloaded;
 	} if (op == OP_ASS && lhs_bare->kind == pa11::TypeKind::Record && lhs_bare->scope != NULL)
-	return make_record_assignment_expr(lhs, rhs, lhs_bare); if (lhs.category != ValueCategory::LValue || top_level_const(lhs_type) || (lhs_bare->kind == pa11::TypeKind::Array && !pa11::is_gnu_vector_type(lhs_bare)) ||
+	return make_record_assignment_expr(lhs, rhs, lhs_bare);
+	if (type_is_template_dependent(lhs.type) ||
+	    type_is_template_dependent(rhs.type) ||
+	    type_structurally_dependent(lhs.type) ||
+	    type_structurally_dependent(rhs.type))
+	{
+		Expr out;
+		out.type = lhs_type;
+		out.category = ValueCategory::LValue;
+		out.valid = true;
+		out.node = Node("assignment-expression lvalue " +
+		                pa11::describe_type(out.type) + " " +
+		                op_leaf(op, text));
+		add_child(out.node, lhs.node);
+		add_child(out.node, rhs.node);
+		out.node.has_op = true;
+		out.node.op = op;
+		out.node.token_text = text;
+		annotate_expr_node(out);
+		return out;
+	}
+	if (lhs.category != ValueCategory::LValue || top_level_const(lhs_type) || (lhs_bare->kind == pa11::TypeKind::Array && !pa11::is_gnu_vector_type(lhs_bare)) ||
 	lhs_bare->kind == pa11::TypeKind::Function) throw runtime_error("assignment lhs is not lvalue"); Conversion conv; if (op == OP_ASS)
 	{ conv = convert_to(rhs, lhs_type); if (!conv.viable) throw runtime_error("invalid assignment conversion");
 } else { TypePtr rhs_type = lvalue_to_rvalue_type(rhs.type);
@@ -1024,7 +1080,12 @@ out.dependent_value_name = inner.dependent_value_name; out.dependent_value_owner
 inner.dependent_value_member_name; out.dependent_value_owner_template_arguments = inner.dependent_value_owner_template_arguments; out.dependent_value_negated =
 (op == OP_MINUS || op == OP_LNOT) ? !inner.dependent_value_negated : inner.dependent_value_negated; }
 annotate_expr_node(out); return out; } Expr Parser::make_postfix_expr(ETokenType op, const string& text, Expr inner)
-{ if ((op == OP_INC || op == OP_DEC) && pa11::strip_cv(expression_object_type(inner.type))->kind == pa11::TypeKind::Record)
+{ TypePtr record = pa11::strip_cv(expression_object_type(inner.type));
+if ((op == OP_INC || op == OP_DEC) && record->kind == pa11::TypeKind::Record && record->scope != NULL) {
+string opname = operator_function_name(op, text); vector<Binding*> members = lookup_qualified_set(record->scope, opname, pa11::LOOKUP_FUNCTION); if (!members.empty())
+{ Expr callee = make_member_expr(inner, opname, "."); vector<Expr> args; args.push_back(make_integer_literal_expr(FT_INT, 0));
+return make_call_expr(callee, args); }
+} if ((op == OP_INC || op == OP_DEC) && record->kind == pa11::TypeKind::Record)
 { static const EFundamentalType targets[] = { FT_INT, FT_UNSIGNED_INT, FT_LONG_INT, FT_UNSIGNED_LONG_INT, FT_LONG_LONG_INT, FT_UNSIGNED_LONG_LONG_INT, FT_INT128, FT_UNSIGNED_INT128, FT_SHORT_INT,
 FT_UNSIGNED_SHORT_INT, FT_CHAR, FT_SIGNED_CHAR, FT_UNSIGNED_CHAR, FT_BOOL, FT_FLOAT, FT_DOUBLE, FT_LONG_DOUBLE }; for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i)
 { TypePtr ref = pa11::make_lvalue_reference(pa11::make_fundamental(targets[i])); Conversion conv;
@@ -1080,6 +1141,17 @@ return make_dependent_member_expr(object, name, op); if (bare->kind != pa11::Typ
 throw runtime_error("member access on non-record"); } if (bare->is_template_specialization && !type_is_template_dependent(bare))
 complete_template_record(bare); if (!type_is_template_dependent(bare)) instantiate_member_function_templates(bare); vector<Binding*> found = lookup_qualified_set(bare->scope, name, pa11::LOOKUP_VALUE);
 if (found.empty() && (type_is_template_dependent(type) || record_dependent_base_lookup_skips_.count(bare.get()) != 0)) return make_dependent_member_expr(object, name, op);
+if (found.empty())
+{
+	for (size_t i = 0; i < active_class_instantiations_.size(); ++i)
+	{
+		TypePtr active = active_class_instantiations_[i].type.get() != NULL
+			? pa11::strip_cv(active_class_instantiations_[i].type)
+			: TypePtr();
+		if (active.get() == bare.get())
+			return make_dependent_member_expr(object, name, op);
+	}
+}
 if (found.empty()) throw runtime_error("member not found: " + name + " in " + pa11::describe_type(bare)); if (!member_access_allowed(found[0], bare))
 { if (found[0]->is_private) throw runtime_error("private member access"); throw runtime_error("protected member access");
 } Binding* nonfunction = NULL; for (size_t i = 0; i < found.size(); ++i) { if (found[i]->kind == BindingKind::Function) continue; if (nonfunction == NULL) { nonfunction = found[i]; continue; } if (found[i] != nonfunction && (found[i]->owner != nonfunction->owner || found[i]->name != nonfunction->name || !pa11::same_type(found[i]->type, nonfunction->type))) throw runtime_error("ambiguous member: " + name); }
@@ -1136,11 +1208,11 @@ TypePtr target_object = pa11::strip_cv(target->base); TypePtr source_object = pa
 pa11::describe_type(target_object)); base.type = target_object; base.category = ValueCategory::LValue; add_child(base, inner.node);
 inner.node = base; inner.type = target_object; inner.category = ValueCategory::LValue; inner.binding = NULL;
 } } TypePtr source_object = pa11::strip_cv(expression_object_type(inner.type)); TypePtr target_object = pa11::strip_cv(target);
-if (source_object->kind == pa11::TypeKind::Record && target->kind != pa11::TypeKind::LValueReference && target->kind != pa11::TypeKind::RValueReference && target_object->kind != pa11::TypeKind::Record &&
+if (source_object->kind == pa11::TypeKind::Record && target->kind != pa11::TypeKind::LValueReference && target->kind != pa11::TypeKind::RValueReference &&
 !pa11::is_void_type(target)) { ++explicit_conversion_context_; Conversion conv;
 try { conv = convert_to(inner, target); }
 catch (...) { --explicit_conversion_context_; throw;
-} --explicit_conversion_context_; if (conv.viable) inner = conv.expr;
+} --explicit_conversion_context_; if (conv.viable) { if (target_object->kind == pa11::TypeKind::Record) return conv.expr; inner = conv.expr; }
 	} string line = "cast-expression prvalue " + pa11::describe_type(target); if (!op_text.empty()) line += " " + op_text;
 	out.node = Node(line); add_child(out.node, inner.node); out.node.token_text = op_text;
 	out.node.is_dynamic_cast_expression = op_text.find("dynamic_cast") != string::npos;

@@ -1,0 +1,63 @@
+#include <string>
+#include <vector>
+
+struct Node
+{
+  std::string line;
+  std::vector<Node> children;
+
+  Node() {}
+  explicit Node(const std::string& text) : line(text) {}
+};
+
+static Node make_tree()
+{
+  Node root("root");
+  root.children.push_back(Node("left"));
+  root.children.push_back(Node("right"));
+  root.children[0].children.push_back(Node("leaf"));
+  return root;
+}
+
+static int check_tree(const Node& node)
+{
+  if (!(node.line == "root"))
+    return 1;
+  if (node.children.size() != 2)
+    return 2;
+  if (!(node.children[0].line == "left"))
+    return 3;
+  if (node.children[0].children.size() != 1)
+    return 4;
+  if (!(node.children[0].children[0].line == "leaf"))
+    return 5;
+  if (!(node.children[1].line == "right"))
+    return 6;
+  return 0;
+}
+
+int main()
+{
+  Node root = make_tree();
+  std::vector<Node> source;
+  source.push_back(root);
+
+  std::vector<Node> copied = source;
+  if (copied.size() != 1)
+    return 10;
+  int check = check_tree(copied[0]);
+  if (check != 0)
+    return 20 + check;
+
+  std::vector<Node> assigned;
+  assigned = copied;
+  if (assigned.size() != 1)
+    return 30;
+  check = check_tree(assigned[0]);
+  if (check != 0)
+    return 40 + check;
+
+  copied[0].line = "changed";
+  copied[0].children[0].line = "changed child";
+  return check_tree(assigned[0]);
+}

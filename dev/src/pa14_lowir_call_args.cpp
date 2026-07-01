@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 
 namespace pa14 {
 namespace internal {
@@ -16,7 +17,27 @@ bool call_object_arg_is_this(const Node* object_arg)
 
 bool hosted_external_stream_member(const Binding* binding)
 {
-	return hosted_external_stream_function_binding(binding);
+	if (hosted_external_stream_function_binding(binding))
+		return true;
+	if (binding == NULL ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Namespace ||
+	    (binding->owner->name != "std" &&
+	     binding->owner->name != "__gnu_cxx") ||
+	    binding->type.get() == NULL ||
+	    binding->type->kind != TypeKind::Function)
+		return false;
+	for (size_t i = 0; i < binding->type->parameters.size(); ++i)
+	{
+		TypePtr param = pa11::strip_cv(binding->type->parameters[i]);
+		if (param.get() != NULL &&
+		    (param->kind == TypeKind::LValueReference ||
+		     param->kind == TypeKind::RValueReference))
+			param = pa11::strip_cv(param->base);
+		if (record_uses_hosted_external_stream_vtable(param))
+			return true;
+	}
+	return false;
 }
 
 }  // namespace
@@ -235,7 +256,7 @@ void FunctionLowerer::maybe_open_call_temp_cleanup_region(
 		return;
 	call.temp_cleanup_dispatch = fresh_block("call_unwind_dispatch");
 	call.temp_cleanup_end = fresh_block("call_unwind_end");
-	instr((temp_cleanups_are_generated_noop_destructors(call.temp_cleanups)
+	instr((call_temp_cleanup_region_is_cleanup_only(call)
 	       ? "eh_cleanup ^" : "eh_try ^") +
 	      call.temp_cleanup_dispatch);
 	++eh_try_depth_;
@@ -279,10 +300,7 @@ void FunctionLowerer::lower_call_arguments(const Node& expr,
 		TypePtr bare_param = pa11::strip_cv(param);
 		bool function_template_callee =
 			call.direct != NULL &&
-			(!call.direct->function_specialization_symbol.empty() ||
-			 (call.direct->aliased_binding != NULL &&
-			  !call.direct->aliased_binding->
-				  function_specialization_symbol.empty()));
+			binding_has_function_template_specialization_symbol(call.direct);
 		bool preserve_no_storage_lvalue =
 			!variadic_extra &&
 			function_template_callee &&

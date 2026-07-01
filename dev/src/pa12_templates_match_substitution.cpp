@@ -8,6 +8,25 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 
+const size_t kDependentTypenameMatchCacheLimit = 65536;
+
+size_t dependent_cache_hash_combine(size_t seed, size_t value);
+size_t dependent_cache_string_hash(const string& value);
+size_t dependent_cache_type_identity(TypePtr type);
+size_t dependent_cache_template_argument_identity(
+	const TemplateArgument& argument,
+	int depth);
+
+void Parser::trim_dependent_typename_match_caches() const
+{
+	if (dependent_typename_match_cache_.size() +
+	    dependent_typename_match_fail_cache_.size() <=
+	    kDependentTypenameMatchCacheLimit)
+		return;
+	dependent_typename_match_cache_.clear();
+	dependent_typename_match_fail_cache_.clear();
+}
+
 TypePtr Parser::make_integer_sequence_type(
 	const vector<TemplateArgument>& arguments)
 {
@@ -196,8 +215,11 @@ TypePtr Parser::expand_alias_template_for_match(
 					{
 						if (alias->parameters[i].is_pack)
 						{
+							const TemplateParameterInfo& parameter =
+								alias->parameters[i];
 							subst[name] =
-								pa11::make_template_parameter_type(name);
+								template_parameter_placeholder_type(
+									parameter);
 							value_subst[name] = substituted_full_args[i];
 							pack_subst.insert(name);
 						}
@@ -237,20 +259,120 @@ TypePtr Parser::expand_alias_template_for_match(
 	return out;
 }
 
+size_t Parser::dependent_typename_match_cache_key(TypePtr type) const
+{
+	size_t key = dependent_cache_type_identity(type);
+	key = dependent_cache_hash_combine(
+		key,
+		reinterpret_cast<uintptr_t>(current_scope()));
+	key = dependent_cache_hash_combine(
+		key,
+		validating_template_definition_ ? 1 : 0);
+	key = dependent_cache_hash_combine(
+		key,
+		function_template_candidate_instantiation_depth_);
+	key = dependent_cache_hash_combine(key, active_class_instantiations_.size());
+	for (size_t i = 0; i < active_class_instantiations_.size(); ++i)
+	{
+		const ActiveClassInstantiation& active =
+			active_class_instantiations_[i];
+		key = dependent_cache_hash_combine(
+			key,
+			reinterpret_cast<uintptr_t>(active.declaration));
+		key = dependent_cache_hash_combine(
+			key,
+			dependent_cache_string_hash(active.specialization_name));
+		key = dependent_cache_hash_combine(
+			key,
+			dependent_cache_type_identity(active.type));
+	}
+	key = dependent_cache_hash_combine(
+		key,
+		template_type_substitutions_.size());
+	for (size_t i = 0; i < template_type_substitutions_.size(); ++i)
+	{
+		key = dependent_cache_hash_combine(key, i);
+		for (map<string, TypePtr>::const_iterator it =
+			     template_type_substitutions_[i].begin();
+		     it != template_type_substitutions_[i].end();
+		     ++it)
+		{
+			key = dependent_cache_hash_combine(
+				key,
+				dependent_cache_string_hash(it->first));
+			key = dependent_cache_hash_combine(
+				key,
+				dependent_cache_type_identity(it->second));
+		}
+	}
+	key = dependent_cache_hash_combine(
+		key,
+		template_value_substitutions_.size());
+	for (size_t i = 0; i < template_value_substitutions_.size(); ++i)
+	{
+		key = dependent_cache_hash_combine(key, i);
+		for (map<string, TemplateArgument>::const_iterator it =
+			     template_value_substitutions_[i].begin();
+		     it != template_value_substitutions_[i].end();
+		     ++it)
+		{
+			key = dependent_cache_hash_combine(
+				key,
+				dependent_cache_string_hash(it->first));
+			key = dependent_cache_hash_combine(
+				key,
+				dependent_cache_template_argument_identity(it->second,
+				                                           0));
+		}
+	}
+	return key;
+}
+
 TypePtr Parser::resolve_dependent_typename_for_template_match(
 	TypePtr type) const
 {
 	if (type.get() == NULL || !type->is_dependent_typename)
 		return TypePtr();
+	size_t cache_key = dependent_typename_match_cache_key(type);
+	map<size_t, TypePtr>::const_iterator cached =
+		dependent_typename_match_cache_.find(cache_key);
+	if (cached != dependent_typename_match_cache_.end())
+		return cached->second;
+	if (dependent_typename_match_fail_cache_.count(cache_key) != 0)
+		return TypePtr();
+	if (!active_dependent_typename_match_keys_.insert(cache_key).second)
+		return TypePtr();
+	struct ActiveDependentTypenameMatch
+	{
+		set<size_t>& keys;
+		size_t key;
+		ActiveDependentTypenameMatch(set<size_t>& k, size_t cache_key)
+			: keys(k), key(cache_key)
+		{
+		}
+		~ActiveDependentTypenameMatch()
+		{
+			keys.erase(key);
+		}
+	} active(active_dependent_typename_match_keys_, cache_key);
 	try
 	{
 		TypePtr resolved = resolve_dependent_typename_type(type);
 		if (resolved.get() == NULL || resolved == type)
+		{
+			dependent_typename_match_fail_cache_.insert(cache_key);
+			trim_dependent_typename_match_caches();
 			return TypePtr();
-		return substitute_template_type(resolved);
+		}
+		TypePtr substituted = substitute_template_type(resolved);
+		dependent_typename_match_cache_[cache_key] = substituted;
+		trim_dependent_typename_match_caches();
+		return substituted;
 	}
 	catch (const exception&)
 	{
+		dependent_typename_match_fail_cache_.insert(cache_key);
+		trim_dependent_typename_match_caches();
 		return TypePtr();
 	}
 }
@@ -308,9 +430,26 @@ TemplateDeclaration* Parser::class_template_declaration_for_match(
 		}
 	}
 
-TemplateArgument Parser::template_argument_from_instance_argument(
-	const pa11::TemplateInstanceArgument& argument) const
-{
+	TemplateDeclaration* Parser::primary_class_template_declaration_for_match(
+		TypePtr type) const
+	{
+		TemplateDeclaration* declaration =
+			class_template_declaration_for_match(type);
+		if (declaration != NULL && declaration->class_specialization)
+		{
+			TemplateDeclaration* primary =
+				const_cast<Parser*>(this)->find_class_template(
+					declaration->owner,
+					declaration->name);
+			if (primary != NULL && !primary->class_specialization)
+				declaration = primary;
+		}
+		return declaration;
+	}
+
+	TemplateArgument Parser::template_argument_from_instance_argument(
+		const pa11::TemplateInstanceArgument& argument) const
+	{
 	if (argument.kind == pa11::TemplateInstanceArgumentKind::Type)
 	{
 		try

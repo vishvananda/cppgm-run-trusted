@@ -1,0 +1,24 @@
+#include <string>
+
+struct Token {
+  int kind;
+  std::string source;
+};
+
+Token make_token(const std::string& source)
+{
+  Token token;
+  token.kind = 7;
+  token.source = source;
+  return token;
+}
+
+int main()
+{
+  Token token;
+  token.kind = 0;
+  token = make_token("true");
+  if (token.kind != 7)
+    return 1;
+  return token.source == "true" ? 0 : 2;
+}

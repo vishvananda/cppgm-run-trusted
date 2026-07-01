@@ -1,0 +1,10 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+  namespace-definition __gnu_cxx
+  function-definition main function of () returning int
+    compound-statement
+      return-statement
+        literal prvalue int 0
+end translation unit

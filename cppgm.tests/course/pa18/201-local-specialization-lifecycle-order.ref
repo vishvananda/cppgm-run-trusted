@@ -1,0 +1,185 @@
+declare function @__external_runtime___Unwind_Resume() -> void [return=noreturn, role=eh_resume, linkage=c, binding=strong, object=_Unwind_Resume]
+declare function @__external_runtime____gxx_personality_v0() -> void [role=eh_personality, linkage=c, binding=strong, object=__gxx_personality_v0]
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $maker : obj<1x1>
+  slot $cond__1 : i32
+  slot $land__2 : i64
+
+  block ^entry:
+    %t1 = addr $maker
+    %t2 = addr $maker
+    %t3 = call i32 @Maker__one(%t2)
+    %t4 = cmp eq i32 %t3, 0
+    branch %t4, ^land_rhs_4, ^land_short_5
+
+  block ^land_rhs_4:
+    %t5 = addr $maker
+    %t6 = call i32 @Maker__two(%t5)
+    %t7 = cmp eq i32 %t6, 0
+    %t8 = cmp ne i64 %t7, 0
+    store i64 %t8, $land__2
+    jump ^land_end_6
+
+  block ^land_short_5:
+    store i64 0, $land__2
+    jump ^land_end_6
+
+  block ^land_end_6:
+    %t9 = load i64 $land__2
+    branch %t9, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t10 = load i32 $cond__1
+    return i32 %t10
+}
+function @Maker__one(%this : ptr) -> i32 [binding=weak, object=_ZN5Maker3oneEv] {
+  slot $this : ptr
+  slot $box : obj<4x4>
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = addr $box
+    call void @Box_Maker__Piece__local_14468886021768262279___Box(%t1)
+    %t2 = addr $box
+    %t3 = index i8 [projection=field] %t2, 0
+    %t4 = load i32 %t3
+    %t5 = addr $box
+    call void @Box_Maker__Piece__local_14468886021768262279____Box(%t5)
+    return i32 %t4
+}
+function @Maker__two(%this : ptr) -> i32 [binding=weak, object=_ZN5Maker3twoEv] {
+  slot $this : ptr
+  slot $box : obj<4x4>
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = addr $box
+    call void @Box_Maker__Piece__local_6130952152799155301___Box(%t1)
+    %t2 = addr $box
+    %t3 = index i8 [projection=field] %t2, 0
+    %t4 = load i32 %t3
+    %t5 = addr $box
+    call void @Box_Maker__Piece__local_6130952152799155301____Box(%t5)
+    return i32 %t4
+}
+function @Box_Maker__Piece__local_14468886021768262279___Box(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3oneEvE5PieceEC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 0, %t2
+    return void
+}
+function @Box_Maker__Piece__local_14468886021768262279____Box(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3oneEvE5PieceED1Ev] {
+  slot $this : ptr
+  slot $tmpobj__1 : obj<8x8>
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = addr $tmpobj__1
+    %t2 = load ptr $this
+    call void @Box_Maker__Piece__local_14468886021768262279___Guard__Guard(%t1, %t2)
+    call void @Box_Maker__Piece__local_14468886021768262279___Guard__operator__(%t1)
+    return void
+}
+function @Box_Maker__Piece__local_14468886021768262279___Guard__Guard(%this : ptr, %owner : ptr [pass=reference]) -> void [binding=weak, object=_ZN3BoxIZN5Maker3oneEvE5PieceE5GuardC1ERS2_] {
+  slot $this : ptr
+  slot $owner : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %owner, $owner
+    %t1 = load ptr $owner
+    %t2 = load ptr $this
+    %t3 = index i8 [projection=field] %t2, 0
+    store ptr %t1, %t3
+    return void
+}
+function @Box_Maker__Piece__local_14468886021768262279___Guard__operator__(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3oneEvE5PieceE5GuardclEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=reference_field] %t1, 0
+    %t3 = load ptr %t2
+    %t4 = index i8 [projection=field] %t3, 0
+    %t5 = load i32 %t4
+    %t6 = binary add i32 %t5, 1
+    %t7 = load ptr $this
+    %t8 = index i8 [projection=reference_field] %t7, 0
+    %t9 = load ptr %t8
+    %t10 = index i8 [projection=field] %t9, 0
+    store i32 %t6, %t10
+    return void
+}
+function @Box_Maker__Piece__local_6130952152799155301___Box(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3twoEvE5PieceEC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 0, %t2
+    return void
+}
+function @Box_Maker__Piece__local_6130952152799155301____Box(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3twoEvE5PieceED1Ev] {
+  slot $this : ptr
+  slot $tmpobj__1 : obj<8x8>
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = addr $tmpobj__1
+    %t2 = load ptr $this
+    call void @Box_Maker__Piece__local_6130952152799155301___Guard__Guard(%t1, %t2)
+    call void @Box_Maker__Piece__local_6130952152799155301___Guard__operator__(%t1)
+    return void
+}
+function @Box_Maker__Piece__local_6130952152799155301___Guard__Guard(%this : ptr, %owner : ptr [pass=reference]) -> void [binding=weak, object=_ZN3BoxIZN5Maker3twoEvE5PieceE5GuardC1ERS2_] {
+  slot $this : ptr
+  slot $owner : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    store ptr %owner, $owner
+    %t1 = load ptr $owner
+    %t2 = load ptr $this
+    %t3 = index i8 [projection=field] %t2, 0
+    store ptr %t1, %t3
+    return void
+}
+function @Box_Maker__Piece__local_6130952152799155301___Guard__operator__(%this : ptr) -> void [binding=weak, object=_ZN3BoxIZN5Maker3twoEvE5PieceE5GuardclEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=reference_field] %t1, 0
+    %t3 = load ptr %t2
+    %t4 = index i8 [projection=field] %t3, 0
+    %t5 = load i32 %t4
+    %t6 = binary add i32 %t5, 1
+    %t7 = load ptr $this
+    %t8 = index i8 [projection=reference_field] %t7, 0
+    %t9 = load ptr %t8
+    %t10 = index i8 [projection=field] %t9, 0
+    store i32 %t6, %t10
+    return void
+}
+alias object _ZN3BoxIZN5Maker3oneEvE5PieceEC2Ev = @Box_Maker__Piece__local_14468886021768262279___Box
+alias object _ZN3BoxIZN5Maker3oneEvE5PieceED2Ev = @Box_Maker__Piece__local_14468886021768262279____Box
+alias object _ZN3BoxIZN5Maker3oneEvE5PieceE5GuardC2ERS2_ = @Box_Maker__Piece__local_14468886021768262279___Guard__Guard
+alias object _ZN3BoxIZN5Maker3twoEvE5PieceEC2Ev = @Box_Maker__Piece__local_6130952152799155301___Box
+alias object _ZN3BoxIZN5Maker3twoEvE5PieceED2Ev = @Box_Maker__Piece__local_6130952152799155301____Box
+alias object _ZN3BoxIZN5Maker3twoEvE5PieceE5GuardC2ERS2_ = @Box_Maker__Piece__local_6130952152799155301___Guard__Guard

@@ -1,0 +1,19 @@
+template<class T>
+struct S {
+  struct H {
+    H(char* p, T&& a = T()) : p_(p), value_(a) {}
+    char* p_;
+    T value_;
+  };
+};
+
+template<class U>
+struct B {};
+
+int main() {
+  char c = 0;
+  S<int>::H h(&c);
+  if (h.p_ != &c) return 1;
+  if (h.value_ != 0) return 2;
+  return 0;
+}

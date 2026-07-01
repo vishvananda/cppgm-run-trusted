@@ -1,5 +1,7 @@
 #include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 #include "pa12_templates_function_support.h"
+#include "pa12_templates_instance_support.h"
 #include <algorithm>
 #include <stdexcept>
 using namespace std;
@@ -133,7 +135,8 @@ bool Parser::parse_structured_binding_declaration(const DeclSpecs& specs,
 	Expr init;
 	if (consume(OP_ASS))
 	{
-		init = at(OP_LBRACE) ? parse_braced_init_list() : parse_expression();
+		init = at(OP_LBRACE) ? parse_braced_init_list()
+		                      : parse_assignment_expression();
 		init.copy_initialization = true;
 	}
 	else
@@ -805,35 +808,35 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 		saved_initializer_scopes = scopes_;
 		scopes_.push_back(declarator_scope);
 		pushed_initializer_scope = true;
-	}
-	try
-	{
-	if (consume(OP_ASS))
-	{
-		if (at(OP_LBRACE))
+		}
+		try
 		{
-			has_init = true;
-			init = parse_braced_init_list();
+		if (consume(OP_ASS))
+		{
+			if (at(OP_LBRACE))
+			{
+				has_init = true;
+				init = parse_braced_init_list();
 		}
 		else
 		{
 			has_init = true;
-			init = parse_expression();
+			init = parse_assignment_expression();
 		}
-		if (has_init)
-			init.copy_initialization = true;
-	}
-	else if ((brace_init = consume(OP_LBRACE)))
-	{
-		has_init = true;
-		--pos_;
-		init = parse_braced_init_list();
-	}
-		else if (at(OP_LPAREN) && !declares_function)
+			if (has_init)
+				init.copy_initialization = true;
+		}
+		else if ((brace_init = consume(OP_LBRACE)))
 		{
-		expect(OP_LPAREN);
-		if (!at(OP_RPAREN))
-		{
+			has_init = true;
+			--pos_;
+			init = parse_braced_init_list();
+		}
+			else if (at(OP_LPAREN) && !declares_function)
+			{
+			expect(OP_LPAREN);
+			if (!at(OP_RPAREN))
+			{
 			vector<Expr> args = parse_argument_list();
 				TypePtr decl_type = declared_type;
 			if (pa11::strip_cv(decl_type)->kind == pa11::TypeKind::Record)
@@ -865,13 +868,13 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 				throw runtime_error("unsupported direct initializer");
 			}
 			has_init = true;
+			}
+			expect(OP_RPAREN);
 		}
-		expect(OP_RPAREN);
-	}
-	}
-	catch (...)
-	{
-		if (pushed_initializer_scope)
+		}
+		catch (...)
+		{
+			if (pushed_initializer_scope)
 			scopes_ = saved_initializer_scopes;
 		throw;
 	}
@@ -882,34 +885,34 @@ void Parser::parse_simple_or_function_declaration(Node& out, bool emit_node)
 	                                                      pos_);
 	Node node(current_scope()->kind == ScopeKind::Namespace ? "" :
 	          "simple-declaration");
-	Binding* first =
-		declare_one(specs, base, declarator, has_init ? &init : NULL, false, node);
-	if (first != NULL && first->is_local_static)
-		first->local_static_discriminator =
-			"tokens" + to_string(decl_span_begin + 1) + "_" +
-			to_string(pos_);
-	if (bit_field)
-	{
-		first->is_bit_field = true;
-		first->bit_width = bit_width;
-	}
-	while (consume(OP_COMMA))
-	{
-		size_t next_begin = pos_;
-		Declarator next = parse_declarator(false);
-		TypePtr next_declared_type = apply_declarator(next, probe_base);
-		Expr next_init;
-		bool next_has_init =
-			parse_trailing_declarator_initializer(next_declared_type, next_init);
-		Binding* next_binding =
-			declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
-		if (next_binding != NULL && next_binding->is_local_static)
-			next_binding->local_static_discriminator =
+		Binding* first =
+			declare_one(specs, base, declarator, has_init ? &init : NULL, false, node);
+		if (first != NULL && first->is_local_static)
+			first->local_static_discriminator =
+				"tokens" + to_string(decl_span_begin + 1) + "_" +
+				to_string(pos_);
+		if (bit_field)
+		{
+			first->is_bit_field = true;
+			first->bit_width = bit_width;
+		}
+		while (consume(OP_COMMA))
+		{
+			size_t next_begin = pos_;
+			Declarator next = parse_declarator(false);
+			TypePtr next_declared_type = apply_declarator(next, probe_base);
+			Expr next_init;
+			bool next_has_init =
+				parse_trailing_declarator_initializer(next_declared_type, next_init);
+			Binding* next_binding =
+				declare_one(specs, base, next, next_has_init ? &next_init : NULL, false, node);
+			if (next_binding != NULL && next_binding->is_local_static)
+				next_binding->local_static_discriminator =
 				"tokens" + to_string(next_begin + 1) + "_" +
 				to_string(pos_);
-	}
-	skip_attributes(&specs.no_unique_address_decl);
-	expect(OP_SEMICOLON);
+		}
+		skip_attributes(&specs.no_unique_address_decl);
+		expect(OP_SEMICOLON);
 	if (emit_node && !node.children.empty())
 	{
 		if (node.line.empty())
@@ -958,16 +961,47 @@ void Parser::complete_class_virtuals(TypePtr type)
 	TypePtr bare = pa11::strip_cv(type);
 	if (bare->kind != pa11::TypeKind::Record || bare->scope == NULL)
 		return;
+	string active_key = !bare->template_primary_name.empty()
+		? bare->template_primary_name : bare->name;
+	map<const void*, TemplateDeclaration*>::const_iterator declaration =
+		record_template_declarations_.find(bare.get());
+	if (declaration != record_template_declarations_.end() &&
+	    declaration->second != NULL)
+		active_key = declaration->second->name;
+	vector<TemplateArgument> active_args;
+	map<const void*, vector<TemplateArgument> >::const_iterator stored_args =
+		record_template_arguments_.find(bare.get());
+	if (stored_args != record_template_arguments_.end())
+		active_args = stored_args->second;
+	else
+		for (size_t i = 0; i < bare->template_arguments.size(); ++i)
+			active_args.push_back(raw_template_argument_from_instance_argument(
+				bare->template_arguments[i]));
+	if (!active_args.empty())
+		active_key += "<" + template_argument_key(active_args) + ">";
+	if (!active_key.empty() &&
+	    find(active_class_virtual_completion_keys_.begin(),
+	         active_class_virtual_completion_keys_.end(),
+	         active_key) != active_class_virtual_completion_keys_.end())
+		return;
 	if (virtual_completion_active(active_class_virtual_completions_, bare))
 		return;
 	active_class_virtual_completions_.push_back(bare);
+	active_class_virtual_completion_keys_.push_back(active_key);
 	struct ActiveVirtualCompletionGuard
 	{
 		vector<TypePtr>& active;
+		vector<string>& keys;
 		TypePtr key;
+		string active_key;
 		ActiveVirtualCompletionGuard(vector<TypePtr>& active_records,
-		                             TypePtr active_key)
-			: active(active_records), key(active_key)
+		                             vector<string>& active_keys,
+		                             TypePtr record_key,
+		                             const string& key_text)
+			: active(active_records),
+			  keys(active_keys),
+			  key(record_key),
+			  active_key(key_text)
 		{
 		}
 		~ActiveVirtualCompletionGuard()
@@ -977,12 +1011,50 @@ void Parser::complete_class_virtuals(TypePtr type)
 				if (same_virtual_completion_record(active[i - 1], key))
 				{
 					active.erase(active.begin() + (i - 1));
-					return;
+					break;
 				}
 			}
+			for (size_t i = keys.size(); i > 0; --i)
+				if (keys[i - 1] == active_key)
+				{
+					keys.erase(keys.begin() + (i - 1));
+					break;
+				}
 		}
-	} active_guard(active_class_virtual_completions_, bare);
+	} active_guard(active_class_virtual_completions_,
+	               active_class_virtual_completion_keys_,
+	               bare,
+	               active_key);
 	vector<TypePtr> direct_bases = pa11::record_direct_bases(bare);
+	if (hosted_compatibility_ && hosted_library_namespace_scope(bare->scope))
+	{
+		bool needs_virtual_completion = false;
+		for (size_t i = 0; i < bare->scope->binding_order.size(); ++i)
+		{
+			Binding* member = bare->scope->binding_order[i];
+			if (member->kind == BindingKind::Function &&
+			    (member->is_virtual || member->is_override_specified))
+			{
+				needs_virtual_completion = true;
+				break;
+			}
+		}
+		for (size_t i = 0; !needs_virtual_completion && i < direct_bases.size(); ++i)
+		{
+			TypePtr direct_base = direct_bases[i].get() != NULL
+				? pa11::strip_cv(direct_bases[i]) : TypePtr();
+			if (direct_base.get() != NULL &&
+			    direct_base->kind == pa11::TypeKind::Record &&
+			    direct_base->is_polymorphic)
+				needs_virtual_completion = true;
+		}
+		if (!needs_virtual_completion)
+		{
+			bare->virtual_entries.clear();
+			bare->introduces_vptr = false;
+			return;
+		}
+	}
 	bool dependent_base_validation =
 		validating_template_definition_ &&
 		record_dependent_base_lookup_skips_.count(bare.get()) != 0;
@@ -1187,10 +1259,19 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 			for (size_t i = 0; i < suffix->parameters.size(); ++i)
 				if (suffix->parameters[i].has_default)
 					function->has_default_arguments = true;
-		if (specs.auto_decl)
+	bool deduced_auto_return =
+		specs.auto_decl &&
+		(suffix == NULL || suffix->trailing_return.get() == NULL);
+	if (deduced_auto_return)
 	{
 		auto_return_functions_.insert(function);
 		auto_return_patterns_[function] = type->base;
+	}
+	else
+	{
+		auto_return_functions_.erase(function);
+		auto_return_patterns_.erase(function);
+		auto_return_deduced_.erase(function);
 	}
 	if (validating_template_definition_)
 		function->is_dependent_template_artifact = true;
@@ -1284,7 +1365,8 @@ Binding* Parser::declare_function_entity(const DeclSpecs& specs,
 				defaults.push_back(default_value);
 				names.push_back(parameter_name);
 			}
-			default_arguments_[function] = defaults;
+			default_arguments_[function] =
+				default_arguments_for_binding(function, defaults);
 			function_parameter_names_[function] = names;
 			if (use_parameter_name_override)
 				override_function_parameter_name_bindings_.insert(function);

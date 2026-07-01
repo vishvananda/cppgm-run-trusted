@@ -1,5 +1,8 @@
 #include "pa12_templates_function_instantiation_engine.h"
 
+#include <cstdint>
+#include <functional>
+#include <set>
 #include <stdexcept>
 
 using namespace std;
@@ -59,12 +62,18 @@ bool same_owner_record(TypePtr left, TypePtr right)
 {
 	left = left.get() != NULL ? pa11::strip_cv(left) : TypePtr();
 	right = right.get() != NULL ? pa11::strip_cv(right) : TypePtr();
-	return left.get() != NULL &&
-	       right.get() != NULL &&
-	       left->kind == pa11::TypeKind::Record &&
-	       right->kind == pa11::TypeKind::Record &&
-	       (pa11::same_type(left, right) ||
-	        same_template_specialization_record(left, right));
+	if (left.get() == NULL ||
+	    right.get() == NULL ||
+	    left->kind != pa11::TypeKind::Record ||
+	    right->kind != pa11::TypeKind::Record)
+		return false;
+	if (left->is_template_specialization &&
+	    right->is_template_specialization &&
+	    !left->template_primary_name.empty() &&
+	    left->template_primary_name == right->template_primary_name)
+		return pa11::same_type(left, right);
+	return pa11::same_type(left, right) ||
+	       same_template_signature_type(left, right);
 }
 
 TypePtr function_this_record(Binding* binding)
@@ -95,6 +104,18 @@ bool same_replay_source_declaration(TemplateDeclaration* left,
 	       left->placeholder == right->placeholder &&
 	       left->decl_begin == right->decl_begin &&
 	       left->decl_end == right->decl_end;
+}
+
+map<string, Binding*>::iterator find_specialization_by_key(
+	map<string, Binding*>& specializations,
+	const string& key)
+{
+	for (map<string, Binding*>::iterator it = specializations.begin();
+	     it != specializations.end();
+	     ++it)
+		if (it->first.size() == key.size() && it->first == key)
+			return it;
+	return specializations.end();
 }
 
 }  // namespace
@@ -231,6 +252,16 @@ Binding* FunctionTemplateInstantiationEngine::redirect_to_matching_definition()
 {
 	if (declaration->has_definition)
 		return NULL;
+	vector<size_t> cache_key;
+	cache_key.push_back(reinterpret_cast<uintptr_t>(declaration));
+	cache_key.push_back(hash<string>()(key));
+	cache_key.push_back(arguments.size());
+	cache_key.push_back(p.template_declarations_.size());
+	cache_key.push_back(p.member_function_template_generation_);
+	map<vector<size_t>, Binding*>::iterator cached =
+		p.function_template_redirect_cache_.find(cache_key);
+	if (cached != p.function_template_redirect_cache_.end())
+		return cached->second;
 	for (map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
 		     sit = p.function_templates_.begin();
 	     sit != p.function_templates_.end(); ++sit)
@@ -265,34 +296,64 @@ Binding* FunctionTemplateInstantiationEngine::redirect_to_matching_definition()
 			{
 				continue;
 			}
-			return p.instantiate_function_template(candidate, arguments);
+			Binding* binding =
+				p.instantiate_function_template(candidate, arguments);
+			p.function_template_redirect_cache_[cache_key] = binding;
+			return binding;
 		}
 	}
+	p.function_template_redirect_cache_[cache_key] = NULL;
 	return NULL;
 }
 
 void FunctionTemplateInstantiationEngine::
 share_existing_specialization_if_available()
 {
-	if (declaration->function_specializations.find(key) !=
+	if (find_specialization_by_key(declaration->function_specializations,
+	                               key) !=
 	    declaration->function_specializations.end())
+		return;
+	if (p.hosted_compatibility_ &&
+	    p.function_template_candidate_instantiation_depth_ != 0 &&
+	    declaration->constructor_template &&
+	    declaration->placeholder != NULL &&
+	    p.hosted_library_function(declaration->placeholder))
+		return;
+	static set<size_t> miss_cache;
+	size_t miss_key = reinterpret_cast<uintptr_t>(&p);
+	miss_key ^= reinterpret_cast<uintptr_t>(declaration) +
+	            0x9e3779b97f4a7c15ULL + (miss_key << 6) + (miss_key >> 2);
+	miss_key ^= hash<string>()(key) +
+	            0x9e3779b97f4a7c15ULL + (miss_key << 6) + (miss_key >> 2);
+	miss_key ^= p.template_declarations_.size() +
+	            0x9e3779b97f4a7c15ULL + (miss_key << 6) + (miss_key >> 2);
+	miss_key ^= p.member_function_template_generation_ +
+	            0x9e3779b97f4a7c15ULL + (miss_key << 6) + (miss_key >> 2);
+	if (miss_cache.find(miss_key) != miss_cache.end())
 		return;
 	for (size_t di = 0; di < p.template_declarations_.size(); ++di)
 	{
 		TemplateDeclaration* candidate = p.template_declarations_[di].get();
 		if (candidate == declaration || candidate == NULL ||
-		    (!same_function_template_declaration_family(declaration,
-		                                                candidate) &&
-		     !same_replay_source_declaration(declaration,
-		                                     candidate)))
+		    candidate->kind != TemplateDeclarationKind::Function ||
+		    candidate->name != declaration->name ||
+		    candidate->function_specializations.empty())
 			continue;
 		map<string, Binding*>::iterator found =
-			candidate->function_specializations.find(key);
+			find_specialization_by_key(candidate->function_specializations,
+			                           key);
 		if (found == candidate->function_specializations.end())
+			continue;
+		if (!same_function_template_declaration_family(declaration,
+		                                               candidate) &&
+		    !same_replay_source_declaration(declaration,
+		                                    candidate))
 			continue;
 		if (!specialization_matches_declaration_owner(found->second))
 			continue;
 		declaration->function_specializations[key] = found->second;
+		remember_reused_specialization_body(found->second, candidate);
+		remember_reused_specialization_body(found->second, declaration);
 		return;
 	}
 	for (map<Scope*, map<string, vector<TemplateDeclaration*> > >::iterator
@@ -307,21 +368,76 @@ share_existing_specialization_if_available()
 		{
 			TemplateDeclaration* candidate = nit->second[di];
 			if (candidate == declaration || candidate == NULL ||
-			    (!same_function_template_declaration_family(declaration,
-			                                                candidate) &&
-			     !same_replay_source_declaration(declaration,
-			                                     candidate)))
+			    candidate->name != declaration->name)
 				continue;
-				map<string, Binding*>::iterator found =
-					candidate->function_specializations.find(key);
-				if (found == candidate->function_specializations.end())
-					continue;
-				if (!specialization_matches_declaration_owner(found->second))
-					continue;
-				declaration->function_specializations[key] = found->second;
-				return;
-			}
+			map<string, Binding*>::iterator found =
+				find_specialization_by_key(candidate->function_specializations,
+				                           key);
+			if (found == candidate->function_specializations.end())
+				continue;
+			if (!same_function_template_declaration_family(declaration,
+			                                               candidate) &&
+			    !same_replay_source_declaration(declaration,
+			                                    candidate))
+				continue;
+			if (!specialization_matches_declaration_owner(found->second))
+				continue;
+			declaration->function_specializations[key] = found->second;
+			remember_reused_specialization_body(found->second, candidate);
+			remember_reused_specialization_body(found->second, declaration);
+			return;
 		}
+	}
+	miss_cache.insert(miss_key);
+}
+
+	TemplateDeclaration* FunctionTemplateInstantiationEngine::
+	specialization_body_source(TemplateDeclaration* source)
+	{
+		if (source == NULL)
+			return NULL;
+		TemplateDeclaration* replacement =
+			p.replacement_function_template_definition(source);
+		if (replacement != NULL && replacement->has_definition)
+			return replacement;
+		return source->has_definition ? source : NULL;
+	}
+
+	void FunctionTemplateInstantiationEngine::
+	remember_reused_specialization_body(
+		Binding* binding,
+		TemplateDeclaration* source)
+	{
+		TemplateDeclaration* body_source = specialization_body_source(source);
+		if (binding == NULL || body_source == NULL)
+			return;
+		map<Binding*, TemplateDeclaration*>::iterator existing =
+			p.function_template_placeholders_.find(binding);
+		bool existing_has_body =
+			existing != p.function_template_placeholders_.end() &&
+			existing->second != NULL &&
+			existing->second->has_definition;
+		if (!existing_has_body)
+			p.function_template_placeholders_[binding] = body_source;
+		if (p.function_template_specialization_arguments_.find(binding) ==
+		    p.function_template_specialization_arguments_.end())
+			p.function_template_specialization_arguments_[binding] = full_args;
+		if (binding->aliased_binding == NULL)
+			return;
+		existing =
+			p.function_template_placeholders_.find(binding->aliased_binding);
+		existing_has_body =
+			existing != p.function_template_placeholders_.end() &&
+			existing->second != NULL &&
+			existing->second->has_definition;
+		if (!existing_has_body)
+			p.function_template_placeholders_[binding->aliased_binding] =
+				body_source;
+		if (p.function_template_specialization_arguments_.find(
+			    binding->aliased_binding) ==
+		    p.function_template_specialization_arguments_.end())
+			p.function_template_specialization_arguments_[
+				binding->aliased_binding] = full_args;
 	}
 
 	bool FunctionTemplateInstantiationEngine::
@@ -353,8 +469,12 @@ share_existing_specialization_if_available()
 		TypePtr this_record = function_this_record(binding);
 		if (this_record.get() == NULL)
 			return !declaration->constructor_template;
-		return same_owner_record(this_record, declaration_owner) &&
-		       specialization_signature_matches(binding);
+		if (!same_owner_record(this_record, declaration_owner))
+			return false;
+		if (declaration->constructor_template &&
+		    p.hosted_library_function(binding))
+			return true;
+		return specialization_signature_matches(binding);
 	}
 
 	bool FunctionTemplateInstantiationEngine::
@@ -385,7 +505,7 @@ share_existing_specialization_if_available()
 				if (parameter.is_pack)
 				{
 					subst[parameter.name] =
-						pa11::make_template_parameter_type(parameter.name);
+						template_parameter_placeholder_type(parameter);
 					value_subst[parameter.name] = full_args[i];
 					pack_subst.insert(parameter.name);
 				}
@@ -443,16 +563,25 @@ share_existing_specialization_if_available()
 			return existing->second;
 		if (p.active_function_body_replays_.count(existing->second) != 0)
 			return existing->second;
+	remember_reused_specialization_body(existing->second, declaration);
 	bool existing_has_body =
 		p.function_bodies_.find(existing->second) != p.function_bodies_.end();
 	bool existing_body_dependent =
 		existing_has_body &&
 		expr_node_structurally_dependent(
 			p.function_bodies_.find(existing->second)->second);
-	bool existing_still_dependent =
+	bool existing_type_dependent =
 		type_structurally_dependent(existing->second->type) ||
-		existing_body_dependent;
+		p.type_is_template_dependent(existing->second->type);
+	bool existing_still_dependent =
+		existing_type_dependent || existing_body_dependent;
 	bool existing_usable = full_args_dependent || !existing_still_dependent;
+	if (existing->second->is_extern_template_instantiation &&
+	    existing_usable)
+		return existing->second;
+	if (existing->second->is_explicit_specialization_member &&
+	    existing_usable)
+		return existing->second;
 	if (existing_has_body &&
 	    p.function_template_placeholders_.find(existing->second) ==
 		    p.function_template_placeholders_.end() &&
@@ -466,8 +595,7 @@ share_existing_specialization_if_available()
 	if (!need_constexpr_value_body &&
 	    p.function_template_candidate_instantiation_depth_ != 0 &&
 	    p.hosted_compatibility_ && !existing->second->is_object_root &&
-	    hosted_internal_function_name(existing->second->name) &&
-	    p.defer_hosted_function_body(existing->second))
+	    hosted_internal_function_name(existing->second->name))
 		return existing->second;
 	if (p.function_template_candidate_instantiation_depth_ != 0 &&
 	    existing_usable && !need_constexpr_value_body)
@@ -485,7 +613,7 @@ share_existing_specialization_if_available()
 		return existing->second;
 	if (existing_usable &&
 	    ((existing->second->is_inline_definition && existing_has_body) ||
-	     existing->second->is_object_root))
+	     (existing->second->is_object_root && existing_has_body)))
 		return existing->second;
 	replaced_specialization = existing->second;
 	if (!declaration->has_definition)
@@ -516,7 +644,9 @@ void FunctionTemplateInstantiationEngine::enter_substitution_scope()
 		{
 			if (declaration->parameters[i].is_pack)
 			{
-				subst[name] = pa11::make_template_parameter_type(name);
+				const TemplateParameterInfo& parameter =
+					declaration->parameters[i];
+				subst[name] = template_parameter_placeholder_type(parameter);
 				value_subst[name] = full_args[i];
 				pack_subst.insert(name);
 			}

@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 
 namespace pa14 {
 namespace internal {
@@ -107,12 +108,12 @@ uint64_t hosted_basic_string_member_offset(TypePtr object_record,
 		? pa11::strip_cv(object_record) : TypePtr();
 	if (!hosted_basic_string_record(object) || member == NULL)
 		return fallback;
-	if (member->name == "_M_dataplus")
+	if (member->name == pa11::abi_private_name("M_dataplus"))
 		return 0;
-	if (member->name == "_M_string_length")
+	if (member->name == pa11::abi_private_name("M_string_length"))
 		return 8;
-	if (member->name == "_M_local_buf" ||
-	    member->name == "_M_allocated_capacity" ||
+	if (member->name == pa11::abi_private_name("M_local_buf") ||
+	    member->name == pa11::abi_private_name("M_allocated_capacity") ||
 	    member->name.find("__anonymous_union_storage__") == 0)
 		return 16;
 	return fallback;
@@ -125,8 +126,8 @@ uint64_t anonymous_union_containing_offset(TypePtr object_record,
 		? pa11::strip_cv(object_record) : TypePtr();
 	if (hosted_basic_string_record(object) &&
 	    member != NULL &&
-	    (member->name == "_M_local_buf" ||
-	     member->name == "_M_allocated_capacity"))
+	    (member->name == pa11::abi_private_name("M_local_buf") ||
+	     member->name == pa11::abi_private_name("M_allocated_capacity")))
 		return 0;
 	TypePtr owner = member != NULL && member->owner != NULL
 		? pa11::record_type_for_scope(member->owner) : TypePtr();
@@ -212,7 +213,7 @@ Value FunctionLowerer::emit_hosted_hash_node_next_call(const Node& expr,
 	if (!starts_with(expr.line, "call-expression") ||
 	    expr.children.empty() ||
 	    !starts_with(expr.children[0].line, "member-expression") ||
-	    expr.children[0].token_text != "_M_next" ||
+	    expr.children[0].token_text != pa11::abi_private_name("M_next") ||
 	    expr.children[0].children.empty())
 		return Value();
 	const Node& object = expr.children[0].children[0];
@@ -289,27 +290,6 @@ Value FunctionLowerer::emit_typeid_lvalue_addr(const Node& expr)
 
 Value FunctionLowerer::emit_literal(const Node& expr)
 {
-	if (expr.binding != NULL &&
-	    expr.binding->kind == BindingKind::Variable &&
-	    expr.binding->has_constant &&
-	    expr.binding->is_static_member &&
-	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
-		    TypeKind::Record &&
-	    pa11::strip_cv(strip_for_value(expr.binding->type))->kind !=
-		    TypeKind::Array)
-	{
-		bool specialized_body =
-			fn_.binding != NULL &&
-			(binding_has_template_specialization_context(fn_.binding) ||
-			 !fn_.binding->function_specialization_symbol.empty() ||
-			 (fn_.binding->aliased_binding != NULL &&
-			  !fn_.binding->aliased_binding
-				   ->function_specialization_symbol.empty()));
-		if (!program_.template_static_member_constant_load_required(
-			    expr.binding) ||
-		    specialized_body)
-			program_.demand_deferred_global_definition(expr.binding);
-	}
 	if (expr.token_text.size() > 0 &&
 	    expr.token_text[expr.token_text.size() - 1] == '"')
 	{
@@ -352,7 +332,9 @@ Value FunctionLowerer::emit_id_rvalue(const Node& expr)
 			    expr.binding) ||
 		    specialized_body)
 		{
-			program_.demand_deferred_global_definition(expr.binding);
+			if (!expr.binding->is_constexpr)
+				program_.demand_deferred_global_definition(
+					expr.binding);
 			return Value(scalar_lowir_type(expr.binding->type),
 			             to_string(expr.binding->constant_value));
 		}
@@ -488,7 +470,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	if (starts_with(expr.line, "call-expression") &&
 	    !expr.children.empty() &&
 	    starts_with(expr.children[0].line, "member-expression") &&
-	    expr.children[0].token_text == "_M_v" &&
+	    expr.children[0].token_text == pa11::abi_private_name("M_v") &&
 	    !expr.children[0].children.empty())
 	{
 		const Node& object = expr.children[0].children[0];
@@ -509,7 +491,7 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		}
 	}
 	if (starts_with(expr.line, "member-expression") &&
-	    expr.token_text == "_M_nxt" &&
+	    expr.token_text == pa11::abi_private_name("M_nxt") &&
 	    !expr.children.empty())
 	{
 		const Node& object = expr.children[0];
@@ -625,10 +607,27 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 		if (return_slot_variables_.find(expr.binding) !=
 		    return_slot_variables_.end())
 			return Value("ptr", "%ret");
+		if (by_address_parameters_.find(expr.binding) !=
+		    by_address_parameters_.end())
+			return Value("ptr", "%" + slot_for(expr.binding));
 		if (expr.binding->is_local_static)
 		{
 			program_.demand_global_declaration(expr.binding);
 			return Value("ptr", "@" + program_.symbol_for(expr.binding));
+		}
+		if (is_reference(expr.binding->type))
+		{
+			string tmp = fresh_temp();
+			if (expr.binding->is_static_member ||
+			    (expr.binding->owner != NULL &&
+			     expr.binding->owner->kind == ScopeKind::Namespace))
+			{
+				program_.demand_global_declaration(expr.binding);
+				instr(tmp + " = load ptr @" + program_.symbol_for(expr.binding));
+			}
+			else
+				instr(tmp + " = load ptr $" + slot_for(expr.binding));
+			return Value("ptr", tmp);
 		}
 		return Value("ptr", "$" + slot_for(expr.binding));
 	}
@@ -837,7 +836,20 @@ Value FunctionLowerer::emit_lvalue_addr(const Node& expr)
 	}
 	if (starts_with(expr.line, "cast-expression") ||
 	    starts_with(expr.line, "id-expression xvalue"))
+	{
+		if (is_reference(expr.type) &&
+		    !expr.children.empty() &&
+		    starts_with(expr.children[0].line, "literal") &&
+		    expr.children[0].has_constant_value &&
+		    expr.children[0].constant_value == 0)
+			return Value("ptr", "0");
 		return emit_lvalue_addr(expr.children.empty() ? expr : expr.children[0]);
+	}
+	if (starts_with(expr.line, "literal") &&
+	    is_reference(expr.type) &&
+	    expr.has_constant_value &&
+	    expr.constant_value == 0)
+		return Value("ptr", "0");
 	throw runtime_error("unsupported lvalue expression: " + expr.line);
 }
 
@@ -864,9 +876,30 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 		throw runtime_error("member expression missing object");
 	TypePtr owner_record = pa11::record_type_for_scope(member->owner);
 	Value base;
-	TypePtr object_record = expr.has_op && expr.op == OP_ARROW
+	TypePtr object_value_type = expr.has_op && expr.op == OP_ARROW
 		? pa11::strip_cv(strip_for_value(expr.children[0].type))
 		: pa11::strip_cv(object_type(expr.children[0].type));
+	TypePtr child_value_type =
+		!expr.children.empty()
+		? pa11::strip_cv(strip_for_value(expr.children[0].type))
+		: TypePtr();
+	bool arrow_pointer_object =
+		expr.has_op && expr.op == OP_ARROW &&
+		object_value_type.get() != NULL &&
+		object_value_type->kind == TypeKind::Pointer;
+	bool pointer_call_object =
+		!expr.children.empty() &&
+		starts_with(expr.children[0].line, "call-expression") &&
+		((child_value_type.get() != NULL &&
+		  child_value_type->kind == TypeKind::Pointer) ||
+		 (expr.children[0].direct_call != NULL &&
+		  (expr.children[0].direct_call->name == "operator->" ||
+		   expr.children[0].direct_call->name == "operator ->") &&
+		  expr.children[0].direct_call->type.get() != NULL &&
+		  expr.children[0].direct_call->type->kind == TypeKind::Function &&
+		  pa11::strip_cv(expr.children[0].direct_call->type->base)->kind ==
+			  TypeKind::Pointer));
+	TypePtr object_record = object_value_type;
 	if (object_record.get() != NULL &&
 	    object_record->kind == TypeKind::Pointer)
 		object_record = pa11::strip_cv(object_record->base);
@@ -893,7 +926,7 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 	}
 	if (!hidden_member_base)
 	{
-		if (expr.has_op && expr.op == OP_ARROW)
+		if ((expr.has_op && expr.op == OP_ARROW) || pointer_call_object)
 			base = emit_rvalue(expr.children[0]);
 		else if (expr.children[0].category == ValueCategory::LValue ||
 		         expr.children[0].category == ValueCategory::XValue)
@@ -914,7 +947,16 @@ Value FunctionLowerer::emit_member_lvalue_addr(const Node& expr)
 			};
 			lower_object_init(object_addr, materialized_record, expr.children[0]);
 		}
-		base = ensure_pointer(base);
+		if ((arrow_pointer_object || pointer_call_object) &&
+		    !base.text.empty() &&
+		    (base.text[0] == '$' || base.text[0] == '@'))
+		{
+			string loaded = fresh_temp();
+			instr(loaded + " = load ptr " + base.text);
+			base = Value("ptr", loaded);
+		}
+		else
+			base = ensure_pointer(base);
 	}
 	bool projected_virtual_base_owner = false;
 	if (object_record.get() != NULL &&

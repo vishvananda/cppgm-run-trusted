@@ -5,10 +5,35 @@ using namespace std;
 namespace pa31 {
 namespace host {
 
+namespace {
+
+const string& catch_all_type_marker()
+{
+	static const string marker = "\001catch_all";
+	return marker;
+}
+
+string catch_all_type_key(int selector)
+{
+	return catch_all_type_marker() + ":" + to_string(selector);
+}
+
+bool is_catch_all_type_key(const string& type)
+{
+	const string& marker = catch_all_type_marker();
+	return type.compare(0, marker.size(), marker) == 0;
+}
+
+}  // namespace
+
 void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 {
 	Blob b; uleb(b, value); out.insert(out.end(), b.data.begin(), b.data.end());
 }
+	void append_bytes(Blob& out, const vector<unsigned char>& bytes)
+	{
+		out.data.insert(out.data.end(), bytes.begin(), bytes.end());
+	}
 	void append_sleb_to(vector<unsigned char>& out, int64_t value)
 	{
 		Blob b; sleb(b, value); out.insert(out.end(), b.data.begin(), b.data.end());
@@ -43,7 +68,9 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 	                            vector<string>& types,
 	                            const CatchInfo& c)
 	{
-		const string type = c.catch_all ? string() : c.type_symbol;
+		const string type = c.catch_all
+			? catch_all_type_key(c.selector)
+			: c.type_symbol;
 		return ensure_type_symbol_index(type_index, types, type, c.selector);
 	}
 	int ensure_exception_spec_filter(map<string, int>& type_index,
@@ -75,29 +102,16 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 		return filter;
 	}
 	int append_action_chain(vector<unsigned char>& action_table,
-	                        map<string, int>& type_index,
-	                        vector<string>& types,
-	                        map<string, int>& spec_filters,
-	                        vector<unsigned char>& spec_table,
 	                        const vector<CatchInfo>& catch_list,
 	                        bool cleanup)
-	{
-		vector<int> filters;
-		if (cleanup && !catch_list.empty())
-			filters.push_back(0);
-		for (size_t i = 0; i < catch_list.size(); ++i)
 		{
-			if (catch_list[i].exception_spec)
-				filters.push_back(ensure_exception_spec_filter(
-					type_index, types, spec_filters, spec_table,
-					catch_list[i]));
-			else
-				filters.push_back(
-					ensure_catch_type_index(type_index, types,
-					                        catch_list[i]));
-		}
-		if (filters.empty())
-			return 0;
+			vector<int> filters;
+			for (size_t i = 0; i < catch_list.size(); ++i)
+				filters.push_back(catch_list[i].raw_selector);
+			if (cleanup && !catch_list.empty())
+				filters.push_back(0);
+			if (filters.empty())
+				return 0;
 		int next_start = -1;
 		for (size_t n = 0; n < filters.size(); ++n)
 		{
@@ -119,17 +133,13 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 		return;
 	sort(ranges.begin(), ranges.end(),
 	     [](const EhRange& a, const EhRange& b) { return a.start < b.start; });
-	map<string, int> type_index;
-	map<string, int> spec_filters;
-	vector<string> types;
 	vector<unsigned char> call_table;
 	vector<unsigned char> action_table;
-	vector<unsigned char> spec_table;
 	size_t cursor = 0;
 	for (size_t i = 0; i < ranges.size(); ++i)
 	{
 		const size_t range_start = ranges[i].start - base;
-		const size_t range_end = ranges[i].end - base + 1;
+		const size_t range_end = ranges[i].end - base;
 		if (range_start > cursor)
 		{
 			append_uleb_to(call_table, cursor);
@@ -147,9 +157,8 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 				!ranges[i].target.empty() &&
 				cleanup_action_blocks.count(ranges[i].target) != 0;
 			if (c != catches.end())
-				action = append_action_chain(action_table, type_index, types,
-				                             spec_filters, spec_table,
-				                             c->second, cleanup);
+				action = append_action_chain(action_table, c->second,
+				                             cleanup);
 		append_uleb_to(call_table, range_start);
 		append_uleb_to(call_table, range_end - range_start);
 		append_uleb_to(call_table, lp);
@@ -163,48 +172,53 @@ void append_uleb_to(vector<unsigned char>& out, uint64_t value)
 		append_uleb_to(call_table, 0);
 		append_uleb_to(call_table, 0);
 	}
-	vector<string> type_refs(types.size());
-	for (size_t i = 0; i < types.size(); ++i)
-		if (!types[i].empty())
-			type_refs[i] = unit.obj.ensure_dw_ref(types[i]);
+	vector<string> type_refs(lsda_types.size());
+	for (size_t i = 0; i < lsda_types.size(); ++i)
+		if (!lsda_types[i].empty() &&
+		    !is_catch_all_type_key(lsda_types[i]))
+			type_refs[i] = unit.obj.ensure_dw_ref(lsda_types[i]);
 	Section& lsda = unit.obj.gcc_except_table();
 	lsda.bytes.align(4);
 	const size_t start = lsda.bytes.pos();
 	info.has_lsda = true;
 	info.lsda_offset = start;
 	lsda.bytes.u8(0xff);
-	if (types.empty())
+	if (lsda_types.empty())
+	{
 		lsda.bytes.u8(0xff);
+		lsda.bytes.u8(0x01);
+		uleb(lsda.bytes, call_table.size());
+		for (size_t i = 0; i < call_table.size(); ++i) lsda.bytes.u8(call_table[i]);
+		for (size_t i = 0; i < action_table.size(); ++i) lsda.bytes.u8(action_table[i]);
+	}
 	else
 	{
-		lsda.bytes.u8(0x9b);
-		const size_t offset_pos = lsda.bytes.pos();
-		uleb(lsda.bytes, 1);
-		lsda.bytes.u8(0x01);
-		uleb(lsda.bytes, call_table.size());
-		for (size_t i = 0; i < call_table.size(); ++i) lsda.bytes.u8(call_table[i]);
-		for (size_t i = 0; i < action_table.size(); ++i) lsda.bytes.u8(action_table[i]);
-		for (size_t n = 0; n < types.size(); ++n)
+		Blob body;
+		body.u8(0x01);
+		uleb(body, call_table.size());
+		append_bytes(body, call_table);
+		append_bytes(body, action_table);
+		vector<size_t> type_offsets;
+		for (size_t n = 0; n < lsda_types.size(); ++n)
 		{
-				const string& type = types[types.size() - 1 - n];
-				const size_t off = lsda.bytes.pos();
-				lsda.bytes.u32(0);
-				if (!type.empty())
-					unit.obj.reloc(lsda, off,
-					               type_refs[types.size() - 1 - n],
-					               R_X86_64_PC32, 0);
+			type_offsets.push_back(body.pos());
+			body.u32(0);
 		}
-		const size_t base_pos = lsda.bytes.pos();
-		for (size_t i = 0; i < spec_table.size(); ++i)
-			lsda.bytes.u8(spec_table[i]);
-		const uint64_t ttype_offset = base_pos - (offset_pos + 1);
-		lsda.bytes.data[offset_pos] = static_cast<unsigned char>(ttype_offset);
-		return;
+		const size_t type_table_base = body.pos();
+		append_bytes(body, lsda_spec_table);
+		lsda.bytes.u8(0x9b);
+		uleb(lsda.bytes, type_table_base);
+		const size_t body_start = lsda.bytes.pos();
+		append_bytes(lsda.bytes, body.data);
+		for (size_t n = 0; n < type_offsets.size(); ++n)
+		{
+			const size_t i = lsda_types.size() - 1 - n;
+			if (!lsda_types[i].empty() &&
+			    !is_catch_all_type_key(lsda_types[i]))
+				unit.obj.reloc(lsda, body_start + type_offsets[n],
+				               type_refs[i], R_X86_64_PC32, 0);
+		}
 	}
-		lsda.bytes.u8(0x01);
-		uleb(lsda.bytes, call_table.size());
-		for (size_t i = 0; i < call_table.size(); ++i) lsda.bytes.u8(call_table[i]);
-		for (size_t i = 0; i < action_table.size(); ++i) lsda.bytes.u8(action_table[i]);
 	}
 
 	void cie_instructions(Blob& b)
@@ -280,11 +294,18 @@ void Unit::emit_eh_frame()
 {
 	if (infos.empty())
 		return;
+	bool any_fde = false;
+	for (size_t i = 0; i < infos.size(); ++i)
+		any_fde = any_fde || infos[i].emit_fde;
+	if (!any_fde)
+		return;
 	const size_t cie_plain = write_cie(obj, false);
 	size_t cie_eh = 0;
 	bool made_eh = false;
 	for (size_t i = 0; i < infos.size(); ++i)
 	{
+		if (!infos[i].emit_fde)
+			continue;
 		if (infos[i].has_lsda && !made_eh)
 		{
 			cie_eh = write_cie(obj, true);

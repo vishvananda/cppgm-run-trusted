@@ -1,0 +1,5 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+end translation unit

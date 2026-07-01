@@ -1,0 +1,54 @@
+declare function @Sink__write(%arg0 : ptr, %arg1 : ptr [pass=reference], %arg2 : i32) -> void [binding=strong, object=_ZN4Sink5writeERK4TextIiEi]
+declare function @Text_int___Text(%arg0 : ptr, %arg1 : ptr) -> void [binding=weak, object=_ZN4TextIiEC1EPKc]
+declare function @Text_int____Text(%arg0 : ptr) -> void [binding=weak, object=_ZN4TextIiED1Ev]
+
+global @__strlit__1 [binding=internal] = {
+  i8 116
+  i8 97
+  i8 103
+  i8 0
+}
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $sink : obj<1x1>
+
+  block ^entry:
+    %t1 = addr $sink
+    %t2 = addr $sink
+    call void @Sink__emit(%t2, 7)
+    return i32 0
+}
+function @Sink__emit(%this : ptr, %value : i32) -> void [binding=weak, object=_ZN4Sink4emitEi] {
+  slot $this : ptr
+  slot $value : i32
+  slot $arg__1 : obj<1x1>
+
+  block ^entry:
+    store ptr %this, $this
+    store i32 %value, $value
+    eh_try ^call_unwind_dispatch_1
+    %t1 = load ptr $this
+    %t2 = addr $arg__1
+    %t3 = addr @__strlit__1
+    call void @Text_int___Text(%t2, %t3)
+    eh_end
+    jump ^call_unwind_end_2
+
+  block ^call_unwind_dispatch_1:
+    resume
+
+  block ^call_unwind_end_2:
+    eh_try ^call_unwind_dispatch_3
+    %t4 = load i32 $value
+    call void @Sink__write(%t1, %t2, %t4)
+    call void @Text_int____Text(%t2)
+    eh_end
+    jump ^call_unwind_end_4
+
+  block ^call_unwind_dispatch_3:
+    call void @Text_int____Text(%t2)
+    resume
+
+  block ^call_unwind_end_4:
+    return void
+}

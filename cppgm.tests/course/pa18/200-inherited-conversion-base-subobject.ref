@@ -1,0 +1,128 @@
+function @use_a(%value : ptr [pass=reference]) -> i32 [binding=strong, object=_Z5use_aRK1A] {
+  slot $value : ptr
+
+  block ^entry:
+    store ptr %value, $value
+    %t1 = load ptr $value
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load i32 %t2
+    return i32 %t3
+}
+function @use_b(%value : ptr [pass=reference]) -> i32 [binding=strong, object=_Z5use_bRK1B] {
+  slot $value : ptr
+
+  block ^entry:
+    store ptr %value, $value
+    %t1 = load ptr $value
+    %t2 = index i8 [projection=field] %t1, 0
+    %t3 = load i32 %t2
+    return i32 %t3
+}
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  slot $value : obj<8x4>
+  slot $cond__1 : i32
+  slot $land__2 : i64
+
+  block ^entry:
+    %t1 = addr $value
+    call void @Convertible_B__Convertible_A__Empty____Convertible(%t1)
+    %t2 = addr $value
+    %t3 = index i8 [projection=base_subobject] %t2, 0
+    %t4 = call ptr @Convertible_A__Empty___operatorconstT_(%t3)
+    %t5 = call i32 @use_a(%t4)
+    %t6 = cmp eq i32 %t5, 7
+    branch %t6, ^land_rhs_4, ^land_short_5
+
+  block ^land_rhs_4:
+    %t7 = addr $value
+    %t8 = call ptr @Convertible_B__Convertible_A__Empty____operatorconstT_(%t7)
+    %t9 = call i32 @use_b(%t8)
+    %t10 = cmp eq i32 %t9, 11
+    %t11 = cmp ne i64 %t10, 0
+    store i64 %t11, $land__2
+    jump ^land_end_6
+
+  block ^land_short_5:
+    store i64 0, $land__2
+    jump ^land_end_6
+
+  block ^land_end_6:
+    %t12 = load i64 $land__2
+    branch %t12, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 0, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 1, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t13 = load i32 $cond__1
+    return i32 %t13
+}
+function @Convertible_B__Convertible_A__Empty____Convertible(%this : ptr) -> void [binding=weak, object=_ZN11ConvertibleI1BS_I1A5EmptyEEC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=base_subobject] %t1, 0
+    call void @Convertible_A__Empty___Convertible__base_entry(%t2)
+    %t3 = load ptr $this
+    %t4 = index i8 [projection=field] %t3, 4
+    call void @B__B(%t4)
+    return void
+}
+function @Convertible_B__Convertible_A__Empty____operatorconstT_(%this : ptr) -> ptr [binding=weak, object=_ZNK11ConvertibleI1BS_I1A5EmptyEEcvRK1BEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 4
+    return ptr %t2
+}
+function @Convertible_A__Empty___Convertible__base_entry(%this : ptr) -> void [binding=weak, object=_ZN11ConvertibleI1A5EmptyEC2Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    call void @A__A(%t2)
+    return void
+}
+function @Convertible_A__Empty___operatorconstT_(%this : ptr) -> ptr [binding=weak, object=_ZNK11ConvertibleI1A5EmptyEcvRK1AEv] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    return ptr %t2
+}
+function @A__A(%this : ptr) -> void [binding=weak, object=_ZN1AC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 7, %t2
+    return void
+}
+function @B__B(%this : ptr) -> void [binding=weak, object=_ZN1BC1Ev] {
+  slot $this : ptr
+
+  block ^entry:
+    store ptr %this, $this
+    %t1 = load ptr $this
+    %t2 = index i8 [projection=field] %t1, 0
+    store i32 11, %t2
+    return void
+}
+alias object _ZN11ConvertibleI1BS_I1A5EmptyEEC2Ev = @Convertible_B__Convertible_A__Empty____Convertible
+alias object _ZN1AC2Ev = @A__A
+alias object _ZN1BC2Ev = @B__B

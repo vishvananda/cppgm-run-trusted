@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 #include "pa12_templates_function_support.h"
 #include "pa12_types_support.h"
 
@@ -81,6 +82,13 @@ bool lowir_signature_needs_incomplete_record_layout(const Binding* binding)
 	return false;
 }
 
+bool lowir_skip_function_definition_node(const Node& node)
+{
+	return node.token_text == "deleted" ||
+	       (node.binding != NULL &&
+	        !pa12::internal::substituted_type_is_valid(node.binding->type));
+}
+
 bool record_vector_contains(const vector<TypePtr>& records, TypePtr record)
 {
 	record = record.get() != NULL ? pa11::strip_cv(record) : TypePtr();
@@ -143,6 +151,25 @@ void collect_owner_template_specialization_records(const Binding* binding,
 		    !record_vector_contains(out, record))
 			out.push_back(record);
 	}
+}
+
+string static_member_demand_order_key(const Binding* binding)
+{
+	if (binding == NULL)
+		return string();
+	string object = global_object_symbol(binding);
+	if (!object.empty())
+		return "O:" + object;
+	return "N:" + binding->name + ":" +
+	       (binding->type.get() != NULL ? pa11::describe_type(binding->type)
+	                                    : string());
+}
+
+bool static_member_demand_less(const Binding* left, const Binding* right)
+{
+	string lkey = static_member_demand_order_key(left);
+	string rkey = static_member_demand_order_key(right);
+	return lkey != rkey ? lkey < rkey : false;
 }
 
 bool binding_set_contains_constructor_or_alias(
@@ -243,7 +270,10 @@ void demand_complete_static_downcast_source_constructors(
 }  // namespace
 
 ProgramLowerer::ProgramLowerer(bool native, bool host_object)
-	: active_inline_definition(NULL),
+	: inline_definition_lookup_cache_size(0),
+	  inline_definition_member_lookup_cache_size(0),
+	  emitting_inline_definitions(false),
+	  active_inline_definition(NULL),
 	  active_inline_dependency_insert_count(0),
 	  native_lowering(native),
 	  host_object_lowering(host_object),
@@ -251,6 +281,16 @@ ProgramLowerer::ProgramLowerer(bool native, bool host_object)
 	  needs_eh_declarations(false),
 	  generated_assignment_emit_depth(0)
 {
+}
+
+void rank_inline_definition(ProgramLowerer& program, const Binding* binding)
+{
+	if (binding == NULL)
+		return;
+	if (program.inline_definition_ranks.find(binding) ==
+	    program.inline_definition_ranks.end())
+		program.inline_definition_ranks[binding] =
+			program.inline_definition_ranks.size();
 }
 
 void ProgramLowerer::mark_static_downcast_source_record(TypePtr record)
@@ -315,6 +355,11 @@ string ProgramLowerer::global_scalar_initializer(TypePtr type, const Node& init)
 	    init.token_text.size() > 0 &&
 	    init.token_text[init.token_text.size() - 1] == '"')
 		return "addr @" + string_symbol(init.token_text);
+	if (scalar_lowir_type(type) == "ptr" &&
+	    starts_with(init.line, "literal") &&
+	    init.has_constant_value &&
+	    init.constant_value == 0)
+		return "zero";
 	if (starts_with(init.line, "id-expression") && init.binding != NULL &&
 	    scalar_lowir_type(type) == "ptr")
 	{
@@ -373,7 +418,7 @@ string ProgramLowerer::global_data_item(TypePtr elem, const Node& init)
 	if (scalar_lowir_type(elem) == "ptr")
 	{
 		string value = global_scalar_initializer(elem, init);
-		if (value == "zero")
+		if (value == "zero" || value == "0" || value == "nullptr")
 			return "zero 8";
 		return "ptr " + value;
 	}
@@ -676,10 +721,17 @@ void ProgramLowerer::demand_template_static_member_definitions_for_function(
 		    !member->is_static_member ||
 		    !member->is_template_static_member_definition)
 			continue;
+		TypePtr member_object = strip_for_value(member->type);
+		TypePtr member_bare = pa11::strip_cv(member_object);
+		if (member->is_constexpr &&
+		    member_bare->kind != TypeKind::Array &&
+		    member_bare->kind != TypeKind::Record)
+			continue;
 		TypePtr owner = class_record_for_member(member);
 		if (record_vector_contains(associated_records, owner))
 			demands.push_back(member);
 	}
+	stable_sort(demands.begin(), demands.end(), static_member_demand_less);
 	for (size_t i = 0; i < demands.size(); ++i)
 		demand_deferred_global_definition(demands[i]);
 }
@@ -980,11 +1032,17 @@ void ProgramLowerer::queue_synthetic_assignment_function(Binding* binding,
 
 void ProgramLowerer::emit_pending_synthetic_assignment_functions()
 {
-	if (pending_synthetic_assignment_functions.empty())
+	if (pending_synthetic_constructor_functions.empty() &&
+	    pending_synthetic_assignment_functions.empty())
 		return;
 	emit_pending_generated_aggregate_constructors();
-	if (pending_synthetic_assignment_functions.empty())
+	if (pending_synthetic_constructor_functions.empty() &&
+	    pending_synthetic_assignment_functions.empty())
 		return;
+	functions.insert(functions.end(),
+	                 pending_synthetic_constructor_functions.begin(),
+	                 pending_synthetic_constructor_functions.end());
+	pending_synthetic_constructor_functions.clear();
 	functions.insert(functions.end(),
 	                 pending_synthetic_assignment_functions.begin(),
 	                 pending_synthetic_assignment_functions.end());
@@ -1076,6 +1134,8 @@ void collect_variable_node(ProgramLowerer& program, const Node& node)
 void collect_function_definition_node(ProgramLowerer& program,
                                       const Node& node)
 {
+	if (lowir_skip_function_definition_node(node))
+		return;
 	if (node.binding != NULL &&
 	    node.binding->is_inline_definition &&
 	    !node.binding->is_explicit_defaulted_definition)
@@ -1108,19 +1168,24 @@ void collect_function_definition_node(ProgramLowerer& program,
 	if (is_class_constructor_binding(node.binding))
 	{
 		string name = program.symbol_for(node.binding);
-		program.defined_functions.insert(name + "__base_entry");
-		program.functions.push_back(make_constructor_base_entry(lowered, name));
+		string base_name = name + "__base_entry";
+		if (program.defined_functions.insert(base_name).second)
+			program.functions.push_back(
+				make_constructor_base_entry(lowered, name));
 	}
 	if (is_class_destructor_binding(node.binding))
 	{
 		string name = program.symbol_for(node.binding);
-		program.defined_functions.insert(name + "__base_entry");
-		FunctionLowerer base_lowerer(program, node, true);
-		FunctionOut base_lowered = base_lowerer.lower();
-		program.functions.push_back(
-			make_destructor_base_entry(base_lowered,
-			                           name,
-			                           program.native_lowering));
+		string base_name = name + "__base_entry";
+		if (program.defined_functions.insert(base_name).second)
+		{
+			FunctionLowerer base_lowerer(program, node, true);
+			FunctionOut base_lowered = base_lowerer.lower();
+			program.functions.push_back(
+				make_destructor_base_entry(base_lowered,
+				                           name,
+				                           program.native_lowering));
+		}
 	}
 	if (node.binding != NULL &&
 	    node.binding->owner != NULL &&
@@ -1182,10 +1247,25 @@ void ProgramLowerer::register_function_declaration(const Node& node)
 		return;
 	if (lowir_signature_needs_incomplete_record_layout(binding))
 		return;
+	if (!pa12::internal::substituted_type_is_valid(binding->type))
+		return;
 	string name = symbol_for(binding);
 	if (function_declarations_by_binding.find(binding) !=
 	    function_declarations_by_binding.end())
 		return;
+	if (lowir_synthesizable_hosted_inline_body(binding) &&
+	    synthetic_inline_definitions.find(binding) ==
+		    synthetic_inline_definitions.end() &&
+	    inline_definitions.find(binding) == inline_definitions.end())
+	{
+		synthetic_inline_definitions[binding] =
+			lowir_make_hosted_inline_body_node(binding);
+		rank_inline_definition(*this, binding);
+		inline_definitions[binding] =
+			&synthetic_inline_definitions[binding];
+		demanded_inline_complete_entries.insert(binding);
+		insert_pending_inline_definition(binding);
+	}
 	bool indirect_result =
 		pa11::strip_cv(binding->type->base)->kind == TypeKind::Record &&
 		record_return_by_address(binding->type->base);
@@ -1316,13 +1396,35 @@ bool synthesized_default_constructor_should_replace(const Node& current,
 	       !function_definition_compound_body_empty(candidate) &&
 	       function_definition_is_complete_body(candidate);
 }
+
+bool synthesized_copy_move_constructor_should_replace(const Node& current,
+                                                      const Node& candidate)
+{
+	Binding* binding = candidate.binding;
+	if (binding == NULL ||
+	    binding != current.binding ||
+	    (!binding->is_generated_copy_move_constructor &&
+	     candidate.token_text != "copy-move-helper") ||
+	    !binding->is_defaulted ||
+	    binding->owner == NULL ||
+	    binding->owner->kind != ScopeKind::Class ||
+	    binding->name != binding->owner->name)
+		return false;
+	return function_definition_compound_body_empty(current) &&
+	       !function_definition_compound_body_empty(candidate) &&
+	       function_definition_is_complete_body(candidate);
+}
 }
 
 void ProgramLowerer::register_inline_definition(const Node& node)
 {
 	if (node.binding == NULL)
 		return;
-	if (lowir_extern_template_class_external_binding(node.binding))
+	if (lowir_skip_function_definition_node(node))
+		return;
+	if (lowir_extern_template_class_external_binding(node.binding) ||
+	    (host_object_lowering &&
+	     hosted_external_stream_function_binding(node.binding)))
 		return;
 	if (node.binding->owner != NULL &&
 	    node.binding->owner->kind == ScopeKind::Class &&
@@ -1350,14 +1452,14 @@ void ProgramLowerer::register_inline_definition(const Node& node)
 		    !binding_has_template_specialization_context(node.binding))
 			symbol_for(node.binding);
 	}
-	if (!copy_move_helper &&
-	    inline_definition_ranks.find(node.binding) == inline_definition_ranks.end())
-		inline_definition_ranks[node.binding] = inline_definition_ranks.size();
+	rank_inline_definition(*this, node.binding);
 	map<const Binding*, const Node*>::iterator existing =
 		inline_definitions.find(node.binding);
 	if (existing == inline_definitions.end() ||
 	    synthesized_default_constructor_should_replace(*existing->second,
 	                                                    node) ||
+	    synthesized_copy_move_constructor_should_replace(*existing->second,
+	                                                     node) ||
 	    (binding_has_template_specialization_context(node.binding) &&
 	     (!function_definition_is_complete_body(*existing->second) ||
 	      function_definition_is_complete_body(node))))

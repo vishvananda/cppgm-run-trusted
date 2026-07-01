@@ -24,6 +24,30 @@ string abi_substitution_code(size_t index)
 		return "S_";
 	return "S" + abi_base36_number(index - 1) + "_";
 }
+size_t abi_substitution_code_index(const string& encoded)
+{
+	if (encoded == "S_")
+		return 0;
+	if (encoded.size() < 3 || encoded[0] != 'S' ||
+	    encoded[encoded.size() - 1] != '_')
+		return static_cast<size_t>(-1);
+	size_t value = 0;
+	for (size_t i = 1; i + 1 < encoded.size(); ++i)
+	{
+		char c = encoded[i];
+		size_t digit;
+		if (c >= '0' && c <= '9')
+			digit = static_cast<size_t>(c - '0');
+		else if (c >= 'A' && c <= 'Z')
+			digit = static_cast<size_t>(c - 'A') + 10;
+		else
+			return static_cast<size_t>(-1);
+		if (digit >= 36)
+			return static_cast<size_t>(-1);
+		value = value * 36 + digit;
+	}
+	return value + 1;
+}
 size_t abi_find_substitution(const AbiSubstitutionContext& ctx,
                              const string& encoded)
 {
@@ -31,9 +55,10 @@ size_t abi_find_substitution(const AbiSubstitutionContext& ctx,
 		ctx.substitution_aliases.find(encoded);
 	if (alias != ctx.substitution_aliases.end())
 		return alias->second;
-	for (size_t i = 0; i < ctx.substitutions.size(); ++i)
-		if (ctx.substitutions[i] == encoded)
-			return i;
+	map<string, size_t>::const_iterator found =
+		ctx.substitution_indices.find(encoded);
+	if (found != ctx.substitution_indices.end())
+		return found->second;
 	return static_cast<size_t>(-1);
 }
 void abi_add_substitution_alias(AbiSubstitutionContext& ctx,
@@ -52,6 +77,7 @@ void abi_add_substitution(AbiSubstitutionContext& ctx, const string& encoded)
 	if (encoded.empty() ||
 	    abi_find_substitution(ctx, encoded) != static_cast<size_t>(-1))
 		return;
+	ctx.substitution_indices[encoded] = ctx.substitutions.size();
 	ctx.substitutions.push_back(encoded);
 }
 string abi_use_or_add_substitution(AbiSubstitutionContext& ctx,
@@ -80,23 +106,57 @@ string abi_type_with_substitutions(TypePtr type,
                                    AbiSubstitutionContext& ctx);
 string abi_type_probe_with_substitutions(TypePtr type,
                                          AbiSubstitutionContext& ctx);
+size_t abi_ensure_actual_template_parameter_substitution(
+	const string& name,
+	AbiSubstitutionContext& ctx)
+{
+	map<string, size_t>::const_iterator existing =
+		ctx.actual_template_parameter_substitutions.find(name);
+	if (existing != ctx.actual_template_parameter_substitutions.end())
+		return existing->second;
+	map<string, size_t>::const_iterator found =
+		ctx.template_parameters.find(name);
+	size_t index = found == ctx.template_parameters.end() ? 0 : found->second;
+	if (!ctx.use_actual_template_parameter_types ||
+	    index >= ctx.actual_template_arguments.size() ||
+	    ctx.actual_template_arguments[index].kind != TemplateArgumentKind::Type)
+		return static_cast<size_t>(-1);
+	bool saved_force = ctx.force_template_parameter_spelling;
+	ctx.force_template_parameter_spelling = false;
+	string encoded = abi_type_with_substitutions(
+		ctx.actual_template_arguments[index].type,
+		ctx);
+	ctx.force_template_parameter_spelling = saved_force;
+	size_t sub = abi_substitution_code_index(encoded);
+	if (sub == static_cast<size_t>(-1))
+		sub = abi_find_substitution(ctx, encoded);
+	if (sub == static_cast<size_t>(-1))
+	{
+		sub = ctx.substitutions.size();
+		ctx.substitution_indices[encoded] = sub;
+		ctx.substitutions.push_back(encoded);
+	}
+	ctx.actual_template_parameter_substitutions[name] = sub;
+	return sub;
+}
 bool abi_type_encoding_active(const AbiSubstitutionContext& ctx,
                               const void* key)
 {
+	size_t key_id = reinterpret_cast<size_t>(key);
 	return key != NULL &&
 	       find(ctx.active_type_encodings.begin(),
 	            ctx.active_type_encodings.end(),
-	            key) != ctx.active_type_encodings.end();
+	            key_id) != ctx.active_type_encodings.end();
 }
 struct AbiActiveTypeEncoding
 {
 	AbiSubstitutionContext& ctx;
-	const void* key;
+	size_t key;
 	bool pushed;
 	AbiActiveTypeEncoding(AbiSubstitutionContext& context, const void* value)
-		: ctx(context), key(value), pushed(false)
+		: ctx(context), key(reinterpret_cast<size_t>(value)), pushed(false)
 	{
-		if (key != NULL)
+		if (value != NULL)
 		{
 			ctx.active_type_encodings.push_back(key);
 			pushed = true;
@@ -115,28 +175,23 @@ string abi_template_parameter_type_with_substitutions(
 	map<string, size_t>::const_iterator found =
 		ctx.template_parameters.find(name);
 	size_t index = found == ctx.template_parameters.end() ? 0 : found->second;
-	if (ctx.use_actual_template_parameter_types &&
-	    index < ctx.actual_template_arguments.size() &&
-	    ctx.actual_template_arguments[index].kind == TemplateArgumentKind::Type)
-	{
-		map<string, size_t>::const_iterator existing =
-			ctx.actual_template_parameter_substitutions.find(name);
-		if (existing != ctx.actual_template_parameter_substitutions.end())
-			return abi_substitution_code(existing->second);
-		string encoded = abi_type_probe_with_substitutions(
-			ctx.actual_template_arguments[index].type,
-			ctx);
-		size_t sub = ctx.substitutions.size();
-		ctx.substitutions.push_back(encoded);
-		ctx.actual_template_parameter_substitutions[name] = sub;
-		return abi_substitution_code(sub);
-	}
 	string encoded = index == 0 ? string("T_") :
 	                 string("T") + to_string(index - 1) + "_";
 	if (ctx.force_template_parameter_spelling)
 	{
+		abi_ensure_actual_template_parameter_substitution(name, ctx);
 		abi_add_substitution(ctx, encoded);
 		return encoded;
+	}
+	if (ctx.use_actual_template_parameter_types &&
+	    index < ctx.actual_template_arguments.size() &&
+	    ctx.actual_template_arguments[index].kind == TemplateArgumentKind::Type)
+	{
+		size_t sub =
+			abi_ensure_actual_template_parameter_substitution(name, ctx);
+		if (sub == static_cast<size_t>(-1))
+			return encoded;
+		return abi_substitution_code(sub);
 	}
 	return abi_use_or_add_substitution(ctx, encoded);
 }
@@ -331,7 +386,7 @@ string abi_dependent_typename_type_with_substitutions(
 		size_t template_pos = root.find('<');
 		if (template_pos != string::npos)
 			root = root.substr(0, template_pos);
-		if (root == "enable_if_t")
+		if (root == "enable_if_t" || root == "__enable_if_t")
 		{
 			vector<pa11::TemplateInstanceArgument> arguments;
 			if (!type->dependent_typename_template_argument_lists.empty())
@@ -458,11 +513,19 @@ string abi_dependent_typename_type_with_substitutions(
 		string source = abi_source_name(part);
 		if (has_template_id || implicit_template_id)
 		{
-			size_t source_sub = abi_find_substitution(ctx, source);
-			if (source_sub != static_cast<size_t>(-1))
-				source = abi_substitution_code(source_sub);
-			else
-				abi_add_substitution(ctx, source);
+			bool suppress_source_substitution =
+				ctx.force_template_parameter_spelling &&
+				part == "enable_if" &&
+				(type->dependent_typename_qualified ||
+				 root_template_name == "enable_if");
+			if (!suppress_source_substitution)
+			{
+				size_t source_sub = abi_find_substitution(ctx, source);
+				if (source_sub != static_cast<size_t>(-1))
+					source = abi_substitution_code(source_sub);
+				else
+					abi_add_substitution(ctx, source);
+			}
 		}
 		out += source;
 		vector<pa11::TemplateInstanceArgument> arguments;
@@ -683,7 +746,11 @@ vector<Scope*> abi_scope_path_outer_first(Scope* scope)
 		         cur->name != "<unnamed>")
 			reversed.push_back(cur);
 	}
-	return vector<Scope*>(reversed.rbegin(), reversed.rend());
+	vector<Scope*> out;
+	out.reserve(reversed.size());
+	for (size_t i = reversed.size(); i > 0; --i)
+		out.push_back(reversed[i - 1]);
+	return out;
 }
 string abi_scope_component_with_substitutions(Scope* scope,
                                              AbiSubstitutionContext& ctx)
@@ -1152,6 +1219,23 @@ string abi_template_argument_for_parameter_with_substitutions(
 	}
 	return abi_template_argument_with_substitutions(arg, ctx);
 }
+bool abi_dependent_typename_is_enable_if_alias(TypePtr type)
+{
+	if (type.get() == NULL ||
+	    !type->is_dependent_typename)
+		return false;
+	vector<string> parts = abi_split_qualified_name(type->name);
+	if (parts.empty())
+		return false;
+	string root = type->template_primary_name.empty()
+		? parts[0] : type->template_primary_name;
+	size_t template_pos = root.find('<');
+	if (template_pos != string::npos)
+		root = root.substr(0, template_pos);
+	return root == "enable_if" ||
+	       root == "enable_if_t" ||
+	       root == "__enable_if_t";
+}
 string abi_type_with_substitutions(TypePtr type,
                                    AbiSubstitutionContext& ctx)
 {
@@ -1284,9 +1368,13 @@ string abi_function_return_type_with_substitutions(
 				return decltype_type;
 			}
 		bool saved = ctx.use_actual_template_parameter_types;
-		ctx.use_actual_template_parameter_types = true;
+		bool saved_force = ctx.force_template_parameter_spelling;
+		ctx.use_actual_template_parameter_types = false;
+		if (abi_dependent_typename_is_enable_if_alias(type))
+			ctx.force_template_parameter_spelling = true;
 		string encoded =
 			abi_dependent_typename_type_with_substitutions(type, ctx, false);
+		ctx.force_template_parameter_spelling = saved_force;
 		ctx.use_actual_template_parameter_types = saved;
 		return encoded;
 	}

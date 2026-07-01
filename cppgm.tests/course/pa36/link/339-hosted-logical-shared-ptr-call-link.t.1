@@ -1,0 +1,40 @@
+#include <memory>
+
+struct T
+{
+  int kind;
+  int fundamental;
+
+  T() : kind(0), fundamental(18) {}
+};
+
+struct V
+{
+  std::shared_ptr<T> type;
+  bool valid;
+
+  V() : valid(false) {}
+};
+
+bool is_a(std::shared_ptr<T> type)
+{
+  return type.get() != 0 && type->kind == 0;
+}
+
+bool is_b(std::shared_ptr<T> type)
+{
+  return type.get() != 0 && type->fundamental == 99;
+}
+
+bool check(const V& value)
+{
+  return value.valid && (is_a(value.type) || is_b(value.type));
+}
+
+int main()
+{
+  V value;
+  value.type = std::shared_ptr<T>(new T);
+  value.valid = true;
+  return check(value) ? 0 : 1;
+}

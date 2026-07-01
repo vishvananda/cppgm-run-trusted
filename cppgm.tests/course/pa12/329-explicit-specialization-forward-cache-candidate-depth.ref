@@ -1,0 +1,13 @@
+1 translation units
+start translation unit 1
+translation-unit
+  namespace-definition std
+  variable cached pointer to struct std::char_traits<char>
+  namespace-definition std
+  function-definition main function of () returning int
+    compound-statement
+      return-statement
+        call-expression prvalue int
+          callee f function of (int) returning int
+          literal prvalue int 0
+end translation unit

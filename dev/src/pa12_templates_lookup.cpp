@@ -43,9 +43,46 @@ bool variable_template_visible_in_scope_tree(
 	return false;
 }
 
+bool scope_has_visible_direct_binding(Scope* scope, const string& name)
+{
+	if (scope == NULL)
+		return false;
+	map<string, vector<Binding*> >::const_iterator found =
+		scope->members.find(name);
+	if (found == scope->members.end())
+		return false;
+	for (size_t i = 0; i < found->second.size(); ++i)
+		if (found->second[i] != NULL && !found->second[i]->is_hidden_friend)
+			return true;
+	return false;
+}
+
 }  // namespace
 
 vector<TemplateDeclaration*> Parser::find_function_templates(
+	const QualifiedName& name)
+{
+	vector<size_t> cache_key;
+	cache_key.push_back(reinterpret_cast<uintptr_t>(
+		name.qualifier != NULL ? name.qualifier : current_scope()));
+	cache_key.push_back(name.qualifier != NULL);
+	cache_key.push_back(hash<string>()(name.name));
+	cache_key.push_back(replaying_dependent_decltype_);
+	cache_key.push_back(template_declarations_.size());
+	cache_key.push_back(member_function_template_generation_);
+	cache_key.push_back(function_templates_.size());
+	cache_key.push_back(record_dependent_base_lookup_skips_.size());
+	map<vector<size_t>, vector<TemplateDeclaration*> >::const_iterator cached =
+		function_template_lookup_cache_.find(cache_key);
+	if (cached != function_template_lookup_cache_.end())
+		return cached->second;
+	vector<TemplateDeclaration*> out =
+		find_function_templates_uncached(name);
+	function_template_lookup_cache_[cache_key] = out;
+	return out;
+}
+
+vector<TemplateDeclaration*> Parser::find_function_templates_uncached(
 	const QualifiedName& name)
 {
 	vector<TemplateDeclaration*> out;
@@ -102,6 +139,8 @@ vector<TemplateDeclaration*> Parser::find_function_templates(
 			if (it != sit->second.end())
 				return it->second;
 		}
+		if (scope_has_visible_direct_binding(cur, name.name))
+			return out;
 		for (size_t i = 0; i < cur->using_directives.size(); ++i)
 		{
 			QualifiedName nested = name;
@@ -163,6 +202,8 @@ bool Parser::visible_variable_template_name(const QualifiedName& name)
 	}
 	for (Scope* cur = current_scope(); cur != NULL; cur = cur->parent)
 	{
+		if (scope_has_visible_direct_binding(cur, name.name))
+			return false;
 		set<Scope*> seen;
 		if (variable_template_visible_in_scope_tree(cur,
 		                                            name.name,

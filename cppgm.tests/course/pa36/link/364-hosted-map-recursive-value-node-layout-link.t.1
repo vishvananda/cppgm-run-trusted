@@ -1,0 +1,51 @@
+#include <map>
+#include <vector>
+
+struct Value {
+  bool valid;
+  bool is_object;
+  unsigned long long int_value;
+  std::map<int, Value> fields;
+  std::vector<Value> elements;
+
+  Value() : valid(false), is_object(false), int_value(0) {
+  }
+
+  static Value object() {
+    Value out;
+    out.valid = true;
+    out.is_object = true;
+    return out;
+  }
+
+  static Value integer(unsigned long long v) {
+    Value out;
+    out.valid = true;
+    out.int_value = v;
+    return out;
+  }
+};
+
+int main() {
+  std::map<int, Value> locals;
+  Value this_value = Value::object();
+  this_value.fields[1] = Value::integer(7);
+  this_value.elements.push_back(Value::integer(9));
+  locals[5] = this_value;
+
+  Value out;
+  out = locals[5];
+  if (!out.valid || !out.is_object) {
+    return 1;
+  }
+  if (out.fields[1].int_value != 7) {
+    return 2;
+  }
+  if (out.elements.size() != 1) {
+    return 3;
+  }
+  if (out.elements[0].int_value != 9) {
+    return 4;
+  }
+  return 0;
+}

@@ -1,0 +1,98 @@
+global @flag_true___value : u8 [binding=weak, object=_ZN4flagILb1EE5valueE] = 1
+
+function @main() -> i32 [role=entry, binding=strong, keep_alias=yes] {
+  block ^entry:
+    %t1 = call i32 @read_value()
+    %t2 = cmp ne i32 %t1, 3
+    branch %t2, ^if_then_1, ^if_else_2
+
+  block ^if_then_1:
+    return i32 1
+
+  block ^if_else_2:
+    jump ^if_end_3
+
+  block ^if_end_3:
+    %t3 = call i32 @read_value__ov2()
+    %t4 = cmp ne i32 %t3, 5
+    branch %t4, ^if_then_4, ^if_else_5
+
+  block ^if_then_4:
+    return i32 2
+
+  block ^if_else_5:
+    jump ^if_end_6
+
+  block ^if_end_6:
+    %t5 = call i32 @read_address()
+    %t6 = cmp ne i32 %t5, 7
+    branch %t6, ^if_then_7, ^if_else_8
+
+  block ^if_then_7:
+    return i32 3
+
+  block ^if_else_8:
+    jump ^if_end_9
+
+  block ^if_end_9:
+    return i32 0
+}
+function @read_value() -> i32 [binding=weak, object=_Z10read_valueILb1EEiv] {
+  slot $cond__1 : i32
+
+  block ^entry:
+    branch 1, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 3, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 5, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t1 = load i32 $cond__1
+    return i32 %t1
+}
+function @read_value__ov2() -> i32 [binding=weak, object=_Z10read_valueILb0EEiv] {
+  slot $cond__1 : i32
+
+  block ^entry:
+    branch 0, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 3, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 5, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t1 = load i32 $cond__1
+    return i32 %t1
+}
+function @read_address() -> i32 [binding=weak, object=_Z12read_addressILb1EEiv] {
+  slot $p : ptr
+  slot $cond__1 : i32
+
+  block ^entry:
+    %t1 = addr @flag_true___value
+    store ptr %t1, $p
+    %t2 = load ptr $p
+    %t3 = load u8 %t2
+    branch %t3, ^cond_then_1, ^cond_else_2
+
+  block ^cond_then_1:
+    store i32 7, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_else_2:
+    store i32 11, $cond__1
+    jump ^cond_end_3
+
+  block ^cond_end_3:
+    %t4 = load i32 $cond__1
+    return i32 %t4
+}

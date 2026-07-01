@@ -1,0 +1,14 @@
+#include <exception>
+#include <stdexcept>
+
+int main()
+{
+	std::exception_ptr p =
+		std::make_exception_ptr(std::runtime_error("owned"));
+	try {
+		std::rethrow_exception(p);
+	} catch (const std::runtime_error&) {
+		return 0;
+	}
+	return 1;
+}

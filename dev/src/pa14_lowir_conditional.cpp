@@ -1,4 +1,5 @@
 #include "pa14_lowir_internal.h"
+#include "pa14_lowir_function_internal.h"
 
 namespace pa14 {
 namespace internal {
@@ -57,10 +58,12 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 		yv = ensure_pointer(emit_lvalue_addr(expr.children[1]));
 	else
 	{
+		call_result_store_consumed_ = false;
 		if (starts_with(expr.children[1].line, "call-expression"))
 		{
 			call_result_store_slot_ = slot;
 			call_result_store_type_ = expr.type;
+			call_result_store_expr_ = &expr.children[1];
 			call_result_store_consumed_ = false;
 		}
 		yv = emit_rvalue(expr.children[1]);
@@ -70,11 +73,12 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 	if (expr.category == ValueCategory::LValue)
 		yv = convert_value(yv,
 		                   pa11::make_pointer(object_type(expr.children[1].type)),
-		                   pa11::make_pointer(expr.type));
+		                   pa11::make_pointer(object_type(expr.type)));
 	if (!call_result_store_consumed_)
 		instr("store " + type + " " + yv.text + ", $" + slot);
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();
+	call_result_store_expr_ = NULL;
 	call_result_store_consumed_ = false;
 	emit_pending_temp_cleanups();
 	terminate("jump ^" + end);
@@ -84,10 +88,12 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 		nv = ensure_pointer(emit_lvalue_addr(expr.children[2]));
 	else
 	{
+		call_result_store_consumed_ = false;
 		if (starts_with(expr.children[2].line, "call-expression"))
 		{
 			call_result_store_slot_ = slot;
 			call_result_store_type_ = expr.type;
+			call_result_store_expr_ = &expr.children[2];
 			call_result_store_consumed_ = false;
 		}
 		nv = emit_rvalue(expr.children[2]);
@@ -97,11 +103,12 @@ Value FunctionLowerer::emit_conditional(const Node& expr)
 	if (expr.category == ValueCategory::LValue)
 		nv = convert_value(nv,
 		                   pa11::make_pointer(object_type(expr.children[2].type)),
-		                   pa11::make_pointer(expr.type));
+		                   pa11::make_pointer(object_type(expr.type)));
 	if (!call_result_store_consumed_)
 		instr("store " + type + " " + nv.text + ", $" + slot);
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();
+	call_result_store_expr_ = NULL;
 	call_result_store_consumed_ = false;
 	emit_pending_temp_cleanups();
 	terminate("jump ^" + end);
@@ -155,10 +162,12 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 		terminate_with_pending_temp_cleanups(cond.text, yes, no);
 	}
 	start_block(yes);
+	call_result_store_consumed_ = false;
 	if (starts_with(expr.children[1].line, "call-expression"))
 	{
 		call_result_store_slot_ = slot;
 		call_result_store_type_ = expr.type;
+		call_result_store_expr_ = &expr.children[1];
 		call_result_store_consumed_ = false;
 	}
 	Value yv = emit_rvalue(expr.children[1]);
@@ -169,14 +178,17 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 	}
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();
+	call_result_store_expr_ = NULL;
 	call_result_store_consumed_ = false;
 	emit_pending_temp_cleanups();
 	terminate("jump ^" + end);
 	start_block(no);
+	call_result_store_consumed_ = false;
 	if (starts_with(expr.children[2].line, "call-expression"))
 	{
 		call_result_store_slot_ = slot;
 		call_result_store_type_ = expr.type;
+		call_result_store_expr_ = &expr.children[2];
 		call_result_store_consumed_ = false;
 	}
 	Value nv = emit_rvalue(expr.children[2]);
@@ -187,6 +199,7 @@ Value FunctionLowerer::emit_conditional_value(const Node& expr)
 	}
 	call_result_store_slot_.clear();
 	call_result_store_type_.reset();
+	call_result_store_expr_ = NULL;
 	call_result_store_consumed_ = false;
 	emit_pending_temp_cleanups();
 	terminate("jump ^" + end);
@@ -284,8 +297,7 @@ bool FunctionLowerer::lower_record_conditional_init(
 		terminate("jump ^" + done);
 		start_block(dispatch);
 		destroy_result();
-		emit_unwind_cleanups();
-		terminate("resume");
+		emit_shared_unwind_dispatch_body();
 		start_block(done);
 		return true;
 	}

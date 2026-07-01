@@ -149,6 +149,7 @@ int decode_utf8_at(const string & bytes, size_t i, size_t & width)
 vector<SourceChar> decode_source(const string & bytes)
 {
   vector<SourceChar> out;
+  out.reserve(bytes.size());
   int line = 1;
   int column = 1;
   size_t index = 0;
@@ -267,10 +268,11 @@ TextChar make_text_char(const SourceChar & source, int cp)
 vector<TextChar> apply_trigraphs_and_line_splices(const vector<SourceChar> & source)
 {
   vector<TextChar> out;
-  out.reserve(source.size());
-  for(size_t i = 0; i < source.size();) {
+  const size_t source_size = source.size();
+  out.reserve(source_size);
+  for(size_t i = 0; i < source_size;) {
     TextChar ch;
-    if(i + 2 < source.size() && source[i].cp == '?' && source[i + 1].cp == '?') {
+    if(i + 2 < source_size && source[i].cp == '?' && source[i + 1].cp == '?') {
       const int replacement = trigraph_replacement(source[i + 2].cp);
       if(replacement >= 0) {
         ch = make_text_char(source[i], replacement);
@@ -287,8 +289,8 @@ vector<TextChar> apply_trigraphs_and_line_splices(const vector<SourceChar> & sou
       size_t lookahead = i;
       TextChar next;
       bool have_next = false;
-      if(lookahead < source.size()) {
-        if(lookahead + 2 < source.size() && source[lookahead].cp == '?' &&
+      if(lookahead < source_size) {
+        if(lookahead + 2 < source_size && source[lookahead].cp == '?' &&
            source[lookahead + 1].cp == '?') {
           const int replacement = trigraph_replacement(source[lookahead + 2].cp);
           if(replacement >= 0) {
@@ -435,13 +437,24 @@ bool is_ascii_identifier_start(int cp)
 
 bool is_identifier_start_cp(int cp)
 {
-  return is_ascii_identifier_start(cp) ||
-      (is_annex_e1(cp) && !is_annex_e2(cp));
+  if(is_ascii_identifier_start(cp)) {
+    return true;
+  }
+  if(cp < 0x80) {
+    return false;
+  }
+  return is_annex_e1(cp) && !is_annex_e2(cp);
 }
 
 bool is_identifier_body_cp(int cp)
 {
-  return is_identifier_start_cp(cp) || is_digit(cp) || is_annex_e2(cp);
+  if(is_ascii_identifier_start(cp) || is_digit(cp)) {
+    return true;
+  }
+  if(cp < 0x80) {
+    return false;
+  }
+  return (is_annex_e1(cp) && !is_annex_e2(cp)) || is_annex_e2(cp);
 }
 
 bool is_space_no_newline(int cp)
@@ -489,14 +502,15 @@ public:
   Tokenizer(const vector<SourceChar> & source,
             const vector<TextChar> & text,
             IPPTokenStream & output)
-      : source_(source), text_(text), output_(output), pos_(0),
+      : source_(source), text_(text), output_(output),
+        source_size_(source.size()), text_size_(text.size()), pos_(0),
         header_state_(HeaderState::AtLineStart)
   {
   }
 
   void run()
   {
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       if(scan_newline() || scan_whitespace_or_comment() ||
          scan_header_name() || scan_literal() || scan_identifier() ||
          scan_pp_number() || scan_operator()) {
@@ -511,12 +525,14 @@ private:
   const vector<SourceChar> & source_;
   const vector<TextChar> & text_;
   IPPTokenStream & output_;
+  size_t source_size_;
+  size_t text_size_;
   size_t pos_;
   HeaderState header_state_;
 
   string error_at(size_t index, const string & message) const
   {
-    if(index < text_.size()) {
+    if(index < text_size_) {
       return location_message(text_[index].line, text_[index].column, message);
     }
     if(!text_.empty()) {
@@ -527,7 +543,7 @@ private:
 
   void note_location(size_t index)
   {
-    if(index < text_.size()) {
+    if(index < text_size_) {
       output_.note_source_location(text_[index].line, text_[index].column);
     } else if(!text_.empty()) {
       output_.note_source_location(text_.back().line, text_.back().column);
@@ -538,7 +554,7 @@ private:
 
   bool decode_ucn_at(size_t index, LogicalChar & out, bool diagnose = true) const
   {
-    if(index + 1 >= text_.size() || text_[index].cp != '\\') {
+    if(index + 1 >= text_size_ || text_[index].cp != '\\') {
       return false;
     }
     const int marker = text_[index + 1].cp;
@@ -546,7 +562,7 @@ private:
     if(digits == 0) {
       return false;
     }
-    if(index + 2 + digits > text_.size()) {
+    if(index + 2 + digits > text_size_) {
       return false;
     }
     int cp = 0;
@@ -572,15 +588,16 @@ private:
   LogicalChar logical_at(size_t index) const
   {
     LogicalChar out;
-    if(index >= text_.size()) {
+    if(index >= text_size_) {
       out.cp = -1;
       out.width = 0;
       return out;
     }
-    if(decode_ucn_at(index, out)) {
+    const int cp = text_[index].cp;
+    if(cp == '\\' && decode_ucn_at(index, out)) {
       return out;
     }
-    out.cp = text_[index].cp;
+    out.cp = cp;
     out.width = 1;
     return out;
   }
@@ -588,15 +605,16 @@ private:
   LogicalChar comment_logical_at(size_t index) const
   {
     LogicalChar out;
-    if(index >= text_.size()) {
+    if(index >= text_size_) {
       out.cp = -1;
       out.width = 0;
       return out;
     }
-    if(decode_ucn_at(index, out, false)) {
+    const int cp = text_[index].cp;
+    if(cp == '\\' && decode_ucn_at(index, out, false)) {
       return out;
     }
-    out.cp = text_[index].cp;
+    out.cp = cp;
     out.width = 1;
     return out;
   }
@@ -613,6 +631,22 @@ private:
   {
     size_t cursor = index;
     for(size_t i = 0; i < value.size(); ++i) {
+      LogicalChar logical = logical_at(cursor);
+      if(logical.cp != static_cast<unsigned char>(value[i])) {
+        return false;
+      }
+      cursor += logical.width;
+    }
+    consumed = cursor - index;
+    return true;
+  }
+
+  bool logical_matches_ascii(size_t index,
+                             const char * value,
+                             size_t & consumed) const
+  {
+    size_t cursor = index;
+    for(size_t i = 0; value[i] != '\0'; ++i) {
       LogicalChar logical = logical_at(cursor);
       if(logical.cp != static_cast<unsigned char>(value[i])) {
         return false;
@@ -667,7 +701,7 @@ private:
   string source_slice(size_t first, size_t last) const
   {
     string data;
-    for(size_t i = first; i < last && i < source_.size(); ++i) {
+    for(size_t i = first; i < last && i < source_size_; ++i) {
       append_utf8(source_[i].cp, data);
     }
     return data;
@@ -711,7 +745,7 @@ private:
     }
     const size_t start = pos_;
     bool consumed = false;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       if(logical_space_no_newline(pos_, width)) {
         consumed = true;
         pos_ += width;
@@ -720,7 +754,7 @@ private:
       if(starts_line_comment(pos_, width)) {
         consumed = true;
         pos_ += width;
-        while(pos_ < text_.size() && text_[pos_].cp != '\n') {
+        while(pos_ < text_size_ && text_[pos_].cp != '\n') {
           LogicalChar logical = comment_logical_at(pos_);
           if(logical.cp == '\n') {
             break;
@@ -765,7 +799,7 @@ private:
     size_t width = 0;
     starts_block_comment(pos_, width);
     pos_ += width;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       if(comment_logical_pair(pos_, '*', '/', width)) {
         pos_ += width;
         return;
@@ -798,7 +832,7 @@ private:
     LogicalChar logical = logical_at(pos_);
     append_logical(pos_, logical, data);
     pos_ += logical.width;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       logical = logical_at(pos_);
       if(logical.cp == '\n') {
         break;
@@ -823,7 +857,7 @@ private:
     LogicalChar logical = logical_at(pos_);
     append_logical(pos_, logical, data);
     pos_ += logical.width;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       logical = logical_at(pos_);
       if(logical.cp == '\n') {
         break;
@@ -841,10 +875,22 @@ private:
     return false;
   }
 
-  bool scan_literal()
-  {
-    return scan_raw_string() || scan_string() || scan_character();
-  }
+	  bool scan_literal()
+	  {
+	    LogicalChar first = logical_at(pos_);
+	    switch(first.cp) {
+	      case 'u':
+	      case 'U':
+	      case 'L':
+	      case 'R':
+	      case '"':
+	      case '\'':
+	        break;
+	      default:
+	        return false;
+	    }
+	    return scan_raw_string() || scan_string() || scan_character();
+	  }
 
   bool scan_raw_string()
   {
@@ -879,8 +925,7 @@ private:
                             size_t & consumed) const
   {
     for(size_t i = 0; i < prefix_count; ++i) {
-      const string prefix(prefixes[i]);
-      if(!logical_matches_ascii(pos_, prefix, consumed)) {
+      if(!logical_matches_ascii(pos_, prefixes[i], consumed)) {
         continue;
       }
       data.clear();
@@ -897,17 +942,17 @@ private:
 
   size_t source_index_at_text_position(size_t index) const
   {
-    if(index < text_.size()) {
+    if(index < text_size_) {
       return text_[index].source_index;
     }
-    return source_.size();
+    return source_size_;
   }
 
   size_t parse_raw_source_end(size_t open_search) const
   {
     size_t open = open_search;
     vector<int> delimiter;
-    while(open < source_.size() && source_[open].cp != '(') {
+    while(open < source_size_ && source_[open].cp != '(') {
       if(delimiter.size() == 16) {
         throw runtime_error(general_message("raw string delimiter too long"));
       }
@@ -917,10 +962,10 @@ private:
       delimiter.push_back(source_[open].cp);
       ++open;
     }
-    if(open >= source_.size()) {
+    if(open >= source_size_) {
       throw runtime_error(general_message("unterminated raw string literal"));
     }
-    for(size_t i = open + 1; i < source_.size(); ++i) {
+    for(size_t i = open + 1; i < source_size_; ++i) {
       if(source_[i].cp == ')' && raw_close_matches(i, delimiter)) {
         return i + delimiter.size() + 2;
       }
@@ -936,7 +981,7 @@ private:
 
   bool raw_close_matches(size_t close, const vector<int> & delimiter) const
   {
-    if(close + delimiter.size() + 1 >= source_.size()) {
+    if(close + delimiter.size() + 1 >= source_size_) {
       return false;
     }
     for(size_t i = 0; i < delimiter.size(); ++i) {
@@ -950,7 +995,7 @@ private:
   size_t text_position_after_source(size_t source_end) const
   {
     size_t i = pos_;
-    while(i < text_.size() && !text_[i].synthetic &&
+    while(i < text_size_ && !text_[i].synthetic &&
           text_[i].source_index < source_end) {
       ++i;
     }
@@ -1011,7 +1056,7 @@ private:
                         const string & error_message,
                         string & data)
   {
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       LogicalChar logical = logical_at(pos_);
       if(logical.cp == close_cp) {
         append_logical(pos_, logical, data);
@@ -1036,7 +1081,7 @@ private:
     LogicalChar slash = logical_at(pos_);
     append_logical(pos_, slash, data);
     pos_ += slash.width;
-    if(pos_ >= text_.size()) {
+    if(pos_ >= text_size_) {
       throw runtime_error(error_at(pos_, "Invalid escape sequence"));
     }
     LogicalChar escaped = logical_at(pos_);
@@ -1061,7 +1106,7 @@ private:
 
   void consume_octal_escape(string & data)
   {
-    for(size_t count = 0; count < 3 && pos_ < text_.size(); ++count) {
+    for(size_t count = 0; count < 3 && pos_ < text_size_; ++count) {
       LogicalChar logical = logical_at(pos_);
       if(!is_oct_digit(logical.cp)) {
         break;
@@ -1076,10 +1121,10 @@ private:
     LogicalChar x = logical_at(pos_);
     append_logical(pos_, x, data);
     pos_ += x.width;
-    if(pos_ >= text_.size() || !is_hex_digit(logical_at(pos_).cp)) {
+    if(pos_ >= text_size_ || !is_hex_digit(logical_at(pos_).cp)) {
       throw runtime_error(error_at(pos_, "invalid hex escape sequence"));
     }
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       LogicalChar logical = logical_at(pos_);
       if(!is_hex_digit(logical.cp)) {
         break;
@@ -1091,14 +1136,14 @@ private:
 
   void append_identifier_suffix(string & data)
   {
-    if(pos_ >= text_.size()) {
+    if(pos_ >= text_size_) {
       return;
     }
     LogicalChar first = logical_at(pos_);
     if(!is_identifier_start_cp(first.cp)) {
       return;
     }
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       LogicalChar logical = logical_at(pos_);
       if(!is_identifier_body_cp(logical.cp)) {
         return;
@@ -1141,7 +1186,7 @@ private:
     }
     const size_t start = pos_;
     string data;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       LogicalChar logical = logical_at(pos_);
       if(!is_identifier_body_cp(logical.cp)) {
         break;
@@ -1168,7 +1213,7 @@ private:
     const size_t start = pos_;
     string data;
     int previous = -1;
-    while(pos_ < text_.size()) {
+    while(pos_ < text_size_) {
       LogicalChar logical = logical_at(pos_);
       if(is_digit(logical.cp) || logical.cp == '.' ||
          is_identifier_body_cp(logical.cp)) {
@@ -1195,7 +1240,7 @@ private:
 
   bool starts_pp_number() const
   {
-    if(pos_ >= text_.size()) {
+    if(pos_ >= text_size_) {
       return false;
     }
     LogicalChar first = logical_at(pos_);
@@ -1209,34 +1254,86 @@ private:
     return is_digit(second.cp);
   }
 
-  bool scan_operator()
-  {
-    if(scan_angle_colon_exception()) {
-      return true;
-    }
-    static const char * const ops[] = {
-      "%:%:", ">>=", "<<=", "->*", "...", "##", "<:", ":>", "<%", "%>",
-      "%:", "::", ".*", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
-      "<<", ">>", "<=", ">=", "&&", "==", "!=", "||", "++", "--", "->",
-      "{", "}", "[", "]", "#", "(", ")", ";", ":", "?", ".", "+", "-",
-      "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ","
-    };
-    for(size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i) {
-      const string op(ops[i]);
-      size_t consumed = 0;
-      if(logical_matches_ascii(pos_, op, consumed)) {
-        const size_t start = pos_;
-        pos_ += consumed;
-        note_location(start);
-        output_.emit_preprocessing_op_or_punc(op);
-        note_non_whitespace_token("op", op);
-        return true;
-      }
-    }
-    return false;
-  }
+	  bool scan_operator()
+	  {
+	    if(scan_angle_colon_exception()) {
+	      return true;
+	    }
+	    LogicalChar first = logical_at(pos_);
+	    switch(first.cp) {
+	      case '%':
+	        return scan_operator_token("%:%:") || scan_operator_token("%>") ||
+	            scan_operator_token("%:") || scan_operator_token("%=") ||
+	            scan_operator_token("%");
+	      case '>':
+	        return scan_operator_token(">>=") || scan_operator_token(">>") ||
+	            scan_operator_token(">=") || scan_operator_token(">");
+	      case '<':
+	        return scan_operator_token("<<=") || scan_operator_token("<:") ||
+	            scan_operator_token("<%") || scan_operator_token("<<") ||
+	            scan_operator_token("<=") || scan_operator_token("<");
+	      case '-':
+	        return scan_operator_token("->*") || scan_operator_token("-=") ||
+	            scan_operator_token("--") || scan_operator_token("->") ||
+	            scan_operator_token("-");
+	      case '.':
+	        return scan_operator_token("...") || scan_operator_token(".*") ||
+	            scan_operator_token(".");
+	      case '#':
+	        return scan_operator_token("##") || scan_operator_token("#");
+	      case ':':
+	        return scan_operator_token(":>") || scan_operator_token("::") ||
+	            scan_operator_token(":");
+	      case '+':
+	        return scan_operator_token("+=") || scan_operator_token("++") ||
+	            scan_operator_token("+");
+	      case '*':
+	        return scan_operator_token("*=") || scan_operator_token("*");
+	      case '/':
+	        return scan_operator_token("/=") || scan_operator_token("/");
+	      case '^':
+	        return scan_operator_token("^=") || scan_operator_token("^");
+	      case '&':
+	        return scan_operator_token("&=") || scan_operator_token("&&") ||
+	            scan_operator_token("&");
+	      case '|':
+	        return scan_operator_token("|=") || scan_operator_token("||") ||
+	            scan_operator_token("|");
+	      case '=':
+	        return scan_operator_token("==") || scan_operator_token("=");
+	      case '!':
+	        return scan_operator_token("!=") || scan_operator_token("!");
+	      case '{': return scan_operator_token("{");
+	      case '}': return scan_operator_token("}");
+	      case '[': return scan_operator_token("[");
+	      case ']': return scan_operator_token("]");
+	      case '(': return scan_operator_token("(");
+	      case ')': return scan_operator_token(")");
+	      case ';': return scan_operator_token(";");
+	      case '?': return scan_operator_token("?");
+	      case '~': return scan_operator_token("~");
+	      case ',': return scan_operator_token(",");
+	      default:
+	        return false;
+	    }
+	  }
 
-  bool scan_angle_colon_exception()
+	  bool scan_operator_token(const char * op)
+	  {
+	    size_t consumed = 0;
+	    if(!logical_matches_ascii(pos_, op, consumed)) {
+	      return false;
+	    }
+	    const size_t start = pos_;
+	    pos_ += consumed;
+	    note_location(start);
+	    string data(op);
+	    output_.emit_preprocessing_op_or_punc(data);
+	    note_non_whitespace_token("op", data);
+	    return true;
+	  }
+
+	  bool scan_angle_colon_exception()
   {
     size_t consumed = 0;
     if(!logical_matches_ascii(pos_, "<::", consumed)) {

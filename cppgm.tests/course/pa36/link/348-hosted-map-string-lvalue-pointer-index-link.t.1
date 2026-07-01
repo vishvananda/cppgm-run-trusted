@@ -1,0 +1,41 @@
+#include <map>
+#include <string>
+
+struct TemplateDeclaration
+{
+  int value;
+  explicit TemplateDeclaration(int v) : value(v) {}
+};
+
+int main()
+{
+  std::map<std::string, TemplateDeclaration*> templates;
+  TemplateDeclaration first(11);
+  TemplateDeclaration second(17);
+
+  std::string one = "basic_string";
+  std::string two = "allocator";
+
+  templates[one] = &first;
+  templates[two] = &second;
+
+  if (templates.size() != 2)
+    return 1;
+  if (templates[one] != &first)
+    return 2;
+  if (templates[two] != &second)
+    return 3;
+  if (!(templates.begin()->first == "allocator") &&
+      !(templates.begin()->first == "basic_string"))
+    return 4;
+
+  std::map<std::string, TemplateDeclaration*>::iterator found =
+    templates.find(one);
+  if (found == templates.end())
+    return 5;
+  if (!(found->first == one))
+    return 6;
+  if (found->second->value != 11)
+    return 7;
+  return 0;
+}

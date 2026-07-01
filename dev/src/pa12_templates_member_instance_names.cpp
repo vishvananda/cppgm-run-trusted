@@ -23,10 +23,78 @@ pa11::TemplateInstanceArgument remap_template_parameter_names(
 	const pa11::TemplateInstanceArgument& argument,
 	const map<string, string>& names);
 
-TypePtr remap_template_parameter_names(TypePtr type,
+bool remap_name_matches(const string& name, const map<string, string>& names)
+{
+	return !name.empty() && names.find(name) != names.end();
+}
+
+bool type_uses_remapped_parameter_name(TypePtr type,
+                                       const map<string, string>& names);
+
+bool instance_argument_uses_remapped_parameter_name(
+	const pa11::TemplateInstanceArgument& argument,
+	const map<string, string>& names)
+{
+	if (names.empty())
+		return false;
+	if (type_uses_remapped_parameter_name(argument.type, names))
+		return true;
+	if (remap_name_matches(argument.value_name, names) ||
+	    remap_name_matches(argument.template_name, names) ||
+	    remap_name_matches(argument.value_owner_template_name, names))
+		return true;
+	for (size_t i = 0; i < argument.pack.size(); ++i)
+		if (instance_argument_uses_remapped_parameter_name(argument.pack[i],
+		                                                   names))
+			return true;
+	for (size_t i = 0; i < argument.value_owner_template_arguments.size(); ++i)
+		if (instance_argument_uses_remapped_parameter_name(
+			    argument.value_owner_template_arguments[i],
+			    names))
+			return true;
+	return false;
+}
+
+bool type_uses_remapped_parameter_name(TypePtr type,
                                        const map<string, string>& names)
 {
 	if (type.get() == NULL || names.empty())
+		return false;
+	if ((type->kind == pa11::TypeKind::TemplateParameter ||
+	     type->kind == pa11::TypeKind::TemplateTemplateParameter) &&
+	    remap_name_matches(type->name, names))
+		return true;
+	if (remap_name_matches(type->template_primary_name, names))
+		return true;
+	if (type_uses_remapped_parameter_name(type->base, names) ||
+	    type_uses_remapped_parameter_name(type->member_class, names))
+		return true;
+	for (size_t i = 0; i < type->parameters.size(); ++i)
+		if (type_uses_remapped_parameter_name(type->parameters[i], names))
+			return true;
+	for (size_t i = 0; i < type->template_arguments.size(); ++i)
+		if (instance_argument_uses_remapped_parameter_name(
+			    type->template_arguments[i],
+			    names))
+			return true;
+	for (size_t i = 0;
+	     i < type->dependent_typename_template_argument_lists.size();
+	     ++i)
+		for (size_t j = 0;
+		     j < type->dependent_typename_template_argument_lists[i].size();
+		     ++j)
+			if (instance_argument_uses_remapped_parameter_name(
+				    type->dependent_typename_template_argument_lists[i][j],
+				    names))
+				return true;
+	return false;
+}
+
+TypePtr remap_template_parameter_names(TypePtr type,
+                                       const map<string, string>& names)
+{
+	if (type.get() == NULL || names.empty() ||
+	    !type_uses_remapped_parameter_name(type, names))
 		return type;
 	TypePtr out(new pa11::Type(*type));
 	map<string, string>::const_iterator found = names.find(out->name);
@@ -66,7 +134,8 @@ pa11::TemplateInstanceArgument remap_template_parameter_names(
 	const pa11::TemplateInstanceArgument& argument,
 	const map<string, string>& names)
 {
-	if (names.empty())
+	if (names.empty() ||
+	    !instance_argument_uses_remapped_parameter_name(argument, names))
 		return argument;
 	pa11::TemplateInstanceArgument out = argument;
 	if (out.kind == pa11::TemplateInstanceArgumentKind::Type)
@@ -129,7 +198,7 @@ void build_owner_template_substitutions(
 		if (parameter.kind == TemplateParameterKind::Type) {
 			if (parameter.is_pack) {
 				subst[parameter.name] =
-					pa11::make_template_parameter_type(parameter.name);
+					template_parameter_placeholder_type(parameter);
 				value_subst[parameter.name] = owner_arguments[k];
 				pack_subst.insert(parameter.name);
 			} else {

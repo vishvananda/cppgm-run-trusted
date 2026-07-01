@@ -500,35 +500,37 @@ void rebuild_program(Program& program)
 	}
 
 	for (size_t f = 0; f < program.functions.size(); ++f)
+		rebuild_function(program.functions[f]);
+}
+
+void rebuild_function(Function& fn)
+{
+	fn.temp_order.clear();
+	fn.temp_types.clear();
+	fn.temp_offsets.clear();
+	fn.slot_offsets.clear();
+	fn.slot_types.clear();
+	fn.param_types.clear();
+	fn.param_offsets.clear();
+	for (size_t i = 0; i < fn.params.size(); ++i)
+		fn.param_types[fn.params[i].name] = fn.params[i].type;
+	for (size_t i = 0; i < fn.slots.size(); ++i)
+		fn.slot_types[fn.slots[i].name] = fn.slots[i].type;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
 	{
-		Function& fn = program.functions[f];
-		fn.temp_order.clear();
-		fn.temp_types.clear();
-		fn.temp_offsets.clear();
-		fn.slot_offsets.clear();
-		fn.slot_types.clear();
-		fn.param_types.clear();
-		fn.param_offsets.clear();
-		for (size_t i = 0; i < fn.params.size(); ++i)
-			fn.param_types[fn.params[i].name] = fn.params[i].type;
-		for (size_t i = 0; i < fn.slots.size(); ++i)
-			fn.slot_types[fn.slots[i].name] = fn.slots[i].type;
-		for (size_t b = 0; b < fn.blocks.size(); ++b)
+		if (fn.blocks[b].instructions.empty() ||
+		    !is_terminator(fn.blocks[b].instructions.back().kind))
+			throw runtime_error("LowIR block missing terminator");
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
 		{
-			if (fn.blocks[b].instructions.empty() ||
-			    !is_terminator(fn.blocks[b].instructions.back().kind))
-				throw runtime_error("LowIR block missing terminator");
-			for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-			{
-				Instruction& ins = fn.blocks[b].instructions[i];
-				if (!ins.has_dest)
-					continue;
-				if (fn.temp_types.find(ins.dest) != fn.temp_types.end() ||
-				    fn.param_types.find(ins.dest) != fn.param_types.end())
-					throw runtime_error("duplicate LowIR temp");
-				fn.temp_types[ins.dest] = instruction_result_type(ins);
-				fn.temp_order.push_back(ins.dest);
-			}
+			Instruction& ins = fn.blocks[b].instructions[i];
+			if (!ins.has_dest)
+				continue;
+			if (fn.temp_types.find(ins.dest) != fn.temp_types.end() ||
+			    fn.param_types.find(ins.dest) != fn.param_types.end())
+				throw runtime_error("duplicate LowIR temp");
+			fn.temp_types[ins.dest] = instruction_result_type(ins);
+			fn.temp_order.push_back(ins.dest);
 		}
 	}
 }
@@ -597,7 +599,9 @@ void optimize_files_to_file(const vector<string>& srcfiles,
                             const Options& options)
 {
 	Program program = lowir2cy86::parse_files(srcfiles);
-	program = optimize_program(program, options.optimization_level);
+	program = optimize_program(program,
+	                           options.optimization_level,
+	                           options.prune_unreachable_weak);
 	write_lowir_file(options.outfile, emit_lowir(program));
 }
 

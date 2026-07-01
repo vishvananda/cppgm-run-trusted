@@ -9,6 +9,11 @@ using namespace std;
 namespace pa12 {
 namespace internal {
 EvalState::EvalState() {}
+bool template_name_is(const string& name, const string& unqualified);
+bool constexpr_integral_or_bool_type(TypePtr type);
+uint64_t constexpr_convert_integral(TypePtr source,
+                                    TypePtr target,
+                                    uint64_t value);
 namespace {
 struct EvalBudget { int steps; int depth; EvalBudget() : steps(0), depth(0) {} };
 EvalBudget* active_budget = NULL;
@@ -49,93 +54,10 @@ bool is_float_type(TypePtr type)
 { TypePtr bare = pa11::strip_cv(type); return bare->kind == pa11::TypeKind::Fundamental && (bare->fundamental == FT_FLOAT || bare->fundamental == FT_DOUBLE || bare->fundamental == FT_LONG_DOUBLE); }
 bool starts_with(const string& text, const string& prefix)
 { return text.compare(0, prefix.size(), prefix) == 0; }
-bool template_name_is(const string& name, const string& unqualified)
-{
-	if (name == unqualified)
-		return true;
-	if (name.size() <= unqualified.size() + 2)
-		return false;
-	size_t offset = name.size() - unqualified.size();
-	return name.compare(offset, unqualified.size(), unqualified) == 0 &&
-	       offset >= 2 &&
-	       name.compare(offset - 2, 2, "::") == 0;
-}
 bool truthy(const ConstexprValue& value)
 { if (value.is_pointer) return value.pointer_binding != NULL || value.pointer_index != 0; return value.is_float ? value.float_value != 0 : value.int_value != 0; }
 uint64_t integer_value(const ConstexprValue& value)
 { if (value.is_pointer) return static_cast<uint64_t>(value.pointer_index); return value.is_float ? static_cast<uint64_t>(value.float_value) : value.int_value; }
-bool constexpr_integral_or_bool_type(TypePtr type)
-{ TypePtr bare = type.get() != NULL ? pa11::strip_cv(type) : TypePtr(); return bare.get() != NULL && (pa11::is_integral_or_bool_type(bare) || bare->kind == pa11::TypeKind::Enum); }
-bool constexpr_integral_unsigned(TypePtr type)
-{
-	TypePtr bare = type.get() != NULL
-		? pa11::strip_cv(type) : TypePtr();
-	if (bare.get() == NULL)
-		return false;
-	if (bare->kind == pa11::TypeKind::Enum)
-	{
-		switch (bare->enum_underlying)
-		{
-		case FT_UNSIGNED_CHAR:
-		case FT_UNSIGNED_SHORT_INT:
-		case FT_UNSIGNED_INT:
-		case FT_UNSIGNED_LONG_INT:
-		case FT_UNSIGNED_LONG_LONG_INT:
-			return true;
-		default:
-			return false;
-		}
-	}
-	if (bare->kind != pa11::TypeKind::Fundamental)
-		return false;
-	switch (bare->fundamental)
-	{
-	case FT_BOOL:
-	case FT_UNSIGNED_CHAR:
-	case FT_UNSIGNED_SHORT_INT:
-	case FT_UNSIGNED_INT:
-	case FT_UNSIGNED_LONG_INT:
-	case FT_UNSIGNED_LONG_LONG_INT:
-	case FT_CHAR16_T:
-	case FT_CHAR32_T:
-		return true;
-	default:
-		return false;
-	}
-}
-unsigned constexpr_integral_bits(TypePtr type)
-{ uint64_t bytes = pa11::type_size(pa11::strip_cv(type)); return bytes >= 8 ? 64 : static_cast<unsigned>(bytes * 8); }
-uint64_t constexpr_integral_mask(unsigned bits)
-{ return bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1); }
-uint64_t constexpr_normalize_integral(TypePtr type, uint64_t value)
-{ return value & constexpr_integral_mask(constexpr_integral_bits(type)); }
-int64_t constexpr_signed_integral(TypePtr type, uint64_t value)
-{
-	unsigned bits = constexpr_integral_bits(type);
-	uint64_t normalized = value & constexpr_integral_mask(bits);
-	if (bits >= 64)
-		return static_cast<int64_t>(normalized);
-	uint64_t sign = uint64_t(1) << (bits - 1);
-	if ((normalized & sign) == 0)
-		return static_cast<int64_t>(normalized);
-	return static_cast<int64_t>(normalized | ~constexpr_integral_mask(bits));
-}
-uint64_t constexpr_convert_integral(TypePtr source,
-                                    TypePtr target,
-                                    uint64_t value)
-{
-	if (source.get() != NULL &&
-	    target.get() != NULL &&
-	    constexpr_integral_or_bool_type(source) &&
-	    constexpr_integral_or_bool_type(target) &&
-	    !constexpr_integral_unsigned(source) &&
-	    constexpr_integral_bits(target) > constexpr_integral_bits(source))
-		return constexpr_normalize_integral(
-			target,
-			static_cast<uint64_t>(
-				constexpr_signed_integral(source, value)));
-	return constexpr_normalize_integral(target, value);
-}
 long double float_value(const ConstexprValue& value)
 { return value.is_float ? value.float_value : static_cast<long double>(value.int_value); }
 string trim_float_suffix(string text)
@@ -546,6 +468,60 @@ bool try_eval_single_field_comparison(Binding* function,
 		return true;
 	return eval_binary_value(op, left, right, out);
 }
+bool try_eval_static_value_conversion(Parser& parser,
+                                      Binding* function,
+                                      const vector<ConstexprValue>& args,
+                                      ConstexprValue& out)
+{
+	if (function == NULL ||
+	    function->kind != BindingKind::Function ||
+	    !function->is_constexpr ||
+	    function->name.compare(0, 9, "operator ") != 0 ||
+	    function->owner == NULL ||
+	    function->owner->kind != ScopeKind::Class ||
+	    function->type.get() == NULL ||
+	    function->type->kind != pa11::TypeKind::Function ||
+	    function->type->parameters.size() != 1 ||
+	    args.size() != 1 ||
+	    !args[0].is_object)
+		return false;
+	TypePtr target = function->type->base.get() != NULL
+		? pa11::strip_cv(function->type->base) : TypePtr();
+	if (target.get() == NULL ||
+	    !constexpr_integral_or_bool_type(target))
+		return false;
+	map<string, vector<Binding*> >::iterator found =
+		function->owner->members.find("value");
+	if (found == function->owner->members.end())
+		return false;
+	for (size_t i = 0; i < found->second.size(); ++i)
+	{
+		Binding* value_member = found->second[i];
+		if (value_member == NULL ||
+		    value_member->kind != BindingKind::Variable ||
+		    !value_member->is_static_member)
+			continue;
+		TypePtr source = value_member->type.get() != NULL
+			? pa11::strip_cv(value_member->type) : TypePtr();
+		if (source.get() == NULL ||
+		    !constexpr_integral_or_bool_type(source))
+			continue;
+		ConstexprValue value;
+		if (value_member->has_constant)
+			value = ConstexprValue::integer(value_member->constant_value);
+		else if (!parser.try_evaluate_constexpr_binding(value_member, value))
+			continue;
+		if (!value.valid || value.is_object || value.is_pointer ||
+		    value.is_float)
+			continue;
+		out = ConstexprValue::integer(
+			constexpr_convert_integral(source,
+			                           target,
+			                           value.int_value));
+		return true;
+	}
+	return false;
+}
 bool eval_expr_list(Parser& parser,
                     const vector<Node>& children,
                     size_t begin,
@@ -664,6 +640,33 @@ bool eval_member_field(Parser& parser,
 	if (found == object.fields.end())
 		return false;
 	out = found->second;
+	return true;
+}
+bool eval_base_subobject(Parser& parser,
+                         const Node& node,
+                         EvalState& state,
+                         ConstexprValue& out)
+{
+	if (!starts_with(node.line, "base-subobject-expression") ||
+	    node.type.get() == NULL ||
+	    node.children.empty())
+		return false;
+	ConstexprValue object;
+	if (!eval_node(parser, node.children[0], state, object) ||
+	    !object.is_object)
+		return false;
+	TypePtr base = pa11::strip_cv(node.type);
+	if (base.get() == NULL || base->kind != pa11::TypeKind::Record)
+		return false;
+	out = ConstexprValue::object(base);
+	for (map<Binding*, ConstexprValue>::const_iterator it =
+		     object.fields.begin();
+	     it != object.fields.end();
+	     ++it)
+	{
+		if (it->first != NULL && it->first->owner == base->scope)
+			out.fields[it->first] = it->second;
+	}
 	return true;
 }
 bool eval_named_node(Parser& parser,
@@ -991,6 +994,8 @@ bool eval_node(Parser& parser,
 			return false;
 		return eval_constructor_action(parser, node, object_type, state, out);
 	}
+	if (starts_with(node.line, "base-subobject-expression"))
+		return eval_base_subobject(parser, node, state, out);
 	if (eval_member_field(parser, node, state, out))
 		return true;
 	if (starts_with(node.line, "id-expression") ||
@@ -1056,10 +1061,115 @@ bool eval_node(Parser& parser,
 		if (!eval_node(*this, args[i], arg_state, value))
 			return false;
 		values.push_back(value);
+		}
+		return try_evaluate_constexpr_call_values(function, values, out);
 	}
-	return try_evaluate_constexpr_call_values(function, values, out);
+bool Parser::try_evaluate_pending_constexpr_return(
+	Binding* function,
+	const vector<ConstexprValue>& args,
+	ConstexprValue& out)
+{
+	(void)args;
+	if (function == NULL ||
+	    function->kind != BindingKind::Function ||
+	    !function->is_constexpr)
+		return false;
+	map<Binding*, PendingFunctionBody>::iterator found =
+		pending_function_bodies_.find(function);
+	if (found == pending_function_bodies_.end() &&
+	    function->aliased_binding != NULL)
+		found = pending_function_bodies_.find(function->aliased_binding);
+	if (found == pending_function_bodies_.end())
+		return false;
+	PendingFunctionBody pending = found->second;
+	if (pending.body_pos + 2 >= tokens_.size() ||
+	    tokens_[pending.body_pos].type != OP_LBRACE ||
+	    tokens_[pending.body_pos + 1].type != KW_RETURN)
+		return false;
+	size_t saved_pos = pos_;
+	vector<Scope*> saved_scopes = scopes_;
+	vector<Scope*> saved_friend_class_scopes = active_friend_class_scopes_;
+	vector<map<string, TypePtr> > saved_type_substitutions =
+		template_type_substitutions_;
+	vector<map<string, TemplateArgument> > saved_value_substitutions =
+		template_value_substitutions_;
+	vector<set<string> > saved_pack_substitutions =
+		template_type_parameter_packs_;
+	pos_ = pending.body_pos + 2;
+	scopes_ = pending.scopes;
+	active_friend_class_scopes_ = pending.friend_class_scopes;
+	template_type_substitutions_ = pending.type_substitutions;
+	template_value_substitutions_ = pending.value_substitutions;
+	template_type_parameter_packs_ = pending.pack_substitutions;
+	push_pending_owner_template_substitutions(pending);
+	push_pending_function_template_substitutions(pending);
+	Expr expr;
+	try
+	{
+		expr = parse_expression();
+		expect(OP_SEMICOLON);
+	}
+	catch (const runtime_error&)
+	{
+		template_value_substitutions_ = saved_value_substitutions;
+		template_type_substitutions_ = saved_type_substitutions;
+		template_type_parameter_packs_ = saved_pack_substitutions;
+		active_friend_class_scopes_ = saved_friend_class_scopes;
+		scopes_ = saved_scopes;
+		pos_ = saved_pos;
+		return false;
+	}
+	template_value_substitutions_ = saved_value_substitutions;
+	template_type_substitutions_ = saved_type_substitutions;
+	template_type_parameter_packs_ = saved_pack_substitutions;
+	active_friend_class_scopes_ = saved_friend_class_scopes;
+	scopes_ = saved_scopes;
+	pos_ = saved_pos;
+	if (!expr.valid)
+		return false;
+	TypePtr target =
+		function->type.get() != NULL &&
+		function->type->kind == pa11::TypeKind::Function
+		? function->type->base : TypePtr();
+	if (expr.has_constant_value)
+	{
+		TypePtr source = expression_object_type(expr.type);
+		target = target.get() != NULL ? pa11::strip_cv(target) : TypePtr();
+		if (target.get() != NULL && constexpr_integral_or_bool_type(target))
+			out = ConstexprValue::integer(
+				constexpr_convert_integral(source,
+				                           target,
+				                           expr.constant_value));
+		else
+			out = ConstexprValue::integer(expr.constant_value);
+		return true;
+	}
+	ConstexprValue value;
+	if (try_evaluate_constexpr_expr(expr.node, value) &&
+	    value.valid &&
+	    !value.is_object)
+	{
+		out = value;
+		return true;
+	}
+	try
+	{
+		Conversion conv = convert_to(expr, target);
+		if (conv.viable &&
+		    try_evaluate_constexpr_expr(conv.expr.node, value) &&
+		    value.valid &&
+		    !value.is_object)
+		{
+			out = value;
+			return true;
+		}
+	}
+	catch (const runtime_error&)
+	{
+	}
+	return false;
 }
-	bool Parser::try_evaluate_constexpr_call_values(Binding* function,
+		bool Parser::try_evaluate_constexpr_call_values(Binding* function,
 	                                                const vector<ConstexprValue>& args,
 	                                                ConstexprValue& out)
 	{
@@ -1089,9 +1199,26 @@ bool eval_node(Parser& parser,
 				replay_bodyless_constexpr_template(cur);
 		}
 		Binding* body_binding = NULL;
-		map<Binding*, Node>::const_iterator found = function_bodies_.end();
-		if (!ensure_constexpr_function_body(function, body_binding, found))
+			map<Binding*, Node>::const_iterator found = function_bodies_.end();
+			if (!ensure_constexpr_function_body(function, body_binding, found))
+			{
+				if (try_evaluate_pending_constexpr_return(function,
+				                                          args,
+				                                          out))
+				{
+					constexpr_call_result_cache_[cache_key] = out;
+					return true;
+				}
+				if (try_eval_static_value_conversion(*this,
+				                                     function,
+				                                     args,
+			                                     out))
+			{
+				constexpr_call_result_cache_[cache_key] = out;
+				return true;
+			}
 			return false;
+		}
 		const Node& fn = found->second;
 		EvalState state;
 		size_t body_index = 0;

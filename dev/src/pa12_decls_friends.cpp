@@ -1,4 +1,5 @@
 #include "pa12_internal.h"
+#include "pa12_expr_semantics_support.h"
 #include <stdexcept>
 
 using namespace std;
@@ -177,7 +178,8 @@ bool Parser::parse_friend_declaration()
 			defaults.push_back(suffix->parameters[i].default_value);
 			names.push_back(suffix->parameters[i].name);
 		}
-		default_arguments_[function] = defaults;
+		default_arguments_[function] =
+			default_arguments_for_binding(function, defaults);
 		function_parameter_names_[function] = names;
 	}
 	add_friend_function(class_scope, function);

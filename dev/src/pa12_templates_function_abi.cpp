@@ -1031,7 +1031,7 @@ string abi_dependent_typename_type(
 			size_t template_pos = root.find('<');
 			if (template_pos != string::npos)
 				root = root.substr(0, template_pos);
-			if (root == "enable_if_t")
+			if (root == "enable_if_t" || root == "__enable_if_t")
 			{
 				vector<pa11::TemplateInstanceArgument> arguments =
 					!type->dependent_typename_template_argument_lists.empty()

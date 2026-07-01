@@ -439,6 +439,11 @@ void AppendHostStandardIncludePaths(vector<string>& out)
 		out.push_back(cppgm_builtin_host_config::kStandardIncludePaths[i]);
 }
 
+bool HostPredefinedMacroOwnedByCompiler(const string& name)
+{
+	return name == "__SIZE_TYPE__";
+}
+
 bool NextLogicalLine(const vector<PPToken>& tokens,
                      size_t& pos,
                      vector<PPToken>& line)
@@ -587,20 +592,28 @@ private:
 			vector<PPToken> tokens = TokenizePPString(line);
 			try
 			{
-				size_t hash = SkipHorizontalWhitespace(tokens, 0, tokens.size());
-				if (hash >= tokens.size() || !IsHash(tokens[hash]))
-					continue;
-				size_t name = SkipHorizontalWhitespace(tokens, hash + 1,
-				                                       tokens.size());
-				if (name >= tokens.size() || !IsIdentifier(tokens[name]))
-					continue;
-				const string directive = tokens[name].text;
-				size_t body = name + 1;
-				if (directive == "define")
-					macros_.parse_define(tokens, body, tokens.size());
-				else if (directive == "undef")
-					macros_.parse_undef(tokens, body, tokens.size());
-			}
+					size_t hash = SkipHorizontalWhitespace(tokens, 0, tokens.size());
+					if (hash >= tokens.size() || !IsHash(tokens[hash]))
+						continue;
+					size_t name = SkipHorizontalWhitespace(tokens, hash + 1,
+					                                       tokens.size());
+					if (name >= tokens.size() || !IsIdentifier(tokens[name]))
+						continue;
+					const string directive = tokens[name].text;
+					size_t body = name + 1;
+					if (directive == "define")
+					{
+						const size_t macro_name =
+							SkipHorizontalWhitespace(tokens, body, tokens.size());
+						if (macro_name < tokens.size() &&
+						    IsIdentifier(tokens[macro_name]) &&
+						    HostPredefinedMacroOwnedByCompiler(tokens[macro_name].text))
+							continue;
+						macros_.parse_define(tokens, body, tokens.size());
+					}
+					else if (directive == "undef")
+						macros_.parse_undef(tokens, body, tokens.size());
+				}
 			catch (const exception&)
 			{
 			}

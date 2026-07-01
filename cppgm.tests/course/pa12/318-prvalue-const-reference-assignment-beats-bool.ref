@@ -1,0 +1,9 @@
+1 translation units
+start translation unit 1
+translation-unit
+  function-declaration Boolish::Boolish function of (pointer to struct Boolish, struct RefProxy) returning void
+  function-declaration make_ref_proxy function of () returning struct RefProxy
+  function-declaration choose function of (lvalue-reference to const struct RefProxy) returning int
+  function-declaration choose function of (struct Boolish) returning long int
+  type-alias Chosen int
+end translation unit

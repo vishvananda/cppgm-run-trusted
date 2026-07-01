@@ -1,5 +1,6 @@
 #include "lowiropt.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -14,6 +15,7 @@ using lowir2cy86::Block;
 using lowir2cy86::Function;
 using lowir2cy86::InstrKind;
 using lowir2cy86::Instruction;
+using lowir2cy86::Parameter;
 using lowir2cy86::Program;
 using lowir2cy86::Slot;
 using lowir2cy86::Type;
@@ -30,9 +32,27 @@ struct SlotFact
 
 typedef map<string, SlotFact> SlotState;
 
+struct ActiveHandler
+{
+	string target;
+	set<string> dirty_slots;
+};
+
 bool same_value(const Value& a, const Value& b)
 {
 	return a.kind == b.kind && a.text == b.text;
+}
+
+bool same_string_set(const set<string>& a, const set<string>& b)
+{
+	if (a.size() != b.size())
+		return false;
+	set<string>::const_iterator ai = a.begin();
+	set<string>::const_iterator bi = b.begin();
+	for (; ai != a.end(); ++ai, ++bi)
+		if (*ai != *bi)
+			return false;
+	return true;
 }
 
 bool parse_int_literal(const string& text, long long& out)
@@ -102,6 +122,40 @@ vector<size_t> block_successors(const Function& fn,
 	return out;
 }
 
+vector<size_t> block_eh_successors(const Function& fn,
+                                   const map<string, size_t>& index,
+                                   size_t block)
+{
+	vector<size_t> out;
+	const Block& b = fn.blocks[block];
+	for (size_t i = 0; i < b.instructions.size(); ++i)
+	{
+		const Instruction& ins = b.instructions[i];
+		if ((ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup) &&
+		    !ins.target.empty())
+			add_target(index, ins.target, out);
+	}
+	return out;
+}
+
+bool call_may_throw(const Instruction& ins, const Program& program)
+{
+	if (ins.kind != InstrKind::Call)
+		return false;
+	if (ins.signature.present)
+		return lowir2cy86::metadata_value(ins.signature.metadata, "unwind") != "no";
+	if (ins.a.kind == ValueKind::Function)
+	{
+		map<string, size_t>::const_iterator it =
+		    program.function_by_name.find(ins.a.text);
+		if (it != program.function_by_name.end() &&
+		    lowir2cy86::metadata_value(program.functions[it->second].metadata,
+		                               "unwind") == "no")
+			return false;
+	}
+	return true;
+}
+
 SlotFact state_value(const SlotState& state, const string& slot)
 {
 	map<string, SlotFact>::const_iterator it = state.find(slot);
@@ -130,6 +184,17 @@ SlotState merge_states(const SlotState& a,
 		if (av.known && bv.known && same_value(av.value, bv.value))
 			set_known(out, *s, av.value);
 	}
+	return out;
+}
+
+SlotState state_with_unknown_slots(const SlotState& state,
+                                   const set<string>& dirty)
+{
+	SlotState out = state;
+	for (set<string>::const_iterator it = dirty.begin();
+	     it != dirty.end();
+	     ++it)
+		out.erase(*it);
 	return out;
 }
 
@@ -177,6 +242,23 @@ bool candidate_slot_type(const Type& type)
 	return !lowir2cy86::is_obj_type(type);
 }
 
+bool storage_value_kind(ValueKind kind)
+{
+	return kind == ValueKind::Temp || kind == ValueKind::Slot ||
+	       kind == ValueKind::Global;
+}
+
+bool may_record_temp_replacement(const Instruction& ins,
+                                 const set<string>& storage_temps)
+{
+	if (!ins.has_dest || (ins.kind != InstrKind::Const &&
+	                      ins.kind != InstrKind::Copy))
+		return false;
+	if (storage_temps.count(ins.dest) == 0)
+		return true;
+	return storage_value_kind(ins.a.kind);
+}
+
 void collect_candidate_slots(const Function& fn, set<string>& candidates)
 {
 	set<string> escapes;
@@ -222,7 +304,43 @@ void count_storage_temp(const Value& value, set<string>& out)
 		out.insert(value.text);
 }
 
-set<string> storage_temp_uses(const Function& fn)
+bool pass_uses_storage(const lowir2cy86::Metadata& metadata)
+{
+	const string pass = lowir2cy86::metadata_value(metadata, "pass");
+	return pass == "reference" || pass == "indirect_result" ||
+	       pass == "by_address" || pass == "decay";
+}
+
+const vector<Parameter>* call_parameters(const Instruction& ins,
+                                         const Program& program)
+{
+	if (ins.signature.present)
+		return &ins.signature.params;
+	if (ins.a.kind != ValueKind::Function)
+		return NULL;
+	map<string, size_t>::const_iterator it =
+	    program.function_by_name.find(ins.a.text);
+	if (it == program.function_by_name.end())
+		return NULL;
+	return &program.functions[it->second].params;
+}
+
+void count_call_storage_temps(const Instruction& ins,
+                              const Program& program,
+                              set<string>& out)
+{
+	if (ins.kind != InstrKind::Call)
+		return;
+	const vector<Parameter>* params = call_parameters(ins, program);
+	if (params == NULL)
+		return;
+	const size_t n = min(ins.args.size(), params->size());
+	for (size_t i = 0; i < n; ++i)
+		if (pass_uses_storage((*params)[i].metadata))
+			count_storage_temp(ins.args[i], out);
+}
+
+set<string> storage_temp_uses(const Function& fn, const Program& program)
 {
 	set<string> out;
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
@@ -235,17 +353,64 @@ set<string> storage_temp_uses(const Function& fn)
 			    ins.kind == InstrKind::VaArg)
 				count_storage_temp(ins.a, out);
 			else if (ins.kind == InstrKind::Store ||
-			         ins.kind == InstrKind::AtomicStore ||
-			         ins.kind == InstrKind::AtomicExchange ||
-			         ins.kind == InstrKind::AtomicCompareExchange ||
+			         ins.kind == InstrKind::AtomicStore)
+				count_storage_temp(ins.b, out);
+			else if (ins.kind == InstrKind::AtomicExchange ||
 			         ins.kind == InstrKind::AtomicAddFetch)
+				count_storage_temp(ins.a, out);
+			else if (ins.kind == InstrKind::AtomicCompareExchange)
+			{
+				count_storage_temp(ins.a, out);
 				count_storage_temp(ins.b, out);
+			}
 			else if (ins.kind == InstrKind::CopyObj)
+			{
+				count_storage_temp(ins.a, out);
 				count_storage_temp(ins.b, out);
+			}
 			else if (ins.kind == InstrKind::ZeroInit)
 				count_storage_temp(ins.a, out);
+			count_call_storage_temps(ins, program, out);
 		}
 	}
+	return out;
+}
+
+void note_cross_block_temp_use(const Value& value,
+                               size_t block,
+                               const map<string, size_t>& def_blocks,
+                               set<string>& out)
+{
+	if (value.kind != ValueKind::Temp)
+		return;
+	map<string, size_t>::const_iterator found = def_blocks.find(value.text);
+	if (found != def_blocks.end() && found->second != block)
+		out.insert(value.text);
+}
+
+set<string> temps_used_outside_defining_block(const Function& fn)
+{
+	map<string, size_t> def_blocks;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+			if (fn.blocks[b].instructions[i].has_dest)
+				def_blocks[fn.blocks[b].instructions[i].dest] = b;
+	set<string> out;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+		{
+			const Instruction& ins = fn.blocks[b].instructions[i];
+			note_cross_block_temp_use(ins.a, b, def_blocks, out);
+			note_cross_block_temp_use(ins.b, b, def_blocks, out);
+			note_cross_block_temp_use(ins.c, b, def_blocks, out);
+			for (size_t a = 0; a < ins.args.size(); ++a)
+				note_cross_block_temp_use(ins.args[a], b, def_blocks, out);
+			for (size_t c = 0; c < ins.switch_cases.size(); ++c)
+				note_cross_block_temp_use(ins.switch_cases[c].value,
+				                          b,
+				                          def_blocks,
+				                          out);
+		}
 	return out;
 }
 
@@ -283,6 +448,18 @@ void simulate_successors(const Function& fn,
 {
 	if (fn.blocks[block].instructions.empty())
 		return;
+	for (size_t i = 0; i < fn.blocks[block].instructions.size(); ++i)
+	{
+		const Instruction& ins = fn.blocks[block].instructions[i];
+		if ((ins.kind != InstrKind::EhTry && ins.kind != InstrKind::EhCleanup) ||
+		    ins.target.empty())
+			continue;
+		map<string, size_t>::const_iterator it = index.find(ins.target);
+		if (it == index.end())
+			continue;
+		merge_into_block(it->second, state, slots, in_states,
+		                 initialized, work);
+	}
 	Instruction term = fn.blocks[block].instructions.back();
 	replace_instruction_values(term, temps);
 	if (term.kind == InstrKind::Jump)
@@ -345,7 +522,9 @@ void simulate_successors(const Function& fn,
 }
 
 void analyze_slot_states(const Function& fn,
+                         const Program& program,
                          const set<string>& slots,
+                         const set<string>& storage_temps,
                          vector<SlotState>& in_states,
                          vector<bool>& reachable)
 {
@@ -362,22 +541,46 @@ void analyze_slot_states(const Function& fn,
 		const size_t block = work.back();
 		work.pop_back();
 		reachable[block] = true;
-		SlotState state = in_states[block];
-		map<string, Value> temps;
-		for (size_t i = 0; i < fn.blocks[block].instructions.size(); ++i)
-		{
-			Instruction ins = fn.blocks[block].instructions[i];
-			replace_instruction_values(ins, temps);
-			if ((ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup) &&
-			    !ins.target.empty())
+			SlotState state = in_states[block];
+			map<string, Value> temps;
+			vector<ActiveHandler> active_handlers;
+			for (size_t i = 0; i < fn.blocks[block].instructions.size(); ++i)
 			{
-				map<string, size_t>::const_iterator it = index.find(ins.target);
-				if (it != index.end())
-					merge_into_block(it->second, state, slots, in_states,
-					                 initialized, work);
-			}
-			if (ins.kind == InstrKind::Load && ins.has_dest &&
-			    ins.a.kind == ValueKind::Slot && slots.count(ins.a.text) != 0)
+				Instruction ins = fn.blocks[block].instructions[i];
+				replace_instruction_values(ins, temps);
+				if ((ins.kind == InstrKind::EhTry || ins.kind == InstrKind::EhCleanup) &&
+				    !ins.target.empty())
+				{
+					ActiveHandler handler;
+					handler.target = ins.target;
+					active_handlers.push_back(handler);
+					continue;
+				}
+				if (ins.kind == InstrKind::EhEnd)
+				{
+					if (!active_handlers.empty())
+						active_handlers.pop_back();
+					continue;
+				}
+				if (call_may_throw(ins, program))
+				{
+					if (!active_handlers.empty())
+					{
+						map<string, size_t>::const_iterator it =
+						    index.find(active_handlers.back().target);
+						if (it != index.end())
+						{
+							SlotState handler_state =
+								state_with_unknown_slots(
+									state,
+									active_handlers.back().dirty_slots);
+							merge_into_block(it->second, handler_state, slots,
+							                 in_states, initialized, work);
+						}
+					}
+				}
+				if (ins.kind == InstrKind::Load && ins.has_dest &&
+				    ins.a.kind == ValueKind::Slot && slots.count(ins.a.text) != 0)
 			{
 				SlotFact fact = state_value(state, ins.a.text);
 				if (fact.known)
@@ -386,9 +589,12 @@ void analyze_slot_states(const Function& fn,
 			else if (ins.kind == InstrKind::Store &&
 			         ins.b.kind == ValueKind::Slot &&
 			         slots.count(ins.b.text) != 0)
+			{
 				set_known(state, ins.b.text, ins.a);
-			else if (ins.has_dest && (ins.kind == InstrKind::Const ||
-			                          ins.kind == InstrKind::Copy))
+				for (size_t h = 0; h < active_handlers.size(); ++h)
+					active_handlers[h].dirty_slots.insert(ins.b.text);
+			}
+			else if (may_record_temp_replacement(ins, storage_temps))
 				temps[ins.dest] = ins.a;
 		}
 		simulate_successors(fn, index, block, state, temps, slots,
@@ -433,12 +639,13 @@ bool fold_terminator(Instruction& ins)
 
 bool rewrite_slot_loads(Function& fn,
                         const set<string>& slots,
+                        const set<string>& storage_temps,
                         const vector<SlotState>& in_states,
                         const vector<bool>& reachable)
 {
 	set<string> unknown_load_slots;
 	set<string> seen_slots = slots;
-	set<string> storage_temps = storage_temp_uses(fn);
+	set<string> cross_block_temps = temps_used_outside_defining_block(fn);
 	bool changed = false;
 	vector<Block> new_blocks;
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
@@ -460,6 +667,12 @@ bool rewrite_slot_loads(Function& fn,
 			    ins.a.kind == ValueKind::Slot && slots.count(ins.a.text) != 0)
 			{
 				SlotFact fact = state_value(state, ins.a.text);
+				if (cross_block_temps.count(ins.dest) != 0)
+				{
+					unknown_load_slots.insert(ins.a.text);
+					kept.push_back(ins);
+					continue;
+				}
 				if (fact.known &&
 				    pointer_literal_value(fn, ins.a.text, fact.value) &&
 				    storage_temps.count(ins.dest) != 0)
@@ -484,8 +697,7 @@ bool rewrite_slot_loads(Function& fn,
 			         ins.b.kind == ValueKind::Slot &&
 			         slots.count(ins.b.text) != 0)
 				set_known(state, ins.b.text, ins.a);
-			else if (ins.has_dest && (ins.kind == InstrKind::Const ||
-			                          ins.kind == InstrKind::Copy))
+			else if (may_record_temp_replacement(ins, storage_temps))
 				temps[ins.dest] = ins.a;
 			changed = fold_terminator(ins) || changed;
 			kept.push_back(ins);
@@ -532,16 +744,17 @@ bool rewrite_slot_loads(Function& fn,
 	return changed;
 }
 
-bool propagate_slot_values(Function& fn)
+bool propagate_slot_values(Function& fn, const Program& program)
 {
 	set<string> slots;
 	collect_candidate_slots(fn, slots);
 	if (slots.empty())
 		return false;
+	set<string> storage_temps = storage_temp_uses(fn, program);
 	vector<SlotState> in_states(fn.blocks.size());
 	vector<bool> reachable(fn.blocks.size(), false);
-	analyze_slot_states(fn, slots, in_states, reachable);
-	return rewrite_slot_loads(fn, slots, in_states, reachable);
+	analyze_slot_states(fn, program, slots, storage_temps, in_states, reachable);
+	return rewrite_slot_loads(fn, slots, storage_temps, in_states, reachable);
 }
 
 bool remove_dead_slot_stores(Function& fn)
@@ -552,8 +765,12 @@ bool remove_dead_slot_stores(Function& fn)
 		return false;
 	const map<string, size_t> index = block_indices(fn);
 	vector<vector<size_t> > succs(fn.blocks.size());
+	vector<vector<size_t> > eh_succs(fn.blocks.size());
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
+	{
 		succs[b] = block_successors(fn, index, b);
+		eh_succs[b] = block_eh_successors(fn, index, b);
+	}
 
 	vector<set<string> > in_live(fn.blocks.size());
 	vector<set<string> > out_live(fn.blocks.size());
@@ -580,7 +797,8 @@ bool remove_dead_slot_stores(Function& fn)
 				         slots.count(ins.b.text) != 0)
 					live.erase(ins.b.text);
 			}
-			if (out != out_live[b] || live != in_live[b])
+			if (!same_string_set(out, out_live[b]) ||
+			    !same_string_set(live, in_live[b]))
 			{
 				out_live[b].swap(out);
 				in_live[b].swap(live);
@@ -592,12 +810,17 @@ bool remove_dead_slot_stores(Function& fn)
 	bool removed = false;
 	for (size_t b = 0; b < fn.blocks.size(); ++b)
 	{
+		set<string> eh_live;
+		for (size_t s = 0; s < eh_succs[b].size(); ++s)
+			eh_live.insert(in_live[eh_succs[b][s]].begin(),
+			               in_live[eh_succs[b][s]].end());
 		set<string> live = out_live[b];
 		vector<bool> keep(fn.blocks[b].instructions.size(), true);
 		for (size_t ri = 0; ri < fn.blocks[b].instructions.size(); ++ri)
 		{
 			const size_t i = fn.blocks[b].instructions.size() - 1 - ri;
 			const Instruction& ins = fn.blocks[b].instructions[i];
+			live.insert(eh_live.begin(), eh_live.end());
 			if (ins.kind == InstrKind::Load && ins.a.kind == ValueKind::Slot &&
 			    slots.count(ins.a.text) != 0)
 				live.insert(ins.a.text);
@@ -633,10 +856,10 @@ bool promote_o2_slots_once(Program& program)
 	{
 		if (program.functions[i].declaration)
 			continue;
-		changed = propagate_slot_values(program.functions[i]) || changed;
-		rebuild_program(program);
+		changed = propagate_slot_values(program.functions[i], program) || changed;
+		rebuild_function(program.functions[i]);
 		changed = remove_dead_slot_stores(program.functions[i]) || changed;
-		rebuild_program(program);
+		rebuild_function(program.functions[i]);
 	}
 	return changed;
 }

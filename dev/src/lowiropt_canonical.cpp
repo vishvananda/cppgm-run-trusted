@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <deque>
 #include <map>
 #include <set>
 
@@ -68,66 +67,10 @@ int weak_member_order(const Function& fn)
 	return 3;
 }
 
-void collect_direct_call_names(const Function& fn, vector<string>& out)
+string function_object_order_key(const Function& fn)
 {
-	for (size_t b = 0; b < fn.blocks.size(); ++b)
-		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
-		{
-			const Instruction& ins = fn.blocks[b].instructions[i];
-			if (ins.kind == InstrKind::Call && ins.a.kind == ValueKind::Function)
-				out.push_back(ins.a.text);
-		}
-}
-
-map<string, int> weak_class_order_from_calls(const Program& original)
-{
-	map<string, int> out;
-	deque<string> pending;
-	set<string> seen_functions;
-	for (size_t i = 0; i < original.functions.size(); ++i)
-	{
-		const Function& fn = original.functions[i];
-		if (function_order_category(fn) == 2 || function_order_category(fn) == 3)
-		{
-			vector<string> calls;
-			collect_direct_call_names(fn, calls);
-			pending.insert(pending.end(), calls.begin(), calls.end());
-		}
-	}
-	while (!pending.empty())
-	{
-		string name = pending.front();
-		pending.pop_front();
-		if (!seen_functions.insert(name).second)
-			continue;
-		map<string, size_t>::const_iterator it = original.function_by_name.find(name);
-		if (it == original.function_by_name.end())
-			continue;
-		const Function& fn = original.functions[it->second];
-		if (metadata_is(fn.metadata, "binding", "weak"))
-		{
-			string klass = function_class_key(fn);
-			if (out.find(klass) == out.end())
-				out[klass] = static_cast<int>(out.size());
-		}
-		vector<string> calls;
-		collect_direct_call_names(fn, calls);
-		pending.insert(pending.end(), calls.begin(), calls.end());
-	}
-	for (size_t i = 0; i < original.functions.size(); ++i)
-		if (metadata_is(original.functions[i].metadata, "binding", "weak"))
-		{
-			string klass = function_class_key(original.functions[i]);
-			if (out.find(klass) == out.end())
-				out[klass] = static_cast<int>(out.size());
-		}
-	return out;
-}
-
-int weak_class_order(const Function& fn, const map<string, int>& class_order)
-{
-	map<string, int>::const_iterator it = class_order.find(function_class_key(fn));
-	return it == class_order.end() ? 1000000 : it->second;
+	const string object = lowir2cy86::metadata_value(fn.metadata, "object");
+	return object.empty() ? body_name(fn.name) : object;
 }
 
 bool empty_void_constructor_body(const Function& fn)
@@ -243,32 +186,155 @@ void close_initial_temp_gap(Function& fn)
 			rename_instruction_temps(fn.blocks[b].instructions[i], shifts);
 }
 
+void collect_weak_order_value(const Program& program,
+                              const Value& value,
+                              map<string, size_t>& order,
+                              set<string>& visiting);
+
+void collect_weak_order_function(const Program& program,
+                                 const string& name,
+                                 map<string, size_t>& order,
+                                 set<string>& visiting)
+{
+	map<string, size_t>::const_iterator found =
+		program.function_by_name.find(name);
+	if (found == program.function_by_name.end())
+		return;
+	const Function& fn = program.functions[found->second];
+	if (fn.declaration)
+		return;
+	if (function_order_category(fn) == 4 &&
+	    order.find(fn.name) == order.end())
+		order[fn.name] = order.size();
+	if (!visiting.insert(fn.name).second)
+		return;
+	for (size_t b = 0; b < fn.blocks.size(); ++b)
+		for (size_t i = 0; i < fn.blocks[b].instructions.size(); ++i)
+		{
+			const Instruction& ins = fn.blocks[b].instructions[i];
+			collect_weak_order_value(program, ins.a, order, visiting);
+			collect_weak_order_value(program, ins.b, order, visiting);
+			collect_weak_order_value(program, ins.c, order, visiting);
+			for (size_t a = 0; a < ins.args.size(); ++a)
+				collect_weak_order_value(program, ins.args[a], order, visiting);
+			for (size_t s = 0; s < ins.switch_cases.size(); ++s)
+				collect_weak_order_value(program,
+				                         ins.switch_cases[s].value,
+				                         order,
+				                         visiting);
+		}
+	visiting.erase(fn.name);
+}
+
+void collect_weak_order_value(const Program& program,
+                              const Value& value,
+                              map<string, size_t>& order,
+                              set<string>& visiting)
+{
+	if (value.kind == ValueKind::Function ||
+	    (value.kind == ValueKind::Global &&
+	     program.function_by_name.find(value.text) !=
+		     program.function_by_name.end()))
+		collect_weak_order_function(program, value.text, order, visiting);
+}
+
+map<string, size_t> original_reachable_weak_order(const Program& original)
+{
+	map<string, size_t> order;
+	set<string> visiting;
+	for (size_t i = 0; i < original.functions.size(); ++i)
+	{
+		const Function& fn = original.functions[i];
+		if (fn.declaration || function_order_category(fn) == 4)
+			continue;
+		collect_weak_order_function(original, fn.name, order, visiting);
+	}
+	return order;
+}
+
 }  // namespace
 
-void canonicalize_optimized_program(Program& program, const Program& original)
+void canonicalize_optimized_program(Program& program,
+                                    const Program& original,
+                                    bool preserve_weak_order)
 {
-	const map<string, int> class_order = weak_class_order_from_calls(original);
 	strip_optimized_metadata(program);
 	for (size_t i = 0; i < program.functions.size(); ++i)
 		if (!program.functions[i].declaration)
 			close_initial_temp_gap(program.functions[i]);
+	map<string, size_t> weak_order = preserve_weak_order
+		? original_reachable_weak_order(original)
+		: map<string, size_t>();
+	map<string, size_t> weak_class_order;
+	if (preserve_weak_order)
+		for (size_t i = 0; i < program.functions.size(); ++i)
+		{
+			const Function& fn = program.functions[i];
+			map<string, size_t>::const_iterator found =
+				weak_order.find(fn.name);
+			if (found == weak_order.end())
+				continue;
+			string klass = function_class_key(fn);
+			map<string, size_t>::iterator existing =
+				weak_class_order.find(klass);
+			if (existing == weak_class_order.end() ||
+			    found->second < existing->second)
+				weak_class_order[klass] = found->second;
+		}
 	stable_sort(program.functions.begin(),
 	            program.functions.end(),
-	            [&class_order](const Function& a, const Function& b) {
+	            [preserve_weak_order,
+	             &weak_order,
+	             &weak_class_order](const Function& a, const Function& b) {
 		            int ac = function_order_category(a);
 		            int bc = function_order_category(b);
 		            if (ac != bc)
 			            return ac < bc;
+		            if (ac == 1)
+		            {
+			            string ak = lowir2cy86::metadata_value(a.metadata, "object");
+			            string bk = lowir2cy86::metadata_value(b.metadata, "object");
+			            if (ak.empty() && bk.empty())
+				            return false;
+			            if (ak.empty() != bk.empty())
+				            return !ak.empty();
+			            if (ak != bk)
+				            return ak < bk;
+			            return a.name < b.name;
+		            }
 		            if (ac == 4)
 		            {
-			            int ao = weak_class_order(a, class_order);
-			            int bo = weak_class_order(b, class_order);
-			            if (ao != bo)
-				            return ao < bo;
+			            if (preserve_weak_order)
+			            {
+				            string ak = function_class_key(a);
+				            string bk = function_class_key(b);
+				            if (ak != bk)
+				            {
+					            map<string, size_t>::const_iterator aco =
+						            weak_class_order.find(ak);
+					            map<string, size_t>::const_iterator bco =
+						            weak_class_order.find(bk);
+					            bool ach = aco != weak_class_order.end();
+					            bool bch = bco != weak_class_order.end();
+					            if (ach != bch)
+						            return ach;
+					            if (ach && aco->second != bco->second)
+						            return aco->second < bco->second;
+				            }
+			            }
+			            string ak = function_class_key(a);
+			            string bk = function_class_key(b);
+			            if (ak != bk)
+				            return ak < bk;
 			            int am = weak_member_order(a);
 			            int bm = weak_member_order(b);
 			            if (am != bm)
 				            return am < bm;
+			            ak = function_object_order_key(a);
+			            bk = function_object_order_key(b);
+			            if (ak != bk)
+				            return ak < bk;
+			            return a.name < b.name;
 		            }
 		            return false;
 	            });

@@ -59,6 +59,10 @@ Binding* FunctionTemplateInstantiationEngine::replay_function_template()
 	TypePtr replay_substituted_function_type;
 	TypePtr saved_replay_function_type_override =
 		p.replay_function_type_override_;
+	Scope* saved_replay_function_type_override_owner =
+		p.replay_function_type_override_owner_;
+	string saved_replay_function_type_override_name =
+		p.replay_function_type_override_name_;
 	if (declaration->generic_function_type.get() != NULL &&
 	    declaration->generic_function_type->kind == pa11::TypeKind::Function)
 	{
@@ -66,10 +70,19 @@ Binding* FunctionTemplateInstantiationEngine::replay_function_template()
 			p.substitute_function_template_type(
 				declaration,
 				declaration->generic_function_type);
-		p.replay_function_type_override_ =
-			replay_substituted_function_type;
-		p.replay_function_type_override_owner_ = declaration->owner;
-		p.replay_function_type_override_name_ = declaration->name;
+		if (substituted_type_is_valid(replay_substituted_function_type))
+		{
+			p.replay_function_type_override_ =
+				replay_substituted_function_type;
+			p.replay_function_type_override_owner_ = declaration->owner;
+			p.replay_function_type_override_name_ = declaration->name;
+		}
+		else
+		{
+			p.replay_function_type_override_ = TypePtr();
+			p.replay_function_type_override_owner_ = NULL;
+			p.replay_function_type_override_name_.clear();
+		}
 		p.replay_function_template_declaration_ = declaration;
 		p.replay_function_template_arguments_ = full_args;
 	}
@@ -86,12 +99,20 @@ Binding* FunctionTemplateInstantiationEngine::replay_function_template()
 		p.active_friend_class_scopes_.resize(friend_scope_depth);
 		p.replay_function_type_override_ =
 			saved_replay_function_type_override;
+		p.replay_function_type_override_owner_ =
+			saved_replay_function_type_override_owner;
+		p.replay_function_type_override_name_ =
+			saved_replay_function_type_override_name;
 		throw;
 	}
 	--p.suppress_qualifier_template_member_instantiation_depth_;
 	p.active_friend_class_scopes_.resize(friend_scope_depth);
 	p.replay_function_type_override_ =
 		saved_replay_function_type_override;
+	p.replay_function_type_override_owner_ =
+		saved_replay_function_type_override_owner;
+	p.replay_function_type_override_name_ =
+		saved_replay_function_type_override_name;
 	restore_parser_state();
 	return finish_replayed_function(
 		node,
@@ -238,24 +259,78 @@ Node FunctionTemplateInstantiationEngine::replay_template_declaration(
 		node = replay_constructor_template(replay_extra_begin);
 	else
 		node = replay_ordinary_function(replay_extra_begin);
+	if (substituted_type_is_valid(replay_substituted_function_type))
+		return node;
 	if (declaration->generic_function_type.get() != NULL &&
 	    declaration->generic_function_type->kind == pa11::TypeKind::Function)
-		replay_substituted_function_type =
+	{
+		p.dependent_type_substitution_cache_.clear();
+		p.template_dependent_type_cache_.clear();
+		TypePtr updated =
 			p.substitute_function_template_type(
 				declaration,
 				declaration->generic_function_type);
+		if (replay_substituted_function_type.get() == NULL ||
+		    substituted_type_is_valid(updated) ||
+		    !substituted_type_is_valid(replay_substituted_function_type))
+			replay_substituted_function_type = updated;
+	}
 	return node;
 }
 
 Node FunctionTemplateInstantiationEngine::replay_inherited_constructor()
 {
-	map<Binding*, TemplateDeclaration*>::iterator base_template =
-		p.function_template_placeholders_.find(
-			declaration->inherited_constructor_base);
-	if (base_template == p.function_template_placeholders_.end())
+	TemplateDeclaration* base_template =
+		declaration->inherited_constructor_base_template;
+	if (base_template == NULL)
+	{
+		map<Binding*, TemplateDeclaration*>::iterator found =
+			p.function_template_placeholders_.find(
+				declaration->inherited_constructor_base);
+		if (found != p.function_template_placeholders_.end())
+			base_template = found->second;
+	}
+	if (base_template == NULL)
 		throw runtime_error("inherited constructor template base missing");
+	string base_key = p.template_argument_key(full_args);
+	map<string, Binding*>::iterator existing_base =
+		base_template->function_specializations.find(base_key);
+	if (existing_base != base_template->function_specializations.end())
+	{
+		string expected_symbol =
+			abi_function_template_specialization_symbol(
+				base_template,
+				full_args,
+				existing_base->second,
+				&p.declaration_tokens_);
+		if (!expected_symbol.empty() &&
+		    existing_base->second->function_specialization_symbol !=
+			    expected_symbol)
+			base_template->function_specializations.erase(existing_base);
+	}
 	Binding* base_call =
-		p.instantiate_function_template(base_template->second, full_args);
+		p.instantiate_function_template(base_template, full_args);
+	if (base_call != NULL &&
+	    base_call->aliased_binding != NULL &&
+	    base_call->aliased_binding->kind == BindingKind::Function &&
+	    base_call->aliased_binding->type.get() != NULL &&
+	    base_call->type.get() != NULL &&
+	    pa11::same_type(base_call->aliased_binding->type, base_call->type))
+		base_call = base_call->aliased_binding;
+	if (base_call != NULL)
+	{
+		p.function_template_placeholders_[base_call] = base_template;
+		p.function_template_specialization_arguments_[base_call] = full_args;
+		string symbol =
+			abi_function_template_specialization_symbol(
+				base_template,
+				full_args,
+				base_call,
+				&p.declaration_tokens_);
+		if (!symbol.empty())
+			base_call->function_specialization_symbol =
+				symbol;
+	}
 	TypePtr fn_type = p.substitute_function_template_type(
 		declaration,
 		declaration->generic_function_type);
@@ -496,9 +571,12 @@ void FunctionTemplateInstantiationEngine::finish_replayed_defaults(
 		p.default_arguments_.find(declaration->placeholder);
 	if (defaults == p.default_arguments_.end())
 		return;
-	p.default_arguments_[binding] = defaults->second;
+	p.default_arguments_[binding] =
+		default_arguments_for_binding(binding, defaults->second);
 	if (binding->aliased_binding != NULL)
-		p.default_arguments_[binding->aliased_binding] = defaults->second;
+		p.default_arguments_[binding->aliased_binding] =
+			default_arguments_for_binding(binding->aliased_binding,
+			                              defaults->second);
 }
 
 void FunctionTemplateInstantiationEngine::parse_replayed_pending_bodies(
@@ -554,8 +632,9 @@ void FunctionTemplateInstantiationEngine::prune_candidate_replay_bodies(
 		(p.template_argument_expression_depth_ != 0 ||
 		 p.constexpr_value_expression_depth_ != 0) &&
 		binding != NULL && binding->is_constexpr;
-	if (!keep_constexpr_body_for_value_expression)
-		p.function_bodies_.erase(binding);
+	if (!keep_constexpr_body_for_value_expression &&
+	    p.function_bodies_.erase(binding) != 0)
+		p.note_function_bodies_changed();
 	for (size_t i = replay_extra_begin; i < p.extra_lowir_nodes_.size(); ++i)
 		if (p.extra_lowir_nodes_[i].binding != NULL)
 		{
@@ -563,8 +642,10 @@ void FunctionTemplateInstantiationEngine::prune_candidate_replay_bodies(
 				keep_constexpr_body_for_value_expression &&
 				p.extra_lowir_nodes_[i].binding != NULL &&
 				p.extra_lowir_nodes_[i].binding->is_constexpr;
-			if (!keep_extra_constexpr_body)
-				p.function_bodies_.erase(p.extra_lowir_nodes_[i].binding);
+			if (!keep_extra_constexpr_body &&
+			    p.function_bodies_.erase(
+				    p.extra_lowir_nodes_[i].binding) != 0)
+				p.note_function_bodies_changed();
 		}
 	p.extra_lowir_nodes_.resize(replay_extra_begin);
 }
