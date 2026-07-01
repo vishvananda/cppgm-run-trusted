@@ -83,6 +83,7 @@ INCEPTION_COMPILER_FLAVOR ?= selfhost
 else
 INCEPTION_COMPILER_FLAVOR ?= host
 endif
+INCEPTION_OBJECT_BUILD_JOBS ?= $(if $(filter inception,$(INCEPTION_COMPILER_FLAVOR)),$(INCEPTION_BUILD_JOBS),$(DEFAULT_BUILD_JOBS))
 
 ifneq ($(filter ./% ../% /%,$(CXX)),)
 INCEPTION_CXX_DEP := $(CXX)
@@ -585,14 +586,14 @@ $(call inception_entry_object_path,$(1)): $(INCEPTION_ENTRY_$(1)) $(INCEPTION_CX
 $(call inception_binary_path,$(1)): FORCE | $(INCEPTION_BIN_ROOT)
 	+@if [ "$(INCEPTION_BUILD_MISSING_FIRST)" = "1" ] && [ -n "$(call inception_missing_link_inputs,$(1))" ]; then \
 		echo "Building missing $(1) objects first"; \
-		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_missing_link_inputs,$(1)); \
+		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_OBJECT_BUILD_JOBS) $(call inception_missing_link_inputs,$(1)); \
 	fi
 	+@if [ "$(INCEPTION_BUILD_MISSING_FIRST)" = "1" ]; then \
 		if [ -n "$(call inception_existing_link_inputs,$(1))" ]; then \
-			env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_existing_link_inputs,$(1)); \
+			env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_OBJECT_BUILD_JOBS) $(call inception_existing_link_inputs,$(1)); \
 		fi; \
 	else \
-		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_BUILD_JOBS) $(call inception_link_inputs,$(1)); \
+		env MAKEFLAGS= $$(MAKE) -j$(INCEPTION_OBJECT_BUILD_JOBS) $(call inception_link_inputs,$(1)); \
 	fi
 	@rm -f "$(call inception_link_output_path,$(1))"
 	$(CPPGM_HOST_CXX) $(INCEPTION_LINK_FLAGS) -I../dev/src -o "$(call inception_link_output_path,$(1))" $(call inception_link_inputs,$(1))
